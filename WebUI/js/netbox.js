@@ -9,7 +9,7 @@
 async function loadNetboxData(subMenu) {
     const container = document.getElementById('netbox-content');
     if (!container) return;
-    container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
+    container.innerHTML = '<p class="text-sm text-slate-500 italic p-4">Loading…</p>';
 
     // Show/hide the "+ Add" button based on writable sub-views. It lives in the
     // menu strip (far-right #top-nav-actions) rather than the page body.
@@ -85,7 +85,7 @@ async function loadNetboxData(subMenu) {
             // builds returned 200+{status:'ERROR',message}. Handle both so the operator
             // sees the "spoke not connected" notice either way instead of "No devices".
             const d = await r.json().catch(() => ({}));
-            if (!r.ok || d.status === 'ERROR') { container.innerHTML = `<p class="p-4 text-amber-600 text-sm font-medium">Error: ${d.message || d.detail || 'NetBox spoke not connected'}</p><p class="px-4 pb-4 text-xs text-slate-400">Verify the NetBox URL and API Token in Setup → IPAM.</p>`; return; }
+            if (!r.ok || d.status === 'ERROR') { container.innerHTML = `<p class="p-4 text-amber-600 text-sm font-medium">Error: ${d.message || d.detail || 'NetBox spoke not connected'}</p><p class="px-4 pb-4 text-xs text-slate-500">Verify the NetBox URL and API Token in Setup → IPAM.</p>`; return; }
             const devices = d.devices || [];
             window._nbDevices = devices;
             const cols = ['Name', 'Status', 'Site', 'Rack', 'Unit', 'Role', 'Type', 'Primary IP', ''];
@@ -101,13 +101,13 @@ async function loadNetboxData(subMenu) {
                     <td class="px-4 py-2 text-xs">${dv.device_type || '—'}</td>
                     <td class="px-4 py-2 text-xs font-mono">${dv.primary_ip || '—'}</td>
                     <td class="px-4 py-2 whitespace-nowrap">
-                        <button onclick="editNetboxDevice(${dv.id})" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
-                        <button onclick="deleteNetboxDevice(${dv.id})" title="Delete" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>
+                        <button onclick="editNetboxDevice(${dv.id})" title="Edit" class="p-1 text-slate-500 hover:text-blue-600 transition-colors">${editIcon}</button>
+                        <button onclick="deleteNetboxDevice(${dv.id})" title="Delete" class="p-1 text-slate-500 hover:text-red-500 transition-colors">${delIcon}</button>
                     </td>
                 </tr>`;
             }).join('');
             container.innerHTML = devices.length === 0
-                ? '<p class="p-4 text-slate-400 italic text-sm">No devices found in NetBox.</p>'
+                ? '<p class="p-4 text-slate-500 italic text-sm">No devices found in NetBox.</p>'
                 : tw(th(cols) + `<tbody>${rows}</tbody>`);
 
         } else if (subMenu === 'Racks') {
@@ -127,13 +127,13 @@ async function loadNetboxData(subMenu) {
                 <td class="px-4 py-2 text-xs font-mono">${rk.facility_id || '—'}</td>
                 <td class="px-4 py-2 text-center">${rk.u_height}</td>
                 <td class="px-4 py-2 whitespace-nowrap">
-                    <button onclick="showRackElevationModal(${rk.id})" title="View elevation" class="p-1 text-slate-400 hover:text-primary-text transition-colors">${viewIcon}</button>
-                    <button onclick="editNetboxRack(${rk.id})" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
-                    <button onclick="deleteNetboxRack(${rk.id})" title="Delete" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>
+                    <button onclick="showRackElevationModal(${rk.id})" title="View elevation" class="p-1 text-slate-500 hover:text-primary-text transition-colors">${viewIcon}</button>
+                    <button onclick="editNetboxRack(${rk.id})" title="Edit" class="p-1 text-slate-500 hover:text-blue-600 transition-colors">${editIcon}</button>
+                    <button onclick="deleteNetboxRack(${rk.id})" title="Delete" class="p-1 text-slate-500 hover:text-red-500 transition-colors">${delIcon}</button>
                 </td>
             </tr>`).join('');
             container.innerHTML = racks.length === 0
-                ? '<p class="p-4 text-slate-400 italic text-sm">No racks found in NetBox.</p>'
+                ? '<p class="p-4 text-slate-500 italic text-sm">No racks found in NetBox.</p>'
                 : tw(th(cols) + `<tbody>${rows}</tbody>`);
 
         } else if (subMenu === 'Prefixes') {
@@ -150,7 +150,7 @@ async function loadNetboxData(subMenu) {
                 const isDhcp = !!cf.dhcp_enabled && p.status !== 'container';
                 const dhcpBadge = isDhcp
                     ? '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800" title="DHCP scope enabled">DHCP</span>'
-                    : '<span class="text-slate-300 text-xs">—</span>';
+                    : '<span class="text-slate-500 text-xs">—</span>';
                 return `<tr class="border-b border-slate-100 hover:bg-slate-50">
                     <td class="px-4 py-2 font-mono font-medium">${escapeHtml(p.prefix)}</td>
                     <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${statusCls}">${escapeHtml(p.status)}</span></td>
@@ -159,15 +159,15 @@ async function loadNetboxData(subMenu) {
                     <td class="px-4 py-2 text-xs">${p.vrf || 'Global'}</td>
                     <td class="px-4 py-2 text-xs">${p.description || '—'}</td>
                     <td class="px-4 py-2 whitespace-nowrap">
-                        <button onclick="showNetboxAllocateIPModal('${p.prefix}')" title="Allocate IP address in this subnet" class="p-1 text-slate-400 hover:text-primary-text transition-colors text-xs font-medium">+IP</button>
-                        <button onclick="releaseSubnetToPool(${p.id}, '${p.prefix}')" title="Return to pool — releases subnet and all its allocated IPs back to available pool for reassignment" class="p-1 text-slate-400 hover:text-amber-600 transition-colors text-xs font-medium">Pool</button>
-                        <button onclick="editNetboxPrefix(${p.id})" title="Edit subnet details" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
-                        <button onclick="deleteNetboxPrefix(${p.id})" title="Delete subnet directly from NetBox" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>
+                        <button onclick="showNetboxAllocateIPModal('${p.prefix}')" title="Allocate IP address in this subnet" class="p-1 text-slate-500 hover:text-primary-text transition-colors text-xs font-medium">+IP</button>
+                        <button onclick="releaseSubnetToPool(${p.id}, '${p.prefix}')" title="Return to pool — releases subnet and all its allocated IPs back to available pool for reassignment" class="p-1 text-slate-500 hover:text-amber-600 transition-colors text-xs font-medium">Pool</button>
+                        <button onclick="editNetboxPrefix(${p.id})" title="Edit subnet details" class="p-1 text-slate-500 hover:text-blue-600 transition-colors">${editIcon}</button>
+                        <button onclick="deleteNetboxPrefix(${p.id})" title="Delete subnet directly from NetBox" class="p-1 text-slate-500 hover:text-red-500 transition-colors">${delIcon}</button>
                     </td>
                 </tr>`;
             }).join('');
             container.innerHTML = prefixes.length === 0
-                ? '<p class="p-4 text-slate-400 italic text-sm">No prefixes found in NetBox.</p>'
+                ? '<p class="p-4 text-slate-500 italic text-sm">No prefixes found in NetBox.</p>'
                 : tw(th(cols) + `<tbody>${rows}</tbody>`);
 
         } else if (subMenu === 'IP Addresses') {
@@ -187,7 +187,7 @@ async function loadNetboxData(subMenu) {
                 // and gate the Reserve action on it.
                 const nbMac = (ip.custom_fields || {}).mac_address || '';
                 const reserveBtn = nbMac
-                    ? `<button onclick="reserveNetboxIP(${ip.id})" title="Create a DHCP reservation pinning this address to ${escapeHtml(nbMac)}" class="p-1 text-slate-400 hover:text-primary-text transition-colors text-xs font-medium">Reserve</button>`
+                    ? `<button onclick="reserveNetboxIP(${ip.id})" title="Create a DHCP reservation pinning this address to ${escapeHtml(nbMac)}" class="p-1 text-slate-500 hover:text-primary-text transition-colors text-xs font-medium">Reserve</button>`
                     : `<span title="No MAC on this NetBox IP record yet — a DHCP reservation needs one to match the client. Discovery fills it in once the device is seen." class="p-1 text-slate-200 text-xs cursor-not-allowed">Reserve</span>`;
                 return `<tr class="border-b border-slate-100 hover:bg-slate-50">
                     <td class="px-4 py-2 font-mono font-medium">${escapeHtml(ip.address)}</td>
@@ -199,13 +199,13 @@ async function loadNetboxData(subMenu) {
                     <td class="px-4 py-2 text-xs">${ip.device || '—'}</td>
                     <td class="px-4 py-2 whitespace-nowrap">
                         ${reserveBtn}
-                        <button onclick="editNetboxIP(${ip.id})" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
-                        <button onclick="releaseNetboxIP(${ip.id})" title="Release" class="p-1 text-slate-300 hover:text-red-500 transition-colors text-xs">Release</button>
+                        <button onclick="editNetboxIP(${ip.id})" title="Edit" class="p-1 text-slate-500 hover:text-blue-600 transition-colors">${editIcon}</button>
+                        <button onclick="releaseNetboxIP(${ip.id})" title="Release" class="p-1 text-slate-500 hover:text-red-500 transition-colors text-xs">Release</button>
                     </td>
                 </tr>`;
             }).join('');
             container.innerHTML = ips.length === 0
-                ? '<p class="p-4 text-slate-400 italic text-sm">No IP addresses found.</p>'
+                ? '<p class="p-4 text-slate-500 italic text-sm">No IP addresses found.</p>'
                 : tw(th(cols) + `<tbody>${rows}</tbody>`);
         }
     } catch (err) {
@@ -225,9 +225,9 @@ async function showCPPMDeviceDetail(mac) {
     const modal = openModal('cppm-device-modal', `
         <div class="flex justify-between items-start">
             <p class="font-mono text-base font-bold text-navy">${mac}</p>
-            <button class="cppm-modal-close text-slate-400 hover:text-slate-600 text-xl leading-none" title="Close modal">&times;</button>
+            <button class="cppm-modal-close text-slate-500 hover:text-slate-600 text-xl leading-none" title="Close modal">&times;</button>
         </div>
-        <div class="cppm-modal-body"><p class="text-xs text-slate-400 italic">Loading…</p></div>`, { card: 'w-full max-w-xl p-6 space-y-4 max-h-[90vh] overflow-y-auto', backdropClose: true });
+        <div class="cppm-modal-body"><p class="text-xs text-slate-500 italic">Loading…</p></div>`, { card: 'w-full max-w-xl p-6 space-y-4 max-h-[90vh] overflow-y-auto', backdropClose: true });
     modal.querySelector('.cppm-modal-close').addEventListener('click', () => modal.remove());
 
     const body = modal.querySelector('.cppm-modal-body');
@@ -244,7 +244,7 @@ async function showCPPMDeviceDetail(mac) {
         const srcBadge = key => sources[key] && sources[key] !== 'ClearPass'
             ? `<span class="ml-1 text-[9px] font-bold uppercase px-1 py-0.5 rounded bg-blue-50 text-blue-500">${sources[key]}</span>` : '';
         const field = (label, val, srcKey) => val
-            ? `<div><p class="text-[10px] text-slate-400 uppercase font-bold tracking-wide mb-0.5">${label}${srcKey ? srcBadge(srcKey) : ''}</p><p class="text-sm text-slate-700">${val}</p></div>`
+            ? `<div><p class="text-[10px] text-slate-500 uppercase font-bold tracking-wide mb-0.5">${label}${srcKey ? srcBadge(srcKey) : ''}</p><p class="text-sm text-slate-700">${val}</p></div>`
             : '';
 
         const statusVal = ep.status_val || '';
@@ -261,16 +261,16 @@ async function showCPPMDeviceDetail(mac) {
             ? `<div class="mt-3">
                 <p class="text-xs text-slate-500 font-bold uppercase tracking-wide mb-2">Endpoint Attributes</p>
                 <div class="border border-slate-100 rounded-md p-3 bg-slate-50/50 space-y-1 max-h-56 overflow-y-auto">${attrEntries.map(([k, v]) =>
-                    `<div class="flex gap-2 text-xs"><span class="text-slate-400 font-mono min-w-[140px] shrink-0">${k}</span><span class="text-slate-700 break-all">${v}</span></div>`
+                    `<div class="flex gap-2 text-xs"><span class="text-slate-500 font-mono min-w-[140px] shrink-0">${k}</span><span class="text-slate-700 break-all">${v}</span></div>`
                 ).join('')}</div>
             </div>`
-            : '<p class="text-xs text-slate-400 italic mt-3">No endpoint attributes.</p>';
+            : '<p class="text-xs text-slate-500 italic mt-3">No endpoint attributes.</p>';
 
         const sessions = sd.sessions || [];
         const sessionHtml = sessions.length === 0
-            ? '<p class="text-xs text-slate-400 italic">No RADIUS accounting sessions found for this device.</p>'
+            ? '<p class="text-xs text-slate-500 italic">No RADIUS accounting sessions found for this device.</p>'
             : `<table class="w-full text-left text-xs border-collapse">
-                <thead><tr class="border-b border-slate-200 text-slate-400 uppercase text-[10px]">
+                <thead><tr class="border-b border-slate-200 text-slate-500 uppercase text-[10px]">
                     <th class="px-3 py-1.5">Username</th><th class="px-3 py-1.5">IP</th>
                     <th class="px-3 py-1.5">NAS</th><th class="px-3 py-1.5">Port</th><th class="px-3 py-1.5">Role</th>
                     <th class="px-3 py-1.5">Start</th><th class="px-3 py-1.5">State</th>
@@ -302,7 +302,7 @@ async function showCPPMDeviceDetail(mac) {
                 ${sessionHtml}
             </div>
             ${isUntagged ? `<div class="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between">
-                <p class="text-xs text-slate-400">Not assigned to any tenant - claim this device to your tenant.</p>
+                <p class="text-xs text-slate-500">Not assigned to any tenant - claim this device to your tenant.</p>
                 <button onclick="showClaimDeviceModal('${encodeURIComponent(mac)}')" title="Claim this unassigned device into NetBox IPAM" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-5 py-2 rounded-md text-sm font-bold shrink-0">Claim Device</button>
             </div>` : ''}`;
     } catch (e) {
@@ -335,10 +335,10 @@ async function showClaimDeviceModal(mac) {
         <h3 class="text-lg font-bold text-navy">Claim in NetBox</h3>
         <p class="text-xs text-slate-500">Creates a NetBox device owned by a tenant and attaches this endpoint's IP. After a sync, the device leaves Unknown Devices and appears under My Devices.</p>
         <div class="rounded-md bg-slate-50 border border-slate-100 p-3 grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
-            <div><span class="text-slate-400">MAC:</span> <span class="font-mono text-slate-700">${esc(dev.mac || mac || '—')}</span></div>
-            <div><span class="text-slate-400">IP:</span> <span class="font-mono text-slate-700">${esc(dev.ip || '—')}</span></div>
-            <div><span class="text-slate-400">Hostname:</span> <span class="text-slate-700">${esc(dev.hostname || '—')}</span></div>
-            <div><span class="text-slate-400">Vendor/OS:</span> <span class="text-slate-700">${esc([dev.device_vendor, dev.device_os].filter(Boolean).join(' / ') || '—')}</span></div>
+            <div><span class="text-slate-500">MAC:</span> <span class="font-mono text-slate-700">${esc(dev.mac || mac || '—')}</span></div>
+            <div><span class="text-slate-500">IP:</span> <span class="font-mono text-slate-700">${esc(dev.ip || '—')}</span></div>
+            <div><span class="text-slate-500">Hostname:</span> <span class="text-slate-700">${esc(dev.hostname || '—')}</span></div>
+            <div><span class="text-slate-500">Vendor/OS:</span> <span class="text-slate-700">${esc([dev.device_vendor, dev.device_os].filter(Boolean).join(' / ') || '—')}</span></div>
         </div>
         <div class="grid grid-cols-2 gap-3">
             <div class="col-span-2 space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Device Name</label><input id="cl-name" value="${esc(nameDefault)}" class="${inputCls}" placeholder="router-01" title="Device name in NetBox"></div>
@@ -654,7 +654,7 @@ async function showNetboxAllocatePrefixModal(editItem) {
                     <input type="checkbox" id="nb-p-dhcp" class="rounded border-slate-300 text-primary-text" ${dhcpChecked ? 'checked' : ''}>
                     Enable DHCP scope for this subnet
                 </label>
-                <p class="text-xs text-slate-400 mt-0.5">Only checked, non-container prefixes are synced to Kea as a DHCP scope. Leave unchecked on a parent/aggregate block — carve smaller child subnets and enable this on those instead.</p>
+                <p class="text-xs text-slate-500 mt-0.5">Only checked, non-container prefixes are synced to Kea as a DHCP scope. Leave unchecked on a parent/aggregate block — carve smaller child subnets and enable this on those instead.</p>
             </div>
             <div class="border-t border-slate-200 pt-3 space-y-3">
                 <div class="text-xs font-bold uppercase text-slate-500">DHCP Options</div>
@@ -833,7 +833,7 @@ async function showFindSubnetModal() {
                         </select>
                         <input id="nb-f-hosts" type="number" min="1" value="60" class="${inputCls} flex-1 hidden" oninput="_updateFindSizeHint()">
                     </div>
-                    <p id="nb-f-size-hint" class="text-[10px] text-slate-400"></p>
+                    <p id="nb-f-size-hint" class="text-[10px] text-slate-500"></p>
                 </div>
             </div>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -855,7 +855,7 @@ async function showFindSubnetModal() {
                     <input type="checkbox" id="nb-f-dhcp" class="rounded border-slate-300 text-primary-text">
                     Enable DHCP scope for this subnet
                 </label>
-                <p class="text-xs text-slate-400 mt-0.5">Only checked, non-container prefixes are synced to Kea as a DHCP scope.</p>
+                <p class="text-xs text-slate-500 mt-0.5">Only checked, non-container prefixes are synced to Kea as a DHCP scope.</p>
             </div>
             <div class="border-t border-slate-200 pt-3 space-y-3">
                 <div class="text-xs font-bold uppercase text-slate-500">DHCP Options</div>
@@ -938,7 +938,7 @@ async function searchAvailableSubnets() {
     const prefixLength = _findPrefixLength();
     const resultsEl = document.getElementById('nb-f-results');
     const assignBtn = document.getElementById('nb-f-assign-btn');
-    resultsEl.innerHTML = '<p class="text-xs text-slate-400 italic">Searching…</p>';
+    resultsEl.innerHTML = '<p class="text-xs text-slate-500 italic">Searching…</p>';
     assignBtn.disabled = true;
     window._nbFindSelected = null;
     try {
@@ -960,7 +960,7 @@ async function searchAvailableSubnets() {
             return `<label class="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-slate-50 cursor-pointer border border-slate-100">
                 <input type="radio" name="nb-f-pick" value="${i}" onchange="_pickFindSubnet(${i})">
                 <span class="font-mono text-sm">${a.prefix}</span>
-                <span class="text-[10px] text-slate-400 ml-auto">${distLabel}</span>
+                <span class="text-[10px] text-slate-500 ml-auto">${distLabel}</span>
             </label>`;
         }).join('');
         _pickFindSubnet(0);

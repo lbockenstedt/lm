@@ -16,7 +16,7 @@ function showAddNwDeviceModal(prefillDevice) {
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50 sticky top-0">
                 <h3 class="text-lg font-bold text-navy" id="nw-modal-title">Add Network Device</h3>
-                <button onclick="closeNwDeviceModal()" class="text-slate-400 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                <button onclick="closeNwDeviceModal()" class="text-slate-500 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-4">
                 <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Device Name</label><input type="text" id="nw-name" placeholder="e.g. Core Switch" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
@@ -52,7 +52,7 @@ function showAddNwDeviceModal(prefillDevice) {
                         <option value="21600">Every 6 hours</option>
                         <option value="86400">Every day</option>
                     </select>
-                    <p class="text-[11px] text-slate-400">The nw spoke polls this device on its own cycle (probe + info + ARP/MAC/interfaces), warms the hub cache so sub-views load instantly, and syncs the device + interfaces into NetBox. <b>This device setting overrides the module default</b> (set under Setup → Module Management). Inherit uses the module default (6 hours if unset).</p>
+                    <p class="text-[11px] text-slate-500">The nw spoke polls this device on its own cycle (probe + info + ARP/MAC/interfaces), warms the hub cache so sub-views load instantly, and syncs the device + interfaces into NetBox. <b>This device setting overrides the module default</b> (set under Setup → Module Management). Inherit uses the module default (6 hours if unset).</p>
                 </div>
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3 sticky bottom-0">
@@ -204,7 +204,7 @@ async function loadTruenasAppliancesList() {
     try {
         const apps = await loadTruenasAppliances();
         if (!apps.length) {
-            listEl.innerHTML = '<p class="text-xs text-slate-400 italic">No TrueNAS appliances configured.</p>';
+            listEl.innerHTML = '<p class="text-xs text-slate-500 italic">No TrueNAS appliances configured.</p>';
             return;
         }
         listEl.innerHTML = apps.map(a => {
@@ -214,7 +214,7 @@ async function loadTruenasAppliancesList() {
                 a.verify_ssl === false ? 'verify SSL off' : 'verify SSL on',
             ].filter(Boolean).join(' · ');
             return `<div class="flex items-center justify-between p-3 rounded-md bg-slate-50 border border-slate-200">
-                <div><span class="text-sm font-medium text-slate-700">${escapeHtml(a.name || a.id)}</span><span class="ml-2 text-xs text-slate-400">${escapeHtml(sub)}</span></div>
+                <div><span class="text-sm font-medium text-slate-700">${escapeHtml(a.name || a.id)}</span><span class="ml-2 text-xs text-slate-500">${escapeHtml(sub)}</span></div>
                 <div class="flex gap-2">
                     <button onclick="editTruenasAppliance('${escapeHtml(a.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium" title="Edit appliance settings">Edit</button>
                     <button onclick="deleteTruenasAppliance('${escapeHtml(a.id)}')" class="text-xs text-red-400 hover:text-red-600 font-medium" title="Remove appliance from Lab Manager">Delete</button>
@@ -242,12 +242,12 @@ function showAddTruenasApplianceModal() {
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50 sticky top-0">
                 <h3 class="text-lg font-bold text-navy" id="truenas-modal-title">Add TrueNAS Appliance</h3>
-                <button onclick="closeTruenasApplianceModal()" class="text-slate-400 hover:text-slate-600 transition-colors" title="Close modal"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                <button onclick="closeTruenasApplianceModal()" class="text-slate-500 hover:text-slate-600 transition-colors" title="Close modal"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-4">
                 <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Name</label><input type="text" id="truenas-name" placeholder="e.g. nas-01" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="TrueNAS appliance display name"></div>
                 <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Host / IP</label><input type="text" id="truenas-host" placeholder="10.0.0.50" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="TrueNAS host IP address or FQDN"></div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">API Key</label><input type="password" id="truenas-api-key" placeholder="Create in TrueNAS → Settings → API Keys" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="TrueNAS API key token for WebSocket JSON-RPC auth"><p class="text-[11px] text-slate-400">Leave blank on edit to keep the stored key (sentinel-merge). The spoke forces <code>wss://</code>; keys auto-revoke over plain <code>ws://</code>.</p></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">API Key</label><input type="password" id="truenas-api-key" placeholder="Create in TrueNAS → Settings → API Keys" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="TrueNAS API key token for WebSocket JSON-RPC auth"><p class="text-[11px] text-slate-500">Leave blank on edit to keep the stored key (sentinel-merge). The spoke forces <code>wss://</code>; keys auto-revoke over plain <code>ws://</code>.</p></div>
                 <div class="grid grid-cols-2 gap-4">
                     <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Verify SSL</label><select id="truenas-verify-ssl" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="TLS certificate verification mode"><option value="true">On (trusted CA)</option><option value="false" selected>Off (self-signed)</option></select></div>
                     <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Auth Mechanism</label><select id="truenas-auth-mech" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="Authentication handshake protocol"><option value="auto" selected>Auto (SCRAM→PLAIN)</option><option value="PLAIN">PLAIN (Core / 24.x)</option><option value="SCRAM">SCRAM-SHA-512 (26+)</option></select></div>
@@ -566,7 +566,7 @@ const DEVICE_TYPES = {
 // Admin tenant's own. Unassigned (no tenant_id) is admin-only, not global.
 function _instanceTenantBadge(inst) {
     const tid = (inst && inst.tenant_id) ? String(inst.tenant_id) : '';
-    if (!tid) return `<span class="ml-2 text-xs text-slate-400" title="Not bound to a tenant — visible to admins only, and not usable by a tenant-scoped scan">unassigned</span>`;
+    if (!tid) return `<span class="ml-2 text-xs text-slate-500" title="Not bound to a tenant — visible to admins only, and not usable by a tenant-scoped scan">unassigned</span>`;
     return `<span class="ml-2 text-xs text-indigo-600" title="Owning tenant: ${escapeHtml(tid)}">tenant: ${escapeHtml(tid)}</span>`;
 }
 
@@ -580,12 +580,12 @@ async function loadInstances(productKey) {
         window._instances = window._instances || {};
         window._instances[productKey] = instances;
         if (instances.length === 0) {
-            listEl.innerHTML = '<p class="text-xs text-slate-400 italic">No instances configured.</p>';
+            listEl.innerHTML = '<p class="text-xs text-slate-500 italic">No instances configured.</p>';
             return;
         }
         listEl.innerHTML = instances.map(inst => `
             <div class="flex items-center justify-between p-3 rounded-md bg-slate-50 border border-slate-200">
-                <div><span class="text-sm font-medium text-slate-700">${inst.name || inst.id}</span><span class="ml-2 text-xs text-slate-400">${p.rowSummary(inst)}${inst.spoke_id ? ' · ' + escapeHtml(_spokeLabelFor(inst.spoke_id)) : ''}</span>${_instanceTenantBadge(inst)}${(inst.vault_credential && inst.vault_credential.name) ? `<span class="ml-2 text-xs text-emerald-600" title="Secret supplied from Credential Vault: ${escapeHtml(inst.vault_credential.bucket)} › ${escapeHtml(inst.vault_credential.name)}">🔐 vault</span>` : ''}</div>
+                <div><span class="text-sm font-medium text-slate-700">${inst.name || inst.id}</span><span class="ml-2 text-xs text-slate-500">${p.rowSummary(inst)}${inst.spoke_id ? ' · ' + escapeHtml(_spokeLabelFor(inst.spoke_id)) : ''}</span>${_instanceTenantBadge(inst)}${(inst.vault_credential && inst.vault_credential.name) ? `<span class="ml-2 text-xs text-emerald-600" title="Secret supplied from Credential Vault: ${escapeHtml(inst.vault_credential.bucket)} › ${escapeHtml(inst.vault_credential.name)}">🔐 vault</span>` : ''}</div>
                 <div class="flex gap-2">
                     <button onclick="editInstance('${productKey}','${inst.id}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Edit</button>
                     <button onclick="deleteInstance('${productKey}','${inst.id}')" class="text-xs text-red-400 hover:text-red-600 font-medium">Delete</button>
@@ -641,7 +641,7 @@ function showAddInstanceModal(productKey, editItem) {
     const schemaBtnHtml = productKey === 'ipam'
         ? `<div class="pt-3 mt-2 border-t border-slate-100 space-y-1">
                 <button onclick="applyIpamSchema()" class="w-full px-4 py-2 rounded-md text-sm font-semibold text-primary-text border border-brand hover:bg-primary hover:text-white transition-all">Apply schema changes</button>
-                <p class="text-[11px] text-slate-400 leading-snug">Provisions the Lab Manager custom fields used by the Proxmox, OPNsense, and ClearPass syncs on the connected NetBox. Idempotent — safe to run as many times as needed; existing fields are left in place.</p>
+                <p class="text-[11px] text-slate-500 leading-snug">Provisions the Lab Manager custom fields used by the Proxmox, OPNsense, and ClearPass syncs on the connected NetBox. Idempotent — safe to run as many times as needed; existing fields are left in place.</p>
             </div>`
         : '';
     // Optional Credential Vault picker (products that carry a connection secret,
@@ -656,9 +656,9 @@ function showAddInstanceModal(productKey, editItem) {
     const failoverPoolHtml = p.roleName ? `
                 <div class="space-y-2 pt-2 border-t border-slate-100">
                     <label class="text-xs text-slate-500 uppercase font-bold">Failover Pool (optional)</label>
-                    <p class="text-[11px] text-slate-400 leading-snug">Spokes that can take over this instance if the active one goes out of contact, or if load gets unbalanced across the pool. No priority order — the hub picks any available checked spoke. Once relocated, it stays there (no automatic fail-back).</p>
+                    <p class="text-[11px] text-slate-500 leading-snug">Spokes that can take over this instance if the active one goes out of contact, or if load gets unbalanced across the pool. No priority order — the hub picks any available checked spoke. Once relocated, it stays there (no automatic fail-back).</p>
                     <div id="inst-spoke-pool" class="max-h-32 overflow-y-auto space-y-1 border border-slate-200 rounded-md p-2">
-                        <p class="text-xs text-slate-400 italic">Loading spokes…</p>
+                        <p class="text-xs text-slate-500 italic">Loading spokes…</p>
                     </div>
                     <p id="inst-active-spoke" class="text-[11px] text-slate-500"></p>
                 </div>` : '';
@@ -666,7 +666,7 @@ function showAddInstanceModal(productKey, editItem) {
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
                 <h3 class="text-lg font-bold text-navy">${editItem ? 'Edit' : 'Add'} ${p.title}</h3>
-                <button onclick="closeInstanceModal()" class="text-slate-400 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                <button onclick="closeInstanceModal()" class="text-slate-500 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-4">
                 <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Instance Name</label><input type="text" id="inst-name" placeholder="e.g. Primary ${p.title.replace(' Instance', '')}" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
@@ -709,7 +709,7 @@ ${schemaBtnHtml}
                             <input type="checkbox" class="inst-pool-cb" value="${escapeHtml(c.baseId)}"${checked.has(c.baseId) ? ' checked' : ''}>
                             ${escapeHtml(c.label)}
                         </label>`).join('')
-                    : '<p class="text-xs text-slate-400 italic">No eligible spokes found.</p>';
+                    : '<p class="text-xs text-slate-500 italic">No eligible spokes found.</p>';
             }
             if (activeEl) {
                 const activeSpoke = editItem && editItem.spoke_id
@@ -874,7 +874,7 @@ function _devEndpoint(t) {
 async function loadAllDevices() {
     const listEl = document.getElementById('all-devices-list');
     if (!listEl) return;
-    listEl.innerHTML = '<p class="text-xs text-slate-400 italic animate-pulse">Loading…</p>';
+    listEl.innerHTML = '<p class="text-xs text-slate-500 italic animate-pulse">Loading…</p>';
     const entries = Object.entries(DEVICE_TYPES);
     const results = await Promise.all(entries.map(async ([typeKey, t]) => {
         try {
@@ -893,7 +893,7 @@ async function loadAllDevices() {
     if (all.length === 0) {
         const tabsEl = document.getElementById('all-devices-tabs');
         if (tabsEl) tabsEl.innerHTML = '';
-        listEl.innerHTML = '<p class="text-xs text-slate-400 italic">No managed devices yet. Click <strong>Add Device</strong> to attach one.</p>';
+        listEl.innerHTML = '<p class="text-xs text-slate-500 italic">No managed devices yet. Click <strong>Add Device</strong> to attach one.</p>';
         return;
     }
     // Map spoke_id -> friendly name AND -> tenant so each row shows the spoke
@@ -956,7 +956,7 @@ function _renderManagedDeviceTabs() {
     const typeKeys = Object.keys(DEVICE_TYPES).filter(k =>
         all.some(d => d._typeKey === k));
     const chip = (active, onclick, label, count) =>
-        `<div onclick="${onclick}" class="sub-nav-item ${active ? 'active ' : ''}px-2 py-1 text-xs uppercase tracking-normal cursor-pointer select-none">${escapeHtml(label)}<span class="ml-1 text-[10px] text-slate-400 normal-case">${count}</span></div>`;
+        `<div onclick="${onclick}" class="sub-nav-item ${active ? 'active ' : ''}px-2 py-1 text-xs uppercase tracking-normal cursor-pointer select-none">${escapeHtml(label)}<span class="ml-1 text-[10px] text-slate-500 normal-case">${count}</span></div>`;
     // A single device type makes the type row redundant (All == that one type).
     let typeRow = '';
     if (typeKeys.length > 1) {
@@ -964,7 +964,7 @@ function _renderManagedDeviceTabs() {
         chips += typeKeys.map(k => chip(f.type === k, `_mdSelectType('${k}')`,
             DEVICE_TYPES[k].badgeLabel || DEVICE_TYPES[k].title, typeCounts[k] || 0)).join('');
         typeRow = `<div class="flex flex-wrap items-center gap-x-1 gap-y-1">
-            <span class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Type</span>${chips}</div>`;
+            <span class="text-[10px] font-bold text-slate-500 uppercase tracking-wider mr-1">Type</span>${chips}</div>`;
     } else if (f.type !== 'all') {
         // Only one type exists but a stale filter still points at a removed one.
         f.type = 'all';
@@ -988,7 +988,7 @@ function _renderManagedDeviceTabs() {
             row += tenantIds.map(tid => chip(f.tenant === tid,
                 `_mdSelectTenant('${escJsAttr(tid)}')`, names[tid] || tid, tenantCounts[tid])).join('');
             tenantRow = `<div class="flex flex-wrap items-center gap-x-1 gap-y-1 border-b border-slate-100 pb-1 mb-1">
-                <span class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Tenant</span>${row}</div>`;
+                <span class="text-[10px] font-bold text-slate-500 uppercase tracking-wider mr-1">Tenant</span>${row}</div>`;
         }
     }
 
@@ -1014,7 +1014,7 @@ function _renderManagedDeviceList() {
     if (!listEl) return;
     const rows = _mdFilteredDevices();
     if (rows.length === 0) {
-        listEl.innerHTML = '<p class="text-xs text-slate-400 italic">No devices match this filter.</p>';
+        listEl.innerHTML = '<p class="text-xs text-slate-500 italic">No devices match this filter.</p>';
         return;
     }
     listEl.innerHTML = rows.map(d => {
@@ -1029,7 +1029,7 @@ function _renderManagedDeviceList() {
             : '';
         const eId = String(d._id).replace(/'/g, "\\'");
         return `<div class="flex items-center justify-between p-3 rounded-md bg-slate-50 border border-slate-200">
-            <div><span class="text-sm font-medium text-slate-700">${escapeHtml(name)}</span><span class="ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700">${t.badgeLabel}</span>${tenant}<span class="ml-2 text-xs text-slate-400">${escapeHtml(summary)}${spoke}</span>${(d.vault_credential && d.vault_credential.name) ? `<span class="ml-2 text-xs text-emerald-600" title="Secret supplied from Credential Vault: ${escapeHtml(d.vault_credential.bucket)} › ${escapeHtml(d.vault_credential.name)}">🔐 vault</span>` : ''}</div>
+            <div><span class="text-sm font-medium text-slate-700">${escapeHtml(name)}</span><span class="ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700">${t.badgeLabel}</span>${tenant}<span class="ml-2 text-xs text-slate-500">${escapeHtml(summary)}${spoke}</span>${(d.vault_credential && d.vault_credential.name) ? `<span class="ml-2 text-xs text-emerald-600" title="Secret supplied from Credential Vault: ${escapeHtml(d.vault_credential.bucket)} › ${escapeHtml(d.vault_credential.name)}">🔐 vault</span>` : ''}</div>
             <div class="flex gap-2">
                 <button onclick="editDevice('${d._typeKey}','${eId}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Edit</button>
                 <button onclick="deleteDevice('${d._typeKey}','${eId}')" class="text-xs text-red-400 hover:text-red-600 font-medium">Delete</button>
@@ -1062,7 +1062,7 @@ function showAddDeviceModal(editTypeKey, editItem) {
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50 sticky top-0">
                 <h3 class="text-lg font-bold text-navy">${editItem ? 'Edit' : 'Add'} Managed Device</h3>
-                <button onclick="closeDeviceModal()" class="text-slate-400 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                <button onclick="closeDeviceModal()" class="text-slate-500 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Device Name</label><input type="text" id="dev-name" placeholder="e.g. Core Firewall" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
@@ -1645,7 +1645,7 @@ function _appendImpersonationToPicker() {
                 if (!users.length) { panel.appendChild(note('No users in this tenant')); return; }
                 users.forEach((u) => {
                     const b = document.createElement('button');
-                    b.className = 'w-full text-left pl-5 pr-3 py-1 text-[11px] text-slate-300 hover:bg-amber-500 hover:text-white';
+                    b.className = 'w-full text-left pl-5 pr-3 py-1 text-[11px] text-slate-500 hover:bg-amber-500 hover:text-white';
                     b.textContent = u.label === u.id ? u.id : `${u.label} (${u.id})`;
                     b.title = `Impersonate ${u.id}`;
                     b.addEventListener('click', (e) => { e.stopPropagation(); closeTenantPicker(); startImpersonation(u.id); });

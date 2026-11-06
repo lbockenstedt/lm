@@ -90,9 +90,9 @@ function _dhcpDegradedBanner(d) {
 // tile look used elsewhere in the app.
 function _ddTile(label, value, sub, valueColor, actionHtml) {
     return `<div class="bg-white border border-slate-200 rounded-lg p-4">
-        <div class="text-[11px] uppercase tracking-wide text-slate-400 font-semibold">${escapeHtml(label)}</div>
+        <div class="text-[11px] uppercase tracking-wide text-slate-500 font-semibold">${escapeHtml(label)}</div>
         <div class="mt-1 text-2xl font-bold ${valueColor || 'text-slate-800'}">${escapeHtml(String(value))}</div>
-        ${(sub || actionHtml) ? `<div class="text-xs text-slate-400 mt-0.5 flex items-center justify-between gap-1">${sub ? `<span class="truncate">${escapeHtml(String(sub))}</span>` : '<span></span>'}${actionHtml || ''}</div>` : ''}
+        ${(sub || actionHtml) ? `<div class="text-xs text-slate-500 mt-0.5 flex items-center justify-between gap-1">${sub ? `<span class="truncate">${escapeHtml(String(sub))}</span>` : '<span></span>'}${actionHtml || ''}</div>` : ''}
     </div>`;
 }
 
@@ -103,7 +103,7 @@ function _showDhcpConfigDetailsModal() {
     openModal('dhcp-cfg-details-modal', `
         <div class="flex items-center justify-between pb-3 border-b border-slate-200">
             <h3 class="text-base font-bold text-navy">Kea DHCP Configuration Test — ${status}</h3>
-            <button onclick="document.getElementById('dhcp-cfg-details-modal').remove()" class="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
+            <button onclick="document.getElementById('dhcp-cfg-details-modal').remove()" class="text-slate-500 hover:text-slate-600 text-lg leading-none">&times;</button>
         </div>
         <div class="mt-3">
             <div class="text-xs font-semibold text-slate-500 uppercase mb-1">Command Output</div>
@@ -121,7 +121,7 @@ function _ddBar(pct, label) {
     return `<div class="flex items-center gap-2">
         <div class="flex-1 bg-slate-100 rounded-full h-2 overflow-hidden"><div class="${color} h-2 rounded-full" style="width:${p}%"></div></div>
         <span class="text-xs font-mono text-slate-500 w-12 text-right">${p}%</span>
-        ${label ? `<span class="text-xs text-slate-400">${escapeHtml(label)}</span>` : ''}
+        ${label ? `<span class="text-xs text-slate-500">${escapeHtml(label)}</span>` : ''}
     </div>`;
 }
 
@@ -180,7 +180,7 @@ function _dnsClusterPanel(c) {
         return `<tr class="border-b border-slate-100">
             <td class="px-4 py-2 font-medium" title="${escapeHtml(m.id || '')}">
                 ${escapeHtml(memberName)}
-                ${showId ? `<div class="font-mono text-[11px] text-slate-400">${escapeHtml(m.id)}</div>` : ''}
+                ${showId ? `<div class="font-mono text-[11px] text-slate-500">${escapeHtml(m.id)}</div>` : ''}
             </td>
             <td class="px-4 py-2 font-mono text-xs">${escapeHtml(m.host || '—')}</td>
             <td class="px-4 py-2 text-xs font-bold ${tone}">${escapeHtml(m.convergence || 'unknown')}</td>
@@ -188,7 +188,7 @@ function _dnsClusterPanel(c) {
             <td class="px-4 py-2 text-xs">${m.unbound_running === false ? '<span class="text-red-600 font-bold">stopped</span>' : (m.unbound_running ? 'running' : '—')}</td>
             <td class="px-4 py-2 text-xs text-slate-500">${escapeHtml(seen)}</td>
             ${admin ? `<td class="px-4 py-2 text-right">
-                <button onclick="removeDnsClusterMember('${eId}')" title="Remove this member from the resolver cluster" class="p-1 text-slate-300 hover:text-red-500 transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
+                <button onclick="removeDnsClusterMember('${eId}')" title="Remove this member from the resolver cluster" class="p-1 text-slate-500 hover:text-red-500 transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
             </td>` : ''}
         </tr>`;
     }).join('');
@@ -197,7 +197,7 @@ function _dnsClusterPanel(c) {
         <div class="bg-white border border-slate-200 rounded-lg overflow-hidden mb-4">
             <div class="px-4 py-3 border-b border-slate-200 flex items-center justify-between gap-3">
                 <div class="text-sm font-semibold text-slate-700">Resolver cluster ${_ddClusterBadge(c.state)}</div>
-                <div class="text-xs text-slate-400">${c.converged_count || 0}/${c.member_count || 0} converged on desired set v${desired.version == null ? '?' : desired.version} (${desired.record_count || 0} records)</div>
+                <div class="text-xs text-slate-500">${c.converged_count || 0}/${c.member_count || 0} converged on desired set v${desired.version == null ? '?' : desired.version} (${desired.record_count || 0} records)</div>
             </div>
             ${tableWrap(tableHead(['Member', 'Host', 'Convergence', 'Applied', 'Unbound', 'Last seen'].concat(admin ? [''] : [])) + `<tbody>${rows}</tbody>`)}
             ${partial ? `<div class="px-4 py-3 border-t border-slate-200 text-xs text-amber-700 bg-amber-50">
@@ -206,7 +206,7 @@ function _dnsClusterPanel(c) {
             </div>` : ''}
             <div class="px-4 py-3 border-t border-slate-200">
                 <button onclick="reconcileDnsCluster()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Reconcile now</button>
-                <span class="text-xs text-slate-400 ml-2">Re-pushes the desired record set to any resolver that has drifted.</span>
+                <span class="text-xs text-slate-500 ml-2">Re-pushes the desired record set to any resolver that has drifted.</span>
             </div>
         </div>`;
 }
@@ -264,7 +264,7 @@ function _dhcpHaPanel(c) {
             <td class="px-4 py-2 font-mono text-[11px] text-slate-500">${escapeHtml(scopes)}</td>
             <td class="px-4 py-2 font-mono text-[11px] text-slate-500">${escapeHtml(m.config_digest ? String(m.config_digest).slice(0, 12) + '…' : '—')}</td>
             ${admin ? `<td class="px-4 py-2 text-right">
-                <button onclick="removeDhcpHaMember('${eId}')" title="Remove this node from the Kea HA pair" class="p-1 text-slate-300 hover:text-red-500 transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
+                <button onclick="removeDhcpHaMember('${eId}')" title="Remove this node from the Kea HA pair" class="p-1 text-slate-500 hover:text-red-500 transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
             </td>` : ''}
         </tr>`;
     }).join('');
@@ -291,7 +291,7 @@ function _dhcpHaPanel(c) {
         <div class="bg-white border border-slate-200 rounded-lg overflow-hidden mb-4">
             <div class="px-4 py-3 border-b border-slate-200 flex items-center justify-between gap-3">
                 <div class="text-sm font-semibold text-slate-700">Kea HA pair ${_ddClusterBadge(c.state)}</div>
-                <div class="text-xs text-slate-400">${escapeHtml(c.mode || 'hot-standby')} · ${syncLabel} · configuration ${configLabel}</div>
+                <div class="text-xs text-slate-500">${escapeHtml(c.mode || 'hot-standby')} · ${syncLabel} · configuration ${configLabel}</div>
             </div>
             ${c.updating ? `<div class="px-4 py-2 border-b border-slate-200 text-xs text-sky-800 bg-sky-50">
                 <b>Applying configuration.</b> Kea re-reads its config and re-synchronises the HA pair after a NetBox sync or a re-apply.
@@ -304,9 +304,9 @@ function _dhcpHaPanel(c) {
             </div>` : ''}
             <div class="px-4 py-3 border-t border-slate-200">
                 <button onclick="applyDhcpHaConfig()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Re-apply configuration to both nodes</button>
-                <span class="text-xs text-slate-400 ml-2">Validates both nodes, then applies standby first and primary last.</span>
+                <span class="text-xs text-slate-500 ml-2">Validates both nodes, then applies standby first and primary last.</span>
                 <button onclick="syncDhcpFromNetbox()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50 ml-2">Sync from NetBox</button>
-                <span class="text-xs text-slate-400 ml-2">Pulls subnets/reservations from NetBox first — needed before Re-apply if nothing has synced yet.</span>
+                <span class="text-xs text-slate-500 ml-2">Pulls subnets/reservations from NetBox first — needed before Re-apply if nothing has synced yet.</span>
             </div>
         </div>`;
 }
@@ -472,7 +472,7 @@ function _ddMemberEvidence(members, kind, updatingIds) {
             <div class="text-sm font-semibold text-slate-700 mb-1" title="${escapeHtml(id)}">${escapeHtml(name)} — ${okBadge}</div>
             ${diag && diag.status !== 'SUCCESS' ? `<div class="text-xs text-red-600">${escapeHtml(diag.message || 'no response')}</div>` : ''}
             ${recs.length ? `<ul class="list-disc pl-5 space-y-1 text-xs text-slate-600 mt-1">${recs.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul>`
-                          : '<div class="text-xs text-slate-400">No findings reported.</div>'}
+                          : '<div class="text-xs text-slate-500">No findings reported.</div>'}
             ${dnsEvidence}
         </div>`;
     }).join('');
@@ -555,47 +555,47 @@ function openServiceClusterModal(kind, current) {
         ${[0, 1].map(i => `
         <div class="grid grid-cols-2 gap-2">
             <div>
-                <label class="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold">Member ${i + 1} id</label>
+                <label class="block text-[11px] uppercase tracking-wide text-slate-500 font-semibold">Member ${i + 1} id</label>
                 <input id="svc-cl-id-${i}" value="${escapeHtml(m(i).id || '')}" placeholder="${isDns ? 'dns-a' : 'kea-a'}" class="w-full border border-slate-300 rounded-md px-2 py-1 text-sm">
             </div>
             <div>
-                <label class="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold">Member ${i + 1} host</label>
+                <label class="block text-[11px] uppercase tracking-wide text-slate-500 font-semibold">Member ${i + 1} host</label>
                 <input id="svc-cl-host-${i}" value="${escapeHtml(m(i).host || '')}" placeholder="10.0.1.${i + 10}" class="w-full border border-slate-300 rounded-md px-2 py-1 text-sm">
             </div>
         </div>`).join('')}
         ${isDns ? '' : `
         <div>
-            <label class="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold">HA mode</label>
+            <label class="block text-[11px] uppercase tracking-wide text-slate-500 font-semibold">HA mode</label>
             <select id="svc-cl-mode" class="w-full border border-slate-300 rounded-md px-2 py-1 text-sm" disabled>
                 <option value="hot-standby" selected>hot-standby</option>
             </select>
-            <p class="text-[11px] text-slate-400 mt-1">Load-balancing is not offered: it requires each subnet's pool to be split between the two servers by client class, which this module does not yet generate. Both nodes would allocate from the same range.</p>
+            <p class="text-[11px] text-slate-500 mt-1">Load-balancing is not offered: it requires each subnet's pool to be split between the two servers by client class, which this module does not yet generate. Both nodes would allocate from the same range.</p>
         </div>
         <div class="grid grid-cols-2 gap-2">
             <div>
-                <label class="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold">HA control user</label>
+                <label class="block text-[11px] uppercase tracking-wide text-slate-500 font-semibold">HA control user</label>
                 <input id="svc-cl-hauser" value="${escapeHtml(m(0).ha_user || 'kea-ha')}" class="w-full border border-slate-300 rounded-md px-2 py-1 text-sm">
             </div>
             <div>
-                <label class="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold">HA control password${m(0).ha_password_set ? '' : ' <span class="text-red-600">(required)</span>'}</label>
+                <label class="block text-[11px] uppercase tracking-wide text-slate-500 font-semibold">HA control password${m(0).ha_password_set ? '' : ' <span class="text-red-600">(required)</span>'}</label>
                 <input id="svc-cl-hapass" type="password" placeholder="${m(0).ha_password_set ? 'unchanged' : 'required to enable the pair'}" class="w-full border border-slate-300 rounded-md px-2 py-1 text-sm">
             </div>
         </div>
-        <p class="text-[11px] text-slate-400">Write-only, and carried over when left blank. Must match <code>--ha-user</code>/<code>--ha-password</code> on both nodes. Peer traffic is HTTPS with mutual cert verification; these credentials travel inside that TLS session.</p>
+        <p class="text-[11px] text-slate-500">Write-only, and carried over when left blank. Must match <code>--ha-user</code>/<code>--ha-password</code> on both nodes. Peer traffic is HTTPS with mutual cert verification; these credentials travel inside that TLS session.</p>
         <div>
-            <label class="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold">HA peer addresses (firewall scope)</label>
+            <label class="block text-[11px] uppercase tracking-wide text-slate-500 font-semibold">HA peer addresses (firewall scope)</label>
             <input id="svc-cl-hapeers" value="${escapeHtml((current && (current.ha_peers || []).join(', ')) || '')}" placeholder="10.0.1.10, 10.0.1.11" class="w-full border border-slate-300 rounded-md px-2 py-1 text-sm">
-            <p class="text-[11px] text-slate-400 mt-1">Passed to each node's installer as <code>--ha-peer</code>; the HA port accepts only these sources.</p>
+            <p class="text-[11px] text-slate-500 mt-1">Passed to each node's installer as <code>--ha-peer</code>; the HA port accepts only these sources.</p>
         </div>
         <div>
-            <label class="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold">HA TLS directory (on each node)</label>
+            <label class="block text-[11px] uppercase tracking-wide text-slate-500 font-semibold">HA TLS directory (on each node)</label>
             <input id="svc-cl-hatls" value="${escapeHtml((m(0).ha_trust_anchor || '').replace(/\/ha-ca\.pem$/, '') || SVC_HA_TLS_DIR)}" class="w-full border border-slate-300 rounded-md px-2 py-1 text-sm">
-            <p class="text-[11px] text-slate-400 mt-1">Where <code>install_dhcp.sh --ha-ca/--ha-cert/--ha-key</code> placed the material: <code>${escapeHtml(SVC_HA_TLS_DIR)}/ha-ca.pem</code>, <code>node.crt</code>, <code>node.key</code>. Leave as-is unless you installed them elsewhere.</p>
+            <p class="text-[11px] text-slate-500 mt-1">Where <code>install_dhcp.sh --ha-ca/--ha-cert/--ha-key</code> placed the material: <code>${escapeHtml(SVC_HA_TLS_DIR)}/ha-ca.pem</code>, <code>node.crt</code>, <code>node.key</code>. Leave as-is unless you installed them elsewhere.</p>
         </div>`}
         <div>
-            <label class="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold">Worker secret${alreadyEnabled ? '' : ' <span class="text-red-600">(required)</span>'}</label>
+            <label class="block text-[11px] uppercase tracking-wide text-slate-500 font-semibold">Worker secret${alreadyEnabled ? '' : ' <span class="text-red-600">(required)</span>'}</label>
             <input id="svc-cl-secret" type="password" placeholder="${alreadyEnabled ? 'leave blank to keep the current secret' : 'required to enable the cluster'}" class="w-full border border-slate-300 rounded-md px-2 py-1 text-sm">
-            <p class="text-[11px] text-slate-400 mt-1">Write-only. Choose it here and give the SAME value to each host's installer:
+            <p class="text-[11px] text-slate-500 mt-1">Write-only. Choose it here and give the SAME value to each host's installer:
                 <code>--worker-secret &lt;value&gt;</code>. Nothing generates it for you — a secret you cannot read could never be handed to the workers — and it is never displayed again.</p>
         </div>
         <div id="svc-cl-error" class="hidden text-xs text-red-600"></div>`;
@@ -792,7 +792,7 @@ function _dhcpPacketTracePanel() {
     return `
         <div class="bg-white border border-slate-200 rounded-lg p-4 mt-4">
             <div class="text-sm font-semibold text-slate-700">Client request trace</div>
-            <div class="text-xs text-slate-400 mb-3">Shows whether the Kea server(s) are receiving a client's DHCP requests and where the exchange stops (DISCOVER → OFFER → REQUEST → ACK). For a packet-level check, set a capture window and make the client retry (unplug/replug, renew) while it runs. Leave the MAC empty to list every client Kea has heard from.</div>
+            <div class="text-xs text-slate-500 mb-3">Shows whether the Kea server(s) are receiving a client's DHCP requests and where the exchange stops (DISCOVER → OFFER → REQUEST → ACK). For a packet-level check, set a capture window and make the client retry (unplug/replug, renew) while it runs. Leave the MAC empty to list every client Kea has heard from.</div>
             <div class="flex flex-wrap items-end gap-3">
                 <label class="text-xs text-slate-600">Client MAC
                     <input id="dhcp-trace-mac" type="text" placeholder="aa:bb:cc:dd:ee:ff" value="${escapeHtml(last.mac || '')}" class="mt-1 block w-48 px-2 py-1.5 border border-slate-300 rounded text-xs font-mono"></label>
@@ -890,7 +890,7 @@ function _dhcpDnsHookPanel(dnsHook) {
             <div class="flex items-center justify-between gap-3 mb-2">
                 <div>
                     <div class="text-sm font-semibold text-slate-700">Real-time DNS registration (Kea → Unbound)</div>
-                    <div class="text-xs text-slate-400">Registers/retracts a client's DNS record in Unbound the instant a Kea lease is committed, renewed, released, expired, or declined — no dependency on the NetBox sync loop above.</div>
+                    <div class="text-xs text-slate-500">Registers/retracts a client's DNS record in Unbound the instant a Kea lease is committed, renewed, released, expired, or declined — no dependency on the NetBox sync loop above.</div>
                 </div>
                 ${admin ? `<button onclick="toggleDhcpDnsHook(${enabled ? 'false' : 'true'})" class="px-3 py-1.5 rounded-md text-xs font-bold ${enabled ? 'bg-white border border-slate-300 hover:bg-slate-50' : 'bg-primary text-white hover:bg-[#018a6c]'} flex-shrink-0">${enabled ? 'Disable' : 'Enable'}</button>` : ''}
             </div>
@@ -931,7 +931,7 @@ async function toggleDhcpDnsHook(enable) {
 // collapsed "source" line listing which client IP(s) made those queries.
 function _ddQueryNameRows(names, searchActive = false) {
     if (!names.length && !searchActive) {
-        return '<p class="text-slate-400 italic text-sm">No DNS queries recorded yet. This may mean:<br>• Unbound DNS is not running<br>• Query logging is not enabled<br>• No DNS queries have been made recently.</p>';
+        return '<p class="text-slate-500 italic text-sm">No DNS queries recorded yet. This may mean:<br>• Unbound DNS is not running<br>• Query logging is not enabled<br>• No DNS queries have been made recently.</p>';
     }
     return `<div class="max-h-80 overflow-y-auto divide-y divide-slate-100">${names.map(q => {
         const sources = q.sources || [];
@@ -940,7 +940,7 @@ function _ddQueryNameRows(names, searchActive = false) {
         // see /api/dns/stats' ip_to_host enrichment) so operators can see
         // WHICH DEVICE queried a name, not just its IP.
         const sourceLine = sources.length
-            ? `<div class="text-[11px] text-slate-400 font-mono mt-0.5">from ${sources.slice(0, 5).map(s => {
+            ? `<div class="text-[11px] text-slate-500 font-mono mt-0.5">from ${sources.slice(0, 5).map(s => {
                   const host = s.host && s.host !== s.ip ? `${escapeHtml(s.host)} (${escapeHtml(s.ip)})` : escapeHtml(s.ip);
                   return `${host} (${(s.count || 0).toLocaleString()})`;
               }).join(', ')}${sources.length > 5 ? `, +${sources.length - 5} more` : ''}</div>`
@@ -966,7 +966,7 @@ async function _ddSyncStatusLine(side) {
         const s = (data.status || {})[side] || {};
         const cfg = data.config || {};
         if (!s.last_run) {
-            return `<div class="text-xs text-slate-400 mt-2">NetBox auto-sync: ${cfg.enabled === false ? 'disabled' : 'enabled'} (every ${cfg.interval || 300}s) — no run yet</div>`;
+            return `<div class="text-xs text-slate-500 mt-2">NetBox auto-sync: ${cfg.enabled === false ? 'disabled' : 'enabled'} (every ${cfg.interval || 300}s) — no run yet</div>`;
         }
         const when = new Date(s.last_run * 1000).toLocaleString();
         const badge = s.status === 'ok' ? 'text-emerald-600' : s.status === 'error' ? 'text-red-500' : 'text-amber-500';
@@ -980,7 +980,7 @@ async function _ddSyncStatusLine(side) {
         const warn = s.warning
             ? `<div class="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded px-2 py-1 mt-2">⚠ ${escapeHtml(s.warning)}</div>`
             : '';
-        return `${warn}<div class="text-xs text-slate-400 mt-2">NetBox auto-sync: <span class="${badge} font-medium">${escapeHtml(s.status)}</span> · ${escapeHtml(detail)} · <span title="${escapeHtml(when)}">${escapeHtml(when)}</span></div>`;
+        return `${warn}<div class="text-xs text-slate-500 mt-2">NetBox auto-sync: <span class="${badge} font-medium">${escapeHtml(s.status)}</span> · ${escapeHtml(detail)} · <span title="${escapeHtml(when)}">${escapeHtml(when)}</span></div>`;
     } catch (_e) { return ''; }
 }
 
@@ -1011,7 +1011,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
         if (navActions) navActions.innerHTML = '';
         return loadExternalDNS();
     }
-    container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
+    container.innerHTML = '<p class="text-sm text-slate-500 italic p-4">Loading…</p>';
     // ALL per-tab action buttons — "+ Add Record" (Records tab only), "+ Add
     // Forwarder" (Forwarders tab only) — render into the trailing
     // #top-nav-actions strip in the sub-nav bar, pinned right next to the
@@ -1106,14 +1106,14 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
             // looks authoritative.
             const statErrors = (d.member_errors && typeof d.member_errors === 'object')
                 ? Object.entries(d.member_errors) : [];
-            const sourceLine = d.cluster ? `<div class="text-xs text-slate-400 mb-3">Combined across ${d.members_reporting == null ? (d.member_count || 0) : d.members_reporting} of ${d.member_count || 0} resolver(s).</div>` : '';
+            const sourceLine = d.cluster ? `<div class="text-xs text-slate-500 mb-3">Combined across ${d.members_reporting == null ? (d.member_count || 0) : d.members_reporting} of ${d.member_count || 0} resolver(s).</div>` : '';
             // Tenant-scoped: totals are derived from this tenant's own devices'
             // queries. Cache/recursion counters can't be attributed to a
             // client, so the hub only returns them (resolver-wide) when the
             // resolver is the tenant's own or the viewer is a Global Admin.
             const scoped = !!d.tenant_scoped;
             const resolverWide = scoped && d.resolver_counters ? ' (whole resolver)' : '';
-            const scopeLine = scoped ? `<div class="text-xs text-slate-400 mb-3">Showing only queries from this tenant's subnets. ${d.resolver_counters ? 'Cache and recursion counters cover the whole resolver.' : 'Cache and recursion counters are server-wide and hidden on a shared resolver.'}</div>` : '';
+            const scopeLine = scoped ? `<div class="text-xs text-slate-500 mb-3">Showing only queries from this tenant's subnets. ${d.resolver_counters ? 'Cache and recursion counters cover the whole resolver.' : 'Cache and recursion counters are server-wide and hidden on a shared resolver.'}</div>` : '';
             const win = d.window || null;
             const windowLine = !win
                 ? `<div class="text-xs text-amber-600 mb-3">This resolver does not support time windows yet — counters below are totals since Unbound last started.</div>`
@@ -1161,7 +1161,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                 <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">${tiles}</div>
                 <div class="bg-white border border-slate-200 rounded-lg p-4 mb-4">
                     <div class="text-sm font-semibold text-slate-700 mb-2">Queries by Type</div>
-                    ${typeRows || '<p class="text-slate-400 italic text-sm">No query-type data yet.</p>'}
+                    ${typeRows || '<p class="text-slate-500 italic text-sm">No query-type data yet.</p>'}
                 </div>
                 <div class="bg-white border border-slate-200 rounded-lg p-4">
                     <div class="flex items-center justify-between mb-2 gap-3">
@@ -1191,7 +1191,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                             <button id="dns-client-go" class="text-xs bg-brand/10 text-primary-text border border-brand px-3 py-1 rounded-md font-bold">Show</button>
                         </div>
                     </div>
-                    <div id="dns-client-list"><p class="text-slate-400 italic text-sm">Enter a device IP to list every DNS query it made in the chosen window.</p></div>
+                    <div id="dns-client-list"><p class="text-slate-500 italic text-sm">Enter a device IP to list every DNS query it made in the chosen window.</p></div>
                 </div>
                 ${syncLine}`;
             const clientGo = document.getElementById('dns-client-go');
@@ -1200,17 +1200,17 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                     const list = document.getElementById('dns-client-list');
                     const who = (document.getElementById('dns-client-ip').value || '').trim();
                     const mins = document.getElementById('dns-client-minutes').value;
-                    list.innerHTML = '<p class="text-sm text-slate-400 italic">Loading…</p>';
+                    list.innerHTML = '<p class="text-sm text-slate-500 italic">Loading…</p>';
                     const qs = (_tenantQS() ? '&' : '?') + 'client=' + encodeURIComponent(who) + '&minutes=' + encodeURIComponent(mins);
                     const { ok: okc, data: dc, detail: det } = await _spokeFetch('/api/dns/client-queries' + _tenantQS() + qs);
                     if (!okc || !dc) { list.innerHTML = `<p class="text-sm text-red-500">${escapeHtml(det || 'Query failed')}</p>`; return; }
                     const qs2 = dc.queries || [];
-                    if (!qs2.length) { list.innerHTML = `<p class="text-slate-400 italic text-sm">No queries from ${escapeHtml(who || 'any device')} in the last ${escapeHtml(String(mins))} minutes${dc.source === 'journal' ? ' (read from the journal: query log file not yet active)' : ''}.</p>`; return; }
+                    if (!qs2.length) { list.innerHTML = `<p class="text-slate-500 italic text-sm">No queries from ${escapeHtml(who || 'any device')} in the last ${escapeHtml(String(mins))} minutes${dc.source === 'journal' ? ' (read from the journal: query log file not yet active)' : ''}.</p>`; return; }
                     list.innerHTML = `<div class="text-xs text-slate-500 mb-1">${(dc.total || 0).toLocaleString()} queries${dc.total > qs2.length ? ` (showing newest ${qs2.length})` : ''}</div>
                         <div class="max-h-96 overflow-y-auto divide-y divide-slate-100">${qs2.map(q => `
                         <div class="py-1 text-xs flex items-center justify-between gap-3">
-                            <span><span class="px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 font-medium mr-2">${escapeHtml(q.type)}</span><span class="font-mono text-slate-700">${escapeHtml(q.name)}</span>${who ? '' : `<span class="text-slate-400 ml-2">${escapeHtml(q.host && q.host !== q.client ? q.host + ' (' + q.client + ')' : q.client)}</span>`}</span>
-                            <span class="font-mono text-slate-400 whitespace-nowrap">${new Date(q.time * 1000).toLocaleTimeString()}</span>
+                            <span><span class="px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 font-medium mr-2">${escapeHtml(q.type)}</span><span class="font-mono text-slate-700">${escapeHtml(q.name)}</span>${who ? '' : `<span class="text-slate-500 ml-2">${escapeHtml(q.host && q.host !== q.client ? q.host + ' (' + q.client + ')' : q.client)}</span>`}</span>
+                            <span class="font-mono text-slate-500 whitespace-nowrap">${new Date(q.time * 1000).toLocaleTimeString()}</span>
                         </div>`).join('')}</div>`;
                 };
                 clientGo.addEventListener('click', runClient);
@@ -1283,7 +1283,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                 <div class="flex items-center justify-between gap-3 mb-4">
                     <div>
                         <div class="text-sm font-semibold ${good ? 'text-emerald-700' : 'text-red-700'}">${good ? (cluster ? 'DNS cluster healthy' : 'DNS listener healthy') : (cluster ? 'DNS cluster needs attention' : 'DNS listener needs attention')}</div>
-                        <div class="text-xs text-slate-400">${cluster ? `Cluster of ${cluster.member_count || 0} resolver(s); each resolver's own checks and evidence are shown below.` : 'Live checks run on the Unbound server.'}</div>
+                        <div class="text-xs text-slate-500">${cluster ? `Cluster of ${cluster.member_count || 0} resolver(s); each resolver's own checks and evidence are shown below.` : 'Live checks run on the Unbound server.'}</div>
                     </div>
                     <div class="flex items-center gap-2">
                         ${serviceClusterButton('dns', cluster)}
@@ -1346,8 +1346,8 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                 <td class="px-4 py-2 text-xs">${escapeHtml(f.class || 'IN')}</td>
                 <td class="px-4 py-2 font-mono text-xs">${(f.upstreams || []).map(u => escapeHtml(u)).join(', ') || '—'}</td>
                 <td class="px-4 py-2 whitespace-nowrap text-right">
-                    <button onclick="editDnsForwarder('${eZone}')" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
-                    <button onclick="deleteDnsForwarder('${eZone}')" title="Delete" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>
+                    <button onclick="editDnsForwarder('${eZone}')" title="Edit" class="p-1 text-slate-500 hover:text-blue-600 transition-colors">${editIcon}</button>
+                    <button onclick="deleteDnsForwarder('${eZone}')" title="Delete" class="p-1 text-slate-500 hover:text-red-500 transition-colors">${delIcon}</button>
                 </td>
             </tr>`;
             }).join('');
@@ -1369,7 +1369,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                 </div>`
                 : '';
             container.innerHTML = errorBanner + (fwds.length === 0
-                ? '<p class="p-4 text-slate-400 italic text-sm">No upstream forwarders configured (Unbound is resolving recursively from root).</p>'
+                ? '<p class="p-4 text-slate-500 italic text-sm">No upstream forwarders configured (Unbound is resolving recursively from root).</p>'
                 : tw(th(cols) + `<tbody>${rows}</tbody>`));
             return;
         }
@@ -1391,7 +1391,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
         const overridesP = _spokeFetch('/api/dns/overrides' + _tenantQS()).catch(() => ({ ok: false }));
         const { ok, data: d, detail } = await _spokeFetch('/api/dns/records?tenant=' + encodeURIComponent(currentTenant));
         if (!ok) {
-            container.innerHTML = `${_spokeErrorBanner(detail, 'DNS spoke not connected')}${_isSpokeUpdating(detail) ? '' : '<p class="px-4 pb-4 text-xs text-slate-400">Verify the Unbound configuration in Setup → DNS.</p>'}`;
+            container.innerHTML = `${_spokeErrorBanner(detail, 'DNS spoke not connected')}${_isSpokeUpdating(detail) ? '' : '<p class="px-4 pb-4 text-xs text-slate-500">Verify the Unbound configuration in Setup → DNS.</p>'}`;
             _clearTopNavActions();
             return;
         }
@@ -1417,8 +1417,8 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
             const isHost = r.type === 'A' || r.type === 'AAAA';
             const assigned = (showOverrideCol && isHost) ? _dnsOverrideFor(r.value) : null;
             const overrideCell = !showOverrideCol ? '' : `<td class="px-4 py-2 text-xs whitespace-nowrap">${
-                !isHost ? '<span class="text-slate-300">—</span>'
-                : `${assigned ? `<span class="px-2 py-0.5 rounded-full font-medium ${assigned.exact ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-600'}" title="${assigned.exact ? 'Assigned to this device' : 'Inherited from subnet ' + escapeHtml(assigned.target)}">${escapeHtml(assigned.profile)}</span>` : '<span class="text-slate-400">none</span>'}${
+                !isHost ? '<span class="text-slate-500">—</span>'
+                : `${assigned ? `<span class="px-2 py-0.5 rounded-full font-medium ${assigned.exact ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-600'}" title="${assigned.exact ? 'Assigned to this device' : 'Inherited from subnet ' + escapeHtml(assigned.target)}">${escapeHtml(assigned.profile)}</span>` : '<span class="text-slate-500">none</span>'}${
                     canAssign ? ` <button onclick="dnsOverrideForRecord(${idx})" title="Apply or remove a DNS override profile for this device or its subnet" class="ml-1 text-primary-text hover:underline font-bold">Override…</button>` : ''}`
             }</td>`;
             return `<tr class="border-b border-slate-100 hover:bg-slate-50">
@@ -1427,13 +1427,13 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                 <td class="px-4 py-2 font-mono text-xs">${escapeHtml(r.value)}</td>
                 ${overrideCell}
                 <td class="px-4 py-2 whitespace-nowrap">
-                    <button onclick="editDnsRecord('${eName}','${eType}')" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
-                    <button onclick="deleteDnsRecord('${eName}','${eType}')" title="Delete" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>
+                    <button onclick="editDnsRecord('${eName}','${eType}')" title="Edit" class="p-1 text-slate-500 hover:text-blue-600 transition-colors">${editIcon}</button>
+                    <button onclick="deleteDnsRecord('${eName}','${eType}')" title="Delete" class="p-1 text-slate-500 hover:text-red-500 transition-colors">${delIcon}</button>
                 </td>
             </tr>`;
         }).join('');
         container.innerHTML = _spokeCachedBadge(d) + (records.length === 0
-            ? '<p class="p-4 text-slate-400 italic text-sm">No DNS records found.</p>'
+            ? '<p class="p-4 text-slate-500 italic text-sm">No DNS records found.</p>'
             : tw(th(cols) + `<tbody>${rows}</tbody>`));
     } catch (err) {
         container.innerHTML = `<p class="p-4 text-red-500 text-sm">Error: ${err.message}</p>`;

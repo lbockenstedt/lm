@@ -9,7 +9,7 @@
 async function loadAllTenantsOverview(forceRefresh = false) {
     const container = document.getElementById('all-tenants-overview');
     if (!container) return;
-    container.innerHTML = '<p class="text-sm text-slate-400 italic">Loading tenants…</p>';
+    container.innerHTML = '<p class="text-sm text-slate-500 italic">Loading tenants…</p>';
     try {
         const url = '/api/dashboard/all-tenants' + (forceRefresh ? '?refresh=1' : '');
         const r = await fetch(url);
@@ -26,7 +26,7 @@ async function loadAllTenantsOverview(forceRefresh = false) {
         if (!r.ok) throw new Error(`HTTP ${r.status}: ${d.detail || text.slice(0, 120)}`);
         const tenants = (d.tenants || []).slice().sort((a, b) => a.name.localeCompare(b.name));
         if (!tenants.length) {
-            container.innerHTML = '<p class="text-sm text-slate-400 italic">No tenants configured.</p>';
+            container.innerHTML = '<p class="text-sm text-slate-500 italic">No tenants configured.</p>';
             return;
         }
         const esc = escapeHtml;  // shared escaper (escapes &<>"')
@@ -41,8 +41,8 @@ async function loadAllTenantsOverview(forceRefresh = false) {
             const up = sp.up || 0, down = sp.down || 0, decomm = sp.decommissioned || 0;
             const downPart = down > 0
                 ? `<span class="text-red-600 font-semibold">${down} down</span>`
-                : `<span class="text-slate-400">0 down</span>`;
-            return `<span class="whitespace-nowrap"><span class="text-slate-700">${up} up</span> · ${downPart}${decomm ? ` <span class="text-slate-400">· ${decomm} decomm</span>` : ''}</span>`;
+                : `<span class="text-slate-500">0 down</span>`;
+            return `<span class="whitespace-nowrap"><span class="text-slate-700">${up} up</span> · ${downPart}${decomm ? ` <span class="text-slate-500">· ${decomm} decomm</span>` : ''}</span>`;
         };
         // Expandable list of down spokes under a tenant row — each entry links
         // to Setup → Spokes & Agents filtered to that tenant so the operator can
@@ -61,7 +61,7 @@ async function loadAllTenantsOverview(forceRefresh = false) {
             const items = ds.map(d => `<div class="flex items-center gap-2 py-0.5">
                 <span class="inline-block w-2 h-2 rounded-full bg-red-500"></span>
                 <span class="font-mono text-xs text-slate-600 truncate">${esc(d.name || d.spoke_id)}</span>
-                ${d.module_type ? `<span class="text-[10px] text-slate-400">${esc(d.module_type)}</span>` : ''}
+                ${d.module_type ? `<span class="text-[10px] text-slate-500">${esc(d.module_type)}</span>` : ''}
                 <span class="text-[10px] text-red-500">offline · ${esc(ago(d.last_seen_epoch))}</span>
                 <button class="text-[11px] text-blue-500 hover:text-blue-700 font-medium ml-1" data-jump-tid="${esc(tid)}">manage →</button>
             </div>`).join('');
@@ -75,7 +75,7 @@ async function loadAllTenantsOverview(forceRefresh = false) {
             return `<tr class="border-b border-slate-100 hover:bg-slate-50 cursor-pointer at-row ${active ? 'bg-green-50/60' : ''}" data-tid="${esc(t.id)}">
                 <td class="px-4 py-2 text-sm">
                     <span class="font-medium text-navy ${active ? 'text-primary-text' : ''}">${esc(t.name)}</span>
-                    ${t.description ? `<span class="block text-xs text-slate-400">${esc(t.description)}</span>` : ''}
+                    ${t.description ? `<span class="block text-xs text-slate-500">${esc(t.description)}</span>` : ''}
                 </td>
                 <td class="${cell}">${num(t.devices)}</td>
                 <td class="${cell}">${num(t.vms)}</td>
@@ -83,21 +83,21 @@ async function loadAllTenantsOverview(forceRefresh = false) {
                 <td class="${cell}">${num(t.prefixes)}</td>
                 <td class="${cell}">${num(t.ips_used)}</td>
                 <td class="${cell}">${spokeCell(sp)}</td>
-                <td class="px-4 py-2 text-xs text-slate-400 text-right">${active ? '<span class="text-primary-text font-medium">viewing</span>' : 'View →'}</td>
+                <td class="px-4 py-2 text-xs text-slate-500 text-right">${active ? '<span class="text-primary-text font-medium">viewing</span>' : 'View →'}</td>
             </tr>${hasDown ? `<tr class="bg-red-50/30"><td colspan="8">${downList(sp, t.id)}</td></tr>` : ''}`;
         }).join('');
         // Shared/unassigned spokes (untagged) get their own trailing block so an
         // offline shared spoke is never lost from the overview.
         const sharedBlock = shared && ((shared.down || 0) + (shared.decommissioned || 0) + (shared.up || 0)) > 0
             ? `<tr class="border-b border-slate-100 bg-slate-50/60 at-row" data-tid="__all__">
-                <td class="px-4 py-2 text-sm"><span class="font-medium text-slate-500">Shared / unassigned</span><span class="block text-xs text-slate-400">spokes bound to no tenant</span></td>
+                <td class="px-4 py-2 text-sm"><span class="font-medium text-slate-500">Shared / unassigned</span><span class="block text-xs text-slate-500">spokes bound to no tenant</span></td>
                 <td class="${cell}" colspan="5"></td>
                 <td class="${cell}">${spokeCell(shared)}</td>
-                <td class="px-4 py-2 text-xs text-slate-400 text-right">View →</td>
+                <td class="px-4 py-2 text-xs text-slate-500 text-right">View →</td>
             </tr>${(shared.down || 0) > 0 ? `<tr class="bg-red-50/30"><td colspan="8">${downList(shared, '__all__')}</td></tr>` : ''}`
             : '';
         container.innerHTML = `<table class="w-full text-left">
-            <thead class="text-slate-400 uppercase text-xs border-b border-slate-200"><tr>
+            <thead class="text-slate-500 uppercase text-xs border-b border-slate-200"><tr>
                 <th class="px-4 py-2">Tenant</th>
                 <th class="px-4 py-2">Devices</th>
                 <th class="px-4 py-2">VMs</th>
@@ -109,7 +109,7 @@ async function loadAllTenantsOverview(forceRefresh = false) {
             </tr></thead>
             <tbody>${rows}${sharedBlock}</tbody>
         </table>
-        <p class="mt-2 text-xs text-slate-400">Click a row to view as that tenant. Spokes shows up/down from the spoke roster (offline spokes included). “manage →” jumps to Spokes &amp; Agents for that tenant. Counts cached 60s — use Refresh for live numbers.</p>`;
+        <p class="mt-2 text-xs text-slate-500">Click a row to view as that tenant. Spokes shows up/down from the spoke roster (offline spokes included). “manage →” jumps to Spokes &amp; Agents for that tenant. Counts cached 60s — use Refresh for live numbers.</p>`;
         container.querySelectorAll('.at-row').forEach(tr => {
             tr.addEventListener('click', () => {
                 const tid = tr.dataset.tid;
@@ -174,23 +174,23 @@ async function loadInfraStatus() {
         const r = await fetch(`/api/dashboard/infra-status?tenant=${tenantParam}`);
         if (!r.ok) throw new Error('HTTP ' + r.status);
         d = await r.json();
-    } catch (e) { el.innerHTML = '<p class="text-xs text-slate-400 italic">Status unavailable</p>'; return; }
+    } catch (e) { el.innerHTML = '<p class="text-xs text-slate-500 italic">Status unavailable</p>'; return; }
     const c = d.counts || {};
     const items = d.items || [];
     const dot = s => `<span class="inline-block w-2.5 h-2.5 rounded-full ${s === 'green' ? 'bg-green-500' : s === 'yellow' ? 'bg-amber-400' : 'bg-red-500'}"></span>`;
     const pill = (label, n, cls) => `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full ${cls} text-xs font-bold">${label} ${n}</span>`;
     const rows = items.map(i => `<div class="flex items-center justify-between gap-3 py-1 border-b border-slate-100 last:border-0">
-        <span class="flex items-center gap-2 min-w-0">${dot(i.status)}<span class="font-mono text-xs text-slate-600 truncate">${escapeHtml(i.name)}</span>${i.type ? `<span class="text-[10px] text-slate-400">${escapeHtml(i.type)}</span>` : ''}</span>
-        <span class="text-[10px] ${i.online ? (i.tier === 'warning' ? 'text-amber-600' : 'text-slate-400') : 'text-red-500'}">${i.online ? (i.tier === 'warning' ? 'warning' : 'online') : 'offline'}</span></div>`).join('');
+        <span class="flex items-center gap-2 min-w-0">${dot(i.status)}<span class="font-mono text-xs text-slate-600 truncate">${escapeHtml(i.name)}</span>${i.type ? `<span class="text-[10px] text-slate-500">${escapeHtml(i.type)}</span>` : ''}</span>
+        <span class="text-[10px] ${i.online ? (i.tier === 'warning' ? 'text-amber-600' : 'text-slate-500') : 'text-red-500'}">${i.online ? (i.tier === 'warning' ? 'warning' : 'online') : 'offline'}</span></div>`).join('');
     el.innerHTML = `
       <div class="flex flex-wrap items-center gap-2 mb-3">
         <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-green-100 text-green-700 text-xs font-bold">${dot('green')} Hub online</span>
         ${pill('Healthy', c.green || 0, 'bg-green-100 text-green-700')}
         ${pill('Warning', c.yellow || 0, 'bg-amber-100 text-amber-700')}
         ${pill('Down', c.red || 0, 'bg-red-100 text-red-700')}
-        <span class="text-[11px] text-slate-400 ml-auto">${items.length} spoke/agent(s)${d.all_tenants ? ' · all tenants' : ''}</span>
+        <span class="text-[11px] text-slate-500 ml-auto">${items.length} spoke/agent(s)${d.all_tenants ? ' · all tenants' : ''}</span>
       </div>
-      <div class="max-h-56 overflow-y-auto">${items.length ? rows : '<p class="text-xs text-slate-400 italic">No spokes/agents in scope.</p>'}</div>`;
+      <div class="max-h-56 overflow-y-auto">${items.length ? rows : '<p class="text-xs text-slate-500 italic">No spokes/agents in scope.</p>'}</div>`;
 }
 
 // ─── Global Cross-System Search ──────────────────────────────────────────────
@@ -206,7 +206,7 @@ function handleSearch(value) {
         return;
     }
     dropdown.classList.remove('hidden');
-    dropdown.innerHTML = '<p class="text-xs text-slate-400 italic px-2 py-1">Searching…</p>';
+    dropdown.innerHTML = '<p class="text-xs text-slate-500 italic px-2 py-1">Searching…</p>';
 
     _searchTimer = setTimeout(async () => {
         try {
@@ -224,7 +224,7 @@ function handleSearch(value) {
             const degradedNote = (Array.isArray(d.degraded) && d.degraded.length)
                 ? `<p class="text-[10px] text-amber-600 px-2 pt-1 border-t border-slate-100">Some sources did not answer: ${d.degraded.map(c => legNames[c] || c).join(', ')}</p>` : '';
             if (d.total === 0) {
-                dropdown.innerHTML = '<p class="text-xs text-slate-400 italic px-2 py-1">No results</p>' + degradedNote;
+                dropdown.innerHTML = '<p class="text-xs text-slate-500 italic px-2 py-1">No results</p>' + degradedNote;
                 return;
             }
 
@@ -285,12 +285,12 @@ function handleSearch(value) {
                     <span class="text-base leading-none mt-0.5">${icon}</span>
                     <div class="min-w-0">
                         <div class="text-xs font-medium text-slate-800 truncate">${item.name || item.ip || '—'}</div>
-                        <div class="text-[10px] text-slate-400 truncate">${label} · ${item.source}${sub ? ' · ' + sub : ''}</div>
+                        <div class="text-[10px] text-slate-500 truncate">${label} · ${item.source}${sub ? ' · ' + sub : ''}</div>
                     </div>
                 </div>`;
             }).join('');
 
-            const more = d.total > 12 ? `<p class="text-[10px] text-slate-400 px-2 pt-1 border-t border-slate-100">${d.total - 12} more — narrow your search</p>` : '';
+            const more = d.total > 12 ? `<p class="text-[10px] text-slate-500 px-2 pt-1 border-t border-slate-100">${d.total - 12} more — narrow your search</p>` : '';
             dropdown.innerHTML = rows + more + degradedNote;
         } catch (err) {
             dropdown.innerHTML = `<p class="text-xs text-red-400 px-2 py-1">Error: ${err.message}</p>`;
@@ -353,13 +353,13 @@ async function showDeviceDashboard(item) {
     panel.innerHTML = `
         <div class="flex items-center justify-between px-6 py-4 border-b border-slate-100">
             <div>
-                <p class="text-xs text-slate-400 uppercase font-bold tracking-widest mb-0.5">Device Dashboard</p>
+                <p class="text-xs text-slate-500 uppercase font-bold tracking-widest mb-0.5">Device Dashboard</p>
                 <p class="text-base font-bold text-navy font-mono" id="dd-identity">Searching…</p>
             </div>
-            <button class="dd-close text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
+            <button class="dd-close text-slate-500 hover:text-slate-600 text-2xl leading-none">&times;</button>
         </div>
         <div id="dd-body" class="p-6 grid grid-cols-1 gap-4">
-            <p class="text-sm text-slate-400 italic col-span-full">Loading data from all modules…</p>
+            <p class="text-sm text-slate-500 italic col-span-full">Loading data from all modules…</p>
         </div>`;
     modal.appendChild(panel);
     modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
@@ -383,7 +383,7 @@ async function showDeviceDashboard(item) {
         document.getElementById('dd-identity').textContent = identParts.join('  ·  ') || item.name || '—';
 
         const badge = (label, cls) => `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${cls}">${label}</span>`;
-        const row = (label, val) => val ? `<div class="flex justify-between text-xs py-1 border-b border-slate-50"><span class="text-slate-400">${label}</span><span class="font-medium text-slate-700 font-mono">${val}</span></div>` : '';
+        const row = (label, val) => val ? `<div class="flex justify-between text-xs py-1 border-b border-slate-50"><span class="text-slate-500">${label}</span><span class="font-medium text-slate-700 font-mono">${val}</span></div>` : '';
 
         const card = (title, color, content) => `
             <div class="rounded-lg border border-slate-100 overflow-hidden">
@@ -393,7 +393,7 @@ async function showDeviceDashboard(item) {
                 <div class="px-4 py-3">${content}</div>
             </div>`;
 
-        const empty = '<p class="text-xs text-slate-400 italic">No data from this module.</p>';
+        const empty = '<p class="text-xs text-slate-500 italic">No data from this module.</p>';
         const cards = [];
 
         // NAC / ClearPass
@@ -411,12 +411,12 @@ async function showDeviceDashboard(item) {
                     ${row('RADIUS Sessions', sessCount > 0 ? `${sessCount} found` : 'None')}
                 </div>`));
         } else {
-            cards.push(card('ClearPass NAC', 'bg-slate-50 text-slate-400', empty));
+            cards.push(card('ClearPass NAC', 'bg-slate-50 text-slate-500', empty));
         }
 
         // DHCP
         const dhcp = d.dhcp;
-        cards.push(card('DHCP', dhcp ? 'bg-blue-50 text-blue-700' : 'bg-slate-50 text-slate-400', dhcp ? `
+        cards.push(card('DHCP', dhcp ? 'bg-blue-50 text-blue-700' : 'bg-slate-50 text-slate-500', dhcp ? `
             ${row('IP Address', dhcp.ip)}
             ${row('Hostname', dhcp.hostname !== 'unknown' ? dhcp.hostname : null)}
             ${row('MAC', dhcp.mac)}
@@ -424,7 +424,7 @@ async function showDeviceDashboard(item) {
 
         // NetBox
         const nb = d.netbox || [];
-        cards.push(card('NetBox Inventory', nb.length ? 'bg-green-50 text-green-700' : 'bg-slate-50 text-slate-400',
+        cards.push(card('NetBox Inventory', nb.length ? 'bg-green-50 text-green-700' : 'bg-slate-50 text-slate-500',
             nb.length ? nb.slice(0, 5).map(n => {
                 const meta = [
                     n.device_type ? `Type: ${n.device_type}` : (n.type && n.type !== 'device' ? n.type : ''),
@@ -446,7 +446,7 @@ async function showDeviceDashboard(item) {
 
         // Proxmox
         const px = d.proxmox || [];
-        cards.push(card('Proxmox', px.length ? 'bg-orange-50 text-orange-700' : 'bg-slate-50 text-slate-400',
+        cards.push(card('Proxmox', px.length ? 'bg-orange-50 text-orange-700' : 'bg-slate-50 text-slate-500',
             px.length ? px.slice(0, 3).map(v => {
                 const meta = `${v.type || 'VM'} ${v.ip ? '· ' + v.ip : ''} ${v.cluster ? '· ' + v.cluster : ''}`;
                 // VNC console: only when the VM carries the identifiers the
@@ -463,7 +463,7 @@ async function showDeviceDashboard(item) {
                 return `<div class="flex items-center justify-between gap-2 py-1 border-b border-slate-50 last:border-0">
                     <div class="min-w-0">
                         <span class="text-xs font-medium text-slate-700">${v.name || '—'}</span>
-                        <span class="text-slate-400 ml-2 text-[10px]">${meta}</span>
+                        <span class="text-slate-500 ml-2 text-[10px]">${meta}</span>
                     </div>${btn}
                 </div>`;
             }).join('') : empty));
@@ -471,7 +471,7 @@ async function showDeviceDashboard(item) {
         // Network (NW): which switch/gateway sees this ip/mac, and where (port /
         // VLAN) — stitched from the NW module's ARP/MAC/endpoint/interface data.
         const nwHits = d.nw || [];
-        cards.push(card('Network (NW)', nwHits.length ? 'bg-indigo-50 text-indigo-700' : 'bg-slate-50 text-slate-400',
+        cards.push(card('Network (NW)', nwHits.length ? 'bg-indigo-50 text-indigo-700' : 'bg-slate-50 text-slate-500',
             nwHits.length ? nwHits.map(h => {
                 const loc = [];
                 (h.arp || []).forEach(a => loc.push(`ARP ${a.ip || ''} → ${a.mac || ''} @ ${a.interface || '?'}${a.vlan ? ' · vlan ' + a.vlan : ''}`));
@@ -483,18 +483,18 @@ async function showDeviceDashboard(item) {
                     ? loc.slice(0, 6).map(l => `<div class="text-[10px] text-slate-500 font-mono truncate">${escapeHtml(l)}</div>`).join('')
                     : (h.is_self ? '' : empty);
                 return `<div class="py-1.5 border-b border-slate-50 last:border-0">
-                    <div class="text-xs font-medium text-slate-700 truncate">${escapeHtml(h.name || h.address || '—')} ${selfBadge}<span class="text-slate-400 ml-1 text-[10px]">${escapeHtml(h.object_type || '')}${h.address ? ' · ' + escapeHtml(h.address) : ''}</span></div>
+                    <div class="text-xs font-medium text-slate-700 truncate">${escapeHtml(h.name || h.address || '—')} ${selfBadge}<span class="text-slate-500 ml-1 text-[10px]">${escapeHtml(h.object_type || '')}${h.address ? ' · ' + escapeHtml(h.address) : ''}</span></div>
                     ${lines}
                 </div>`;
             }).join('') : empty));
 
         // LDAP
         const ld = d.ldap || [];
-        cards.push(card('Directory (LDAP)', ld.length ? 'bg-yellow-50 text-yellow-700' : 'bg-slate-50 text-slate-400',
+        cards.push(card('Directory (LDAP)', ld.length ? 'bg-yellow-50 text-yellow-700' : 'bg-slate-50 text-slate-500',
             ld.length ? ld.slice(0, 3).map(u => `
                 <div class="text-xs py-1 border-b border-slate-50 last:border-0">
                     <span class="font-medium text-slate-700">${u.name || u.dn || '—'}</span>
-                    <span class="text-slate-400 ml-2">${u.type || ''}</span>
+                    <span class="text-slate-500 ml-2">${u.type || ''}</span>
                 </div>`).join('') : empty));
 
         // Console: serial-console port(s) mapped to this device, each with a
@@ -503,7 +503,7 @@ async function showDeviceDashboard(item) {
         if (con.length === 0 && item.source === 'console') {
             con = [item];
         }
-        cards.push(card('Console', con.length ? 'bg-brand/10 text-primary-text' : 'bg-slate-50 text-slate-400',
+        cards.push(card('Console', con.length ? 'bg-brand/10 text-primary-text' : 'bg-slate-50 text-slate-500',
             con.length ? con.map(c => {
                 const meta = [c.device, c.baud ? c.baud + 'bps' : '', c.model || c.vendor || '', c.agent_name || '']
                     .filter(Boolean).join(' · ');
@@ -515,7 +515,7 @@ async function showDeviceDashboard(item) {
                 return `<div class="flex items-center justify-between gap-2 py-1.5 border-b border-slate-50 last:border-0">
                     <div class="min-w-0">
                         <div class="text-xs font-medium text-slate-700 truncate">${escapeHtml(c.name || c.device || '—')}${busy}</div>
-                        <div class="text-[10px] text-slate-400 truncate font-mono">${escapeHtml(meta)}</div>
+                        <div class="text-[10px] text-slate-500 truncate font-mono">${escapeHtml(meta)}</div>
                     </div>${btn}
                 </div>`;
             }).join('') : empty));
@@ -581,14 +581,14 @@ document.addEventListener('keydown', e => {
 async function loadWhatsNew() {
     const body = document.getElementById('whats-new-body');
     if (!body) return;
-    body.innerHTML = '<p class="text-xs text-slate-400 italic px-2 py-1">Loading…</p>';
+    body.innerHTML = '<p class="text-xs text-slate-500 italic px-2 py-1">Loading…</p>';
     try {
         const r = await fetch('/api/whats-new');
         const d = r.ok ? await r.json() : null;
         if (!d) { body.innerHTML = '<p class="text-xs text-red-400 px-2 py-1">Could not load updates.</p>'; return; }
         const feats = Array.isArray(d.features) ? d.features : [];
         if (feats.length === 0) {
-            body.innerHTML = '<p class="text-xs text-slate-400 italic px-2 py-1">No bug fixes or features merged in the last 2 weeks.</p>';
+            body.innerHTML = '<p class="text-xs text-slate-500 italic px-2 py-1">No bug fixes or features merged in the last 2 weeks.</p>';
             return;
         }
         body.innerHTML = feats.map(f => {
@@ -597,7 +597,7 @@ async function loadWhatsNew() {
             const isBug   = f.type === 'bug';
             const badge   = `<span class="inline-block shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide ${isBug ? 'bg-red-50 text-red-600' : 'bg-emerald-50 text-emerald-600'}">${isBug ? 'Bug fix' : 'Feature'}</span>`;
             const inner   = `<div class="flex items-start gap-1.5">${badge}<div class="text-xs font-medium text-slate-800">${summary}</div></div>`
-                + (when ? `<div class="text-[10px] text-slate-400 mt-0.5">${escapeHtml(when)}</div>` : '');
+                + (when ? `<div class="text-[10px] text-slate-500 mt-0.5">${escapeHtml(when)}</div>` : '');
             if (f.issue_url) {
                 return `<a href="${escapeHtml(String(f.issue_url))}" target="_blank" rel="noopener noreferrer"
                             class="block px-2 py-1.5 rounded-lg hover:bg-slate-50 cursor-pointer no-underline">${inner}</a>`;

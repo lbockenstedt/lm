@@ -33,14 +33,14 @@ async function loadNwDevicesList() {
     try {
         const devices = await loadNwDevices();
         if (devices.length === 0) {
-            listEl.innerHTML = '<p class="text-xs text-slate-400 italic">No network devices configured.</p>';
+            listEl.innerHTML = '<p class="text-xs text-slate-500 italic">No network devices configured.</p>';
             return;
         }
         listEl.innerHTML = devices.map(d => {
             const typeLabel = _NW_OBJECT_TYPES[d.object_type] || d.object_type || '—';
             const transport = _NW_TRANSPORTS[d.transport] || d.transport || 'auto';
             return `<div class="flex items-center justify-between p-3 rounded-md bg-slate-50 border border-slate-200">
-                <div><span class="text-sm font-medium text-slate-700">${escapeHtml(d.name || d.id)}</span><span class="ml-2 text-xs text-slate-400">${escapeHtml(typeLabel)} · ${escapeHtml(transport)} · ${escapeHtml(d.address || '')}${d.port ? ':' + escapeHtml(String(d.port)) : ''}</span></div>
+                <div><span class="text-sm font-medium text-slate-700">${escapeHtml(d.name || d.id)}</span><span class="ml-2 text-xs text-slate-500">${escapeHtml(typeLabel)} · ${escapeHtml(transport)} · ${escapeHtml(d.address || '')}${d.port ? ':' + escapeHtml(String(d.port)) : ''}</span></div>
                 <div class="flex gap-2">
                     <button onclick="editNwDevice('${escapeHtml(d.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Edit</button>
                     <button onclick="deleteNwDeviceEntry('${escapeHtml(d.id)}')" class="text-xs text-red-400 hover:text-red-600 font-medium">Delete</button>
@@ -161,7 +161,7 @@ function _mgmtDeleteActions(o) {
 // only EXCEPTIONS (out-of-date version, Pending, recovery, alerts) carry color.
 function _quietMeta(parts) {
     return (parts || []).filter(p => p != null && p !== '')
-        .join(' <span class="text-slate-300">·</span> ');
+        .join(' <span class="text-slate-500">·</span> ');
 }
 
 function _mgmtEntryCard(o) {
@@ -217,7 +217,7 @@ function _renderSpokesTable(spokesWrap, trueSpokes, diagBy) {
 
     try {
         if (trueSpokes.length === 0) {
-            spokesWrap.innerHTML = `<p class="py-8 text-center text-slate-400 italic text-xs">No spokes have connected yet.</p>`;
+            spokesWrap.innerHTML = `<p class="py-8 text-center text-slate-500 italic text-xs">No spokes have connected yet.</p>`;
         } else {
             spokesWrap.innerHTML = `<div class="space-y-1.5">${trueSpokes.map(s => {
                 const sid = s.spoke_id;
@@ -280,7 +280,7 @@ function _renderSpokesTable(spokesWrap, trueSpokes, diagBy) {
                         // line (was three stacked divs) to save vertical space.
                         `<div class="flex items-center gap-x-3 gap-y-0.5 flex-wrap text-xs pl-6">`
                           + (hostname ? `<span class="font-mono text-slate-500">host: ${escapeHtml(hostname)}</span>` : '')
-                          + `<span class="text-slate-500">tenant: ${tenantId ? `<span class="font-mono text-slate-700">${escapeHtml(tenantId)}</span>${_tenantShared ? ` <span class="text-[9px] px-1.5 py-0.5 rounded-full font-bold uppercase bg-amber-100 text-amber-800 align-middle" title="Shared tenant — its spokes are visible to all tenants">shared</span>` : ''}` : '<span class="italic text-slate-400">unassigned</span>'}</span>`
+                          + `<span class="text-slate-500">tenant: ${tenantId ? `<span class="font-mono text-slate-700">${escapeHtml(tenantId)}</span>${_tenantShared ? ` <span class="text-[9px] px-1.5 py-0.5 rounded-full font-bold uppercase bg-amber-100 text-amber-800 align-middle" title="Shared tenant — its spokes are visible to all tenants">shared</span>` : ''}` : '<span class="italic text-slate-500">unassigned</span>'}</span>`
                           + (extras && extras.status ? `<span class="font-bold ${extras.status.tone}">${escapeHtml(extras.status.text)}</span>` : '')
                           + `</div>`,
                         ...(extras ? extras.metaLines : []),
@@ -376,7 +376,7 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
     // skips (querySelector returns null) if it has since dropped off.
 
     if (all.length === 0) {
-        agentsWrap.innerHTML = `<p class="py-6 text-center text-slate-400 italic text-xs">No agents connected yet. Install the agent on a node (it appears here to be approved, then load a role) or install the agent on a Proxmox node to begin.</p>`;
+        agentsWrap.innerHTML = `<p class="py-6 text-center text-slate-500 italic text-xs">No agents connected yet. Install the agent on a node (it appears here to be approved, then load a role) or install the agent on a Proxmox node to begin.</p>`;
     } else {
         agentsWrap.innerHTML = `<div class="space-y-1.5">${all.map(a => {
             const aid = a.agent_id;
@@ -419,9 +419,9 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
             if (!isSpokeKind) {
                 rolesLine = '';
             } else if (isPending) {
-                rolesLine = `<div class="text-xs text-slate-500 pl-6">roles: <span class="text-slate-400 italic">—</span></div>`;
+                rolesLine = `<div class="text-xs text-slate-500 pl-6">roles: <span class="text-slate-500 italic">—</span></div>`;
             } else {
-                rolesLine = `<div class="text-xs text-slate-500 pl-6">roles: <span class="lm-agent-role-cell text-slate-400 italic" data-role-cell="${escapeHtml(aid)}">loading…</span></div>`;
+                rolesLine = `<div class="text-xs text-slate-500 pl-6">roles: <span class="lm-agent-role-cell text-slate-500 italic" data-role-cell="${escapeHtml(aid)}">loading…</span></div>`;
             }
             // Telemetry extras folded in from the former Diagnostics tile.
             // Generic Hub-direct agents pull their entry from diagBy (the
@@ -456,7 +456,7 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
                     // stays its own line below it.
                     `<div class="flex items-center gap-x-3 gap-y-0.5 flex-wrap text-xs pl-6">`
                       + (a.hostname ? `<span class="font-mono text-slate-500">host: ${escapeHtml(a.hostname)}</span>` : '')
-                      + `<span class="text-slate-500">tenant: ${rowTenant ? `<span class="font-mono text-slate-700">${escapeHtml(rowTenant)}</span>${_rowTenantShared ? ` <span class="text-[9px] px-1.5 py-0.5 rounded-full font-bold uppercase bg-amber-100 text-amber-800 align-middle" title="Shared tenant — its spokes are visible to all tenants">shared</span>` : ''}` : '<span class="italic text-slate-400">unassigned</span>'}</span>`
+                      + `<span class="text-slate-500">tenant: ${rowTenant ? `<span class="font-mono text-slate-700">${escapeHtml(rowTenant)}</span>${_rowTenantShared ? ` <span class="text-[9px] px-1.5 py-0.5 rounded-full font-bold uppercase bg-amber-100 text-amber-800 align-middle" title="Shared tenant — its spokes are visible to all tenants">shared</span>` : ''}` : '<span class="italic text-slate-500">unassigned</span>'}</span>`
                       + (extras && extras.status ? `<span class="font-bold ${extras.status.tone}">${escapeHtml(extras.status.text)}</span>` : '')
                       + `</div>`,
                     rolesLine,
@@ -580,7 +580,7 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
                 }
                 cell.outerHTML = parts.length
                     ? `<span class="inline-flex flex-wrap items-center gap-1">${parts.join(' ')}</span>`
-                    : '<span class="text-slate-400 italic">none (idle)</span>';
+                    : '<span class="text-slate-500 italic">none (idle)</span>';
             });
         });
     }
@@ -931,12 +931,12 @@ async function openAgentConfigModal(agentId, currentLabel) {
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-3xl overflow-hidden max-h-[90vh] overflow-y-auto">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
                 <h3 class="text-lg font-bold text-navy">Agent Configuration</h3>
-                <button onclick="this.closest('#agent-config-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
+                <button onclick="this.closest('#agent-config-modal').remove()" class="text-slate-500 hover:text-slate-600 transition-colors">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                 </button>
             </div>
             <div class="p-6 space-y-4">
-                <div class="text-xs text-slate-400 font-mono mb-2">${_spokeLabelFor(agentId)}</div>
+                <div class="text-xs text-slate-500 font-mono mb-2">${_spokeLabelFor(agentId)}</div>
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">Display Name</label>
                     <input type="text" id="agent-cfg-display-name" value="${safeName}" placeholder="${agentId}" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
@@ -947,18 +947,18 @@ async function openAgentConfigModal(agentId, currentLabel) {
                         <input type="checkbox" id="agent-cfg-cs-enabled" ${csEnabled ? 'checked' : ''} class="rounded border-slate-300 text-primary-text focus:ring-green-500">
                         <label for="agent-cfg-cs-enabled" class="text-sm text-slate-600">Enable Client Simulation mode on this host</label>
                     </div>
-                    <p class="text-[11px] text-slate-400">When enabled, this Proxmox agent activates the Client-Sim feature set (USB provisioning, VM clone/reclone, watchdogs, backup, reseed). Features are ported in incrementally.</p>
+                    <p class="text-[11px] text-slate-500">When enabled, this Proxmox agent activates the Client-Sim feature set (USB provisioning, VM clone/reclone, watchdogs, backup, reseed). Features are ported in incrementally.</p>
                 </div>
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">Managed Crontab</label>
                     <textarea id="agent-cfg-crontab" rows="5" spellcheck="false" placeholder="# One crontab line per job, e.g.\n0 2 * * * /usr/bin/vzdump --all --compress zstd\n*/15 * * * * /root/health-check.sh" class="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-xs font-mono outline-none focus:ring-2 focus:ring-green-500 resize-y">${safeCron}</textarea>
-                    <p class="text-[11px] text-slate-400">Standard crontab lines the agent keeps in sync inside a managed block of <b>root's crontab</b> on this Proxmox server — your own crontab entries are left untouched. Applies to any host (simulation or not). Saving replaces the managed block; clearing this box removes it. Drift is re-corrected every ~10&nbsp;min.</p>
+                    <p class="text-[11px] text-slate-500">Standard crontab lines the agent keeps in sync inside a managed block of <b>root's crontab</b> on this Proxmox server — your own crontab entries are left untouched. Applies to any host (simulation or not). Saving replaces the managed block; clearing this box removes it. Drift is re-corrected every ~10&nbsp;min.</p>
                 </div>
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">Tenant</label>
                     <input type="hidden" id="agent-cfg-tenant" value="${safeTenant}">
-                    <p class="text-sm text-slate-700">${tenantId ? `<span class="font-mono">${tenantId.replace(/</g, '&lt;')}</span>` : '<span class="italic text-slate-400">(unbound)</span>'}</p>
-                    <p class="text-[11px] text-slate-400">Use the <b>Tenant</b> button on the agent row to change this binding.</p>
+                    <p class="text-sm text-slate-700">${tenantId ? `<span class="font-mono">${tenantId.replace(/</g, '&lt;')}</span>` : '<span class="italic text-slate-500">(unbound)</span>'}</p>
+                    <p class="text-[11px] text-slate-500">Use the <b>Tenant</b> button on the agent row to change this binding.</p>
                 </div>
                 <div class="pt-4 flex justify-end gap-3">
                     <button onclick="this.closest('#agent-config-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
@@ -1046,15 +1046,15 @@ async function openAgentAssignModal(agentId, currentTenantId) {
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
                 <h3 class="text-lg font-bold text-navy">Assign Agent to Tenant</h3>
-                <button onclick="this.closest('#agent-assign-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
+                <button onclick="this.closest('#agent-assign-modal').remove()" class="text-slate-500 hover:text-slate-600 transition-colors">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                 </button>
             </div>
             <div class="p-6 space-y-4">
-                <div class="text-xs text-slate-400 font-mono mb-2">${_spokeLabelFor(agentId)}</div>
+                <div class="text-xs text-slate-500 font-mono mb-2">${_spokeLabelFor(agentId)}</div>
                 <input type="hidden" id="agent-assign-dn" value="${safeDn}">
                 <input type="hidden" id="agent-assign-cs" value="${csEnabled ? '1' : '0'}">
-                <p class="text-[11px] text-slate-400">Binds this Proxmox node agent to a tenant so its telemetry appears in that tenant's VM Server. The agent's display name and Client-Simulation setting are preserved.</p>
+                <p class="text-[11px] text-slate-500">Binds this Proxmox node agent to a tenant so its telemetry appears in that tenant's VM Server. The agent's display name and Client-Simulation setting are preserved.</p>
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">Tenant</label>
                     <select id="agent-assign-tenant" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
@@ -1125,13 +1125,13 @@ async function openSpokeAssignModal(spokeId, currentTenantId, noun = 'Spoke') {
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
                 <h3 class="text-lg font-bold text-navy">Assign ${noun} to Tenant</h3>
-                <button onclick="this.closest('#spoke-assign-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
+                <button onclick="this.closest('#spoke-assign-modal').remove()" class="text-slate-500 hover:text-slate-600 transition-colors">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                 </button>
             </div>
             <div class="p-6 space-y-4">
-                <div class="text-xs text-slate-400 font-mono mb-2">${noun}: ${_spokeLabelFor(spokeId)}</div>
-                <p class="text-[11px] text-slate-400">Approving (re-approving) this ${noun.toLowerCase()} with a tenant binds it so its telemetry appears in that tenant's VM Server. Idempotent — the session secret is preserved.</p>
+                <div class="text-xs text-slate-500 font-mono mb-2">${noun}: ${_spokeLabelFor(spokeId)}</div>
+                <p class="text-[11px] text-slate-500">Approving (re-approving) this ${noun.toLowerCase()} with a tenant binds it so its telemetry appears in that tenant's VM Server. Idempotent — the session secret is preserved.</p>
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">Tenant</label>
                     <select id="spoke-assign-tenant" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
@@ -1277,12 +1277,12 @@ async function openSpokeMetadataModal(spokeId, currentName, approved) {
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
                 <h3 class="text-lg font-bold text-navy">Spoke Metadata</h3>
-                <button onclick="this.closest('#spoke-metadata-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
+                <button onclick="this.closest('#spoke-metadata-modal').remove()" class="text-slate-500 hover:text-slate-600 transition-colors">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                 </button>
             </div>
             <div class="p-6 space-y-4">
-                <div class="text-xs text-slate-400 font-mono mb-4">${_spokeLabelFor(spokeId)}</div>
+                <div class="text-xs text-slate-500 font-mono mb-4">${_spokeLabelFor(spokeId)}</div>
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">Display Name</label>
                     <input type="text" id="meta-display-name" value="${safeName}" placeholder="e.g. Core Firewall" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
@@ -1301,7 +1301,7 @@ async function openSpokeMetadataModal(spokeId, currentName, approved) {
                         <button onclick="resetSpokeSecret('${eId}'); this.closest('#spoke-metadata-modal').remove()" class="px-3 py-1.5 text-xs font-medium rounded-md bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 transition-colors" title="Regenerate this spoke's shared secret — the spoke must be reconfigured with the new value">Reset Secret</button>
                         ${approved ? `<button onclick="unapproveSpoke('${eId}'); this.closest('#spoke-metadata-modal').remove()" class="px-3 py-1.5 text-xs font-medium rounded-md bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 transition-colors">Un-approve</button>` : ''}
                     </div>
-                    <p class="text-[11px] text-slate-400">Reset Secret wipes stored keys and forces re-onboarding. Un-approve revokes access until re-approved.</p>
+                    <p class="text-[11px] text-slate-500">Reset Secret wipes stored keys and forces re-onboarding. Un-approve revokes access until re-approved.</p>
                 </div>
                 <div class="pt-4 flex justify-end gap-3">
                     <button onclick="this.closest('#spoke-metadata-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
@@ -1424,7 +1424,7 @@ async function loadUsers() {
         const viewerIsTadm = !!isTenantAdmin();
 
         if (Object.keys(users).length === 0) {
-            bodyEl.innerHTML = `<tr class="text-center py-8 text-slate-400 italic"><td colspan="17">No users configured.</td></tr>`;
+            bodyEl.innerHTML = `<tr class="text-center py-8 text-slate-500 italic"><td colspan="17">No users configured.</td></tr>`;
             return;
         }
 
@@ -1453,21 +1453,21 @@ async function loadUsers() {
                     : `<span class="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-medium">Local</span>`;
             const tenantBadges = (user.tenants || []).map(t =>
                 `<span class="text-[10px] bg-green-50 text-green-700 border border-green-200 px-1.5 py-0.5 rounded font-mono cursor-pointer hover:bg-green-100" onclick="viewAsTenant('${t}')">${t}</span>`
-            ).join(' ') || '<span class="text-[10px] text-slate-300 italic">none</span>';
+            ).join(' ') || '<span class="text-[10px] text-slate-500 italic">none</span>';
             const groupBadges = (user.groups || []).map(g =>
                 `<span class="text-[10px] bg-indigo-50 text-indigo-700 border border-indigo-200 px-1.5 py-0.5 rounded font-medium">${window._permGroupNames[g] || g}</span>`
-            ).join(' ') || '<span class="text-[10px] text-slate-300 italic">none</span>';
+            ).join(' ') || '<span class="text-[10px] text-slate-500 italic">none</span>';
 
             const isProtected = !!user.protected;
-            const lockIcon = `<svg class="w-3 h-3 inline-block text-slate-400 ml-1" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clip-rule="evenodd"/></svg>`;
+            const lockIcon = `<svg class="w-3 h-3 inline-block text-slate-500 ml-1" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clip-rule="evenodd"/></svg>`;
             // A tenant Admin may not edit/remove protected OR admin-tier users
             // (the backend 403s; hide the buttons so the UI matches). Global
             // Admins see the full action set for non-protected users.
             const lockedForTadm = viewerIsTadm && (isProtected || _isPermsAdminTier(perms));
             const actions = isProtected
-                ? `<span class="text-slate-300 text-xs italic select-none">Protected${lockIcon}</span>`
+                ? `<span class="text-slate-500 text-xs italic select-none">Protected${lockIcon}</span>`
                 : lockedForTadm
-                    ? `<span class="text-slate-300 text-xs italic select-none">Admin${lockIcon}</span>`
+                    ? `<span class="text-slate-500 text-xs italic select-none">Admin${lockIcon}</span>`
                     : `<button onclick="editUser('${userId}')" class="text-blue-400 hover:text-blue-600 text-xs font-bold mr-3">Edit</button>
                        <button onclick="deleteUser('${userId}')" class="text-red-400 hover:text-red-600 text-xs font-bold" title="Permanently delete this user account">Delete</button>`;
             // Global Admins can sign in as any other user to see what they see.
@@ -1481,7 +1481,7 @@ async function loadUsers() {
             // prominently as before, with the oid as a small subtitle otherwise.
             const nameLine = user.name ? `<div class="text-sm text-slate-800">${escapeHtml(user.name)}</div>` : '';
             const emailLine = (user.email && user.email !== user.name) ? `<div class="text-xs text-slate-500">${escapeHtml(user.email)}</div>` : '';
-            const oidLine = `<div class="font-mono text-[10px] text-slate-400">${userId}${isProtected ? lockIcon : ''}</div>`;
+            const oidLine = `<div class="font-mono text-[10px] text-slate-500">${userId}${isProtected ? lockIcon : ''}</div>`;
             const userCell = (nameLine || emailLine)
                 ? `${nameLine}${emailLine}${oidLine}`
                 : `<div class="font-mono text-xs font-medium text-slate-700">${userId}${isProtected ? lockIcon : ''}</div>`;
@@ -1568,7 +1568,7 @@ async function loadGroups() {
         await ensureTenants(true);
         if (!bodyEl) return;
         if (Object.keys(groups).length === 0) {
-            bodyEl.innerHTML = `<tr><td colspan="5" class="px-4 py-6 text-center text-slate-400 italic">No groups yet — create one to bundle module access.</td></tr>`;
+            bodyEl.innerHTML = `<tr><td colspan="5" class="px-4 py-6 text-center text-slate-500 italic">No groups yet — create one to bundle module access.</td></tr>`;
             return;
         }
         bodyEl.innerHTML = Object.entries(groups).map(([gid, g]) => {
@@ -1581,10 +1581,10 @@ async function loadGroups() {
                     ? `<span class="text-[10px] bg-amber-50 text-amber-700 border border-amber-200 px-1.5 py-0.5 rounded font-bold">Admin (tenant)</span>`
                     : (Object.keys(perms).filter(k => k !== 'role' && k !== 'tenant_admin' && perms[k]).map(k =>
                         `<span class="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-medium">${_RBAC_RIGHT_LABELS[k] || k}</span>`
-                      ).join(' ') || '<span class="text-[10px] text-slate-300 italic">none</span>');
+                      ).join(' ') || '<span class="text-[10px] text-slate-500 italic">none</span>');
             const ldap = g.ldap_group
                 ? `<span class="font-mono text-xs text-blue-600">${g.ldap_group}</span>`
-                : '<span class="text-[10px] text-slate-300 italic">—</span>';
+                : '<span class="text-[10px] text-slate-500 italic">—</span>';
             // Granted tenant scope: a group may carry a ``tenants`` list so a
             // single Entra/LDAP group grants BOTH RBAC permissions AND tenant
             // scope. Show the tenant names (ids fall back when names unresolved).
@@ -1595,7 +1595,7 @@ async function loadGroups() {
                 : '';
             return `
                 <tr class="hover:bg-slate-50 transition-colors">
-                    <td class="px-4 py-3"><div class="font-medium text-slate-700 text-sm">${g.name || gid}</div><div class="text-[11px] text-slate-400">${g.description || ''}</div>${scopeBadges}</td>
+                    <td class="px-4 py-3"><div class="font-medium text-slate-700 text-sm">${g.name || gid}</div><div class="text-[11px] text-slate-500">${g.description || ''}</div>${scopeBadges}</td>
                     <td class="px-4 py-3"><div class="flex flex-wrap gap-1">${permBadges}</div></td>
                     <td class="px-4 py-3">${ldap}</td>
                     <td class="px-4 py-3 text-center text-slate-600">${g.member_count || 0}</td>
@@ -1668,7 +1668,7 @@ async function showGroupModal(groupId) {
     const granted = new Set(g.tenants || []);
     const tenantRows = tenants.length
         ? tenants.map(t => `<label class="flex items-center gap-2 text-sm text-slate-600 py-1"><input type="checkbox" id="grp-tenant-${t.id}" ${granted.has(t.id) ? 'checked' : ''} class="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"> ${t.name || t.id}</label>`).join('')
-        : '<span class="text-[11px] text-slate-400 italic">No tenants defined yet.</span>';
+        : '<span class="text-[11px] text-slate-500 italic">No tenants defined yet.</span>';
     const modal = document.createElement('div');
     modal.id = 'group-modal';
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
@@ -1676,7 +1676,7 @@ async function showGroupModal(groupId) {
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden">
             <div class="shrink-0 px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
                 <h3 class="text-lg font-bold text-navy">${groupId ? 'Edit' : 'New'} Permission Group</h3>
-                <button onclick="closeGroupModal()" class="text-slate-400 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                <button onclick="closeGroupModal()" class="text-slate-500 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-4 overflow-y-auto flex-1 min-h-0">
                 <input type="hidden" id="grp-id" value="${groupId || ''}">
@@ -1684,7 +1684,7 @@ async function showGroupModal(groupId) {
                     <div class="space-y-1"><label class="text-xs text-slate-500 uppercase font-bold">Group Name</label><input type="text" id="grp-name" value="${g.name || ''}" placeholder="e.g. NOC Operators" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"></div>
                     <div class="space-y-1"><label class="text-xs text-slate-500 uppercase font-bold">Description</label><input type="text" id="grp-desc" value="${g.description || ''}" placeholder="Optional" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"></div>
                 </div>
-                <div class="space-y-1"><label class="text-xs text-slate-500 uppercase font-bold">Directory Group <span class="text-slate-400 normal-case font-normal">(optional — Entra group object ID or LDAP DN; maps a directory group to this bundle + its tenant scope)</span></label>
+                <div class="space-y-1"><label class="text-xs text-slate-500 uppercase font-bold">Directory Group <span class="text-slate-500 normal-case font-normal">(optional — Entra group object ID or LDAP DN; maps a directory group to this bundle + its tenant scope)</span></label>
                     <div class="flex gap-2">
                         <input type="text" id="grp-ldap" value="${g.ldap_group || ''}" placeholder="Entra object ID or cn=noc,ou=groups,dc=example,dc=com" class="flex-1 bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500 font-mono">
                         <button type="button" onclick="loadEntraGroupPicker()" id="grp-entra-btn" class="whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold">Pick from Entra</button>
@@ -1693,7 +1693,7 @@ async function showGroupModal(groupId) {
                     <p id="grp-entra-msg" class="text-[11px] text-amber-600 hidden"></p>
                 </div>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-6 border-t border-slate-200 pt-3">
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">Tenant Scope <span class="text-slate-400 normal-case font-normal">(optional — grants tenant access to members)</span></label><div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 mt-2 max-h-56 overflow-y-auto pr-1">${tenantRows}</div></div>
+                    <div><label class="text-xs text-slate-500 uppercase font-bold">Tenant Scope <span class="text-slate-500 normal-case font-normal">(optional — grants tenant access to members)</span></label><div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 mt-2 max-h-56 overflow-y-auto pr-1">${tenantRows}</div></div>
                     <div><label class="text-xs text-slate-500 uppercase font-bold">Permissions</label><div class="grid grid-cols-2 gap-x-4 gap-y-1 mt-2">${rightRows}</div></div>
                 </div>
             </div>
@@ -1829,10 +1829,10 @@ async function _populateUserGroupChecklist(containerId, selectedIds) {
     const sel = new Set(selectedIds || []);
     const entries = Object.entries(groups);
     if (entries.length === 0) {
-        el.innerHTML = '<span class="text-[11px] text-slate-400 italic">No groups defined — create one below.</span>';
+        el.innerHTML = '<span class="text-[11px] text-slate-500 italic">No groups defined — create one below.</span>';
         return;
     }
-    el.classList.remove('italic', 'text-slate-400');
+    el.classList.remove('italic', 'text-slate-500');
     el.innerHTML = entries.map(([gid, g]) => `
         <label class="flex items-center gap-2 px-2 py-1 border border-slate-200 rounded-md cursor-pointer hover:bg-slate-50">
             <input type="checkbox" data-grp="${gid}" ${sel.has(gid) ? 'checked' : ''} class="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500">
@@ -1857,7 +1857,7 @@ async function loadApiTokens() {
         const data = await apiJson('/auth/tokens', { credentials: 'same-origin' });
         const toks = data.tokens || [];
         if (!toks.length) {
-            body.innerHTML = '<tr><td colspan="4" class="px-4 py-8 text-center text-slate-400 italic">No API tokens.</td></tr>';
+            body.innerHTML = '<tr><td colspan="4" class="px-4 py-8 text-center text-slate-500 italic">No API tokens.</td></tr>';
             return;
         }
         const fmt = (s) => s ? new Date(s * 1000).toLocaleString() : '—';
@@ -1945,7 +1945,7 @@ async function loadMtlsReadiness() {
             const spokes = d.spokes || [];
             if (spokes.length) {
                 spokesEl.classList.remove('hidden');
-                spokesEl.innerHTML = `<div class="text-xs text-slate-400 mb-1.5 uppercase tracking-wider font-semibold">Per-spoke readiness</div>` +
+                spokesEl.innerHTML = `<div class="text-xs text-slate-500 mb-1.5 uppercase tracking-wider font-semibold">Per-spoke readiness</div>` +
                     spokes.map(s => {
                         const c = s.ready ? 'bg-green-500' : (s.online ? 'bg-amber-500' : 'bg-slate-300');
                         const t = s.ready ? 'ready' : (s.online ? 'missing materials' : 'offline — will receive on reconnect');
@@ -1953,7 +1953,7 @@ async function loadMtlsReadiness() {
                         // section header's `uppercase tracking-wider` treatment.
                         // Styled, not transformed: the underlying value stays
                         // intact for the title tooltip, copy/paste and search.
-                        return `<div class="flex items-center gap-2 text-xs text-slate-600 py-0.5"><span class="inline-block w-2 h-2 rounded-full ${c}"></span><span class="font-medium uppercase" title="${escapeHtml(s.id)}">${escapeHtml(s.name || s.id)}</span><span class="text-slate-400">· ${escapeHtml(s.type || '')} · ${t}</span></div>`;
+                        return `<div class="flex items-center gap-2 text-xs text-slate-600 py-0.5"><span class="inline-block w-2 h-2 rounded-full ${c}"></span><span class="font-medium uppercase" title="${escapeHtml(s.id)}">${escapeHtml(s.name || s.id)}</span><span class="text-slate-500">· ${escapeHtml(s.type || '')} · ${t}</span></div>`;
                     }).join('');
             } else {
                 spokesEl.classList.add('hidden');
@@ -2044,7 +2044,7 @@ async function loadActiveSessions() {
         if (!r.ok) throw new Error(r.statusText);
         const { sessions } = await r.json();
         if (!sessions.length) {
-            tbody.innerHTML = `<tr><td colspan="5" class="px-4 py-8 text-center text-slate-400 italic">No active sessions.</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="5" class="px-4 py-8 text-center text-slate-500 italic">No active sessions.</td></tr>`;
             return;
         }
         const fmtExpiry = (secs) => {
@@ -2175,7 +2175,7 @@ function spokeEventRow(e) {
     const meta = SPOKE_EVENT_LABELS[e.event] || { label: e.event, tone: 'text-slate-600' };
     const when = new Date(e.ts * 1000).toLocaleTimeString();
     const detail = e.detail ? ` — ${e.detail}` : '';
-    return `<div class="py-0.5"><span class="text-slate-400">${when}</span> <span class="${meta.tone} font-medium">${meta.label}</span><span class="text-slate-500">${detail}</span></div>`;
+    return `<div class="py-0.5"><span class="text-slate-500">${when}</span> <span class="${meta.tone} font-medium">${meta.label}</span><span class="text-slate-500">${detail}</span></div>`;
 }
 
 // Render one relayed WARNING/ERROR/CRITICAL log line in the per-spoke events
@@ -2186,7 +2186,7 @@ function spokeLogEventRow(le) {
                : lvl === 'WARNING' ? 'text-amber-600' : 'text-slate-600';
     const t = String(le.ts_str || '');
     const when = (t.split(' ')[1] || t).split(',')[0];
-    return `<div class="py-0.5"><span class="text-slate-400">${escapeHtml(when)}</span> <span class="${tone} font-bold">${escapeHtml(lvl)}</span> <span class="text-slate-400">${escapeHtml(le.name || '')}</span> <span class="text-slate-600 break-all">${escapeHtml(le.msg || '')}</span></div>`;
+    return `<div class="py-0.5"><span class="text-slate-500">${escapeHtml(when)}</span> <span class="${tone} font-bold">${escapeHtml(lvl)}</span> <span class="text-slate-500">${escapeHtml(le.name || '')}</span> <span class="text-slate-600 break-all">${escapeHtml(le.msg || '')}</span></div>`;
 }
 
 // Build the inner HTML of a spoke's events panel from its events + log_events
@@ -2196,7 +2196,7 @@ function spokeLogEventRow(le) {
 function _renderSpokeEventsInner(events, log_events) {
     events = events || [];
     log_events = log_events || [];
-    return `${log_events.length ? `<div class="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-0.5">Errors &amp; warnings</div>${log_events.map(spokeLogEventRow).join('')}<div class="border-t border-slate-200 my-1.5"></div>` : ''}${events.length ? `<div class="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-0.5">Lifecycle</div>${events.map(spokeEventRow).join('')}` : (log_events.length ? '' : '<span class="text-slate-400 italic">No events recorded.</span>')}`;
+    return `${log_events.length ? `<div class="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-0.5">Errors &amp; warnings</div>${log_events.map(spokeLogEventRow).join('')}<div class="border-t border-slate-200 my-1.5"></div>` : ''}${events.length ? `<div class="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-0.5">Lifecycle</div>${events.map(spokeEventRow).join('')}` : (log_events.length ? '' : '<span class="text-slate-500 italic">No events recorded.</span>')}`;
 }
 
 // Lazily fetch + render a spoke's events into its panel the first time it's
@@ -2392,7 +2392,7 @@ function openAddServerModal(role, label) {
     const body = `
         <h3 class="text-lg font-bold text-navy">Add ${escapeHtml(label)} Server</h3>
         <p class="text-sm text-slate-500">Generate a one-time onboarding key, then run the install command below on the new server. It registers and binds to <b>${escapeHtml(tenant)}</b> automatically — no admin approval needed.</p>
-        <div id="add-server-psk-area" class="text-xs text-slate-400 italic">No key generated yet.</div>
+        <div id="add-server-psk-area" class="text-xs text-slate-500 italic">No key generated yet.</div>
         <div class="flex justify-end gap-2 pt-2">
             <button onclick="document.getElementById('add-server-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Close</button>
             <button onclick="_addServerGenPsk('${escapeHtml(role)}', '${escapeHtml(tenant)}')" class="px-4 py-1.5 text-sm rounded-md bg-primary text-white font-bold hover:bg-primary-hover">Generate Key</button>
@@ -2409,7 +2409,7 @@ async function _addServerGenPsk(role, tenant) {
         area.innerHTML = `<p class="text-xs font-bold text-slate-600 mb-1">Run this on the new server:</p>
             <pre id="add-server-cmd" class="bg-slate-50 border border-slate-200 rounded-md p-3 text-[11px] font-mono overflow-x-auto whitespace-pre-wrap">${escapeHtml(cmd)}</pre>
             <button onclick="_addServerCopyCmd()" class="mt-2 text-xs text-primary-text hover:underline">Copy command</button>
-            <p class="mt-2 text-[11px] text-slate-400">This key is single-use for onboarding — it does not expire on its own. Revoke it from the tenant's onboarding key list once the server has connected.</p>`;
+            <p class="mt-2 text-[11px] text-slate-500">This key is single-use for onboarding — it does not expire on its own. Revoke it from the tenant's onboarding key list once the server has connected.</p>`;
     } catch (e) {
         console.error('_addServerGenPsk: generate failed', e);
         if (typeof showToast === 'function') showToast(e.message, 'error');
@@ -2437,12 +2437,12 @@ async function loadMyDeviceSpokes() {
     const el = document.getElementById('my-spokes-list');
     if (!el) return;
     const tenant = _myDevTenant();
-    if (!tenant) { el.innerHTML = '<p class="text-xs text-slate-400 italic">Select a tenant first.</p>'; return; }
+    if (!tenant) { el.innerHTML = '<p class="text-xs text-slate-500 italic">Select a tenant first.</p>'; return; }
     try {
         const r = await apiJson(`/tenant/${encodeURIComponent(tenant)}/spokes`);
         const rows = (r && r.spokes) || [];
         if (!rows.length) {
-            el.innerHTML = '<p class="text-xs text-slate-400 italic">No spokes or agents onboarded yet. Generate an onboarding key below to add your first one.</p>';
+            el.innerHTML = '<p class="text-xs text-slate-500 italic">No spokes or agents onboarded yet. Generate an onboarding key below to add your first one.</p>';
             return;
         }
         el.innerHTML = rows.map((s) => {
@@ -2483,7 +2483,7 @@ async function loadMyDeviceSpokes() {
             const delBtn = `<button onclick="_myDevDeleteSpoke('${eSid}', '${eName}')" class="px-2.5 py-1 rounded-md text-[11px] font-bold bg-white hover:bg-red-50 text-red-600 border border-red-300 transition-colors" title="Permanently remove this spoke/agent — it must re-onboard to return">Delete</button>`;
             return `<div class="flex items-center justify-between border border-slate-100 rounded-md px-3 py-2">
                 <div><span class="text-sm font-medium text-slate-700">${escapeHtml(_nodeLabel(_spokeName(s), s.tenant_id || tenant))}</span>
-                <span class="ml-2 text-[11px] text-slate-400 font-mono">${escapeHtml(s.module_type || '—')}</span></div>
+                <span class="ml-2 text-[11px] text-slate-500 font-mono">${escapeHtml(s.module_type || '—')}</span></div>
                 <div class="flex items-center gap-2">${rolesBtn}${revoked}${appr}${conn}${delBtn}</div></div>`;
         }).join('');
     } catch (e) {
@@ -2501,7 +2501,7 @@ async function loadMyDeviceAgents() {
     const el = document.getElementById('my-pxmx-agents-list');
     if (!el) return;
     const tenant = _myDevTenant();
-    if (!tenant) { el.innerHTML = '<p class="text-xs text-slate-400 italic">Select a tenant first.</p>'; return; }
+    if (!tenant) { el.innerHTML = '<p class="text-xs text-slate-500 italic">Select a tenant first.</p>'; return; }
     try {
         const r = await apiJson(`/tenant/${encodeURIComponent(tenant)}/agents`);
         const rows = [
@@ -2510,7 +2510,7 @@ async function loadMyDeviceAgents() {
             ...(r.offline_agents || []).map((a) => ({ ...a, _status: 'offline' })),
         ];
         if (!rows.length) {
-            el.innerHTML = '<p class="text-xs text-slate-400 italic">No Proxmox node agents relayed through your tenant\'s spokes yet.</p>';
+            el.innerHTML = '<p class="text-xs text-slate-500 italic">No Proxmox node agents relayed through your tenant\'s spokes yet.</p>';
             return;
         }
         el.innerHTML = rows.map((a) => {
@@ -2537,7 +2537,7 @@ async function loadMyDeviceAgents() {
                 : '';
             return `<div class="flex items-center justify-between border border-slate-100 rounded-md px-3 py-2">
                 <div><span class="text-sm font-medium text-slate-700">${escapeHtml(String(a.hostname || a.agent_id || '').toUpperCase())}</span>
-                <span class="ml-2 text-[11px] text-slate-400">via ${escapeHtml(a.spoke_id ? _spokeLabelFor(a.spoke_id) : '—')}</span>
+                <span class="ml-2 text-[11px] text-slate-500">via ${escapeHtml(a.spoke_id ? _spokeLabelFor(a.spoke_id) : '—')}</span>
                 ${csEnabled ? '<span class="ml-2 px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-700">CS</span>' : ''}</div>
                 <div class="flex items-center gap-2">${badge}${approveBtn}${csToggle}</div></div>`;
         }).join('');
@@ -2579,11 +2579,11 @@ async function loadMyDevicePsks() {
     const el = document.getElementById('my-psk-list');
     if (!el) return;
     const tenant = _myDevTenant();
-    if (!tenant) { el.innerHTML = '<p class="text-xs text-slate-400 italic">Select a tenant first.</p>'; return; }
+    if (!tenant) { el.innerHTML = '<p class="text-xs text-slate-500 italic">Select a tenant first.</p>'; return; }
     try {
         const r = await apiJson(`/tenant/${encodeURIComponent(tenant)}/onboarding-psk`);
         const keys = (r && r.psks) || [];
-        if (!keys.length) { el.innerHTML = '<p class="text-xs text-slate-400 italic">No active onboarding keys.</p>'; return; }
+        if (!keys.length) { el.innerHTML = '<p class="text-xs text-slate-500 italic">No active onboarding keys.</p>'; return; }
         // Prefer the configured Hub URL so the install command points spokes at
         // the HUB, not the proxy that may be serving this WebUI (location.host).
         // It comes from the onboarding route itself, which a TENANT ADMIN can
@@ -2612,7 +2612,7 @@ async function loadMyDevicePsks() {
                 <p class="text-[11px] font-bold text-slate-500 mt-2 mb-1">Install command:</p>
                 <pre id="my-psk-cmd-${i}" class="bg-slate-50 border border-slate-200 rounded-md p-3 text-[11px] font-mono overflow-x-auto whitespace-pre-wrap">${escapeHtml(cmd)}</pre>
                 <button onclick="_myDevCopyEl('my-psk-cmd-${i}')" class="mt-1 text-xs text-primary-text hover:underline">Copy command</button>
-                <p class="text-[11px] text-slate-400 mt-2">The spoke installs as a bare agent and loads roles later from this page. To pre-assign roles instead, append <code>--roles &lt;module&gt;</code> (comma-separated, e.g. <code>--roles simulation</code> or <code>--roles dns,dhcp</code>). Installing <code>--roles simulation</code> also makes this box host the client-sim <code>/ws/agent</code> listener, so a Proxmox Host Agent (below) can report to it.</p>
+                <p class="text-[11px] text-slate-500 mt-2">The spoke installs as a bare agent and loads roles later from this page. To pre-assign roles instead, append <code>--roles &lt;module&gt;</code> (comma-separated, e.g. <code>--roles simulation</code> or <code>--roles dns,dhcp</code>). Installing <code>--roles simulation</code> also makes this box host the client-sim <code>/ws/agent</code> listener, so a Proxmox Host Agent (below) can report to it.</p>
                 <p class="text-[11px] font-bold text-slate-500 mt-2 mb-1">Uninstall (removes all LM components from that host):</p>
                 <pre id="my-psk-uninstall-${i}" class="bg-slate-50 border border-slate-200 rounded-md p-3 text-[11px] font-mono overflow-x-auto whitespace-pre-wrap">${escapeHtml(uninstall)}</pre>
                 <button onclick="_myDevCopyEl('my-psk-uninstall-${i}')" class="mt-1 text-xs text-primary-text hover:underline">Copy uninstall</button>
@@ -2774,7 +2774,7 @@ function recoveryBadge(rec) {
     if (rec.gave_up)       return { text: 'Gave up', tone: 'bg-red-100 text-red-600', title: `Gave up: ${rec.last_error || 'unknown'}` };
     if (rec.in_progress)  return { text: `Recovering ${rec.attempts}/3`, tone: 'bg-amber-100 text-amber-600', title: `Last action: ${rec.last_action || 'restart'}` };
     if (rec.attempts > 0)  return { text: 'Recovered', tone: 'bg-green-100 text-green-600', title: `Recovered after ${rec.attempts} attempt(s)` };
-    return { text: '—', tone: 'bg-slate-50 text-slate-400', title: 'No recovery activity' };
+    return { text: '—', tone: 'bg-slate-50 text-slate-500', title: 'No recovery activity' };
 }
 
 
@@ -2918,7 +2918,7 @@ function _diagTelemetryExtras(s, fns) {
         // (toggleSpokeEvents), keeping the polled LIST payload light. If the
         // entry still carries inline arrays (compat), render them immediately and
         // mark the panel loaded so no fetch fires.
-        eventsPanel: `<div id="events-${s.spoke_id}" data-loaded="${(s.events || s.log_events) ? '1' : '0'}" class="hidden font-mono text-[11px] bg-slate-50 border border-slate-200 rounded p-3 max-h-56 overflow-y-auto ml-6 mt-1">${(s.events || s.log_events) ? _renderSpokeEventsInner(s.events || [], s.log_events || []) : '<span class="text-slate-400 italic">Loading…</span>'}</div>`,
+        eventsPanel: `<div id="events-${s.spoke_id}" data-loaded="${(s.events || s.log_events) ? '1' : '0'}" class="hidden font-mono text-[11px] bg-slate-50 border border-slate-200 rounded p-3 max-h-56 overflow-y-auto ml-6 mt-1">${(s.events || s.log_events) ? _renderSpokeEventsInner(s.events || [], s.log_events || []) : '<span class="text-slate-500 italic">Loading…</span>'}</div>`,
     };
 }
 
@@ -3075,7 +3075,7 @@ function _renderLogLineRow(log, count, lineRowFn) {
     let bg = 'hover:bg-slate-50';
     if (u.includes(' ERROR ') || u.includes(' CRITICAL ')) { cls = 'text-red-700 font-semibold'; bg = 'bg-red-50 hover:bg-red-100'; }
     else if (u.includes(' WARNING ') || u.includes(' WARN ')) { cls = 'text-amber-700'; bg = 'bg-amber-50 hover:bg-amber-100'; }
-    else if (u.includes(' DEBUG ')) { cls = 'text-slate-400'; }
+    else if (u.includes(' DEBUG ')) { cls = 'text-slate-500'; }
     // Highlight timestamp + source for both prefixed spoke logs
     // (`[lm-svcs-netbox] <ts> - Source - LEVEL - msg`) and bare hub logs
     // (`<ts> - Source - LEVEL - msg`). Also accept the legacy two-line relay
@@ -3098,7 +3098,7 @@ function _renderLogLineRow(log, count, lineRowFn) {
     // long trail than one long wrapped line. copyLogs reads the raw array, so
     // Copy still emits the original single-line `<ts> - Source - LEVEL - msg`.
     if (tsMatch) {
-        const head = `${tsMatch[1] ? `<span class="text-slate-400">[${tsMatch[1]}]</span> ` : ''}<span class="text-slate-400">${tsMatch[2]}</span> <span class="text-indigo-500 font-semibold">${tsMatch[3].trim()}</span> <span class="opacity-60">${tsMatch[4]}</span>${badge}`;
+        const head = `${tsMatch[1] ? `<span class="text-slate-500">[${tsMatch[1]}]</span> ` : ''}<span class="text-slate-500">${tsMatch[2]}</span> <span class="text-indigo-500 font-semibold">${tsMatch[3].trim()}</span> <span class="opacity-60">${tsMatch[4]}</span>${badge}`;
         return `<div class="group relative px-4 py-0.5 border-b border-slate-100 text-xs font-mono ${cls} ${bg}${clsExtra}"${onClick}>${_logBugBtn(log, tsMatch[4], tsMatch[1] || tsMatch[3])}${head}<div class="pl-4 mt-0.5 break-all">${tsMatch[5]}</div></div>`;
     }
     return `<div class="group relative px-4 py-0.5 border-b border-slate-100 text-xs font-mono ${cls} ${bg}${clsExtra}"${onClick}>${_logBugBtn(log, '', '')}${log}${badge}</div>`;
@@ -3141,7 +3141,7 @@ async function loadModuleLogs(module, isRefresh = false) {
     if (!container) return;
 
     if (!isRefresh) {
-        container.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Fetching ${module} logs...</div>`;
+        container.innerHTML = `<div class="py-12 text-center text-slate-500 animate-pulse">Fetching ${module} logs...</div>`;
     }
 
     try {
@@ -3151,7 +3151,7 @@ async function loadModuleLogs(module, isRefresh = false) {
         const logs = (data.logs || []).slice().reverse();
 
         if (logs.length === 0) {
-            container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No logs available for ${module}.</div>`;
+            container.innerHTML = `<div class="py-12 text-center text-slate-500 italic">No logs available for ${module}.</div>`;
             return;
         }
 
@@ -3408,14 +3408,14 @@ async function showLoadRoleModal(spokeId) {
                     <h3 class="text-lg font-bold text-navy">Load Role</h3>
                     <p class="text-xs text-slate-500 mt-0.5 font-mono">${_spokeLabelFor(spokeId)}</p>
                 </div>
-                <button onclick="document.getElementById('load-role-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
+                <button onclick="document.getElementById('load-role-modal').remove()" class="text-slate-500 hover:text-slate-600 transition-colors">
                     <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                 </button>
             </div>
             <div class="p-6 space-y-4 overflow-y-auto">
                 <p class="text-xs text-slate-500">An agent can host <strong>multiple roles at once</strong>. Each role opens its own sub-spoke (<code class="bg-slate-100 px-1 rounded">&lt;agent-id&gt;-&lt;role&gt;</code>) that auto-approves via this agent.</p>
                 <div id="role-list" class="grid grid-cols-3 gap-2 max-h-44 overflow-y-auto pr-1">
-                    <p class="text-xs text-slate-400 italic col-span-3">Loading roles…</p>
+                    <p class="text-xs text-slate-500 italic col-span-3">Loading roles…</p>
                 </div>
                 <div id="loaded-role-controls" class="hidden"></div>
                 <div id="netbox-admin-creds" class="hidden p-3 bg-slate-50 border border-slate-200 rounded-md space-y-2">
@@ -3485,7 +3485,7 @@ async function showLoadRoleModal(spokeId) {
                 <span class="text-sm text-slate-700 font-medium">${r.name}${deployNote}</span>
             </label>`;
     }).join('');
-    list.innerHTML = rows || '<p class="text-xs text-slate-400 italic col-span-3">All available roles are already loaded.</p>';
+    list.innerHTML = rows || '<p class="text-xs text-slate-500 italic col-span-3">All available roles are already loaded.</p>';
     const loadedControls = document.getElementById('loaded-role-controls');
     // Deploy roles that own a background service (stop = Unload, purge = Uninstall).
     const SERVICE_DEPLOY_ROLES = ['dns-server', 'dhcp-server', 'zabbix-server', 'zbxproxy', 'zbxagent'];
@@ -3818,13 +3818,13 @@ async function loadOpnsenseManagement() {
     const subMenu = currentSubView;
     if (subMenu === 'Configuration' || subMenu === 'config') return;
 
-    container.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Fetching ${subMenu} data…</div>`;
+    container.innerHTML = `<div class="py-12 text-center text-slate-500 animate-pulse">Fetching ${subMenu} data…</div>`;
 
     const firewalls = await _ensureFirewalls();
     if (firewalls.length === 0) {
         const _actions = document.getElementById('top-nav-actions');
         if (_actions) _actions.innerHTML = '';
-        container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No firewalls configured. Add one in Setup → Firewalls.</div>`;
+        container.innerHTML = `<div class="py-12 text-center text-slate-500 italic">No firewalls configured. Add one in Setup → Firewalls.</div>`;
         return;
     }
 
@@ -3900,7 +3900,7 @@ async function loadOpnsenseManagement() {
 
         if (items.length === 0) {
             if (subMenu === 'Impairment' && !errors.length) {
-                container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No impairments. Use "+ Add Impairment" to add latency or packet loss for a host or subnet (needs the os-netimpair plugin on the firewall).</div>`;
+                container.innerHTML = `<div class="py-12 text-center text-slate-500 italic">No impairments. Use "+ Add Impairment" to add latency or packet loss for a host or subnet (needs the os-netimpair plugin on the firewall).</div>`;
                 return;
             }
             // Distinguish "legitimately empty" from "the spoke returned an error"
@@ -3909,7 +3909,7 @@ async function loadOpnsenseManagement() {
             const errNote = errors.length
                 ? `<div class="text-xs text-amber-600 mt-2 max-w-2xl mx-auto">${errors.length} firewall(s) reported an error: ${escapeHtml(errors[0])}</div>`
                 : '';
-            container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No ${subMenu} found.${errNote}</div>`;
+            container.innerHTML = `<div class="py-12 text-center text-slate-500 italic">No ${subMenu} found.${errNote}</div>`;
             return;
         }
 
@@ -3980,7 +3980,7 @@ async function loadOpnsenseManagement() {
                     return `<td class="px-4 py-3"><span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${color}">${eVal}</span></td>`;
                 }
                 if (k === 'status') {
-                    const color = val === 'up' ? 'text-green-600' : 'text-slate-400';
+                    const color = val === 'up' ? 'text-green-600' : 'text-slate-500';
                     return `<td class="px-4 py-3 font-mono text-xs ${color}">${eVal}</td>`;
                 }
                 if (k === 'firewall') {
@@ -3997,10 +3997,10 @@ async function loadOpnsenseManagement() {
             const delCell = showDelete ? `
                 <td class="px-4 py-3 text-right">
                     <div class="flex items-center justify-end gap-1">
-                        <button onclick="showOpnsenseEditModal('${item._fwId}','${subMenu}',${idx})" class="p-1 text-slate-400 hover:text-blue-600 transition-colors" title="Edit ${subMenu.replace(/s$/, '')}">
+                        <button onclick="showOpnsenseEditModal('${item._fwId}','${subMenu}',${idx})" class="p-1 text-slate-500 hover:text-blue-600 transition-colors" title="Edit ${subMenu.replace(/s$/, '')}">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
                         </button>
-                        <button onclick="deleteOpnsenseItem('${item._fwId}','${subMenu}','${escJsAttr(rawId)}')" class="p-1 text-slate-400 hover:text-red-600 transition-colors" title="Delete ${subMenu.replace(/s$/, '')}">
+                        <button onclick="deleteOpnsenseItem('${item._fwId}','${subMenu}','${escJsAttr(rawId)}')" class="p-1 text-slate-500 hover:text-red-600 transition-colors" title="Delete ${subMenu.replace(/s$/, '')}">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
                         </button>
                     </div>
@@ -4012,7 +4012,7 @@ async function loadOpnsenseManagement() {
         let footerHtml = '';
         if (subMenu === 'Firewall Rules' && hiddenRules.length > 0) {
             footerHtml = `<div class="pt-3 flex items-center gap-4">
-                <span class="text-xs text-slate-400">${hiddenRules.length} rules manually hidden</span>
+                <span class="text-xs text-slate-500">${hiddenRules.length} rules manually hidden</span>
                 <button onclick="toggleHiddenFirewallRules()" class="text-xs font-medium text-blue-600 hover:text-blue-800" title="Toggle visibility of hidden firewall rules">${showHiddenOnlyFirewallRules ? 'Show All' : 'View Hidden'}</button>
                 <button onclick="unhideAllFirewallRules()" class="text-xs font-medium text-blue-600 hover:text-blue-800" title="Reset and unhide all hidden firewall rules">Unhide All</button>
             </div>`;
@@ -4021,7 +4021,7 @@ async function loadOpnsenseManagement() {
         const moduleKey = subMenu === 'Firewall Rules' ? 'rules' : subMenu === 'NAT Policies' ? 'nat'
             : subMenu === 'DHCP Leases' ? 'dhcp' : subMenu === 'DNS Records' ? 'dns' : 'interfaces';
         const refreshBtn = !isAdmin() ? `<button onclick="refreshModuleCache('${moduleKey}').then(()=>loadOpnsenseManagement())"
-            class="text-xs text-slate-400 hover:text-slate-600 flex items-center gap-1" title="Refresh ${subMenu} from firewall cache">
+            class="text-xs text-slate-500 hover:text-slate-600 flex items-center gap-1" title="Refresh ${subMenu} from firewall cache">
             <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
             Refresh</button>` : '';
 

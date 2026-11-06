@@ -35,7 +35,7 @@ function _extDnsBackBar(name) {
     if (!window._extDnsMulti) return '';
     return `<div class="mb-3 flex items-center gap-2 text-xs">
         <button onclick="loadExternalDNS()" class="inline-flex items-center gap-1 text-slate-500 hover:text-primary-text font-medium" title="Back to External DNS providers">← External DNS</button>
-        <span class="text-slate-300">/</span>
+        <span class="text-slate-500">/</span>
         <span class="font-bold text-slate-600">${escapeHtml(name)}</span>
       </div>`;
 }
@@ -48,7 +48,7 @@ async function loadExternalDNS() {
     if (!container) return;
     const providers = _externalDnsConnected();
     if (providers.length === 0) {
-        container.innerHTML = '<p class="p-4 text-slate-400 italic text-sm">No external DNS provider connected. Connect a provider spoke (e.g. HE.NET) to manage internet-facing DNS here.</p>';
+        container.innerHTML = '<p class="p-4 text-slate-500 italic text-sm">No external DNS provider connected. Connect a provider spoke (e.g. HE.NET) to manage internet-facing DNS here.</p>';
         return;
     }
     if (providers.length === 1) {
@@ -61,7 +61,7 @@ async function loadExternalDNS() {
           <button onclick="openExternalDns('${p.id}')" class="text-left bg-white border border-slate-200 rounded-lg p-4 hover:border-brand hover:shadow-md transition-all" title="Manage ${escapeHtml(p.name)} external DNS records">
             <div class="flex items-center justify-between mb-1">
               <span class="text-sm font-bold text-navy">${escapeHtml(p.name)}</span>
-              <span class="text-[10px] font-mono text-slate-400">${escapeHtml(p.id)}</span>
+              <span class="text-[10px] font-mono text-slate-500">${escapeHtml(p.id)}</span>
             </div>
             <p class="text-xs text-slate-500 leading-snug">${escapeHtml(p.desc)}</p>
             <span class="inline-block mt-3 text-[11px] font-bold text-primary-text">Manage records →</span>
@@ -142,7 +142,7 @@ function _vaultCredSelectHtml(elId) {
     return `<div class="space-y-1">
         <label class="text-xs text-slate-500 uppercase font-bold" title="Optionally back this connection's secret with a Credential Vault entry instead of typing it inline. The hub resolves the value at push time and never stores the plaintext.">Credential Vault (optional)</label>
         <select id="${elId}" title="Pick a Vault secret to supply this connection's password/secret, or leave as “— none —” to enter it inline." class="${cls}"><option value="">Loading…</option></select>
-        <p class="text-[11px] text-slate-400 leading-snug">When set, the secret field(s) below may be left blank — the hub fills them from the Vault at push time and never stores the plaintext.</p>
+        <p class="text-[11px] text-slate-500 leading-snug">When set, the secret field(s) below may be left blank — the hub fills them from the Vault at push time and never stores the plaintext.</p>
     </div>`;
 }
 
@@ -225,7 +225,7 @@ function _henetScope() {
 }
 
 function _henetPushBadge(r) {
-    if (!r.last_push_status) return '<span class="text-slate-400">—</span>';
+    if (!r.last_push_status) return '<span class="text-slate-500">—</span>';
     if (r.last_push_status === 'imported') {
         const detail = r.last_push_detail ? ` title="${escapeHtml(String(r.last_push_detail))}"` : '';
         return `<span class="px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700"${detail}>imported</span>`;
@@ -239,7 +239,7 @@ function _henetPushBadge(r) {
 async function loadHenet() {
     const container = document.getElementById('dns-content');
     if (!container) return;
-    container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
+    container.innerHTML = '<p class="text-sm text-slate-500 italic p-4">Loading…</p>';
     const th = tableHead, tw = tableWrap;
     const admin = isAdmin();
     // Record/credential writes need tenant-admin tier (or admin) — a plain
@@ -340,7 +340,7 @@ async function loadHenet() {
     try {
         const { ok, data: d, detail } = await _spokeFetch('/api/henet/records');
         if (!ok) {
-            container.innerHTML = backBar + actionBar + `${_spokeErrorBanner(detail, 'HE.NET spoke not connected')}${_isSpokeUpdating(detail) ? '' : '<p class="px-4 pb-4 text-xs text-slate-400">Load the “HE.NET” role on an agent and store an HE DDNS key in the Credential Vault (secret type “HE.NET DDNS key”).</p>'}`;
+            container.innerHTML = backBar + actionBar + `${_spokeErrorBanner(detail, 'HE.NET spoke not connected')}${_isSpokeUpdating(detail) ? '' : '<p class="px-4 pb-4 text-xs text-slate-500">Load the “HE.NET” role on an agent and store an HE DDNS key in the Credential Vault (secret type “HE.NET DDNS key”).</p>'}`;
             return;
         }
         // A non-admin only ever gets their own tenant's records back (the
@@ -366,14 +366,14 @@ async function loadHenet() {
                 <td class="px-4 py-2 text-center text-xs">${escapeHtml(String(r.ttl))}</td>
                 <td class="px-4 py-2 text-center">${_henetPushBadge(r)}</td>
                 ${canWrite ? `<td class="px-4 py-2 whitespace-nowrap">
-                    <button onclick="editHenetRecord('${eName}','${eType}')" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
-                    <button onclick="deleteHenetRecord('${eName}','${eType}')" title="Remove from management" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>
+                    <button onclick="editHenetRecord('${eName}','${eType}')" title="Edit" class="p-1 text-slate-500 hover:text-blue-600 transition-colors">${editIcon}</button>
+                    <button onclick="deleteHenetRecord('${eName}','${eType}')" title="Remove from management" class="p-1 text-slate-500 hover:text-red-500 transition-colors">${delIcon}</button>
                 </td>` : ''}
             </tr>`;
         };
         const bodyHtml = tw(th(cols) + `<tbody>${records.map(rowHtml).join('')}</tbody>`);
         container.innerHTML = backBar + actionBar + (records.length === 0
-            ? '<p class="p-4 text-slate-400 italic text-sm">No HE.NET records under management yet.' + (canWrite ? ' Use “+ Add Record”.' : '') + '</p>'
+            ? '<p class="p-4 text-slate-500 italic text-sm">No HE.NET records under management yet.' + (canWrite ? ' Use “+ Add Record”.' : '') + '</p>'
             : bodyHtml);
     } catch (err) {
         container.innerHTML = backBar + actionBar + `<p class="p-4 text-red-500 text-sm">Error: ${err.message}</p>`;
@@ -414,7 +414,7 @@ async function showHenetRecordModal(editItem) {
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Value (IP)</label><input id="henet-r-value" value="${val(editItem?.value)}" class="${inputCls}" placeholder="203.0.113.5" title="IP address the record resolves to (A = IPv4, AAAA = IPv6)"></div>
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">TTL</label><input id="henet-r-ttl" type="number" min="60" value="${val(editItem?.ttl) || 300}" class="${inputCls}" title="Time-to-live in seconds (minimum 60; default 300)"></div>
             ${tenantField}
-            <p class="text-[11px] text-slate-400">Records are created/updated directly in your HE.NET zone using the assigned account login${cred ? ` (<span class="font-mono">🔐 ${escapeHtml(cred.name)}</span>)` : ''} — no per-record DDNS key needed.${editing && isAdmin() ? ` To just move this record to another tenant's tab, change <b>Tenant</b> and leave <b>Value</b> unchanged — it's re-homed without touching HE.NET.` : ''}</p>
+            <p class="text-[11px] text-slate-500">Records are created/updated directly in your HE.NET zone using the assigned account login${cred ? ` (<span class="font-mono">🔐 ${escapeHtml(cred.name)}</span>)` : ''} — no per-record DDNS key needed.${editing && isAdmin() ? ` To just move this record to another tenant's tab, change <b>Tenant</b> and leave <b>Value</b> unchanged — it's re-homed without touching HE.NET.` : ''}</p>
         </div>
         <div class="flex justify-end gap-2 pt-2">
             <button onclick="saveHenetRecord()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold" title="${editing ? 'Save changes to this HE.NET record' : 'Add record to HE.NET management'}">${editing ? 'Save Changes' : 'Add Record'}</button>
@@ -775,7 +775,7 @@ async function syncHenet() {
 async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
     const container = document.getElementById('dhcp-content');
     if (!container) return;
-    container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
+    container.innerHTML = '<p class="text-sm text-slate-500 italic p-4">Loading…</p>';
     // ALL per-tab action buttons — "+ Add Reservation" (Reservations tab
     // only) — render into the trailing #top-nav-actions strip in the sub-nav
     // bar, pinned right next to the help "i" icon (see renderTopNav), rather
@@ -854,7 +854,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                 // prior sync (e.g. a removed prefix). Flag it instead of
                 // rendering a meaningless "subnet <id>" label.
                 const label = s.subnet
-                    ? escapeHtml(s.subnet) + (s.description ? ` <span class="text-slate-400 font-normal">(${escapeHtml(s.description)})</span>` : '')
+                    ? escapeHtml(s.subnet) + (s.description ? ` <span class="text-slate-500 font-normal">(${escapeHtml(s.description)})</span>` : '')
                     : '<span class="text-red-500 italic">Unknown scope (not in NetBox — stale?)</span>';
                 return `
                 <div class="py-2 border-b border-slate-100 last:border-0">
@@ -870,7 +870,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                 <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">${tiles}</div>
                 <div class="bg-white border border-slate-200 rounded-lg p-4">
                     <div class="text-sm font-semibold text-slate-700 mb-2">Scope Utilization</div>
-                    ${subnetRows || '<p class="text-slate-400 italic text-sm">No subnets configured.</p>'}
+                    ${subnetRows || '<p class="text-slate-500 italic text-sm">No subnets configured.</p>'}
                 </div>
                 ${syncLine}`;
             return;
@@ -932,7 +932,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                 <div class="flex items-center justify-between gap-3 mb-4">
                     <div>
                         <div class="text-sm font-semibold ${updating ? 'text-sky-700' : (good ? 'text-emerald-700' : 'text-red-700')}">${updating ? (haCluster ? 'Kea HA pair updating — applying configuration' : 'Kea DHCP server updating — applying configuration') : (good ? (haCluster ? 'Kea HA pair healthy' : 'Kea DHCP server healthy') : (haCluster ? 'Kea HA pair needs attention' : 'Kea DHCP server needs attention'))}</div>
-                        <div class="text-xs text-slate-400">${haCluster ? `HA pair (${escapeHtml(haCluster.mode || 'hot-standby')}); evidence below is from ${escapeHtml(d.diagnostics_source_name || d.diagnostics_source || 'no reachable node')}.` : 'Live checks mirror the Sim DHCP (Kea) diagnostics: units, config, interfaces, listeners, control agent, and leases.'}</div>
+                        <div class="text-xs text-slate-500">${haCluster ? `HA pair (${escapeHtml(haCluster.mode || 'hot-standby')}); evidence below is from ${escapeHtml(d.diagnostics_source_name || d.diagnostics_source || 'no reachable node')}.` : 'Live checks mirror the Sim DHCP (Kea) diagnostics: units, config, interfaces, listeners, control agent, and leases.'}</div>
                     </div>
                     <div class="flex items-center gap-2">
                         ${serviceClusterButton('dhcp', haCluster)}
@@ -971,7 +971,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                 </div>
                 <div class="bg-white border border-slate-200 rounded-lg overflow-hidden mb-4">
                     <div class="px-4 py-3 text-sm font-semibold text-slate-700 border-b border-slate-200">Configured scopes</div>
-                    ${subnetRows ? tw(th(['ID', 'Subnet', 'Pools']) + `<tbody>${subnetRows}</tbody>`) : '<p class="p-4 text-slate-400 italic text-sm">No subnets reported.</p>'}
+                    ${subnetRows ? tw(th(['ID', 'Subnet', 'Pools']) + `<tbody>${subnetRows}</tbody>`) : '<p class="p-4 text-slate-500 italic text-sm">No subnets reported.</p>'}
                 </div>
                 ${(d.last_errors || []).length ? `<div class="bg-white border border-slate-200 rounded-lg p-4">
                     <div class="text-sm font-semibold text-slate-700 mb-2">Recent service warnings/errors</div>
@@ -999,7 +999,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                 </tr>`;
             }).join('');
             container.innerHTML = _spokeCachedBadge(d) + _dhcpDegradedBanner(d) + (subnets.length === 0
-                ? '<p class="p-4 text-slate-400 italic text-sm">No subnets configured.</p>'
+                ? '<p class="p-4 text-slate-500 italic text-sm">No subnets configured.</p>'
                 : tw(th(cols) + `<tbody>${rows}</tbody>`));
 
         } else if (subMenu === 'Leases') {
@@ -1050,12 +1050,12 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                     <td class="px-4 py-2 font-mono text-xs">${escapeHtml(validUntil)}</td>
                     <td class="px-4 py-2 whitespace-nowrap text-right">
                         ${ip && mac ? `<button onclick="convertLeaseToReservation('${eIp}', '${eSpoke}')" title="Convert to static reservation" class="text-xs bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-2.5 py-1 rounded transition-colors font-medium">Reserve</button>` : ''}
-                        ${ip ? `<button onclick="deleteDhcpLease('${eIp}', '${eSpoke}')" title="Delete lease" class="p-1 text-slate-300 hover:text-red-500 transition-colors ml-1">${delIcon}</button>` : ''}
+                        ${ip ? `<button onclick="deleteDhcpLease('${eIp}', '${eSpoke}')" title="Delete lease" class="p-1 text-slate-500 hover:text-red-500 transition-colors ml-1">${delIcon}</button>` : ''}
                     </td>
                 </tr>`;
             }).join('');
             container.innerHTML = _spokeCachedBadge(d) + _dhcpDegradedBanner(d) + (leases.length === 0
-                ? '<p class="p-4 text-slate-400 italic text-sm">No active leases.</p>'
+                ? '<p class="p-4 text-slate-500 italic text-sm">No active leases.</p>'
                 : tw(th(cols) + `<tbody>${rows}</tbody>`));
 
         } else if (subMenu === 'Reservations') {
@@ -1075,13 +1075,13 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                     <td class="px-4 py-2 text-xs">${escapeHtml(r.hostname || '—')}</td>
                     <td class="px-4 py-2 font-mono text-xs">${escapeHtml(r.subnet || '—')}</td>
                     <td class="px-4 py-2 whitespace-nowrap">
-                        <button onclick="editDhcpReservation('${eIp}', '${eSpoke}')" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
-                        <button onclick="deleteDhcpReservation('${eIp}', '${eSpoke}')" title="Delete" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>
+                        <button onclick="editDhcpReservation('${eIp}', '${eSpoke}')" title="Edit" class="p-1 text-slate-500 hover:text-blue-600 transition-colors">${editIcon}</button>
+                        <button onclick="deleteDhcpReservation('${eIp}', '${eSpoke}')" title="Delete" class="p-1 text-slate-500 hover:text-red-500 transition-colors">${delIcon}</button>
                     </td>
                 </tr>`;
             }).join('');
             container.innerHTML = _spokeCachedBadge(d) + _dhcpDegradedBanner(d) + (res.length === 0
-                ? '<p class="p-4 text-slate-400 italic text-sm">No static reservations configured.</p>'
+                ? '<p class="p-4 text-slate-500 italic text-sm">No static reservations configured.</p>'
                 : tw(th(cols) + `<tbody>${rows}</tbody>`));
         }
     } catch (err) {
