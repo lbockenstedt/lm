@@ -93,3 +93,7 @@ The HPE pass landed as one merge of branch `hpe-design-compliance` (one commit
 per area: tokens, contrast, a11y, typography, buttons, time). The tag
 `pre-hpe-design` marks the commit before it. `git revert -m 1 <merge>` undoes
 all of it; reverting a single area commit undoes just that area.
+
+The report emails (`core/src/simulations/email_report.py`, alert emails in
+`core/src/alert_engine.py`) use the same tokens. They landed as a separate merge
+of branch `hpe-design-reports`; revert that merge to restore the old email look.
