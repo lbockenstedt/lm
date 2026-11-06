@@ -850,7 +850,34 @@ class KeaManager:
 
         # Log and report counts.
         logger.info("Synced %d subnets, %d reservations to Kea", len(kea_subnets), len(reservations))
-        return {"status": "SUCCESS", "subnets": len(kea_subnets), "reservations": len(reservations)}
+        released = self.release_held_declines().get("released", [])
+        return {"status": "SUCCESS", "subnets": len(kea_subnets), "reservations": len(reservations),
+                "released_declines": len(released)}
+
+    def release_held_declines(self, release_all: bool = False) -> dict:
+        """Free declined addresses so the pool can hand them out again.
+
+        By default only addresses held longer than the current probation
+        period: Kea keeps the probation that applied when a client declined,
+        so a decline storm under a 24h hold (Kea's default, or "Hold declined
+        addresses" on) keeps the pool short for a day even after the hold is
+        turned off. Run after every sync so the pool recovers by itself.
+        ``release_all`` frees every declined address (the Diagnostics button).
+        """
+        try:
+            period = 0 if release_all else self.get_config().get(
+                "decline-probation-period", DECLINE_PROBATION_HOLD)
+        except Exception as e:  # noqa: BLE001
+            return {"status": "ERROR", "message": f"Cannot read Kea config: {e}", "released": []}
+        released = []
+        for lease in self.list_leases():
+            if lease.get("state") == 1 and lease.get("valid-lft", 0) > period:
+                self.delete_lease(lease["ip-address"])
+                released.append(lease["ip-address"])
+        if released:
+            logger.warning("Released %d declined address(es) held longer than %ss: %s",
+                           len(released), period, ", ".join(released[:20]))
+        return {"status": "SUCCESS", "released": released}
 
     # ── Real-time DNS registration hook (Option 1) ─────────────────────
 
