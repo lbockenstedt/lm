@@ -1766,6 +1766,7 @@ async function loadLdapConfig() {
 // two header dots Green (healthy) / Yellow (degraded) / Red (down). Self-stops
 // when the user navigates away from the Directory view.
 let _ldapHealthTimer = null;
+let _ldapHealthBusy = false;
 function _setHealthDot(dotId, labelId, status, detail) {
     const dot = document.getElementById(dotId);
     const lbl = document.getElementById(labelId);
@@ -1785,6 +1786,9 @@ async function pollLdapHealth() {
     // currentUser) — otherwise a tab left open keeps polling a dead session
     // every 10s forever. Logging back in re-renders the view and restarts it.
     if (currentView !== 'ldap' || !currentUser) { stopLdapHealthPoll(); return; }
+    // Never overlap polls: a slow check must not stack up requests.
+    if (_ldapHealthBusy) return;
+    _ldapHealthBusy = true;
     try {
         const h = await apiJson('/api/ldap/health', { method: 'GET' });
         _setHealthDot('ldap-health-dot', 'ldap-health-label', h.ldap && h.ldap.status, h.ldap && h.ldap.detail);
@@ -1792,6 +1796,8 @@ async function pollLdapHealth() {
     } catch (e) {
         _setHealthDot('ldap-health-dot', 'ldap-health-label', 'down', 'hub unreachable');
         _setHealthDot('entra-health-dot', 'entra-health-label', 'down', 'hub unreachable');
+    } finally {
+        _ldapHealthBusy = false;
     }
 }
 function startLdapHealthPoll() {
