@@ -15,32 +15,32 @@ function showAddNwDeviceModal(prefillDevice) {
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50 sticky top-0">
-                <h3 class="text-lg font-bold text-[#263040]" id="nw-modal-title">Add Network Device</h3>
-                <button onclick="closeNwDeviceModal()" class="text-slate-400 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                <h3 class="text-lg font-bold text-navy" id="nw-modal-title">Add Network Device</h3>
+                <button onclick="closeNwDeviceModal()" class="text-slate-500 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-4">
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Device Name</label><input type="text" id="nw-name" placeholder="e.g. Core Switch" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Device Name</label><input type="text" id="nw-name" placeholder="e.g. Core Switch" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
                 <div class="grid grid-cols-2 gap-4">
-                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Object Type</label><select id="nw-object-type" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="aos_switch">AOS Switch</option><option value="cx_switch">CX Switch</option><option value="ex_switch">EX Switch</option><option value="gateway">Gateway</option></select></div>
-                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Transport</label><select id="nw-transport" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="auto">Auto</option><option value="ssh">SSH/CLI</option><option value="rest">REST API</option><option value="snmp">SNMP</option></select></div>
+                    <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Object Type</label><select id="nw-object-type" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="aos_switch">AOS Switch</option><option value="cx_switch">CX Switch</option><option value="ex_switch">EX Switch</option><option value="gateway">Gateway</option></select></div>
+                    <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Transport</label><select id="nw-transport" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="auto">Auto</option><option value="ssh">SSH/CLI</option><option value="rest">REST API</option><option value="snmp">SNMP</option></select></div>
                 </div>
                 <div class="grid grid-cols-2 gap-4">
-                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Associated Spoke</label><select id="nw-spoke" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading spokes...</option></select></div>
-                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Port</label><input type="text" id="nw-port" placeholder="22 / 443" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                    <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Associated Spoke</label><select id="nw-spoke" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading spokes...</option></select></div>
+                    <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Port</label><input type="text" id="nw-port" placeholder="22 / 443" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
                 </div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Address / Host IP <span class="text-red-500">*</span></label><input type="text" id="nw-address" placeholder="10.0.0.1" required class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Address / Host IP <span class="text-red-500">*</span></label><input type="text" id="nw-address" placeholder="10.0.0.1" required class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
                 <div class="grid grid-cols-2 gap-4">
-                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Username</label><input type="text" id="nw-username" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
-                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Password</label><input type="password" id="nw-password" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                    <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Username</label><input type="text" id="nw-username" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                    <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Password</label><input type="password" id="nw-password" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
                 </div>
                 <div class="grid grid-cols-2 gap-4">
-                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Enable Secret</label><input type="password" id="nw-enable-secret" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
-                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">API Token</label><input type="password" id="nw-api-token" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                    <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Enable Secret</label><input type="password" id="nw-enable-secret" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                    <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">API Token</label><input type="password" id="nw-api-token" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
                 </div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">SNMP Community</label><input type="text" id="nw-snmp-community" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">SNMP Community</label><input type="text" id="nw-snmp-community" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
                 ${_vaultCredSelectHtml('nw-vaultcred')}
                 <div class="space-y-2">
-                    <label class="text-xs text-slate-500 uppercase font-bold">Auto-Poll Interval</label>
+                    <label class="text-xs text-slate-500 font-bold">Auto-Poll Interval</label>
                     <select id="nw-poll-interval" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                         <option value="inherit" selected>Inherit module default</option>
                         <option value="0">Off (manual Poll Now only)</option>
@@ -52,12 +52,12 @@ function showAddNwDeviceModal(prefillDevice) {
                         <option value="21600">Every 6 hours</option>
                         <option value="86400">Every day</option>
                     </select>
-                    <p class="text-[11px] text-slate-400">The nw spoke polls this device on its own cycle (probe + info + ARP/MAC/interfaces), warms the hub cache so sub-views load instantly, and syncs the device + interfaces into NetBox. <b>This device setting overrides the module default</b> (set under Setup → Module Management). Inherit uses the module default (6 hours if unset).</p>
+                    <p class="text-xs text-slate-500">The nw spoke polls this device on its own cycle (probe + info + ARP/MAC/interfaces), warms the hub cache so sub-views load instantly, and syncs the device + interfaces into NetBox. <b>This device setting overrides the module default</b> (set under Setup → Module Management). Inherit uses the module default (6 hours if unset).</p>
                 </div>
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3 sticky bottom-0">
                 <button onclick="closeNwDeviceModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
-                <button onclick="saveNwDevice()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save Device</button>
+                <button onclick="saveNwDevice()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm">Save Device</button>
             </div>
         </div>
     `;
@@ -204,7 +204,7 @@ async function loadTruenasAppliancesList() {
     try {
         const apps = await loadTruenasAppliances();
         if (!apps.length) {
-            listEl.innerHTML = '<p class="text-xs text-slate-400 italic">No TrueNAS appliances configured.</p>';
+            listEl.innerHTML = '<p class="text-xs text-slate-500 italic">No TrueNAS appliances configured.</p>';
             return;
         }
         listEl.innerHTML = apps.map(a => {
@@ -214,7 +214,7 @@ async function loadTruenasAppliancesList() {
                 a.verify_ssl === false ? 'verify SSL off' : 'verify SSL on',
             ].filter(Boolean).join(' · ');
             return `<div class="flex items-center justify-between p-3 rounded-md bg-slate-50 border border-slate-200">
-                <div><span class="text-sm font-medium text-slate-700">${escapeHtml(a.name || a.id)}</span><span class="ml-2 text-xs text-slate-400">${escapeHtml(sub)}</span></div>
+                <div><span class="text-sm font-medium text-slate-700">${escapeHtml(a.name || a.id)}</span><span class="ml-2 text-xs text-slate-500">${escapeHtml(sub)}</span></div>
                 <div class="flex gap-2">
                     <button onclick="editTruenasAppliance('${escapeHtml(a.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium" title="Edit appliance settings">Edit</button>
                     <button onclick="deleteTruenasAppliance('${escapeHtml(a.id)}')" class="text-xs text-red-400 hover:text-red-600 font-medium" title="Remove appliance from Lab Manager">Delete</button>
@@ -241,20 +241,20 @@ function showAddTruenasApplianceModal() {
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50 sticky top-0">
-                <h3 class="text-lg font-bold text-[#263040]" id="truenas-modal-title">Add TrueNAS Appliance</h3>
-                <button onclick="closeTruenasApplianceModal()" class="text-slate-400 hover:text-slate-600 transition-colors" title="Close modal"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                <h3 class="text-lg font-bold text-navy" id="truenas-modal-title">Add TrueNAS Appliance</h3>
+                <button onclick="closeTruenasApplianceModal()" class="text-slate-500 hover:text-slate-600 transition-colors" title="Close modal"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-4">
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Name</label><input type="text" id="truenas-name" placeholder="e.g. nas-01" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="TrueNAS appliance display name"></div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Host / IP</label><input type="text" id="truenas-host" placeholder="10.0.0.50" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="TrueNAS host IP address or FQDN"></div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">API Key</label><input type="password" id="truenas-api-key" placeholder="Create in TrueNAS → Settings → API Keys" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="TrueNAS API key token for WebSocket JSON-RPC auth"><p class="text-[11px] text-slate-400">Leave blank on edit to keep the stored key (sentinel-merge). The spoke forces <code>wss://</code>; keys auto-revoke over plain <code>ws://</code>.</p></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Name</label><input type="text" id="truenas-name" placeholder="e.g. nas-01" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="TrueNAS appliance display name"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Host / IP</label><input type="text" id="truenas-host" placeholder="10.0.0.50" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="TrueNAS host IP address or FQDN"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">API Key</label><input type="password" id="truenas-api-key" placeholder="Create in TrueNAS → Settings → API Keys" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="TrueNAS API key token for WebSocket JSON-RPC auth"><p class="text-xs text-slate-500">Leave blank on edit to keep the stored key (sentinel-merge). The spoke forces <code>wss://</code>; keys auto-revoke over plain <code>ws://</code>.</p></div>
                 <div class="grid grid-cols-2 gap-4">
-                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Verify SSL</label><select id="truenas-verify-ssl" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="TLS certificate verification mode"><option value="true">On (trusted CA)</option><option value="false" selected>Off (self-signed)</option></select></div>
-                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Auth Mechanism</label><select id="truenas-auth-mech" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="Authentication handshake protocol"><option value="auto" selected>Auto (SCRAM→PLAIN)</option><option value="PLAIN">PLAIN (Core / 24.x)</option><option value="SCRAM">SCRAM-SHA-512 (26+)</option></select></div>
+                    <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Verify SSL</label><select id="truenas-verify-ssl" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="TLS certificate verification mode"><option value="true">On (trusted CA)</option><option value="false" selected>Off (self-signed)</option></select></div>
+                    <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Auth Mechanism</label><select id="truenas-auth-mech" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="Authentication handshake protocol"><option value="auto" selected>Auto (SCRAM→PLAIN)</option><option value="PLAIN">PLAIN (Core / 24.x)</option><option value="SCRAM">SCRAM-SHA-512 (26+)</option></select></div>
                 </div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Associated Storage Spoke</label><select id="truenas-spoke" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="Target storage spoke managing this appliance"><option value="">Loading spokes...</option></select></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Associated Storage Spoke</label><select id="truenas-spoke" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="Target storage spoke managing this appliance"><option value="">Loading spokes...</option></select></div>
                 <div class="space-y-2">
-                    <label class="text-xs text-slate-500 uppercase font-bold">Auto-Poll Interval</label>
+                    <label class="text-xs text-slate-500 font-bold">Auto-Poll Interval</label>
                     <select id="truenas-poll-interval" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="Per-appliance polling cadence">
                         <option value="inherit" selected>Inherit module default</option>
                         <option value="0">Off (manual Poll Now only)</option>
@@ -270,7 +270,7 @@ function showAddTruenasApplianceModal() {
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3 sticky bottom-0">
                 <button onclick="closeTruenasApplianceModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors" title="Cancel and close dialog">Cancel</button>
-                <button onclick="saveTruenasAppliance()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm" title="Save appliance credentials and settings">Save Appliance</button>
+                <button onclick="saveTruenasAppliance()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm" title="Save appliance credentials and settings">Save Appliance</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
@@ -566,7 +566,7 @@ const DEVICE_TYPES = {
 // Admin tenant's own. Unassigned (no tenant_id) is admin-only, not global.
 function _instanceTenantBadge(inst) {
     const tid = (inst && inst.tenant_id) ? String(inst.tenant_id) : '';
-    if (!tid) return `<span class="ml-2 text-xs text-slate-400" title="Not bound to a tenant — visible to admins only, and not usable by a tenant-scoped scan">unassigned</span>`;
+    if (!tid) return `<span class="ml-2 text-xs text-slate-500" title="Not bound to a tenant — visible to admins only, and not usable by a tenant-scoped scan">unassigned</span>`;
     return `<span class="ml-2 text-xs text-indigo-600" title="Owning tenant: ${escapeHtml(tid)}">tenant: ${escapeHtml(tid)}</span>`;
 }
 
@@ -580,12 +580,12 @@ async function loadInstances(productKey) {
         window._instances = window._instances || {};
         window._instances[productKey] = instances;
         if (instances.length === 0) {
-            listEl.innerHTML = '<p class="text-xs text-slate-400 italic">No instances configured.</p>';
+            listEl.innerHTML = '<p class="text-xs text-slate-500 italic">No instances configured.</p>';
             return;
         }
         listEl.innerHTML = instances.map(inst => `
             <div class="flex items-center justify-between p-3 rounded-md bg-slate-50 border border-slate-200">
-                <div><span class="text-sm font-medium text-slate-700">${inst.name || inst.id}</span><span class="ml-2 text-xs text-slate-400">${p.rowSummary(inst)}${inst.spoke_id ? ' · ' + escapeHtml(_spokeLabelFor(inst.spoke_id)) : ''}</span>${_instanceTenantBadge(inst)}${(inst.vault_credential && inst.vault_credential.name) ? `<span class="ml-2 text-xs text-emerald-600" title="Secret supplied from Credential Vault: ${escapeHtml(inst.vault_credential.bucket)} › ${escapeHtml(inst.vault_credential.name)}">🔐 vault</span>` : ''}</div>
+                <div><span class="text-sm font-medium text-slate-700">${inst.name || inst.id}</span><span class="ml-2 text-xs text-slate-500">${p.rowSummary(inst)}${inst.spoke_id ? ' · ' + escapeHtml(_spokeLabelFor(inst.spoke_id)) : ''}</span>${_instanceTenantBadge(inst)}${(inst.vault_credential && inst.vault_credential.name) ? `<span class="ml-2 text-xs text-emerald-600" title="Secret supplied from Credential Vault: ${escapeHtml(inst.vault_credential.bucket)} › ${escapeHtml(inst.vault_credential.name)}">🔐 vault</span>` : ''}</div>
                 <div class="flex gap-2">
                     <button onclick="editInstance('${productKey}','${inst.id}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Edit</button>
                     <button onclick="deleteInstance('${productKey}','${inst.id}')" class="text-xs text-red-400 hover:text-red-600 font-medium">Delete</button>
@@ -630,7 +630,7 @@ function showAddInstanceModal(productKey, editItem) {
         const inner = type === 'select'
             ? `<select id="inst-${f.id}" class="${cls}">${(f.options || []).map(([v, lbl]) => `<option value="${v}">${lbl}</option>`).join('')}</select>`
             : `<input type="${type}" id="inst-${f.id}" placeholder="${f.placeholder || ''}" class="${cls}">`;
-        return `                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">${f.label}</label>${inner}</div>`;
+        return `                    <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">${f.label}</label>${inner}</div>`;
     }).join('\n');
     // IPAM-only: an "Apply schema changes" button that provisions the Lab
     // Manager custom fields (Proxmox / OPNsense / ClearPass sync) on the
@@ -640,8 +640,8 @@ function showAddInstanceModal(productKey, editItem) {
     // newly-added fields without a reinstall). Hidden for non-IPAM products.
     const schemaBtnHtml = productKey === 'ipam'
         ? `<div class="pt-3 mt-2 border-t border-slate-100 space-y-1">
-                <button onclick="applyIpamSchema()" class="w-full px-4 py-2 rounded-md text-sm font-semibold text-[#01A982] border border-[#01A982] hover:bg-[#01A982] hover:text-white transition-all">Apply schema changes</button>
-                <p class="text-[11px] text-slate-400 leading-snug">Provisions the Lab Manager custom fields used by the Proxmox, OPNsense, and ClearPass syncs on the connected NetBox. Idempotent — safe to run as many times as needed; existing fields are left in place.</p>
+                <button onclick="applyIpamSchema()" class="w-full px-4 py-2 rounded-md text-sm font-semibold text-primary-text border border-brand hover:bg-primary hover:text-white transition-all">Apply schema changes</button>
+                <p class="text-xs text-slate-500 leading-snug">Provisions the Lab Manager custom fields used by the Proxmox, OPNsense, and ClearPass syncs on the connected NetBox. Idempotent — safe to run as many times as needed; existing fields are left in place.</p>
             </div>`
         : '';
     // Optional Credential Vault picker (products that carry a connection secret,
@@ -655,22 +655,22 @@ function showAddInstanceModal(productKey, editItem) {
     // instance_relocate.py). Empty/unchecked = plain single-spoke behavior.
     const failoverPoolHtml = p.roleName ? `
                 <div class="space-y-2 pt-2 border-t border-slate-100">
-                    <label class="text-xs text-slate-500 uppercase font-bold">Failover Pool (optional)</label>
-                    <p class="text-[11px] text-slate-400 leading-snug">Spokes that can take over this instance if the active one goes out of contact, or if load gets unbalanced across the pool. No priority order — the hub picks any available checked spoke. Once relocated, it stays there (no automatic fail-back).</p>
+                    <label class="text-xs text-slate-500 font-bold">Failover Pool (optional)</label>
+                    <p class="text-xs text-slate-500 leading-snug">Spokes that can take over this instance if the active one goes out of contact, or if load gets unbalanced across the pool. No priority order — the hub picks any available checked spoke. Once relocated, it stays there (no automatic fail-back).</p>
                     <div id="inst-spoke-pool" class="max-h-32 overflow-y-auto space-y-1 border border-slate-200 rounded-md p-2">
-                        <p class="text-xs text-slate-400 italic">Loading spokes…</p>
+                        <p class="text-xs text-slate-500 italic">Loading spokes…</p>
                     </div>
-                    <p id="inst-active-spoke" class="text-[11px] text-slate-500"></p>
+                    <p id="inst-active-spoke" class="text-xs text-slate-500"></p>
                 </div>` : '';
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-                <h3 class="text-lg font-bold text-[#263040]">${editItem ? 'Edit' : 'Add'} ${p.title}</h3>
-                <button onclick="closeInstanceModal()" class="text-slate-400 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                <h3 class="text-lg font-bold text-navy">${editItem ? 'Edit' : 'Add'} ${p.title}</h3>
+                <button onclick="closeInstanceModal()" class="text-slate-500 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-4">
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Instance Name</label><input type="text" id="inst-name" placeholder="e.g. Primary ${p.title.replace(' Instance', '')}" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Associated Spoke</label><select id="inst-spoke" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading spokes...</option></select></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Instance Name</label><input type="text" id="inst-name" placeholder="e.g. Primary ${p.title.replace(' Instance', '')}" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Associated Spoke</label><select id="inst-spoke" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading spokes...</option></select></div>
 ${fieldHtml}
 ${vaultHtml}
 ${failoverPoolHtml}
@@ -678,7 +678,7 @@ ${schemaBtnHtml}
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="closeInstanceModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
-                <button onclick="saveInstance('${productKey}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save</button>
+                <button onclick="saveInstance('${productKey}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm">Save</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
@@ -709,7 +709,7 @@ ${schemaBtnHtml}
                             <input type="checkbox" class="inst-pool-cb" value="${escapeHtml(c.baseId)}"${checked.has(c.baseId) ? ' checked' : ''}>
                             ${escapeHtml(c.label)}
                         </label>`).join('')
-                    : '<p class="text-xs text-slate-400 italic">No eligible spokes found.</p>';
+                    : '<p class="text-xs text-slate-500 italic">No eligible spokes found.</p>';
             }
             if (activeEl) {
                 const activeSpoke = editItem && editItem.spoke_id
@@ -874,7 +874,7 @@ function _devEndpoint(t) {
 async function loadAllDevices() {
     const listEl = document.getElementById('all-devices-list');
     if (!listEl) return;
-    listEl.innerHTML = '<p class="text-xs text-slate-400 italic animate-pulse">Loading…</p>';
+    listEl.innerHTML = '<p class="text-xs text-slate-500 italic animate-pulse">Loading…</p>';
     const entries = Object.entries(DEVICE_TYPES);
     const results = await Promise.all(entries.map(async ([typeKey, t]) => {
         try {
@@ -893,7 +893,7 @@ async function loadAllDevices() {
     if (all.length === 0) {
         const tabsEl = document.getElementById('all-devices-tabs');
         if (tabsEl) tabsEl.innerHTML = '';
-        listEl.innerHTML = '<p class="text-xs text-slate-400 italic">No managed devices yet. Click <strong>Add Device</strong> to attach one.</p>';
+        listEl.innerHTML = '<p class="text-xs text-slate-500 italic">No managed devices yet. Click <strong>Add Device</strong> to attach one.</p>';
         return;
     }
     // Map spoke_id -> friendly name AND -> tenant so each row shows the spoke
@@ -956,7 +956,7 @@ function _renderManagedDeviceTabs() {
     const typeKeys = Object.keys(DEVICE_TYPES).filter(k =>
         all.some(d => d._typeKey === k));
     const chip = (active, onclick, label, count) =>
-        `<div onclick="${onclick}" class="sub-nav-item ${active ? 'active ' : ''}px-2 py-1 text-xs uppercase tracking-normal cursor-pointer select-none">${escapeHtml(label)}<span class="ml-1 text-[10px] text-slate-400 normal-case">${count}</span></div>`;
+        `<div onclick="${onclick}" class="sub-nav-item ${active ? 'active ' : ''}px-2 py-1 text-xs tracking-normal cursor-pointer select-none">${escapeHtml(label)}<span class="ml-1 text-xs text-slate-500 normal-case">${count}</span></div>`;
     // A single device type makes the type row redundant (All == that one type).
     let typeRow = '';
     if (typeKeys.length > 1) {
@@ -964,7 +964,7 @@ function _renderManagedDeviceTabs() {
         chips += typeKeys.map(k => chip(f.type === k, `_mdSelectType('${k}')`,
             DEVICE_TYPES[k].badgeLabel || DEVICE_TYPES[k].title, typeCounts[k] || 0)).join('');
         typeRow = `<div class="flex flex-wrap items-center gap-x-1 gap-y-1">
-            <span class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Type</span>${chips}</div>`;
+            <span class="text-xs font-bold text-slate-500 mr-1">Type</span>${chips}</div>`;
     } else if (f.type !== 'all') {
         // Only one type exists but a stale filter still points at a removed one.
         f.type = 'all';
@@ -988,7 +988,7 @@ function _renderManagedDeviceTabs() {
             row += tenantIds.map(tid => chip(f.tenant === tid,
                 `_mdSelectTenant('${escJsAttr(tid)}')`, names[tid] || tid, tenantCounts[tid])).join('');
             tenantRow = `<div class="flex flex-wrap items-center gap-x-1 gap-y-1 border-b border-slate-100 pb-1 mb-1">
-                <span class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Tenant</span>${row}</div>`;
+                <span class="text-xs font-bold text-slate-500 mr-1">Tenant</span>${row}</div>`;
         }
     }
 
@@ -1014,7 +1014,7 @@ function _renderManagedDeviceList() {
     if (!listEl) return;
     const rows = _mdFilteredDevices();
     if (rows.length === 0) {
-        listEl.innerHTML = '<p class="text-xs text-slate-400 italic">No devices match this filter.</p>';
+        listEl.innerHTML = '<p class="text-xs text-slate-500 italic">No devices match this filter.</p>';
         return;
     }
     listEl.innerHTML = rows.map(d => {
@@ -1025,11 +1025,11 @@ function _renderManagedDeviceList() {
             ? ` · <span title="${escapeHtml(d.spoke_id)}">${escapeHtml(d._spokeName || d.spoke_id)}</span>`
             : '';
         const tenant = (isAdmin() && d._tenantLabel)
-            ? `<span class="ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700" title="Tenant: ${escapeHtml(d._tenant)}">${escapeHtml(d._tenantLabel)}</span>`
+            ? `<span class="ml-2 px-2 py-0.5 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700" title="Tenant: ${escapeHtml(d._tenant)}">${escapeHtml(d._tenantLabel)}</span>`
             : '';
         const eId = String(d._id).replace(/'/g, "\\'");
         return `<div class="flex items-center justify-between p-3 rounded-md bg-slate-50 border border-slate-200">
-            <div><span class="text-sm font-medium text-slate-700">${escapeHtml(name)}</span><span class="ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700">${t.badgeLabel}</span>${tenant}<span class="ml-2 text-xs text-slate-400">${escapeHtml(summary)}${spoke}</span>${(d.vault_credential && d.vault_credential.name) ? `<span class="ml-2 text-xs text-emerald-600" title="Secret supplied from Credential Vault: ${escapeHtml(d.vault_credential.bucket)} › ${escapeHtml(d.vault_credential.name)}">🔐 vault</span>` : ''}</div>
+            <div><span class="text-sm font-medium text-slate-700">${escapeHtml(name)}</span><span class="ml-2 px-2 py-0.5 rounded-full text-xs font-bold bg-blue-100 text-blue-700">${t.badgeLabel}</span>${tenant}<span class="ml-2 text-xs text-slate-500">${escapeHtml(summary)}${spoke}</span>${(d.vault_credential && d.vault_credential.name) ? `<span class="ml-2 text-xs text-emerald-600" title="Secret supplied from Credential Vault: ${escapeHtml(d.vault_credential.bucket)} › ${escapeHtml(d.vault_credential.name)}">🔐 vault</span>` : ''}</div>
             <div class="flex gap-2">
                 <button onclick="editDevice('${d._typeKey}','${eId}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Edit</button>
                 <button onclick="deleteDevice('${d._typeKey}','${eId}')" class="text-xs text-red-400 hover:text-red-600 font-medium">Delete</button>
@@ -1046,11 +1046,11 @@ function _deviceFieldHtml(t, field, values) {
     const cls = 'w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     if (field.type === 'select') {
         const opts = (field.options || []).map(([v, lbl]) => `<option value="${v}"${String(v) === String(val) ? ' selected' : ''}>${lbl}</option>`).join('');
-        return `                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">${field.label}</label><select id="${id}" class="${cls}">${opts}</select></div>`;
+        return `                    <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">${field.label}</label><select id="${id}" class="${cls}">${opts}</select></div>`;
     }
     const type = field.type || 'text';
     const ph = field.placeholder ? ` placeholder="${field.placeholder}"` : '';
-    return `                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">${field.label}</label><input type="${type}" id="${id}" value="${escapeHtml(String(val))}"${ph} class="${cls}"></div>`;
+    return `                    <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">${field.label}</label><input type="${type}" id="${id}" value="${escapeHtml(String(val))}"${ph} class="${cls}"></div>`;
 }
 
 function showAddDeviceModal(editTypeKey, editItem) {
@@ -1061,18 +1061,18 @@ function showAddDeviceModal(editTypeKey, editItem) {
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50 sticky top-0">
-                <h3 class="text-lg font-bold text-[#263040]">${editItem ? 'Edit' : 'Add'} Managed Device</h3>
-                <button onclick="closeDeviceModal()" class="text-slate-400 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                <h3 class="text-lg font-bold text-navy">${editItem ? 'Edit' : 'Add'} Managed Device</h3>
+                <button onclick="closeDeviceModal()" class="text-slate-500 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Device Name</label><input type="text" id="dev-name" placeholder="e.g. Core Firewall" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Module Type</label><select id="dev-type" ${editItem ? 'disabled' : ''} onchange="_onDeviceTypeChange()" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${typeKeys.map(k => `<option value="${k}"${k === editTypeKey ? ' selected' : ''}>${DEVICE_TYPES[k].title}</option>`).join('')}</select></div>
-                <div class="space-y-2 md:col-span-2"><label class="text-xs text-slate-500 uppercase font-bold">Associated Spoke</label><select id="dev-spoke" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading spokes...</option></select></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Device Name</label><input type="text" id="dev-name" placeholder="e.g. Core Firewall" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Module Type</label><select id="dev-type" ${editItem ? 'disabled' : ''} onchange="_onDeviceTypeChange()" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${typeKeys.map(k => `<option value="${k}"${k === editTypeKey ? ' selected' : ''}>${DEVICE_TYPES[k].title}</option>`).join('')}</select></div>
+                <div class="space-y-2 md:col-span-2"><label class="text-xs text-slate-500 font-bold">Associated Spoke</label><select id="dev-spoke" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading spokes...</option></select></div>
                 <div id="dev-fields" class="md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4"></div>
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3 sticky bottom-0">
                 <button onclick="closeDeviceModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
-                <button onclick="saveDevice()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save</button>
+                <button onclick="saveDevice()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm">Save</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
@@ -1500,16 +1500,16 @@ async function _initApp() {
                     // menu stays open while the user moves to / clicks an item.
                     wrap.innerHTML = `
                         <div class="relative" id="tenant-picker-wrap">
-                            <button onclick="toggleTenantPicker(event)" class="px-2 py-0.5 rounded-full bg-[#01A982] text-white text-[10px] font-bold uppercase tracking-wider flex items-center gap-1">
+                            <button onclick="toggleTenantPicker(event)" class="px-2 py-0.5 rounded-full bg-primary text-white text-xs font-bold flex items-center gap-1">
                                 <span id="user-chip-tenant">${escapeHtml(chipLabel)}</span>
                                 <svg class="w-2.5 h-2.5 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M19 9l-7 7-7-7"/></svg>
                             </button>
                             <div id="tenant-picker-menu" class="hidden absolute top-full left-1/2 -translate-x-1/2 mt-1 bg-slate-800 border border-slate-600 rounded-lg shadow-xl z-50 min-w-[200px] max-h-[60vh] overflow-y-auto py-1">
                                 ${pickerTenants.map(t => `
-                                    <div class="flex items-center hover:bg-[#01A982] group">
-                                    <button data-tid="${escapeHtml(t.id)}" onclick="viewAsTenant('${escapeHtml(t.id)}')" title="${t.isGroup ? escapeHtml('Tenant group — shows: ' + (t.members.join(', ') || 'no members')) : ''}" class="flex-1 text-left pl-3 pr-1 py-1.5 text-[11px] text-slate-200 group-hover:text-white transition-colors flex items-center justify-between gap-2 ${t.id===currentTenant?'font-bold text-[#01A982]':''}">
+                                    <div class="flex items-center hover:bg-primary group">
+                                    <button data-tid="${escapeHtml(t.id)}" onclick="viewAsTenant('${escapeHtml(t.id)}')" title="${t.isGroup ? escapeHtml('Tenant group — shows: ' + (t.members.join(', ') || 'no members')) : ''}" class="flex-1 text-left pl-3 pr-1 py-1.5 text-xs text-slate-200 group-hover:text-white transition-colors flex items-center justify-between gap-2 ${t.id===currentTenant?'font-bold text-primary-text':''}">
                                         <span>${escapeHtml(t.name)}</span>
-                                        ${t.isGroup ? `<span class="px-1 rounded bg-slate-600 text-slate-200 text-[9px] font-bold uppercase tracking-wider shrink-0">Group</span>` : ''}
+                                        ${t.isGroup ? `<span class="px-1 rounded bg-slate-600 text-slate-200 text-xs font-bold shrink-0">Group</span>` : ''}
                                     </button>
                                     ${_tenantDefaultStar(t.id)}
                                     </div>
@@ -1519,7 +1519,7 @@ async function _initApp() {
                     _bindTenantPickerListeners();
                     _appendImpersonationToPicker();
                 } else if (currentTenant && currentTenant !== 'default') {
-                    wrap.innerHTML = `<span id="user-chip-tenant" class="px-2 py-0.5 rounded-full bg-[#01A982] text-white text-[10px] font-bold uppercase tracking-wider">${escapeHtml(chipLabel)}</span>`;
+                    wrap.innerHTML = `<span id="user-chip-tenant" class="px-2 py-0.5 rounded-full bg-primary text-white text-xs font-bold">${escapeHtml(chipLabel)}</span>`;
                 } else {
                     wrap.innerHTML = '';
                 }
@@ -1584,7 +1584,7 @@ function _renderImpersonationBanner() {
     const label = document.createElement('span');
     label.textContent = `Impersonating ${who} (signed in as ${imp.display_name || imp.user_id})`;
     const stop = document.createElement('button');
-    stop.className = 'px-2 py-0.5 rounded bg-white text-amber-700 hover:bg-amber-50 uppercase tracking-wider text-[10px]';
+    stop.className = 'px-2 py-0.5 rounded bg-white text-amber-700 hover:bg-amber-50 text-xs';
     stop.textContent = 'Stop impersonating';
     stop.addEventListener('click', stopImpersonation);
     bar.append(label, stop);
@@ -1599,7 +1599,7 @@ function _appendImpersonationToPicker() {
     if (!menu) return;
     if (currentUser?.impersonator) {
         const stop = document.createElement('button');
-        stop.className = 'w-full text-left border-t border-slate-600 mt-1 px-3 py-1.5 text-[11px] text-amber-300 hover:bg-amber-500 hover:text-white';
+        stop.className = 'w-full text-left border-t border-slate-600 mt-1 px-3 py-1.5 text-xs text-amber-300 hover:bg-amber-500 hover:text-white';
         stop.textContent = `Stop impersonating ${currentUser.display_name || currentUser.user_id}`;
         stop.addEventListener('click', stopImpersonation);
         menu.appendChild(stop);
@@ -1618,7 +1618,7 @@ function _appendImpersonationToPicker() {
 
     const note = (text) => {
         const el = document.createElement('div');
-        el.className = 'px-4 py-1 text-[10px] italic text-slate-500';
+        el.className = 'px-4 py-1 text-xs italic text-slate-500';
         el.textContent = text;
         return el;
     };
@@ -1629,7 +1629,7 @@ function _appendImpersonationToPicker() {
         const pick = (window._lmTenantPicker || []).find(t => t.id === tid);
         const scope = pick?.isGroup ? (pick.members || []) : [tid];
         const info = document.createElement('button');
-        info.className = 'px-1.5 py-1.5 text-[11px] leading-none font-serif italic font-bold text-slate-500 hover:text-amber-300';
+        info.className = 'px-1.5 py-1.5 text-xs leading-none font-serif italic font-bold text-slate-500 hover:text-amber-300';
         info.textContent = 'i';
         info.title = 'Impersonate a user of this tenant';
         info.setAttribute('aria-label', info.title);
@@ -1645,7 +1645,7 @@ function _appendImpersonationToPicker() {
                 if (!users.length) { panel.appendChild(note('No users in this tenant')); return; }
                 users.forEach((u) => {
                     const b = document.createElement('button');
-                    b.className = 'w-full text-left pl-5 pr-3 py-1 text-[11px] text-slate-300 hover:bg-amber-500 hover:text-white';
+                    b.className = 'w-full text-left pl-5 pr-3 py-1 text-xs text-slate-500 hover:bg-amber-500 hover:text-white';
                     b.textContent = u.label === u.id ? u.id : `${u.label} (${u.id})`;
                     b.title = `Impersonate ${u.id}`;
                     b.addEventListener('click', (e) => { e.stopPropagation(); closeTenantPicker(); startImpersonation(u.id); });

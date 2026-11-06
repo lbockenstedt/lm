@@ -32,17 +32,17 @@ async function loadLeAcmeInfo() {
         const reqProfile = a.clientauth_profile || 'classic';
         const reqMissing = names.length && !names.includes(reqProfile);
         const profChips = names.length
-            ? names.map(n => `<span class="inline-block px-1.5 py-0.5 rounded ${/classic/i.test(n) ? 'bg-[#01A982]/15 text-[#01A982]' : 'bg-slate-100 text-slate-600'} font-mono mr-1" title="${esc(profs[n] || '')}">${esc(n)}</span>`).join('')
+            ? names.map(n => `<span class="inline-block px-1.5 py-0.5 rounded ${/classic/i.test(n) ? 'bg-brand/15 text-primary-text' : 'bg-slate-100 text-slate-600'} font-mono mr-1" title="${esc(profs[n] || '')}">${esc(n)}</span>`).join('')
             : `<span class="text-amber-600">CA advertises no profiles (this ACME server may not support profile selection)</span>`;
         const warn = (supp === false)
             ? `<div class="mt-1 text-red-600 font-bold">⚠ certbot too old (need ≥ 4.0) — the le spoke's certbot auto-upgrade hasn't landed; clientAuth/short-lived profiles will be ignored until it does.</div>`
             : (reqMissing ? `<div class="mt-1 text-red-600 font-bold">⚠ clientAuth profile "${esc(reqProfile)}" is NOT in the CA's list — set LM_LE_CLIENTAUTH_PROFILE to one of the names above.</div>` : '');
         el.innerHTML = `<div class="px-3 py-2 rounded-md bg-slate-50 border border-slate-200 text-slate-600">
-            <span class="font-bold uppercase tracking-wider text-slate-400 mr-2">certbot / ACME</span>
+            <span class="font-bold text-slate-500 mr-2">certbot / ACME</span>
             <span>certbot <span class="font-mono">${esc(a.certbot_version || '?')}</span></span>
-            <span class="mx-2 text-slate-300">|</span>
-            <span>profiles: <b class="${supp ? 'text-[#01A982]' : 'text-red-600'}">${supp === null ? 'unknown' : (supp ? 'supported' : 'NOT supported')}</b></span>
-            <span class="mx-2 text-slate-300">|</span>
+            <span class="mx-2 text-slate-500">|</span>
+            <span>profiles: <b class="${supp ? 'text-primary-text' : 'text-red-600'}">${supp === null ? 'unknown' : (supp ? 'supported' : 'NOT supported')}</b></span>
+            <span class="mx-2 text-slate-500">|</span>
             <span>clientAuth via <span class="font-mono">${esc(reqProfile)}</span></span>
             <div class="mt-1">CA profiles: ${profChips}</div>
             ${warn}
@@ -54,9 +54,9 @@ async function loadLeAcmeInfo() {
 
 function _leLegend() {
     const pill = (cls, t) => `<span class="${cls} px-1.5 py-0.5 rounded text-xs font-medium">${t}</span>`;
-    const lbl = t => `<span class="font-bold uppercase tracking-wider text-slate-400 mr-1">${t}</span>`;
-    return `<div class="mt-4 mx-4 pt-3 border-t border-slate-100 text-[11px] text-slate-500 pb-3">
-      <span class="font-bold uppercase tracking-wider text-slate-400">Legend</span>
+    const lbl = t => `<span class="font-bold text-slate-500 mr-1">${t}</span>`;
+    return `<div class="mt-4 mx-4 pt-3 border-t border-slate-100 text-xs text-slate-500 pb-3">
+      <span class="font-bold text-slate-500">Legend</span>
       <div class="mt-2 space-y-1.5">
         <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
           ${lbl('Target')}
@@ -64,11 +64,11 @@ function _leLegend() {
           <span class="flex items-center gap-1.5">${pill('bg-red-100 text-red-700', '\u2717 target')} last push failed</span>
           <span class="flex items-center gap-1.5">${pill('bg-slate-100 text-slate-500', '\u00b7 target')} pending (not pushed yet)</span>
           <span class="flex items-center gap-1.5">${pill('bg-amber-100 text-amber-800 border border-amber-300', '\u25cf target 3s')} deploying now</span>
-          <span class="text-slate-400">click a target badge to re-deploy</span>
+          <span class="text-slate-500">click a target badge to re-deploy</span>
         </div>
         <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
           ${lbl('Add')}
-          <span class="flex items-center gap-1.5">${pill('bg-[#01A982]/10 text-[#01A982] border border-[#01A982]', 'target \u2713')} added (this cert deploys here)</span>
+          <span class="flex items-center gap-1.5">${pill('bg-brand/10 text-primary-text border border-brand', 'target \u2713')} added (this cert deploys here)</span>
           <span class="flex items-center gap-1.5">${pill('bg-slate-100 text-slate-500 border border-slate-200', 'target +')} available — click to add</span>
         </div>
         <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
@@ -102,7 +102,7 @@ async function loadLEData(subMenu) {
     if (!container) return;
     const nav = _lmNavSeq;
     window._leLoading = nav;
-    container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
+    container.innerHTML = '<p class="text-sm text-slate-500 italic p-4">Loading…</p>';
 
     // Live in-flight indicators (yellow target badges + elapsed timer) need a
     // periodic refresh so a deploy transitions when it completes — start the
@@ -137,7 +137,7 @@ async function loadLEData(subMenu) {
     try {
         const { ok, data: d, detail } = await _spokeFetch('/api/le/certs?tenant=' + encodeURIComponent(currentTenant));
         if (!ok) {
-            container.innerHTML = `${_spokeErrorBanner(detail, 'Certificate (le) spoke not connected')}${_isSpokeUpdating(detail) ? '' : '<p class="px-4 pb-4 text-xs text-slate-400">Install the le spoke (install_all.sh, or its install_le.sh) and approve it in Setup → Spokes &amp; Agents.</p>'}`;
+            container.innerHTML = `${_spokeErrorBanner(detail, 'Certificate (le) spoke not connected')}${_isSpokeUpdating(detail) ? '' : '<p class="px-4 pb-4 text-xs text-slate-500">Install the le spoke (install_all.sh, or its install_le.sh) and approve it in Setup → Spokes &amp; Agents.</p>'}`;
             return;
         }
         const body = inner(d);
@@ -213,7 +213,7 @@ async function loadLEData(subMenu) {
             const statusTxt = t.last_status || 'not pushed yet';
             const msgPart = t.last_message ? ` — ${t.last_message}` : '';
             const tip = `${label}: ${statusTxt}${msgPart} (last push: ${when}). Click to deploy now.`;
-            const btn = `<button onclick="leDeployTarget('${dEsc}','${mtEsc}','${idEsc}')" class="px-1.5 py-0.5 rounded text-xs font-medium ${cls} cursor-pointer hover:brightness-95 active:scale-95 transition" title="${escJsAttr(tip)}">${mark} ${bfStar}${label}</button>`;
+            const btn = `<button onclick="leDeployTarget('${dEsc}','${mtEsc}','${idEsc}')" class="px-1.5 py-0.5 rounded-full text-xs font-medium ${cls} cursor-pointer hover:brightness-95 active:scale-95 transition" title="${escJsAttr(tip)}">${mark} ${bfStar}${label}</button>`;
             // Fleet spokes (nw): the spoke-level badge above is the success
             // signal (spoke holds the cert). The per-device detail lives in a
             // collapsed, lazy-loaded section BELOW the targets (leFleetDetail) —
@@ -224,7 +224,7 @@ async function loadLEData(subMenu) {
         // within 30d, so amber (<30d) = renew pending/failed, red (<7d / expired)
         // = at risk — surfaces a stuck renewal the hourly distribution wouldn't.
         const leExpiry = na => {
-            if (!na) return { text: '—', cls: 'text-slate-400', days: null };
+            if (!na) return { text: '—', cls: 'text-slate-500', days: null };
             const dt = new Date(na);
             if (isNaN(dt)) return { text: String(na).slice(0, 10), cls: 'text-slate-500', days: null };
             const days = Math.floor((dt.getTime() - Date.now()) / 86400000);
@@ -259,7 +259,7 @@ async function loadLEData(subMenu) {
             const tgts = c.targets || [];
             const tgtBadges = tgts.length
                 ? `<div class="flex flex-wrap gap-1">${tgts.map(t => tgtBadge(t, c.domain)).join('')}</div>`
-                : `<span class="text-xs text-slate-400 italic">none yet — click Manage to add</span>`;
+                : `<span class="text-xs text-slate-500 italic">none yet — click Manage to add</span>`;
             // Warn when a group ("all nodes") AND an individual node target are
             // both selected for the same agent-hosting type — they deploy the
             // same cert to the same node(s) (in the split topology hypervisor +
@@ -267,7 +267,7 @@ async function loadLEData(subMenu) {
             // contention. Surfaces an existing overlap; addLeTarget also confirms.
             const _redund = _leRedundantTargetTypes(tgts);
             const redundNote = _redund.length
-                ? `<div class="mt-1 flex items-start gap-1 text-[11px] text-amber-700" title="${escJsAttr(_LE_TARGET_OVERLAP_HINT)}">
+                ? `<div class="mt-1 flex items-start gap-1 text-xs text-amber-700" title="${escJsAttr(_LE_TARGET_OVERLAP_HINT)}">
                      <span class="leading-4">⚠</span>
                      <span>Both a group (<b>all nodes</b>) and an individual node target are selected for <b>${escapeHtml(_redund.join(', '))}</b> — these deploy the same cert to the same node(s) and cause repeated restarts. Keep one or the other.</span>
                    </div>`
@@ -279,7 +279,7 @@ async function loadLEData(subMenu) {
             const _failed = tgts.filter(t => t.last_status === 'ERROR');
             const errNote = _failed.length
                 ? `<div class="mt-1 space-y-0.5">${_failed.map(t =>
-                    `<div class="text-[11px] text-red-600 flex items-start gap-1"><span class="leading-4">✗</span><span><b>${escapeHtml(t.module_type + (t.identifier ? '/' + t.identifier : ''))}</b>: ${escapeHtml(t.last_message || 'failed')}${t.last_pushed_at ? ` <span class="text-red-400">— ${escapeHtml(_leWhen(t.last_pushed_at))}</span>` : ''}</span></div>`).join('')}</div>`
+                    `<div class="text-xs text-red-600 flex items-start gap-1"><span class="leading-4">✗</span><span><b>${escapeHtml(t.module_type + (t.identifier ? '/' + t.identifier : ''))}</b>: ${escapeHtml(t.last_message || 'failed')}${t.last_pushed_at ? ` <span class="text-red-400">— ${escapeHtml(_leWhen(t.last_pushed_at))}</span>` : ''}</span></div>`).join('')}</div>`
                 : '';
             const tgtCell = `${tgtBadges}${redundNote}${errNote}${leFleetDetail(c.domain, tgts)}`;
             const exp = leExpiry(c.not_after);
@@ -291,25 +291,25 @@ async function loadLEData(subMenu) {
             // page). ★ AppBuilder = pinned mTLS identity; 🔐 clientAuth = has the
             // clientAuth EKU (mTLS-client-capable); a profile chip = non-default
             // ACME profile (e.g. a short-lived cert).
-            const bfBadge = c.ab ? ` <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-700 align-middle" title="Pinned as the AppBuilder mTLS identity (Manage → ★ AppBuilder)">★ AppBuilder</span>` : '';
+            const bfBadge = c.ab ? ` <span class="inline-block px-1.5 py-0.5 rounded text-xs font-bold bg-purple-100 text-purple-700 align-middle" title="Pinned as the AppBuilder mTLS identity (Manage → ★ AppBuilder)">★ AppBuilder</span>` : '';
             const caBadge = '';
-            const profBadge = (c.profile && String(c.profile).toLowerCase() !== 'classic') ? ` <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-700 align-middle" title="ACME profile: ${escapeHtml(String(c.profile))} (lifetime set by the CA profile)">${escapeHtml(String(c.profile))}</span>` : '';
+            const profBadge = (c.profile && String(c.profile).toLowerCase() !== 'classic') ? ` <span class="inline-block px-1.5 py-0.5 rounded text-xs font-bold bg-amber-100 text-amber-700 align-middle" title="ACME profile: ${escapeHtml(String(c.profile))} (lifetime set by the CA profile)">${escapeHtml(String(c.profile))}</span>` : '';
             // Owner-tenant chips + a shared badge. A cert is owned by one or more
             // tenants (auto-assigned to the issuer's tenant); a "Shared" cert may
             // be deployed by any tenant to their own devices but only changed by
             // an owner/admin. Legacy certs (no owners) show nothing here.
             const _tenChips = (c.tenants || []).map(t =>
-                `<span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-100 text-slate-600 align-middle" title="Owner tenant">${escapeHtml(String(t))}</span>`).join(' ');
-            const sharedBadge = c.shared ? ` <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-teal-100 text-teal-700 align-middle" title="Shared certificate — any tenant may deploy it to their own devices, but only an owner/admin may change it">Shared</span>` : '';
-            const roBadge = (c.can_edit === false) ? ` <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-200 text-slate-500 align-middle" title="Read-only — this certificate belongs to another tenant. You can deploy it to your own devices but not change it.">read-only</span>` : '';
+                `<span class="inline-block px-1.5 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-600 align-middle" title="Owner tenant">${escapeHtml(String(t))}</span>`).join(' ');
+            const sharedBadge = c.shared ? ` <span class="inline-block px-1.5 py-0.5 rounded text-xs font-bold bg-teal-100 text-teal-700 align-middle" title="Shared certificate — any tenant may deploy it to their own devices, but only an owner/admin may change it">Shared</span>` : '';
+            const roBadge = (c.can_edit === false) ? ` <span class="inline-block px-1.5 py-0.5 rounded text-xs font-bold bg-slate-200 text-slate-500 align-middle" title="Read-only — this certificate belongs to another tenant. You can deploy it to your own devices but not change it.">read-only</span>` : '';
             const tenChips = _tenChips ? ` ${_tenChips}${sharedBadge}${roBadge}` : (sharedBadge + roBadge);
             // Change ops (Renew/Revoke) require ownership; a read-only (shared,
             // not-owned) cert only exposes Manage (→ deploy to your own devices).
             const canEdit = (c.can_edit !== false);
-            const manageBtn = `<button onclick="showLeTargetsModal('${dEsc}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="${canEdit ? 'Manage distribution targets, AppBuilder identity + clientAuth' : 'Deploy this shared certificate to your own devices'}">${canEdit ? 'Manage' : 'Deploy'}</button>`;
+            const manageBtn = `<button onclick="showLeTargetsModal('${dEsc}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-full text-xs font-bold transition-all shadow-sm" title="${canEdit ? 'Manage distribution targets, AppBuilder identity + clientAuth' : 'Deploy this shared certificate to your own devices'}">${canEdit ? 'Manage' : 'Deploy'}</button>`;
             const changeBtns = canEdit
-                ? `<button onclick="leRenewCert('${dEsc}')" class="bg-slate-700/10 hover:bg-slate-700/20 text-slate-700 border border-slate-700 px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Renew this cert">Renew</button>
-                            <button onclick="leRevokeCert('${dEsc}')" class="bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Revoke + remove from managed list">Revoke</button>`
+                ? `<button onclick="leRenewCert('${dEsc}')" class="bg-slate-700/10 hover:bg-slate-700/20 text-slate-700 border border-slate-700 px-3 py-1.5 rounded-full text-xs font-bold transition-all shadow-sm" title="Renew this cert">Renew</button>
+                            <button onclick="leRevokeCert('${dEsc}')" class="bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-3 py-1.5 rounded-full text-xs font-bold transition-all shadow-sm" title="Revoke + remove from managed list">Revoke</button>`
                 : '';
             // 2-row group per cert: row 1 = the data (domain, email, challenge,
             // staging, expiry+renew-window) WITH the Manage/Renew/Revoke actions
@@ -325,7 +325,7 @@ async function loadLEData(subMenu) {
                 <td class="px-4 py-2 text-center text-xs">${c.staging ? 'yes' : 'no'}</td>
                 <td class="px-4 py-2 whitespace-nowrap">
                     <span class="px-2 py-0.5 rounded-full text-xs font-medium ${exp.cls} whitespace-nowrap">${exp.text}</span>
-                    <div class="text-[11px] text-slate-400 mt-0.5" title="Renewal loop triggers this many days before expiry (per-cert override; default 7)">renew @ ${c.renew_window_days_effective ?? 7}d</div>
+                    <div class="text-xs text-slate-500 mt-0.5" title="Renewal loop triggers this many days before expiry (per-cert override; default 7)">renew @ ${c.renew_window_days_effective ?? 7}d</div>
                 </td>
                 <td class="px-4 py-2 whitespace-nowrap">
                     <div class="flex flex-col items-end gap-1.5">
@@ -340,7 +340,7 @@ async function loadLEData(subMenu) {
             <tr class="border-b border-slate-200 hover:bg-slate-50">
                 <td colspan="6" class="px-4 py-2">
                     <div class="flex flex-wrap items-center gap-1.5">
-                        <span class="text-[11px] text-slate-400 uppercase tracking-wide mr-1">Targets</span>
+                        <span class="text-xs text-slate-500 mr-1">Targets</span>
                         ${tgtCell}
                     </div>
                 </td>
@@ -405,9 +405,9 @@ async function loadLEData(subMenu) {
                 : ` <span class="text-amber-600">— not yet deployed to a ab target (Manage → add a ab target)</span>`;
             return `<div class="mx-4 mt-3 mb-1 px-3 py-2 rounded-md border text-xs bg-purple-50 border-purple-200 text-purple-800 flex items-center gap-2"><span class="text-purple-600 font-bold">★</span><span><b>AppBuilder identity:</b> ${names}${depNote}${extra}</span></div>`;
         })();
-        const note = body.message ? `<p class="px-4 pb-3 text-xs text-slate-400 italic">${body.message}</p>` : '';
+        const note = body.message ? `<p class="px-4 pb-3 text-xs text-slate-500 italic">${body.message}</p>` : '';
         container.innerHTML = (certs.length === 0 && !attemptRows)
-            ? `${note}<p class="p-4 text-slate-400 italic text-sm">No managed certificates yet. Click <b class="text-slate-600 not-italic">＋ Issue certificate</b> above to configure an ACME account (email + challenge type) and issue your first cert.</p>`
+            ? `${note}<p class="p-4 text-slate-500 italic text-sm">No managed certificates yet. Click <b class="text-slate-600 not-italic">＋ Issue certificate</b> above to configure an ACME account (email + challenge type) and issue your first cert.</p>`
             : bfBanner + expBanner + note + tw(th(cols) + `<tbody>${attemptRows}${rows}</tbody>`) + _leLegend();
     } catch (err) {
         container.innerHTML = `<p class="p-4 text-red-500 text-sm">Error: ${err.message}</p>`;
@@ -521,17 +521,17 @@ async function showLeWildcardCoverage() {
       <div class="bg-white rounded-xl shadow-2xl w-full max-w-3xl max-h-[85vh] overflow-y-auto">
         <div class="flex items-center justify-between px-5 py-3 border-b border-slate-100">
           <h3 class="text-sm font-bold text-slate-700">Wildcard fan-out coverage</h3>
-          <button onclick="this.closest('.fixed').remove()" title="Close dialog" class="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
+          <button onclick="this.closest('.fixed').remove()" title="Close dialog" class="text-slate-500 hover:text-slate-600 text-lg leading-none">&times;</button>
         </div>
         <div class="p-5 space-y-5">
           <p class="text-xs text-slate-500">Fan-out is currently <b class="${d.enabled ? 'text-green-600' : 'text-slate-500'}">${d.enabled ? 'ENABLED' : 'OFF'}</b>. A wildcard cert (<code>*.domain</code>) is pushed to every <b>connected, cert-capable</b> spoke below (plus the hub). Ineligible spokes are skipped — connect them or note that their module type can't host a cert.</p>
           <div>
-            <div class="text-[11px] font-bold text-green-700 uppercase tracking-wide mb-1">Eligible <span class="text-slate-400 font-normal">(${elig.length})</span></div>
-            <table class="w-full border border-slate-200 rounded-md overflow-hidden"><thead class="bg-slate-50"><tr><th class="px-3 py-1.5 text-left text-[10px] uppercase text-slate-400">Spoke</th><th class="px-3 py-1.5 text-left text-[10px] uppercase text-slate-400">Type</th></tr></thead><tbody>${elig.map(rowE).join('') || '<tr><td colspan="2" class="px-3 py-2 text-xs text-slate-400 italic">none</td></tr>'}</tbody></table>
+            <div class="text-xs font-bold text-green-700 mb-1">Eligible <span class="text-slate-500 font-normal">(${elig.length})</span></div>
+            <table class="w-full border border-slate-200 rounded-md overflow-hidden"><thead class="bg-slate-50"><tr><th class="px-3 py-1.5 text-left text-xs text-slate-500">Spoke</th><th class="px-3 py-1.5 text-left text-xs text-slate-500">Type</th></tr></thead><tbody>${elig.map(rowE).join('') || '<tr><td colspan="2" class="px-3 py-2 text-xs text-slate-500 italic">none</td></tr>'}</tbody></table>
           </div>
           <div>
-            <div class="text-[11px] font-bold text-amber-700 uppercase tracking-wide mb-1">Ineligible <span class="text-slate-400 font-normal">(${inelig.length})</span></div>
-            <table class="w-full border border-slate-200 rounded-md overflow-hidden"><thead class="bg-slate-50"><tr><th class="px-3 py-1.5 text-left text-[10px] uppercase text-slate-400">Spoke</th><th class="px-3 py-1.5 text-left text-[10px] uppercase text-slate-400">Type</th><th class="px-3 py-1.5 text-left text-[10px] uppercase text-slate-400">Why not</th></tr></thead><tbody>${inelig.map(rowI).join('') || '<tr><td colspan="3" class="px-3 py-2 text-xs text-slate-400 italic">none — every known spoke is eligible</td></tr>'}</tbody></table>
+            <div class="text-xs font-bold text-amber-700 mb-1">Ineligible <span class="text-slate-500 font-normal">(${inelig.length})</span></div>
+            <table class="w-full border border-slate-200 rounded-md overflow-hidden"><thead class="bg-slate-50"><tr><th class="px-3 py-1.5 text-left text-xs text-slate-500">Spoke</th><th class="px-3 py-1.5 text-left text-xs text-slate-500">Type</th><th class="px-3 py-1.5 text-left text-xs text-slate-500">Why not</th></tr></thead><tbody>${inelig.map(rowI).join('') || '<tr><td colspan="3" class="px-3 py-2 text-xs text-slate-500 italic">none — every known spoke is eligible</td></tr>'}</tbody></table>
           </div>
         </div>
       </div>`;
@@ -775,11 +775,11 @@ async function showLeTargetsModal(domain) {
                 <label class="text-xs text-slate-500 mb-1">Device</label>
                 <select id="le-tgt-id" title="Select target device or node identifier" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></select>
             </div>
-            <button onclick="addLeTarget('${esc(domain)}')" title="Add distribution target for this certificate" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Add target</button>
-            <button onclick="leDistributeCert('${esc(domain)}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold" title="Deploy this certificate to all of its targets">Distribute now</button>
-            <button onclick="document.getElementById('le-targets-modal').remove()" title="Close dialog" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Close</button>
+            <button onclick="addLeTarget('${esc(domain)}')" title="Add distribution target for this certificate" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-sm font-bold">Add target</button>
+            <button onclick="leDistributeCert('${esc(domain)}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-sm font-bold" title="Deploy this certificate to all of its targets">Distribute now</button>
+            <button onclick="document.getElementById('le-targets-modal').remove()" title="Close dialog" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm font-medium">Close</button>
         </div>` : `<div class="flex border-t border-slate-200 pt-4">
-            <button onclick="document.getElementById('le-targets-modal').remove()" title="Close dialog" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Close</button>
+            <button onclick="document.getElementById('le-targets-modal').remove()" title="Close dialog" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm font-medium">Close</button>
         </div>`;
     const modal = openModal('le-targets-modal', `
         <h3 class="text-lg font-bold mb-1">Distribution targets — <span class="font-mono">${esc(domain)}</span></h3>
@@ -788,14 +788,14 @@ async function showLeTargetsModal(domain) {
         <div id="le-tenants-box" class="mb-4"></div>
         ${bfBlock}
         <div class="overflow-x-auto mb-3"><table class="w-full text-sm">
-            <thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>
+            <thead class="bg-slate-50 text-xs text-slate-500"><tr>
                 <th class="px-3 py-2 text-left font-medium">Target</th>
                 <th class="px-3 py-2 text-left font-medium">Status</th>
                 <th class="px-3 py-2 text-left font-medium">Last push</th>
                 <th class="px-3 py-2 text-left font-medium">Message</th>
                 <th></th>
             </tr></thead>
-            <tbody>${tgts.length ? tgts.map(row).join('') : '<tr><td colspan="5" class="px-3 py-3 text-xs text-slate-400 italic">No targets yet — add one below.</td></tr>'}</tbody>
+            <tbody>${tgts.length ? tgts.map(row).join('') : '<tr><td colspan="5" class="px-3 py-3 text-xs text-slate-500 italic">No targets yet — add one below.</td></tr>'}</tbody>
         </table></div>
         ${addBlock}`, { card: 'max-w-2xl w-full p-6 max-h-[90vh] overflow-y-auto' });
     if (canEdit) leTgtMtChange('le-tgt-mt', 'le-tgt-id');  // seed the device list for the first module
@@ -819,8 +819,8 @@ async function _leRenderTenantsSection(domain, cert, canEdit) {
         // Read-only viewers just see who owns it + the shared flag.
         const chips = owners.map(t => `<span class="inline-block px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-600">${escapeHtml(t)}${sharedId && t === sharedId ? ' (shared)' : ''}</span>`).join(' ');
         box.innerHTML = `<div class="p-3 rounded-md border border-slate-200 bg-white">
-            <div class="text-xs font-semibold text-slate-500 uppercase mb-1.5">Owner tenants</div>
-            <div class="flex flex-wrap gap-1.5">${chips || '<span class="text-xs text-slate-400 italic">—</span>'}</div></div>`;
+            <div class="text-xs font-semibold text-slate-500 mb-1.5">Owner tenants</div>
+            <div class="flex flex-wrap gap-1.5">${chips || '<span class="text-xs text-slate-500 italic">—</span>'}</div></div>`;
         return;
     }
     // Load the full tenant list so an owner can add another tenant / the shared one.
@@ -846,8 +846,8 @@ async function _leRenderTenantsSection(domain, cert, canEdit) {
                 <label class="text-xs text-slate-500 mb-1">Add a tenant (or the shared tenant to share)</label>
                 <select id="le-tenant-add" title="Select tenant to grant certificate ownership or sharing" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">— select —</option>${opts}</select>
             </div>
-            <button onclick="_leAddTenantChip()" title="Add selected tenant to owners" class="bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 px-3 py-2 rounded-md text-sm font-medium">Add</button>
-            <button onclick="_leSaveTenants()" title="Save tenant ownership list" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save tenants</button>
+            <button onclick="_leAddTenantChip()" title="Add selected tenant to owners" class="bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 px-3 py-2 rounded-full text-sm font-medium">Add</button>
+            <button onclick="_leSaveTenants()" title="Save tenant ownership list" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-sm font-bold">Save tenants</button>
         </div>`);
 }
 
@@ -858,19 +858,19 @@ function _leRenderTenantChips() {
     let holder = document.getElementById('le-tenant-chips-holder');
     if (!holder) {
         box.innerHTML = `<div class="p-3 rounded-md border border-slate-200 bg-white">
-            <div class="text-xs font-semibold text-slate-500 uppercase mb-1.5">Owner tenants</div>
+            <div class="text-xs font-semibold text-slate-500 mb-1.5">Owner tenants</div>
             <div id="le-tenant-chips-holder" class="flex flex-wrap gap-1.5"></div>
-            <p class="text-[11px] text-slate-400 mt-1.5">Add the shared tenant so any tenant can deploy this cert to their own devices. You cannot remove your own tenant.</p>
+            <p class="text-xs text-slate-500 mt-1.5">Add the shared tenant so any tenant can deploy this cert to their own devices. You cannot remove your own tenant.</p>
         </div>`;
         holder = document.getElementById('le-tenant-chips-holder');
     }
     const chips = Array.from(st.owners).map(t => {
         const isSelf = (!st.admin && t === st.myTenant);
         const isShared = st.sharedId && t === st.sharedId;
-        const rm = isSelf ? '' : `<button onclick="_leRemoveTenantChip('${escJsAttr(t)}')" class="ml-1 text-slate-400 hover:text-red-600" title="Remove">×</button>`;
+        const rm = isSelf ? '' : `<button onclick="_leRemoveTenantChip('${escJsAttr(t)}')" class="ml-1 text-slate-500 hover:text-red-600" title="Remove">×</button>`;
         return `<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${isShared ? 'bg-teal-100 text-teal-700' : 'bg-slate-100 text-slate-600'}">${escapeHtml(t)}${isShared ? ' (shared)' : ''}${isSelf ? ' (you)' : ''}${rm}</span>`;
     }).join(' ');
-    holder.innerHTML = chips || '<span class="text-xs text-slate-400 italic">—</span>';
+    holder.innerHTML = chips || '<span class="text-xs text-slate-500 italic">—</span>';
 }
 
 function _leAddTenantChip() {
@@ -980,14 +980,14 @@ function _leRenderDeviceTable(d) {
         return `<span class="px-2 py-0.5 rounded-full text-sm font-medium ${map[s] || 'bg-slate-100 text-slate-500'}">${escapeHtml(label)}</span>`;
     };
     if (!devs.length) {
-        return '<p class="text-sm text-slate-400 italic py-1">No devices found on this spoke (is it online and are devices configured in Setup → Network Devices?).</p>';
+        return '<p class="text-sm text-slate-500 italic py-1">No devices found on this spoke (is it online and are devices configured in Setup → Network Devices?).</p>';
     }
     const rows = devs.map(v => {
         const did = String(v.device_id || v.name || '');
         const capable = v.cert_capable === true || String(v.object_type || '').toLowerCase() === 'cx_switch';
         const action = capable
-            ? `<button onclick="leDeployDevice('${escJsAttr(domain)}','${escJsAttr(did)}','${escJsAttr(mt)}','${escJsAttr(ident)}',this)" title="Deploy certificate directly to this network device" class="text-sm text-[#01A982] hover:underline font-bold">Deploy</button>`
-            : `<span class="text-xs text-slate-400" title="${escapeHtml(v.message || 'cert install not supported for this device type')}">unsupported</span>`;
+            ? `<button onclick="leDeployDevice('${escJsAttr(domain)}','${escJsAttr(did)}','${escJsAttr(mt)}','${escJsAttr(ident)}',this)" title="Deploy certificate directly to this network device" class="text-sm text-primary-text hover:underline font-bold">Deploy</button>`
+            : `<span class="text-xs text-slate-500" title="${escapeHtml(v.message || 'cert install not supported for this device type')}">unsupported</span>`;
         return `<tr class="border-b border-slate-100">
             <td class="px-3 py-1.5 text-sm font-mono text-slate-700">${escapeHtml(v.name || did || '—')}</td>
             <td class="px-3 py-1.5 text-sm text-slate-500 font-mono">${escapeHtml(v.ip || '')}</td>
@@ -996,17 +996,17 @@ function _leRenderDeviceTable(d) {
             <td class="px-3 py-1.5 text-sm text-slate-500">${v.message ? `<span title="${escapeHtml(v.message)}">${escapeHtml(v.message)}</span>` : ''}</td>
             <td class="px-3 py-1.5 whitespace-nowrap">${action}</td></tr>`;
     }).join('');
-    return `<div class="text-xs text-slate-400 mb-1.5">${d.message ? `<b>${escapeHtml(d.message)}</b> · ` : ''}last run: ${escapeHtml(when)}. Deploy the cert to individual devices below, or to the whole fleet via the target badge.</div>
+    return `<div class="text-xs text-slate-500 mb-1.5">${d.message ? `<b>${escapeHtml(d.message)}</b> · ` : ''}last run: ${escapeHtml(when)}. Deploy the cert to individual devices below, or to the whole fleet via the target badge.</div>
         <div class="overflow-x-auto"><table class="w-full border border-slate-200 rounded-md overflow-hidden"><thead class="bg-slate-50"><tr>
-        <th class="px-3 py-1.5 text-left text-xs uppercase text-slate-400">Device</th>
-        <th class="px-3 py-1.5 text-left text-xs uppercase text-slate-400">IP</th>
-        <th class="px-3 py-1.5 text-left text-xs uppercase text-slate-400">Type</th>
-        <th class="px-3 py-1.5 text-left text-xs uppercase text-slate-400">Cert</th>
-        <th class="px-3 py-1.5 text-left text-xs uppercase text-slate-400">Message</th>
-        <th class="px-3 py-1.5 text-left text-xs uppercase text-slate-400"></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+        <th class="px-3 py-1.5 text-left text-xs text-slate-500">Device</th>
+        <th class="px-3 py-1.5 text-left text-xs text-slate-500">IP</th>
+        <th class="px-3 py-1.5 text-left text-xs text-slate-500">Type</th>
+        <th class="px-3 py-1.5 text-left text-xs text-slate-500">Cert</th>
+        <th class="px-3 py-1.5 text-left text-xs text-slate-500">Message</th>
+        <th class="px-3 py-1.5 text-left text-xs text-slate-500"></th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 async function _leLoadDeviceBox(box, domain, mt, identifier) {
-    box.innerHTML = '<p class="text-xs text-slate-400 italic py-1">Loading devices…</p>';
+    box.innerHTML = '<p class="text-xs text-slate-500 italic py-1">Loading devices…</p>';
     try {
         const q = `module_type=${encodeURIComponent(mt)}&identifier=${encodeURIComponent(identifier || '')}`;
         const r = await _spokeFetch(`/api/le/certs/${encodeURIComponent(domain)}/devices?${q}`);
@@ -1288,11 +1288,11 @@ function leIssueRenderTargets() {
     const cell = document.getElementById('le-issue-targets-list');
     if (!cell) return;
     cell.innerHTML = _leIssueTargets.length === 0
-        ? `<span class="text-xs text-slate-400 italic">none — add below (optional)</span>`
+        ? `<span class="text-xs text-slate-500 italic">none — add below (optional)</span>`
         : `<div class="flex flex-wrap gap-1">${_leIssueTargets.map((t, i) =>
             `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-700">
                 ${t.module_type}${t.identifier ? '/' + escapeHtml(t.identifier) : ''}
-                <button onclick="leIssueRemoveTarget(${i})" class="text-slate-400 hover:text-red-600" type="button">✕</button>
+                <button onclick="leIssueRemoveTarget(${i})" class="text-slate-500 hover:text-red-600" type="button">✕</button>
             </span>`).join('')}</div>`;
 }
 
@@ -1331,7 +1331,7 @@ async function showLeIssueModal(prefill) {
                     <label class="text-xs text-slate-500 mb-1">Domain <span class="text-red-500">*</span></label>
                     <input id="le-issue-domain" type="text" list="le-issue-domain-list" placeholder="pick or type a domain" title="Target domain or FQDN to issue certificate for (e.g. example.com or *.example.com)" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
                     <datalist id="le-issue-domain-list"></datalist>
-                    <p class="text-[11px] text-slate-400 mt-1">Your DNS entries (from DNS + firewalls). A cert only shows on your Certificates page if its domain resolves into your subnet.</p>
+                    <p class="text-xs text-slate-500 mt-1">Your DNS entries (from DNS + firewalls). A cert only shows on your Certificates page if its domain resolves into your subnet.</p>
                 </div>
                 <div class="flex flex-col">
                     <label class="text-xs text-slate-500 mb-1">ACME account email <span class="text-red-500">*</span></label>
@@ -1365,25 +1365,25 @@ async function showLeIssueModal(prefill) {
                 <select id="le-issue-dns-credential" onchange="leIssueToggleSavedCred()" title="Select saved tenant DNS credential" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                     <option value="">— enter manually below —</option>
                 </select>
-                <p class="text-[11px] text-slate-400 mt-1">Pick one of your tenant's saved credentials (manage via 🔑 DNS Credentials), or enter one manually below.</p>
+                <p class="text-xs text-slate-500 mt-1">Pick one of your tenant's saved credentials (manage via 🔑 DNS Credentials), or enter one manually below.</p>
             </div>
             <div id="le-issue-dns-provider-row" class="flex flex-col hidden">
                 <label class="text-xs text-slate-500 mb-1">DNS provider</label>
                 <select id="le-issue-dns-provider" onchange="leIssueUpdateDnsFields()" title="Select DNS provider plugin" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${dnsOpts}</select>
             </div>
             <div id="le-issue-dns-creds-row" class="flex flex-col hidden">
-                <label class="text-xs text-slate-500 mb-1">DNS credentials <span class="text-slate-400">(written to /etc/lm-le/dns-&lt;provider&gt;.ini at 0600)</span></label>
+                <label class="text-xs text-slate-500 mb-1">DNS credentials <span class="text-slate-500">(written to /etc/lm-le/dns-&lt;provider&gt;.ini at 0600)</span></label>
                 <!-- RFC 2136 family (rfc2136, Hurricane Electric): structured
                      key name + key secret — the only two values you actually
                      need. Server/port/algorithm are behind "Advanced". -->
                 <div id="le-issue-dns-structured" class="space-y-2 hidden">
                     <div class="grid grid-cols-2 gap-3">
                         <div class="flex flex-col">
-                            <label class="text-[11px] text-slate-500 mb-0.5">Key name <span class="text-red-500">*</span></label>
+                            <label class="text-xs text-slate-500 mb-0.5">Key name <span class="text-red-500">*</span></label>
                             <input id="le-issue-dns-keyname" type="text" placeholder="YOUR_KEY_NAME" title="TSIG key name" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500" />
                         </div>
                         <div class="flex flex-col">
-                            <label class="text-[11px] text-slate-500 mb-0.5">Key secret <span class="text-red-500">*</span></label>
+                            <label class="text-xs text-slate-500 mb-0.5">Key secret <span class="text-red-500">*</span></label>
                             <input id="le-issue-dns-keysecret" type="password" placeholder="YOUR_TSIG_SECRET" title="TSIG key secret" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500" />
                         </div>
                     </div>
@@ -1391,15 +1391,15 @@ async function showLeIssueModal(prefill) {
                         <summary class="cursor-pointer text-slate-500 hover:text-slate-700 select-none">Advanced — server / port / algorithm</summary>
                         <div class="grid grid-cols-3 gap-2 mt-2">
                             <div class="flex flex-col">
-                                <label class="text-[11px] text-slate-400 mb-0.5">Server</label>
+                                <label class="text-xs text-slate-500 mb-0.5">Server</label>
                                 <input id="le-issue-dns-server" type="text" placeholder="216.218.130.2 (IP, not a hostname)" title="Primary authoritative DNS server IP address" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500" />
                             </div>
                             <div class="flex flex-col">
-                                <label class="text-[11px] text-slate-400 mb-0.5">Port</label>
+                                <label class="text-xs text-slate-500 mb-0.5">Port</label>
                                 <input id="le-issue-dns-port" type="text" value="53" title="Authoritative DNS server port (default 53)" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500" />
                             </div>
                             <div class="flex flex-col">
-                                <label class="text-[11px] text-slate-400 mb-0.5">Algorithm</label>
+                                <label class="text-xs text-slate-500 mb-0.5">Algorithm</label>
                                 <select id="le-issue-dns-algo" title="TSIG HMAC algorithm" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500">
                                     <option value="hmac-sha256">hmac-sha256</option>
                                     <option value="hmac-sha512">hmac-sha512</option>
@@ -1414,21 +1414,21 @@ async function showLeIssueModal(prefill) {
                      TSIG, no IP). Blank fields → use the saved HE account knob
                      (Setup → Certificates). -->
                 <div id="le-issue-he-login" class="space-y-2 hidden">
-                    <p class="text-[11px] text-slate-400">Sets the <span class="font-mono">_acme-challenge</span> TXT via the dns.he.net web panel with your HE account — no per-record TSIG keys. Leave blank to use the saved HE account (Setup → Certificates → Hurricane Electric login).</p>
+                    <p class="text-xs text-slate-500">Sets the <span class="font-mono">_acme-challenge</span> TXT via the dns.he.net web panel with your HE account — no per-record TSIG keys. Leave blank to use the saved HE account (Setup → Certificates → Hurricane Electric login).</p>
                     <div class="grid grid-cols-2 gap-3">
                         <div class="flex flex-col">
-                            <label class="text-[11px] text-slate-500 mb-0.5">HE account email</label>
+                            <label class="text-xs text-slate-500 mb-0.5">HE account email</label>
                             <input id="le-issue-he-user" type="text" placeholder="(use saved account)" autocomplete="off" title="Hurricane Electric account username or email" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
                         </div>
                         <div class="flex flex-col">
-                            <label class="text-[11px] text-slate-500 mb-0.5">HE account password</label>
+                            <label class="text-xs text-slate-500 mb-0.5">HE account password</label>
                             <input id="le-issue-he-pass" type="password" placeholder="(use saved account)" autocomplete="new-password" title="Hurricane Electric account password" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
                         </div>
                     </div>
                 </div>
                 <!-- Non-rfc2136 providers: raw INI textarea (field shapes vary
                      per provider — sample shown as a grey placeholder). -->
-                <textarea id="le-issue-dns-creds" rows="5" placeholder="" title="Provider-specific INI credentials configuration" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500 placeholder:text-slate-400 placeholder:font-mono placeholder:text-xs"></textarea>
+                <textarea id="le-issue-dns-creds" rows="5" placeholder="" title="Provider-specific INI credentials configuration" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500 placeholder:text-slate-500 placeholder:font-mono placeholder:text-xs"></textarea>
             </div>
             <div class="flex items-center gap-4 flex-wrap">
                 <label class="flex items-center gap-2 text-sm text-slate-700">
@@ -1453,20 +1453,20 @@ async function showLeIssueModal(prefill) {
                 <div id="le-issue-targets-list" class="mb-2"></div>
                 <div class="flex flex-wrap items-end gap-2">
                     <div class="flex flex-col">
-                        <label class="text-[11px] text-slate-400 mb-0.5">Module type</label>
+                        <label class="text-xs text-slate-500 mb-0.5">Module type</label>
                         <select id="le-issue-tgt-mt" onchange="leTgtMtChange('le-issue-tgt-mt','le-issue-tgt-id')" title="Select spoke or target module type" class="bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${mtOpts}</select>
                     </div>
                     <div class="flex flex-col flex-1 min-w-[160px]">
-                        <label class="text-[11px] text-slate-400 mb-0.5">Device</label>
+                        <label class="text-xs text-slate-500 mb-0.5">Device</label>
                         <select id="le-issue-tgt-id" title="Select target device or node identifier" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></select>
                     </div>
-                    <button onclick="leIssueAddTarget()" type="button" title="Add distribution target" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-md text-sm font-medium">Add</button>
+                    <button onclick="leIssueAddTarget()" type="button" title="Add distribution target" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-full text-sm font-medium">Add</button>
                 </div>
             </div>
         </div>
         <div class="flex justify-end gap-2 mt-5">
-            <button onclick="document.getElementById('le-issue-modal').remove()" title="Cancel and close dialog" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Cancel</button>
-            <button id="le-issue-submit" onclick="leIssueCert()" title="Submit certificate issuance request" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Issue certificate</button>
+            <button onclick="document.getElementById('le-issue-modal').remove()" title="Cancel and close dialog" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm font-medium">Cancel</button>
+            <button id="le-issue-submit" onclick="leIssueCert()" title="Submit certificate issuance request" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-sm font-bold">Issue certificate</button>
         </div>`, { card: 'max-w-2xl w-full p-6 my-auto', overlay: 'overflow-y-auto py-6' });
     leIssuePopulateDomains();
     leIssueRenderTargets();
@@ -1801,31 +1801,31 @@ async function showDnsCredentialsModal() {
         ? `<div class="text-xs px-3 py-2 rounded bg-blue-50 text-blue-700 border border-blue-100">🔐 New DNS credentials are managed in the <b>Credential Vault</b> (add a <b>DNS</b> secret there, then pick it in the issue-cert form). Creating raw credentials here is disabled; existing ones below still work and can be deleted.</div>
           <p class="text-xs text-slate-500">Saved DNS credentials for <b>your tenant</b> (stored on the le spoke). A certificate can still pick one of these by name when issuing. Delete any you've migrated to the vault.</p>`
         : `<p class="text-xs text-slate-500">Saved DNS credentials for <b>your tenant</b>. A certificate picks one by name when issuing. Secrets are stored on the le spoke, <b>encrypted at rest</b>, and are never shown again — leave a secret blank when editing to keep it.</p>
-           <p class="text-[11px] text-slate-400">No Credential Vault is configured, so credentials are kept locally. Configure a vault under Setup → Cloud to manage them centrally instead.</p>`;
+           <p class="text-xs text-slate-500">No Credential Vault is configured, so credentials are kept locally. Configure a vault under Setup → Cloud to manage them centrally instead.</p>`;
     const form = vaultOn ? '' : `
           <div class="border-t border-slate-200 pt-4">
             <h4 id="dns-cred-form-title" class="text-sm font-bold text-slate-600 mb-2">Add a credential</h4>
             <div class="grid grid-cols-2 gap-3">
-              <div class="flex flex-col"><label class="text-[11px] text-slate-500 mb-0.5">Name</label>
+              <div class="flex flex-col"><label class="text-xs text-slate-500 mb-0.5">Name</label>
                 <input id="dns-cred-name" type="text" placeholder="e.g. HE - lrbtech" title="Descriptive label for this DNS credential set" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
-              <div class="flex flex-col"><label class="text-[11px] text-slate-500 mb-0.5">Provider</label>
+              <div class="flex flex-col"><label class="text-xs text-slate-500 mb-0.5">Provider</label>
                 <select id="dns-cred-provider" onchange="dnsCredRenderFields()" title="Select DNS provider service" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${provOpts}</select></div>
             </div>
             <div id="dns-cred-fields" class="grid grid-cols-2 gap-3 mt-3"></div>
             <div class="flex justify-end gap-2 mt-3">
               <button onclick="dnsCredResetForm()" title="Clear form fields" class="px-3 py-1.5 text-sm text-slate-600 hover:text-slate-800">Clear</button>
-              <button onclick="saveDnsCredential()" title="Save DNS provider credential" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold">Save credential</button>
+              <button onclick="saveDnsCredential()" title="Save DNS provider credential" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-full text-sm font-bold">Save credential</button>
             </div>
           </div>`;
     modal.innerHTML = `
       <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden max-h-[90vh] flex flex-col">
         <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-          <h3 class="text-lg font-bold text-[#263040]">DNS Credentials</h3>
-          <button onclick="document.getElementById('dns-creds-modal').remove()" title="Close dialog" class="text-slate-400 hover:text-slate-600">✕</button>
+          <h3 class="text-lg font-bold text-navy">DNS Credentials</h3>
+          <button onclick="document.getElementById('dns-creds-modal').remove()" title="Close dialog" class="text-slate-500 hover:text-slate-600">✕</button>
         </div>
         <div class="p-6 space-y-4 overflow-y-auto">
           ${note}
-          <div id="dns-creds-list" class="space-y-2"><p class="text-sm text-slate-400 italic">Loading…</p></div>
+          <div id="dns-creds-list" class="space-y-2"><p class="text-sm text-slate-500 italic">Loading…</p></div>
           ${form}
         </div>
       </div>`;
@@ -1844,7 +1844,7 @@ function dnsCredRenderFields(values) {
     const secretsSet = values.__secrets__ || {};
     box.innerHTML = def.fields.map(f => `
       <div class="flex flex-col">
-        <label class="text-[11px] text-slate-500 mb-0.5">${escapeHtml(f.label)}</label>
+        <label class="text-xs text-slate-500 mb-0.5">${escapeHtml(f.label)}</label>
         <input id="dns-cred-f-${f.k}" type="${f.type}" value="${f.secret ? '' : escapeHtml(values[f.k] || '')}"
                placeholder="${f.secret && secretsSet[f.k] ? '(keep stored)' : (f.placeholder ? escapeHtml(f.placeholder) : '')}"
                title="${escapeHtml(f.label)}"
@@ -1910,19 +1910,19 @@ async function dnsCredReloadList() {
         const empty = vaultOn
             ? 'No credentials stored here — add a DNS secret in the Credential Vault.'
             : 'No credentials yet — add one below.';
-        box.innerHTML = warnBanner + `<p class="text-sm text-slate-400 italic">${empty}</p>`;
+        box.innerHTML = warnBanner + `<p class="text-sm text-slate-500 italic">${empty}</p>`;
         return;
     }
     box.innerHTML = warnBanner + creds.map(c => {
         const label = (DNS_CRED_PROVIDERS[c.provider] || {}).label || c.provider;
         const editBtn = vaultOn ? '' :
-            `<button onclick='dnsCredEdit(${escapeHtml(JSON.stringify(c))})' title="Edit this stored DNS provider credential" class="text-xs text-slate-600 hover:text-slate-800 border border-slate-200 rounded px-2 py-1">Edit</button>`;
+            `<button onclick='dnsCredEdit(${escapeHtml(JSON.stringify(c))})' title="Edit this stored DNS provider credential" class="text-xs text-slate-600 hover:text-slate-800 border border-slate-200 rounded-full px-2 py-1">Edit</button>`;
         return `<div class="flex items-center justify-between border border-slate-200 rounded-md px-3 py-2">
           <div><span class="text-sm font-medium text-slate-700">${escapeHtml(c.name)}</span>
-            <span class="text-[11px] text-slate-400 ml-2">${escapeHtml(label)}</span></div>
+            <span class="text-xs text-slate-500 ml-2">${escapeHtml(label)}</span></div>
           <div class="flex gap-2">
             ${editBtn}
-            <button onclick="deleteDnsCredential(${escapeHtml(JSON.stringify(c.name))})" class="text-xs text-red-500 hover:text-red-700 border border-red-200 rounded px-2 py-1" title="Delete this stored DNS provider credential">Delete</button>
+            <button onclick="deleteDnsCredential(${escapeHtml(JSON.stringify(c.name))})" class="text-xs text-red-500 hover:text-red-700 border border-red-200 rounded-full px-2 py-1" title="Delete this stored DNS provider credential">Delete</button>
           </div></div>`;
     }).join('');
 }
@@ -2076,7 +2076,7 @@ function _hubHealthHtml(d) {
     const th = d.thresholds || {};
     const lagHi = th.loop_lag_high_s || 0.75;
     const lag = d.loop_lag_s || 0, lagMax = d.loop_lag_max_s || 0;
-    const lagColor = lag >= lagHi ? 'text-red-600' : lag >= lagHi/2 ? 'text-amber-600' : 'text-[#01A982]';
+    const lagColor = lag >= lagHi ? 'text-red-600' : lag >= lagHi/2 ? 'text-amber-600' : 'text-primary-text';
     const cpuColor = (d.cpu_pct||0) >= (th.cpu_high_pct||90) ? 'text-red-600' : 'text-slate-800';
     const memColor = (d.mem_pct||0) >= (th.mem_high_pct||90) ? 'text-red-600' : 'text-slate-800';
     const conns = d.connections || [];
@@ -2095,7 +2095,7 @@ function _hubHealthHtml(d) {
         <td class="px-3 py-1.5 text-center ${(c.rtt_ms||0)>150?'text-red-600 font-bold':'text-slate-700'}">${c.rtt_ms!=null?c.rtt_ms+' ms':'—'}</td>
         <td class="px-3 py-1.5 text-center ${(c.write_buffer_bytes||0)>65536?'text-red-600 font-bold':'text-slate-700'}">${_fmtBytes(c.write_buffer_bytes)}</td>
         <td class="px-3 py-1.5 text-center text-slate-700">${c.mps}</td>
-      </tr>`).join('') || `<tr><td colspan="5" class="px-3 py-3 text-slate-400 italic">No connected spokes.</td></tr>`;
+      </tr>`).join('') || `<tr><td colspan="5" class="px-3 py-3 text-slate-500 italic">No connected spokes.</td></tr>`;
     const talkers = (d.top_talkers||[]).slice(0,6).map(t => `${esc(t.spoke)} (${t.mps}/s)`).join(', ') || '—';
     return `<div class="space-y-4">
       <div class="flex items-center justify-end">
@@ -2112,12 +2112,12 @@ function _hubHealthHtml(d) {
       </div>
       <div class="text-xs text-slate-700 bg-slate-50 border border-slate-200 rounded p-2">${hint}</div>
       <div class="overflow-x-auto border border-slate-200 rounded-lg">
-        <table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs uppercase"><tr>
+        <table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs"><tr>
           <th class="px-3 py-1 text-left">Spoke</th><th class="px-3 py-1 text-left">Remote IP</th>
           <th class="px-3 py-1 text-center">RTT</th><th class="px-3 py-1 text-center">Write buffer</th><th class="px-3 py-1 text-center">msg/s</th>
         </tr></thead><tbody>${rows}</tbody></table>
       </div>
-      <div class="text-[11px] text-slate-500">RTT = WS keepalive round-trip (network latency to the spoke). Write buffer = hub→spoke outbound backlog (growing = that spoke/network isn't draining). <b>High loop lag + low RTT/buffers = hub loop; high RTT or growing buffers = network transport.</b></div>
+      <div class="text-xs text-slate-500">RTT = WS keepalive round-trip (network latency to the spoke). Write buffer = hub→spoke outbound backlog (growing = that spoke/network isn't draining). <b>High loop lag + low RTT/buffers = hub loop; high RTT or growing buffers = network transport.</b></div>
     </div>`;
 }
 
@@ -2157,7 +2157,7 @@ function _spokeRegistryDiagHtml(d) {
     const rows = (d && d.rows) || [];
     const brokers = (d && d.brokers) || {};
     const findings = (d && d.findings) || [];
-    if (!rows.length) return `<p class="text-slate-400 italic text-xs">No spoke registrations.</p>`;
+    if (!rows.length) return `<p class="text-slate-500 italic text-xs">No spoke registrations.</p>`;
     // Operators know boxes by hostname, never by registration UUID.
     _srdNames = Object.fromEntries(rows.map(r => [r.spoke_id, r.hostname || _spokeLabelFor(r.spoke_id)]));
     const nameOf = id => _srdNames[id] || _spokeLabelFor(id);
@@ -2166,15 +2166,15 @@ function _spokeRegistryDiagHtml(d) {
     let html = '';
     const bk = Object.keys(brokers).sort();
     if (bk.length) {
-        html += `<div class="mb-4"><p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest mb-2">Client-Sim broker election</p>
+        html += `<div class="mb-4"><p class="text-xs text-slate-500 font-bold mb-2">Client-Sim broker election</p>
             <div class="space-y-1">` + bk.map(t => {
             const b = brokers[t] || {};
             const warn = b.multiple;
             return `<div class="flex items-start justify-between gap-3 text-xs p-2 rounded ${warn ? 'bg-amber-50 border border-amber-200' : 'bg-slate-50'}">
                 <div><span class="font-bold text-slate-600">${escapeHtml(t)}</span>
-                    <span class="text-slate-400"> → </span>
+                    <span class="text-slate-500"> → </span>
                     <span class="font-medium text-slate-700">${escapeHtml(b.elected ? nameOf(b.elected) : 'none')}</span></div>
-                <div class="text-right whitespace-nowrap ${warn ? 'text-amber-700' : 'text-slate-400'}">
+                <div class="text-right whitespace-nowrap ${warn ? 'text-amber-700' : 'text-slate-500'}">
                     ${(b.candidates || []).length} connected candidate(s)${warn ? ' — pinned to the incumbent' : ''}</div>
             </div>`;
         }).join('') + `</div></div>`;
@@ -2190,15 +2190,15 @@ function _spokeRegistryDiagHtml(d) {
     const nOffline = rows.filter(r => !r.connected && !r.is_relayed_agent).length;
     const nTwins = rows.filter(r => r.legacy_twin_of).length;
     html += `<div class="flex flex-wrap items-center gap-2 mb-2 text-xs">
-        <button type="button" onclick="srdSelect('offline')" class="px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50" title="Select all offline spoke registrations">Select offline (${nOffline})</button>
-        <button type="button" onclick="srdSelect('twins')" class="px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50" title="Select legacy pre-rename spoke twin registrations">Select pre-rename twins (${nTwins})</button>
-        <button type="button" onclick="srdSelect('none')" class="px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50" title="Clear all selections">Clear</button>
+        <button type="button" onclick="srdSelect('offline')" class="px-2 py-1 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50" title="Select all offline spoke registrations">Select offline (${nOffline})</button>
+        <button type="button" onclick="srdSelect('twins')" class="px-2 py-1 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50" title="Select legacy pre-rename spoke twin registrations">Select pre-rename twins (${nTwins})</button>
+        <button type="button" onclick="srdSelect('none')" class="px-2 py-1 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50" title="Clear all selections">Clear</button>
         <span class="flex-1"></span>
         <button type="button" id="srd-del-btn" onclick="srdDeleteSelected()" disabled
-                class="px-3 py-1 rounded border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed font-bold" title="Delete selected offline spoke registrations from the registry">Delete selected (<span id="srd-del-count">0</span>)</button>
+                class="px-3 py-1 rounded-full border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed font-bold" title="Delete selected offline spoke registrations from the registry">Delete selected (<span id="srd-del-count">0</span>)</button>
     </div>`;
     html += `<div class="overflow-x-auto"><table class="w-full text-xs">
-        <thead><tr class="text-left text-slate-400 uppercase tracking-wider text-[10px] border-b border-slate-200">
+        <thead><tr class="text-left text-slate-500 text-xs border-b border-slate-200">
             <th class="py-1 pr-2 w-6"></th>
             <th class="py-1 pr-2">Spoke</th><th class="py-1 pr-2">Type</th><th class="py-1 pr-2">Tenant</th>
             <th class="py-1 pr-2">State</th><th class="py-1 pr-2">Last seen</th><th class="py-1 pr-2 text-right">Action</th>
@@ -2220,8 +2220,8 @@ function _spokeRegistryDiagHtml(d) {
         if (r.admin_only) badges.push('<span class="px-1.5 py-0.5 rounded bg-purple-100 text-purple-700" title="No tenant_id — hidden from a non-admin Spokes list, but still claimable as a tenant broker">hidden</span>');
         if (r.legacy_twin_of) badges.push('<span class="px-1.5 py-0.5 rounded bg-orange-100 text-orange-700" title="Same box, registered under the pre-2026-07-20 &quot;-spoke&quot; id. Safe to delete once the twin is connected.">twin of ' + escapeHtml(nameOf(r.legacy_twin_of)) + '</span>');
         const del = (r.connected || r.is_relayed_agent)
-            ? `<span class="text-slate-300" title="${r.is_relayed_agent ? 'Relayed agent reporting through its parent spoke — not a leftover' : 'Connected — this is a live spoke, not a leftover'}">live</span>`
-            : `<button onclick="deleteSpokeRegistration('${escJsAttr(r.spoke_id)}')" class="px-2 py-0.5 rounded border border-red-300 text-red-600 hover:bg-red-50" title="Delete this spoke registration">Delete</button>`;
+            ? `<span class="text-slate-500" title="${r.is_relayed_agent ? 'Relayed agent reporting through its parent spoke — not a leftover' : 'Connected — this is a live spoke, not a leftover'}">live</span>`
+            : `<button onclick="deleteSpokeRegistration('${escJsAttr(r.spoke_id)}')" class="px-2 py-0.5 rounded-full border border-red-300 text-red-600 hover:bg-red-50" title="Delete this spoke registration">Delete</button>`;
         const sel = (r.connected || r.is_relayed_agent) ? '' :
             `<input type="checkbox" class="srd-sel" data-twin="${r.legacy_twin_of ? '1' : '0'}" ` +
             `value="${escapeHtml(r.spoke_id)}" onchange="srdSyncCount()" title="Select this spoke registration for deletion">`;
@@ -2231,7 +2231,7 @@ function _spokeRegistryDiagHtml(d) {
             <td class="py-1.5 pr-2 text-slate-500">${escapeHtml(r.module_type || '—')}</td>
             <td class="py-1.5 pr-2 text-slate-500">${escapeHtml(r.tenant_id || 'unassigned')}</td>
             <td class="py-1.5 pr-2"><div class="flex flex-wrap gap-1">${badges.join('')}</div></td>
-            <td class="py-1.5 pr-2 text-slate-400 whitespace-nowrap">${escapeHtml(_srdAge(r.last_seen_age_s))}</td>
+            <td class="py-1.5 pr-2 text-slate-500 whitespace-nowrap">${escapeHtml(_srdAge(r.last_seen_age_s))}</td>
             <td class="py-1.5 pr-2 text-right whitespace-nowrap">${del}</td>
         </tr>`;
     });
@@ -2244,16 +2244,16 @@ function _spokeRegistryDiagHtml(d) {
     if (orphans.length) {
         html += `<div class="mt-4 pt-3 border-t border-slate-200">
             <div class="flex items-center justify-between mb-1">
-                <p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest">Orphaned telemetry (no such spoke)</p>
+                <p class="text-xs text-slate-500 font-bold">Orphaned telemetry (no such spoke)</p>
                 <button type="button" id="srd-orph-btn" onclick="srdPurgeTelemetry()" disabled
-                        class="text-xs px-3 py-1 rounded border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed font-bold" title="Purge cached telemetry for selected nonexistent spoke IDs">Purge selected (<span id="srd-orph-count">0</span>)</button>
+                        class="text-xs px-3 py-1 rounded-full border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed font-bold" title="Purge cached telemetry for selected nonexistent spoke IDs">Purge selected (<span id="srd-orph-count">0</span>)</button>
             </div>
-            <p class="text-[10px] text-slate-400 mb-2">Cached telemetry keyed to a spoke id that no longer exists — typically an id that changed under a box. It keeps claiming the Proxmox hosts it last reported, so those hosts render under a spoke that no longer runs them. Deleting a spoke cannot remove these; purge them here.</p>
+            <p class="text-xs text-slate-500 mb-2">Cached telemetry keyed to a spoke id that no longer exists — typically an id that changed under a box. It keeps claiming the Proxmox hosts it last reported, so those hosts render under a spoke that no longer runs them. Deleting a spoke cannot remove these; purge them here.</p>
             <div class="space-y-1">` + orphans.map(o =>
             `<label class="flex items-start gap-2 text-xs p-2 rounded bg-amber-50 border border-amber-200 cursor-pointer">
                 <input type="checkbox" class="srd-orph mt-0.5" value="${escapeHtml(o.spoke_id)}" onchange="srdSyncOrphCount()" title="Select orphaned telemetry entry to purge">
                 <span class="flex-1"><span class="font-medium text-slate-700">${escapeHtml(_spokeLabelFor(o.spoke_id))}</span>
-                    <span class="text-slate-400"> — tenant ${escapeHtml(o.tenant_id || 'none')}, claims ${o.host_count} host(s)</span>
+                    <span class="text-slate-500"> — tenant ${escapeHtml(o.tenant_id || 'none')}, claims ${o.host_count} host(s)</span>
                     ${(o.hosts || []).length ? `<span class="block text-slate-500 mt-0.5">${(o.hosts || []).map(escapeHtml).join(', ')}</span>` : ''}
                 </span>
             </label>`).join('') + `</div></div>`;
@@ -2261,7 +2261,7 @@ function _spokeRegistryDiagHtml(d) {
 
     if (findings.length) {
         html += `<div class="mt-3 pt-3 border-t border-slate-100 space-y-1">` + findings.map(f =>
-            `<p class="text-[11px] text-slate-500">• ${escapeHtml(f)}</p>`).join('') + `</div>`;
+            `<p class="text-xs text-slate-500">• ${escapeHtml(f)}</p>`).join('') + `</div>`;
     }
     return html;
 }
@@ -2426,14 +2426,14 @@ async function loadModuleDiagnostics() {
                 <td class="px-4 py-2 text-xs font-bold ${tone}">${escapeHtml(a.tier || '')}</td>
                 <td class="px-4 py-2 text-xs text-slate-500">${escapeHtml(_durStr(a.duration_s))}</td>
                 <td class="px-4 py-2 text-xs text-slate-600">${escapeHtml(a.detail || '')}</td>
-                <td class="px-4 py-2 text-[11px] text-amber-700">${escapeHtml(forensics.join(' · '))}</td>
+                <td class="px-4 py-2 text-xs text-amber-700">${escapeHtml(forensics.join(' · '))}</td>
             </tr>`;
         }).join('');
         return `<div class="hpe-card rounded-lg p-5 shadow-sm">
-            <p class="text-sm font-bold text-slate-500 uppercase tracking-wider">${escapeHtml(_MD_SOURCE_LABEL[src])} <span class="text-slate-400 normal-case font-normal">(${mine.length})</span></p>
-            <p class="text-[11px] text-slate-400 mb-3">${escapeHtml(_MD_SOURCE_NOTE[src] || '')}</p>
+            <p class="text-sm font-bold text-slate-500">${escapeHtml(_MD_SOURCE_LABEL[src])} <span class="text-slate-500 normal-case font-normal">(${mine.length})</span></p>
+            <p class="text-xs text-slate-500 mb-3">${escapeHtml(_MD_SOURCE_NOTE[src] || '')}</p>
             <div class="overflow-x-auto"><table class="w-full text-sm">
-              <thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>
+              <thead class="bg-slate-50 text-xs text-slate-500"><tr>
                 <th class="px-4 py-2 text-left font-medium">Module</th>
                 <th class="px-4 py-2 text-left font-medium">Tier</th>
                 <th class="px-4 py-2 text-left font-medium">For</th>
@@ -2444,15 +2444,15 @@ async function loadModuleDiagnostics() {
     }).filter(Boolean).join('');
 
     const findingHtml = findings.length ? `<div class="hpe-card rounded-lg p-5 shadow-sm">
-        <p class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Verdicts</p>
+        <p class="text-sm font-bold text-slate-500 mb-2">Verdicts</p>
         ${findings.map(f => {
             const cls = f.severity === 'error' ? 'border-red-200 bg-red-50 text-red-700'
                       : f.severity === 'warning' ? 'border-amber-200 bg-amber-50 text-amber-700'
                       : 'border-slate-200 bg-slate-50 text-slate-600';
             return `<div class="border rounded-md p-2 mb-1.5 ${cls}">
                 <div class="text-xs font-bold">${escapeHtml(f.code || '')}</div>
-                <p class="text-[11px] opacity-90">${escapeHtml(f.detail || '')}</p>
-                ${(f.ids || []).length ? `<p class="text-[10px] font-mono mt-1 break-all">${escapeHtml((f.ids || []).join(', '))}</p>` : ''}
+                <p class="text-xs opacity-90">${escapeHtml(f.detail || '')}</p>
+                ${(f.ids || []).length ? `<p class="text-xs font-mono mt-1 break-all">${escapeHtml((f.ids || []).join(', '))}</p>` : ''}
             </div>`;
         }).join('')}
       </div>` : '';
@@ -2461,7 +2461,7 @@ async function loadModuleDiagnostics() {
       <div class="hpe-card rounded-lg p-5 shadow-sm flex flex-wrap items-center gap-2">
         ${pill('Errors', nErr, nErr ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-500')}
         ${pill('Warnings', nWarn, nWarn ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500')}
-        <span class="text-[11px] text-slate-400 ml-auto">as of ${escapeHtml(d._fetched_at)}</span>
+        <span class="text-xs text-slate-500 ml-auto">as of ${escapeHtml(d._fetched_at)}</span>
       </div>
       ${alerts.length ? groups : `<div class="hpe-card rounded-lg p-5 shadow-sm"><p class="text-sm text-slate-500">No active alerts from any producer — the MODULE STATUS dot should be green.</p></div>`}
       ${findingHtml}`;
@@ -2560,11 +2560,11 @@ function _alertDiagHtml(d) {
                                         : 'border-amber-300 bg-amber-50 text-amber-700';
     const findingHtml = findings.length ? findings.map(f => `
         <div class="border ${sevClass(f.severity)} rounded p-2 text-xs">
-            <div class="font-bold uppercase tracking-wide text-[10px] mb-0.5">${esc(f.code.replace(/_/g, ' '))}</div>
+            <div class="font-bold text-xs mb-0.5">${esc(f.code.replace(/_/g, ' '))}</div>
             <div class="mb-1">${esc(f.detail)}</div>
-            <div class="text-[11px] opacity-80">${f.ids.map(named).join(', ')}</div>
+            <div class="text-xs opacity-80">${f.ids.map(named).join(', ')}</div>
         </div>`).join('')
-        : `<p class="text-xs text-[#01A982]">No stale or false alert state detected — every active alert reflects a real condition.</p>`;
+        : `<p class="text-xs text-primary-text">No stale or false alert state detected — every active alert reflects a real condition.</p>`;
 
     const alertRows = alerts.length ? alerts.map(a => `
         <tr class="border-b border-slate-100">
@@ -2574,23 +2574,23 @@ function _alertDiagHtml(d) {
             <td class="px-3 py-1.5 text-center text-xs text-slate-600">${dur(a.duration_s)}</td>
             <td class="px-3 py-1.5 text-xs text-slate-500">${esc(a.detail || '')}</td>
         </tr>`).join('')
-        : `<tr><td colspan="5" class="px-3 py-3 text-slate-400 italic">No active alerts.</td></tr>`;
+        : `<tr><td colspan="5" class="px-3 py-3 text-slate-500 italic">No active alerts.</td></tr>`;
 
     // Per-spoke forensics: the exact lookups the alert loop performs, so a false
     // positive is visible as "no bare heartbeat, but a fresh composite one".
-    const yn = (v, good) => `<span class="${v === good ? 'text-[#01A982]' : 'text-red-600'} font-bold">${v ? 'yes' : 'no'}</span>`;
+    const yn = (v, good) => `<span class="${v === good ? 'text-primary-text' : 'text-red-600'} font-bold">${v ? 'yes' : 'no'}</span>`;
     const forensicRows = rows.length ? rows.map(r => {
         const comp = (r.heartbeat_composite || []);
         return `<tr class="border-b border-slate-100">
             <td class="px-3 py-1.5 text-xs font-medium">${named(r.spoke_id)}</td>
             <td class="px-3 py-1.5 text-center text-xs ${r.tier === 'error' ? 'text-red-600 font-bold' : 'text-amber-600'}">${esc(r.tier)}</td>
             <td class="px-3 py-1.5 text-center text-xs">${r.heartbeat_bare != null ? ago(r.heartbeat_bare) + ' ago' : '<span class="text-red-600">none</span>'}</td>
-            <td class="px-3 py-1.5 text-center text-xs">${comp.length ? comp.map(c => `<span class="text-[#01A982]" title="${esc(c.key)}">${c.age_s}s ago</span>`).join(', ') : '—'}</td>
+            <td class="px-3 py-1.5 text-center text-xs">${comp.length ? comp.map(c => `<span class="text-primary-text" title="${esc(c.key)}">${c.age_s}s ago</span>`).join(', ') : '—'}</td>
             <td class="px-3 py-1.5 text-center text-xs">${yn(r.is_relayed_agent, false)}</td>
             <td class="px-3 py-1.5 text-center text-xs">${yn(r.is_approved, true)}</td>
             <td class="px-3 py-1.5 text-center text-xs text-slate-500">${esc(r.latched_tier || '—')}</td>
         </tr>`;
-    }).join('') : `<tr><td colspan="7" class="px-3 py-3 text-slate-400 italic">No spoke out-of-contact alerts.</td></tr>`;
+    }).join('') : `<tr><td colspan="7" class="px-3 py-3 text-slate-500 italic">No spoke out-of-contact alerts.</td></tr>`;
 
     return `<div class="space-y-4">
       <div class="flex items-center justify-end">
@@ -2604,15 +2604,15 @@ function _alertDiagHtml(d) {
       </div>
       <div class="space-y-2">${findingHtml}</div>
       <div class="overflow-x-auto border border-slate-200 rounded-lg">
-        <table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs uppercase"><tr>
+        <table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs"><tr>
           <th class="px-3 py-1 text-left">Alert</th><th class="px-3 py-1 text-left">Producer</th>
           <th class="px-3 py-1 text-center">Tier</th><th class="px-3 py-1 text-center">Active</th><th class="px-3 py-1 text-left">Detail</th>
         </tr></thead><tbody>${alertRows}</tbody></table>
       </div>
       <div>
-        <p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest mb-1">Out-of-contact lookups (per alerted id)</p>
+        <p class="text-xs text-slate-500 font-bold mb-1">Out-of-contact lookups (per alerted id)</p>
         <div class="overflow-x-auto border border-slate-200 rounded-lg">
-          <table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs uppercase"><tr>
+          <table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs"><tr>
             <th class="px-3 py-1 text-left">Spoke</th><th class="px-3 py-1 text-center">Tier</th>
             <th class="px-3 py-1 text-center" title="heartbeat.last_seen[bare_id] — what the alert loop reads">Bare heartbeat</th>
             <th class="px-3 py-1 text-center" title="heartbeat.last_seen['{parent}:{agent_id}'] — where a relayed agent actually reports">Composite heartbeat</th>
@@ -2621,7 +2621,7 @@ function _alertDiagHtml(d) {
           </tr></thead><tbody>${forensicRows}</tbody></table>
         </div>
       </div>
-      <div class="text-[11px] text-slate-500">Thresholds: warn ${dur(cfg.warn_s)} · error ${dur(cfg.error_s)} · alerting ${cfg.enabled ? 'on' : '<b class="text-amber-600">off</b>'}. <b>No bare heartbeat + a fresh composite one = a relayed node-agent that is online but alerting</b> — the loop looks up the bare id, the Agents table reads the composite key, so the two disagree.</div>
+      <div class="text-xs text-slate-500">Thresholds: warn ${dur(cfg.warn_s)} · error ${dur(cfg.error_s)} · alerting ${cfg.enabled ? 'on' : '<b class="text-amber-600">off</b>'}. <b>No bare heartbeat + a fresh composite one = a relayed node-agent that is online but alerting</b> — the loop looks up the bare id, the Agents table reads the composite key, so the two disagree.</div>
     </div>`;
 }
 
@@ -2640,38 +2640,38 @@ async function showMtlsDebug() {
         <tr class="border-b border-slate-100">
             <td class="px-3 py-1.5 font-medium" title="${esc(c.spoke_id)}">${esc(c.label || c.spoke_id)}</td>
             <td class="px-3 py-1.5">${esc(c.module_type || '—')}</td>
-            <td class="px-3 py-1.5 font-bold ${c.local ? 'text-slate-400' : (c.mtls_active ? 'text-[#01A982]' : 'text-amber-600')}" title="${c.local ? 'Co-located spoke — connects over plaintext loopback (ws://127.0.0.1). No TLS leg, so mTLS does not apply. mTLS is remote-only (wss).' : (c.mtls_active ? 'Presenting a verified Hub-CA client cert' : 'Remote spoke connected without presenting a client cert — issue one')}">${c.local ? 'local · N/A' : (c.mtls_active ? 'mTLS ✓' : 'cert-less')}</td>
+            <td class="px-3 py-1.5 font-bold ${c.local ? 'text-slate-500' : (c.mtls_active ? 'text-primary-text' : 'text-amber-600')}" title="${c.local ? 'Co-located spoke — connects over plaintext loopback (ws://127.0.0.1). No TLS leg, so mTLS does not apply. mTLS is remote-only (wss).' : (c.mtls_active ? 'Presenting a verified Hub-CA client cert' : 'Remote spoke connected without presenting a client cert — issue one')}">${c.local ? 'local · N/A' : (c.mtls_active ? 'mTLS ✓' : 'cert-less')}</td>
             <td class="px-3 py-1.5 text-xs">${c.sans && c.sans.length ? esc(c.sans.join(', ')) : '—'}${c.is_ab_pinned ? ' <span class="text-purple-700 font-bold">★ AppBuilder</span>' : ''}</td>
             <td class="px-3 py-1.5 text-xs text-slate-500">${esc(c.not_after || '')}</td>
             <td class="px-3 py-1.5 whitespace-nowrap">
                 ${c.local
-                  ? `<span class="text-xs text-slate-400 italic" title="mTLS is remote-only (wss). A co-located spoke on loopback has no TLS leg to present a client cert.">loopback — mTLS N/A</span>`
-                  : `<button onclick="mtlsProvision('${esc(c.spoke_id)}')" class="text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-2 py-0.5 rounded font-bold" title="Issue/renew this spoke's Hub-Local-CA mTLS client cert now">issue</button>
-                ${c.mtls_active ? `<button onclick="mtlsRevoke('${esc(c.spoke_id)}','${esc(c.label || c.spoke_id)}')" class="text-xs bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-2 py-0.5 rounded font-bold ml-1" title="Revoke this spoke's mTLS client cert (it reconnects cert-less)">revoke</button>` : ''}`}
+                  ? `<span class="text-xs text-slate-500 italic" title="mTLS is remote-only (wss). A co-located spoke on loopback has no TLS leg to present a client cert.">loopback — mTLS N/A</span>`
+                  : `<button onclick="mtlsProvision('${esc(c.spoke_id)}')" class="text-xs bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-2 py-0.5 rounded-full font-bold" title="Issue/renew this spoke's Hub-Local-CA mTLS client cert now">issue</button>
+                ${c.mtls_active ? `<button onclick="mtlsRevoke('${esc(c.spoke_id)}','${esc(c.label || c.spoke_id)}')" class="text-xs bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-2 py-0.5 rounded-full font-bold ml-1" title="Revoke this spoke's mTLS client cert (it reconnects cert-less)">revoke</button>` : ''}`}
             </td>
-        </tr>`).join('') : `<tr><td colspan="6" class="px-3 py-3 text-slate-400 italic">No connected spokes.</td></tr>`;
-    const lmca = (d.lm_mtls_ca_certs || []).map(c => `<div>${esc(c.subject)} <span class="text-slate-400">← ${esc(c.issuer)}</span></div>`).join('') || '<div class="text-slate-400">— none —</div>';
-    const pin = (d.pinned_cert_checks || []).map(p => `<div>${esc(p.domain)}: <span class="font-bold ${p.ok ? 'text-[#01A982]' : 'text-red-600'}">${p.ok ? 'accepted' : 'REJECTED'}</span> <span class="text-slate-400">${esc(p.detail || '')}</span></div>`).join('') || '<div class="text-slate-400">no cert tagged AppBuilder</div>';
+        </tr>`).join('') : `<tr><td colspan="6" class="px-3 py-3 text-slate-500 italic">No connected spokes.</td></tr>`;
+    const lmca = (d.lm_mtls_ca_certs || []).map(c => `<div>${esc(c.subject)} <span class="text-slate-500">← ${esc(c.issuer)}</span></div>`).join('') || '<div class="text-slate-500">— none —</div>';
+    const pin = (d.pinned_cert_checks || []).map(p => `<div>${esc(p.domain)}: <span class="font-bold ${p.ok ? 'text-primary-text' : 'text-red-600'}">${p.ok ? 'accepted' : 'REJECTED'}</span> <span class="text-slate-500">${esc(p.detail || '')}</span></div>`).join('') || '<div class="text-slate-500">no cert tagged AppBuilder</div>';
     const dupes = (d.duplicate_subjects || []);
     openModal('mtls-debug-modal', `
         <div class="p-6 space-y-4">
             <div class="flex items-center justify-between">
-                <h3 class="text-lg font-bold text-[#263040]">🔒 mTLS status</h3>
+                <h3 class="text-lg font-bold text-navy">🔒 mTLS status</h3>
                 <span class="text-xs px-2 py-1 rounded-full ${d.mtls_enabled ? 'bg-green-100 text-green-700' : 'bg-slate-200 text-slate-600'}">${d.mtls_enabled ? 'mTLS ENABLED' : 'mTLS off'}</span>
             </div>
             <div class="flex items-center justify-between gap-2 flex-wrap">
-              <div class="text-sm text-slate-600">${cs.connected ?? 0} connected · <b class="text-[#01A982]">${cs.mtls_active ?? 0}</b> presenting a verified client cert · <b class="text-slate-500">${cs.cert_less ?? 0}</b> cert-less</div>
+              <div class="text-sm text-slate-600">${cs.connected ?? 0} connected · <b class="text-primary-text">${cs.mtls_active ?? 0}</b> presenting a verified client cert · <b class="text-slate-500">${cs.cert_less ?? 0}</b> cert-less</div>
               <div class="flex items-center gap-3">
                 <label class="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer select-none" title="When ON, the hub auto-mints + delivers a Hub-Local-CA mTLS client cert to every spoke on connect (and renews 7 days before expiry). Turn OFF to manage certs manually.">
                   <input type="checkbox" id="mtls-autoprov-chk" ${d.auto_provision ? 'checked' : ''} onchange="mtlsSetAutoProvision(this.checked)" class="w-4 h-4 rounded">
                   Auto-provision
                 </label>
-                <button onclick="mtlsProvision('')" class="text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md font-bold whitespace-nowrap" title="Issue/renew a Hub-Local-CA mTLS client cert for EVERY connected spoke now">⟳ Provision all connected</button>
+                <button onclick="mtlsProvision('')" class="text-xs bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-full font-bold whitespace-nowrap" title="Issue/renew a Hub-Local-CA mTLS client cert for EVERY connected spoke now">⟳ Provision all connected</button>
               </div>
             </div>
             <div class="text-xs text-slate-500">The hub mints each spoke's clientAuth mTLS client cert from its <b>Local CA</b> (public CAs no longer issue clientAuth) — done automatically on connect; use these buttons to (re)issue on demand.</div>
             <div class="overflow-x-auto border border-slate-200 rounded-lg">
-                <table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs uppercase"><tr>
+                <table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs"><tr>
                     <th class="px-3 py-2 text-left">Spoke</th><th class="px-3 py-2 text-left">Type</th><th class="px-3 py-2 text-left">mTLS</th><th class="px-3 py-2 text-left">Cert SANs</th><th class="px-3 py-2 text-left">Expires</th><th class="px-3 py-2 text-left"></th>
                 </tr></thead><tbody>${rows}</tbody></table>
             </div>
@@ -2679,14 +2679,14 @@ async function showMtlsDebug() {
             <div class="border-t border-slate-200 pt-3">
                 <div class="font-semibold text-slate-700 mb-1">Provisioned mTLS certs (registry)</div>
                 <div class="text-xs text-slate-500 mb-2">All Hub-Local-CA mTLS client certs the hub has issued — including ones for spokes that are not connected right now (e.g. a replaced/orphaned box). Remove a stale entry here, or reissue it.</div>
-                <div id="mtls-registry-certs" class="overflow-x-auto border border-slate-200 rounded-lg"><div class="p-3 text-slate-400 italic text-sm">Loading provisioned mTLS certs…</div></div>
+                <div id="mtls-registry-certs" class="overflow-x-auto border border-slate-200 rounded-lg"><div class="p-3 text-slate-500 italic text-sm">Loading provisioned mTLS certs…</div></div>
             </div>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-                <div><div class="font-semibold text-slate-600 mb-1">Hub client-verify CA (LM_MTLS_CA)</div><div class="font-mono text-slate-700 space-y-0.5">${lmca}</div><div class="text-slate-400 mt-1">combined bundle: ${d.combined_ca_count ?? '?'} trusted cert(s)${dupes.length ? ` · <span class="text-amber-600">dup subjects: ${esc(dupes.join(', '))}</span>` : ''}</div></div>
+                <div><div class="font-semibold text-slate-600 mb-1">Hub client-verify CA (LM_MTLS_CA)</div><div class="font-mono text-slate-700 space-y-0.5">${lmca}</div><div class="text-slate-500 mt-1">combined bundle: ${d.combined_ca_count ?? '?'} trusted cert(s)${dupes.length ? ` · <span class="text-amber-600">dup subjects: ${esc(dupes.join(', '))}</span>` : ''}</div></div>
                 <div><div class="font-semibold text-slate-600 mb-1">Pinned AppBuilder cert verify</div><div class="font-mono text-slate-700 space-y-0.5">${pin}</div></div>
             </div>
             <div id="mtls-acme-info" class="border-t border-slate-200 pt-3 text-xs text-slate-500">Loading certbot / ACME profile info…</div>
-            <div class="flex justify-end"><button onclick="document.getElementById('mtls-debug-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium" title="Close dialog">Close</button></div>
+            <div class="flex justify-end"><button onclick="document.getElementById('mtls-debug-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm font-medium" title="Close dialog">Close</button></div>
         </div>`, { card: 'max-w-4xl w-full max-h-[90vh] overflow-y-auto', backdropClose: true });
     // certbot / ACME profile info (le spoke) — diagnoses "requested clientAuth but
     // got serverAuth-only": needs certbot >= 4.0 for --preferred-profile, and the
@@ -2701,12 +2701,12 @@ async function showMtlsDebug() {
                 const profs = a.profiles || {};
                 const names = Object.keys(profs);
                 const profList = names.length
-                    ? names.map(n => `<span class="font-mono ${/classic/i.test(n) ? 'text-[#01A982] font-bold' : 'text-slate-700'}">${esc(n)}</span> <span class="text-slate-400">${esc((profs[n] || '').slice(0, 60))}</span>`).join('<br>')
+                    ? names.map(n => `<span class="font-mono ${/classic/i.test(n) ? 'text-primary-text font-bold' : 'text-slate-700'}">${esc(n)}</span> <span class="text-slate-500">${esc((profs[n] || '').slice(0, 60))}</span>`).join('<br>')
                     : '<span class="text-amber-600">CA advertises no profiles (this ACME server may not support profile selection)</span>';
                 const supp = a.supports_profiles;
                 el.innerHTML =
                     `<div class="font-semibold text-slate-600 mb-1">certbot / ACME profiles (le spoke)</div>` +
-                    `<div>certbot: <span class="font-mono">${esc(a.certbot_version || '?')}</span> · --preferred-profile support: <b class="${supp ? 'text-[#01A982]' : 'text-red-600'}">${supp === null ? 'unknown' : (supp ? 'yes' : 'NO — certbot too old (need ≥4.0)')}</b></div>` +
+                    `<div>certbot: <span class="font-mono">${esc(a.certbot_version || '?')}</span> · --preferred-profile support: <b class="${supp ? 'text-primary-text' : 'text-red-600'}">${supp === null ? 'unknown' : (supp ? 'yes' : 'NO — certbot too old (need ≥4.0)')}</b></div>` +
                     `<div class="mt-1">clientAuth profile requested: <span class="font-mono">${esc(a.clientauth_profile || 'classic')}</span> ${names.length && !names.some(n => n === (a.clientauth_profile || 'classic')) ? '<span class="text-red-600 font-bold">← not in the CA profile list! set LM_LE_CLIENTAUTH_PROFILE to a name below</span>' : ''}</div>` +
                     `<div class="mt-1">CA (${esc(a.acme_directory || '')}) profiles:</div><div class="mt-0.5 pl-2 border-l-2 border-slate-200">${profList}</div>`;
             }
@@ -2752,12 +2752,12 @@ async function showMtlsDebug() {
                         <td class="px-3 py-1.5 text-xs ${expired ? 'text-red-600 font-bold' : 'text-slate-500'}">${esc(naStr || '—')}</td>
                         <td class="px-3 py-1.5 whitespace-nowrap">${statusBadge}${expBadge}</td>
                         <td class="px-3 py-1.5 whitespace-nowrap">
-                            <button onclick="mtlsProvision('${esc(pk)}')" class="text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-2 py-0.5 rounded font-bold" title="Re-issue/renew this Hub-Local-CA mTLS client cert from its registry entry">Reissue</button>
-                            <button onclick="mtlsRemoveCert('${esc(pk)}','${esc(label)}')" class="text-xs bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-2 py-0.5 rounded font-bold ml-1" title="Remove this stored mTLS cert from the hub registry — use for a stale/orphaned entry left by a replaced or reset box">Remove</button>
+                            <button onclick="mtlsProvision('${esc(pk)}')" class="text-xs bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-2 py-0.5 rounded-full font-bold" title="Re-issue/renew this Hub-Local-CA mTLS client cert from its registry entry">Reissue</button>
+                            <button onclick="mtlsRemoveCert('${esc(pk)}','${esc(label)}')" class="text-xs bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-2 py-0.5 rounded-full font-bold ml-1" title="Remove this stored mTLS cert from the hub registry — use for a stale/orphaned entry left by a replaced or reset box">Remove</button>
                         </td>
                     </tr>`;
-                }).join('') : `<tr><td colspan="5" class="px-3 py-3 text-slate-400 italic">No provisioned mTLS certs.</td></tr>`;
-                rel.innerHTML = `<table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs uppercase"><tr>
+                }).join('') : `<tr><td colspan="5" class="px-3 py-3 text-slate-500 italic">No provisioned mTLS certs.</td></tr>`;
+                rel.innerHTML = `<table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs"><tr>
                     <th class="px-3 py-2 text-left">Spoke / ID</th><th class="px-3 py-2 text-left">SANs</th><th class="px-3 py-2 text-left">Expires</th><th class="px-3 py-2 text-left">Status</th><th class="px-3 py-2 text-left">Actions</th>
                 </tr></thead><tbody>${rrows}</tbody></table>`;
             }
@@ -2836,16 +2836,16 @@ function showDnsRecordModal(editItem) {
     const typeOpts = ['A', 'AAAA', 'CNAME', 'PTR'].map(t =>
         `<option value="${t}"${editing && editItem.type === t ? ' selected' : ''}>${t}</option>`).join('');
     const modal = openModal('dns-record-modal', `
-        <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} DNS Record</h3>
+        <h3 class="text-lg font-bold text-navy">${editing ? 'Edit' : 'Add'} DNS Record</h3>
         <div class="space-y-3">
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Name</label><input id="dns-r-name" title="Fully-qualified domain name" value="${val(editItem?.name)}" class="${inputCls}" placeholder="host.example.com" ${editing ? 'readonly' : ''}></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Type</label><select id="dns-r-type" title="DNS record type (A, AAAA, CNAME, PTR)" class="${selectCls}" ${editing ? 'disabled' : ''}>${typeOpts}</select></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Value</label><input id="dns-r-value" title="Target IP address or canonical name" value="${val(editItem?.value)}" class="${inputCls}" placeholder="10.0.1.5"></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">TTL</label><input id="dns-r-ttl" title="Time to Live in seconds (minimum 60s)" type="number" min="60" value="${val(editItem?.ttl) || 300}" class="${inputCls}"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Name</label><input id="dns-r-name" title="Fully-qualified domain name" value="${val(editItem?.name)}" class="${inputCls}" placeholder="host.example.com" ${editing ? 'readonly' : ''}></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Type</label><select id="dns-r-type" title="DNS record type (A, AAAA, CNAME, PTR)" class="${selectCls}" ${editing ? 'disabled' : ''}>${typeOpts}</select></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Value</label><input id="dns-r-value" title="Target IP address or canonical name" value="${val(editItem?.value)}" class="${inputCls}" placeholder="10.0.1.5"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">TTL</label><input id="dns-r-ttl" title="Time to Live in seconds (minimum 60s)" type="number" min="60" value="${val(editItem?.ttl) || 300}" class="${inputCls}"></div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="saveDnsRecord()" title="Save record changes" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Record'}</button>
-            <button onclick="document.getElementById('dns-record-modal').remove()" title="Cancel and close modal" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button onclick="saveDnsRecord()" title="Save record changes" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold">${editing ? 'Save Changes' : 'Add Record'}</button>
+            <button onclick="document.getElementById('dns-record-modal').remove()" title="Cancel and close modal" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     if (editing) { modal.dataset.editName = editItem.name; modal.dataset.editType = editItem.type; }
 }
@@ -2886,22 +2886,22 @@ function showDnsForwarderModal(editItem) {
     const upstreamsVal = isEdit && editItem.upstreams ? (Array.isArray(editItem.upstreams) ? editItem.upstreams.join(', ') : editItem.upstreams) : '';
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     openModal('dns-forwarder-modal', `
-        <h3 class="text-lg font-bold text-[#263040]">${isEdit ? 'Edit DNS Forwarder' : 'Add DNS Forwarder'}</h3>
+        <h3 class="text-lg font-bold text-navy">${isEdit ? 'Edit DNS Forwarder' : 'Add DNS Forwarder'}</h3>
         <div class="space-y-3">
             <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Zone</label>
+                <label class="text-xs text-slate-500 font-bold">Zone</label>
                 <input id="dns-fwd-zone" title="Forwarder zone domain (. for root/default)" value="${escapeHtml(zoneVal)}" ${isEdit ? 'readonly class="' + inputCls + ' bg-slate-50 cursor-not-allowed"' : 'class="' + inputCls + '"'} placeholder=". or example.com">
-                <p class="text-xs text-slate-400">Use <span class="font-mono">.</span> to forward all non-authoritative queries.</p>
+                <p class="text-xs text-slate-500">Use <span class="font-mono">.</span> to forward all non-authoritative queries.</p>
             </div>
             <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Upstream servers</label>
+                <label class="text-xs text-slate-500 font-bold">Upstream servers</label>
                 <input id="dns-fwd-upstreams" title="Comma-separated upstream DNS server IP addresses" value="${escapeHtml(upstreamsVal)}" class="${inputCls}" placeholder="1.1.1.1, 1.0.0.1">
-                <p class="text-xs text-slate-400">Enter one or more IPv4 or IPv6 addresses separated by commas or spaces.</p>
+                <p class="text-xs text-slate-500">Enter one or more IPv4 or IPv6 addresses separated by commas or spaces.</p>
             </div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="saveDnsForwarder()" title="Save forwarder configuration" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${isEdit ? 'Save Changes' : 'Add Forwarder'}</button>
-            <button onclick="document.getElementById('dns-forwarder-modal').remove()" title="Cancel and close modal" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button onclick="saveDnsForwarder()" title="Save forwarder configuration" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold">${isEdit ? 'Save Changes' : 'Add Forwarder'}</button>
+            <button onclick="document.getElementById('dns-forwarder-modal').remove()" title="Cancel and close modal" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     const modal = document.getElementById('dns-forwarder-modal');
     if (modal && isEdit) {
@@ -3021,8 +3021,8 @@ function _dnsOverridesView(d, editIcon, delIcon) {
             <td class="px-4 py-2 text-xs font-mono">${escapeHtml((p.block || []).slice(0, 4).join(', '))}${(p.block || []).length > 4 ? ` … +${p.block.length - 4}` : ''}</td>
             <td class="px-4 py-2 text-center text-xs">${counts[p.name] || 0}</td>
             <td class="px-4 py-2 whitespace-nowrap">${admin ? `
-                <button onclick="editDnsOverrideProfile('${n}')" class="text-slate-400 hover:text-[#01A982] mr-2" title="Edit profile">${editIcon}</button>
-                <button onclick="deleteDnsOverrideProfile('${n}')" class="text-slate-400 hover:text-red-500" title="Delete profile">${delIcon}</button>` : ''}</td>
+                <button onclick="editDnsOverrideProfile('${n}')" class="text-slate-500 hover:text-primary-text mr-2" title="Edit profile">${editIcon}</button>
+                <button onclick="deleteDnsOverrideProfile('${n}')" class="text-slate-500 hover:text-red-500" title="Delete profile">${delIcon}</button>` : ''}</td>
         </tr>`;
     }).join('');
     const asgRows = assignments.map(a => {
@@ -3034,17 +3034,17 @@ function _dnsOverridesView(d, editIcon, delIcon) {
             <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800">${escapeHtml(a.profile)}</span></td>
             <td class="px-4 py-2 text-xs text-slate-600">${escapeHtml(a.comment || '')}</td>
             <td class="px-4 py-2 whitespace-nowrap">${removable ? `
-                <button onclick="editDnsOverrideAssignment('${t}')" class="text-slate-400 hover:text-[#01A982] mr-2" title="Edit this override (IP/subnet, profile, label, comment)">${editIcon}</button>
-                <button onclick="removeDnsOverrideAssignment('${t}')" class="text-slate-400 hover:text-red-500" title="Remove this override (client returns to normal DNS)">${delIcon}</button>` : ''}</td>
+                <button onclick="editDnsOverrideAssignment('${t}')" class="text-slate-500 hover:text-primary-text mr-2" title="Edit this override (IP/subnet, profile, label, comment)">${editIcon}</button>
+                <button onclick="removeDnsOverrideAssignment('${t}')" class="text-slate-500 hover:text-red-500" title="Remove this override (client returns to normal DNS)">${delIcon}</button>` : ''}</td>
         </tr>`;
     }).join('');
     return `<div class="p-4">${intro}${memberHtml}
-        <h4 class="text-sm font-bold text-[#263040] mb-2">Profiles</h4>
+        <h4 class="text-sm font-bold text-navy mb-2">Profiles</h4>
         ${profiles.length ? `<div class="mb-6">${tableWrap(tableHead(['Name', 'Description', 'Answers', 'Blocked', 'Clients', '']) + `<tbody>${profRows}</tbody>`)}</div>`
-            : `<p class="text-sm text-slate-400 mb-6">No override profiles defined${admin ? ' — use <b>+ Add Profile</b>.' : '.'}</p>`}
-        <h4 class="text-sm font-bold text-[#263040] mb-2">Assigned clients</h4>
+            : `<p class="text-sm text-slate-500 mb-6">No override profiles defined${admin ? ' — use <b>+ Add Profile</b>.' : '.'}</p>`}
+        <h4 class="text-sm font-bold text-navy mb-2">Assigned clients</h4>
         ${assignments.length ? tableWrap(tableHead(['Client IP / Subnet', 'Label', 'Profile', 'Comment', '']) + `<tbody>${asgRows}</tbody>`)
-            : `<p class="text-sm text-slate-400">No clients have an override applied.</p>`}
+            : `<p class="text-sm text-slate-500">No clients have an override applied.</p>`}
         <div id="dns-override-live" class="mt-6"></div>
     </div>`;
 }
@@ -3058,7 +3058,7 @@ async function loadDnsOverrideLiveCheck(minutes) {
     if (!box) return;
     const mins = minutes || parseInt(box.dataset.minutes || '60', 10);
     box.dataset.minutes = mins;
-    box.innerHTML = `<h4 class="text-sm font-bold text-[#263040] mb-2">Live check</h4><p class="text-sm text-slate-400">Checking every DNS server…</p>`;
+    box.innerHTML = `<h4 class="text-sm font-bold text-navy mb-2">Live check</h4><p class="text-sm text-slate-500">Checking every DNS server…</p>`;
     const qs = _tenantQS();
     try {
         const { ok, data: d, detail } = await _spokeFetch(`/api/dns/overrides/verify${qs}${qs ? '&' : '?'}minutes=${mins}`);
@@ -3075,11 +3075,11 @@ async function loadDnsOverrideLiveCheck(minutes) {
 function _dnsOverrideLiveView(d, mins, error) {
     const windows = [[60, 'Last hour'], [1440, 'Last 24 hours'], [10080, 'Last 7 days']];
     const header = `<div class="flex items-center gap-2 mb-2">
-        <h4 class="text-sm font-bold text-[#263040]">Live check</h4>
+        <h4 class="text-sm font-bold text-navy">Live check</h4>
         <select onchange="loadDnsOverrideLiveCheck(parseInt(this.value, 10))" class="ml-auto border border-slate-300 rounded-md px-2 py-1 text-xs">
             ${windows.map(([v, t]) => `<option value="${v}" ${v === mins ? 'selected' : ''}>${t}</option>`).join('')}
         </select>
-        <button onclick="loadDnsOverrideLiveCheck()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold">Re-check</button>
+        <button onclick="loadDnsOverrideLiveCheck()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-full text-xs font-bold">Re-check</button>
     </div>`;
     if (!d) return header + `<p class="text-sm text-red-600">${escapeHtml(error || 'Live check unavailable')}</p>`;
     const hits = d.hits || [];
@@ -3091,10 +3091,10 @@ function _dnsOverrideLiveView(d, mins, error) {
         const views = !m.ok ? `<span class="px-2 py-0.5 rounded-md text-xs ${bad}" title="${escapeHtml(m.error)}">no answer: ${escapeHtml(m.error || 'unreachable')}</span>`
             : (m.views || []).map(v => v.loaded
                 ? `<span class="px-2 py-0.5 rounded-md text-xs ${ok}" title="${v.answers} answer line(s) loaded in Unbound">${escapeHtml(v.profile)} ✓ loaded</span>`
-                : `<span class="px-2 py-0.5 rounded-md text-xs ${bad}" title="${escapeHtml(v.error)}">${escapeHtml(v.profile)} ✗ not loaded</span>`).join(' ') || '<span class="text-xs text-slate-400">no profiles</span>';
+                : `<span class="px-2 py-0.5 rounded-md text-xs ${bad}" title="${escapeHtml(v.error)}">${escapeHtml(v.profile)} ✗ not loaded</span>`).join(' ') || '<span class="text-xs text-slate-500">no profiles</span>';
         const logging = !m.ok ? '' : m.log_local_actions === true ? `<span class="px-2 py-0.5 rounded-md text-xs ${ok}">on</span>`
             : m.log_local_actions === false ? `<span class="px-2 py-0.5 rounded-md text-xs ${warn}" title="Turns on automatically with the next override push to this server">off</span>`
-            : '<span class="text-xs text-slate-400">unknown</span>';
+            : '<span class="text-xs text-slate-500">unknown</span>';
         return `<tr class="border-b border-slate-100">
             <td class="px-4 py-2 text-sm font-medium">${escapeHtml(m.display_name)}</td>
             <td class="px-4 py-2">${views}</td>
@@ -3137,7 +3137,7 @@ function _dnsOverrideLiveView(d, mins, error) {
         <div class="mb-4">${tableWrap(tableHead(['DNS server', 'Profiles in Unbound', 'Answer logging', 'Override answers']) + `<tbody>${memberRows}</tbody>`)}</div>
         ${clientRows ? `<div class="mb-4">${tableWrap(tableHead(['Client IP / Subnet', 'Label', 'Profile', 'Status', 'Last override answer']) + `<tbody>${clientRows}</tbody>`)}</div>` : ''}
         ${hits.length ? tableWrap(tableHead(['Time', 'DNS server', 'Client', 'Name', 'Type', 'Result', 'Profile']) + `<tbody>${hitRows}</tbody>`)
-            : '<p class="text-sm text-slate-400">No assigned client queried a name in its profile in this window.</p>'}`;
+            : '<p class="text-sm text-slate-500">No assigned client queried a name in its profile in this window.</p>'}`;
 }
 
 function editDnsOverrideProfile(name) {
@@ -3149,30 +3149,30 @@ function showDnsOverrideProfileModal(editItem) {
     const isEdit = !!editItem;
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     openModal('dns-override-profile-modal', `
-        <h3 class="text-lg font-bold text-[#263040]">${isEdit ? 'Edit Override Profile' : 'Add Override Profile'}</h3>
+        <h3 class="text-lg font-bold text-navy">${isEdit ? 'Edit Override Profile' : 'Add Override Profile'}</h3>
         <div class="space-y-3">
             <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Name</label>
+                <label class="text-xs text-slate-500 font-bold">Name</label>
                 <input id="dns-ovp-name" class="${inputCls}" value="${escapeHtml(isEdit ? editItem.name : '')}" placeholder="PAVO-DEVICE" title="Letters, digits, '-', '_' or '.' (max 48)">
             </div>
             <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Description</label>
+                <label class="text-xs text-slate-500 font-bold">Description</label>
                 <input id="dns-ovp-desc" class="${inputCls}" value="${escapeHtml(isEdit ? (editItem.description || '') : '')}" placeholder="What clients with this profile see">
             </div>
             <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Answers</label>
+                <label class="text-xs text-slate-500 font-bold">Answers</label>
                 <textarea id="dns-ovp-records" rows="6" class="${inputCls} font-mono text-xs" placeholder="api.example.com A 10.1.2.3&#10;*.cdn.example.com A 10.1.2.4 60&#10;portal.example.com CNAME lab.example.net">${escapeHtml(isEdit ? _dnsOverrideRecordLines(editItem) : '')}</textarea>
-                <p class="text-xs text-slate-400">One per line: <span class="font-mono">name TYPE value [ttl]</span>. TYPE is A, AAAA or CNAME. <span class="font-mono">*.zone</span> answers every name under that zone.</p>
+                <p class="text-xs text-slate-500">One per line: <span class="font-mono">name TYPE value [ttl]</span>. TYPE is A, AAAA or CNAME. <span class="font-mono">*.zone</span> answers every name under that zone.</p>
             </div>
             <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Blocked names</label>
+                <label class="text-xs text-slate-500 font-bold">Blocked names</label>
                 <textarea id="dns-ovp-block" rows="3" class="${inputCls} font-mono text-xs" placeholder="telemetry.example.com&#10;*.ads.example.net">${escapeHtml(isEdit ? (editItem.block || []).join('\n') : '')}</textarea>
-                <p class="text-xs text-slate-400">One per line; these return NXDOMAIN (including every name below them).</p>
+                <p class="text-xs text-slate-500">One per line; these return NXDOMAIN (including every name below them).</p>
             </div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="saveDnsOverrideProfile()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${isEdit ? 'Save Changes' : 'Add Profile'}</button>
-            <button onclick="document.getElementById('dns-override-profile-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button onclick="saveDnsOverrideProfile()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold">${isEdit ? 'Save Changes' : 'Add Profile'}</button>
+            <button onclick="document.getElementById('dns-override-profile-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm">Cancel</button>
         </div>`, { card: 'w-full max-w-xl p-6 space-y-4 max-h-[90vh] overflow-y-auto' });
     const modal = document.getElementById('dns-override-profile-modal');
     if (modal && isEdit) modal.dataset.editName = editItem.name;
@@ -3291,36 +3291,36 @@ function showDnsOverrideAssignModal(preset) {
         .concat(profiles.map(x => `<option value="${escapeHtml(x.name)}" ${x.name === currentProfile ? 'selected' : ''}>${escapeHtml(x.name)}${x.description ? ' — ' + escapeHtml(x.description) : ''}</option>`)).join('');
     const scopeHtml = p.lock ? `
             <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Apply to</label>
+                <label class="text-xs text-slate-500 font-bold">Apply to</label>
                 <select id="dns-ova-scope" onchange="_dnsOverrideScopeChanged()" class="${inputCls}">
                     <option value="device">This device only (${escapeHtml(p.target || '')})</option>
                     <option value="subnet">A subnet</option>
                 </select>
             </div>` : '';
     openModal('dns-override-assign-modal', `
-        <h3 class="text-lg font-bold text-[#263040]">${p.edit ? 'Edit DNS Override' : 'DNS Override'}</h3>
+        <h3 class="text-lg font-bold text-navy">${p.edit ? 'Edit DNS Override' : 'DNS Override'}</h3>
         <div class="space-y-3">${scopeHtml}
             <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Client IP or subnet</label>
+                <label class="text-xs text-slate-500 font-bold">Client IP or subnet</label>
                 <input id="dns-ova-target" value="${escapeHtml(p.target || '')}" ${p.lock ? 'readonly' : ''} class="${inputCls}${p.lock ? ' bg-slate-50 cursor-not-allowed' : ''}" placeholder="10.1.2.3 or 10.1.2.0/24" title="A single IP, or a subnet in CIDR form (e.g. 10.1.2.0/24)${isAdmin() ? '' : ' inside your tenant\'s subnets'}">
                 ${current && !current.exact ? `<p class="text-xs text-amber-700">Currently inherits <b>${escapeHtml(current.profile)}</b> from ${escapeHtml(current.target)}. A device assignment takes precedence.</p>` : ''}
             </div>
             <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Profile</label>
+                <label class="text-xs text-slate-500 font-bold">Profile</label>
                 <select id="dns-ova-profile" class="${inputCls}">${opts}</select>
             </div>
             <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Label</label>
+                <label class="text-xs text-slate-500 font-bold">Label</label>
                 <input id="dns-ova-label" value="${escapeHtml(p.label || '')}" class="${inputCls}" placeholder="Device name (optional)">
             </div>
             <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Comment</label>
+                <label class="text-xs text-slate-500 font-bold">Comment</label>
                 <input id="dns-ova-comment" value="${escapeHtml(currentComment)}" maxlength="500" class="${inputCls}" placeholder="Why this override exists (optional)">
             </div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="saveDnsOverrideAssignment()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${p.edit ? 'Save Changes' : 'Apply'}</button>
-            <button onclick="document.getElementById('dns-override-assign-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button onclick="saveDnsOverrideAssignment()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold">${p.edit ? 'Save Changes' : 'Apply'}</button>
+            <button onclick="document.getElementById('dns-override-assign-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     const modal = document.getElementById('dns-override-assign-modal');
     if (modal) {

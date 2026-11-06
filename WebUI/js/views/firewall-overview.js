@@ -14,9 +14,9 @@ function bits(bps) {
 
 function usageBar(label, percent, detail) {
     if (percent === null || percent === undefined) {
-        return safeHtml`<div class="text-xs text-slate-400">${label}: n/a</div>`;
+        return safeHtml`<div class="text-xs text-slate-500">${label}: n/a</div>`;
     }
-    const color = percent >= 90 ? 'bg-red-500' : percent >= 70 ? 'bg-amber-500' : 'bg-[#01A982]';
+    const color = percent >= 90 ? 'bg-red-500' : percent >= 70 ? 'bg-amber-500' : 'bg-primary';
     return safeHtml`<div>
         <div class="flex justify-between text-xs text-slate-600 mb-1"><span>${label}</span><span>${percent}%${detail ? ` · ${detail}` : ''}</span></div>
         <div class="h-2 bg-slate-100 rounded"><div class="h-2 rounded ${color}" style="width:${Math.min(100, percent)}%"></div></div>
@@ -56,7 +56,7 @@ function firewallCard(name, reply) {
     return safeHtml`<div class="border border-slate-200 rounded-lg p-4 space-y-3">
         <div class="flex items-center justify-between">
             <div class="flex items-center gap-2 font-semibold text-slate-700">${dot(healthy ? 'bg-green-500' : 'bg-amber-500')}${name}</div>
-            <div class="text-[11px] text-slate-400">${o.hostname}${reply.stale ? ' (stale)' : ''}</div>
+            <div class="text-xs text-slate-500">${o.hostname}${reply.stale ? ' (stale)' : ''}</div>
         </div>
         <div class="text-xs text-slate-500">${subtitle}</div>
         ${usageBar('CPU', o.cpu_percent)}
@@ -65,13 +65,13 @@ function firewallCard(name, reply) {
             <div class="text-xs font-semibold text-slate-600 mb-1">Gateways</div>
             ${gatewayRows.length
                 ? safeHtml`<table class="w-full text-xs text-slate-600">${gatewayRows}</table>`
-                : safeHtml`<div class="text-xs text-slate-400">No gateways reported</div>`}
+                : safeHtml`<div class="text-xs text-slate-500">No gateways reported</div>`}
         </div>
         <div>
             <div class="text-xs font-semibold text-slate-600 mb-1">Traffic</div>
             ${trafficRows.length
                 ? safeHtml`<table class="w-full text-xs text-slate-600">${trafficRows}</table>`
-                : safeHtml`<div class="text-xs text-slate-400">No traffic data</div>`}
+                : safeHtml`<div class="text-xs text-slate-500">No traffic data</div>`}
         </div>
     </div>`;
 }
