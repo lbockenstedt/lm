@@ -70,6 +70,9 @@ class _ConcSpoke(cp.BaseControlPlane):
         self.modules = {}
         self.module_type = "test"
         self.signer = None   # unsigned frames (_encode_frame → <empty-sig>.<body>)
+        self._cmd_tasks = set()
+        self._cmd_stats = {"rejected_full": 0, "dropped_stale": 0,
+                           "last_rejected_at": None, "by_type": {}}
 
     def _sign(self, msg):  # noqa: D401
         return "sig"
@@ -176,3 +179,29 @@ async def test_command_queued_past_hub_wait_is_skipped():
 def test_hub_wait_comes_from_header_ttl():
     assert cp._hub_wait_s({"header": {"ttl": 31}}) == 31.0
     assert cp._hub_wait_s({"header": {}}) is None
+
+
+# ── Queue diagnostics ────────────────────────────────────────────────────────
+
+async def test_command_queue_stats_track_inflight_and_timing():
+    spoke = _build()
+    ws = _Ws()
+    send_lock = asyncio.Lock()
+    sem = asyncio.Semaphore(8)
+    task = asyncio.create_task(
+        spoke._handle_one_command(ws, "SLOW_CMD", {}, "corrA", send_lock, sem))
+    spoke._cmd_tasks.add(task)
+    spoke._cmd_type_stats("SLOW_CMD")["inflight"] += 1
+    task.add_done_callback(spoke._cmd_tasks.discard)
+    task.add_done_callback(lambda t: spoke._record_command_done("SLOW_CMD", 0.0, t))
+
+    stats = spoke._command_queue_stats()
+    assert stats["inflight"] == 1
+    assert stats["by_type"]["SLOW_CMD"]["inflight"] == 1
+
+    await task
+    await asyncio.sleep(0)
+    stats = spoke._command_queue_stats()
+    assert stats["inflight"] == 0
+    assert stats["by_type"]["SLOW_CMD"]["done"] == 1
+    assert stats["by_type"]["SLOW_CMD"]["inflight"] == 0

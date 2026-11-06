@@ -1540,6 +1540,31 @@ def register(app, hub, ctx):
         # Return the command_runner result.
         return {"status": "ok", "target": target, "result": res}
 
+    # Queue + timeout diagnostics for one spoke.
+    @app.post("/admin/ops/spoke-queue")
+    async def admin_ops_spoke_queue(request: Request):
+        """Show why a spoke is timing out: its command-queue stats (in-flight vs
+        cap, rejected/stale counts, per-command avg/max latency) plus the hub's
+        own timeout counts for it. The spoke answers this inline, so it works
+        while its queue is full.
+
+        Body: ``{"target": "<spoke_id>"}``."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        target = str((body or {}).get("target") or "").strip()
+        if not target:
+            raise HTTPException(status_code=400, detail="target required")
+        if hub._primary_key(target) not in (getattr(hub, "active_connections", {}) or {}):
+            raise HTTPException(status_code=404, detail=f"spoke '{target}' not connected")
+        resp = await hub.request_response(target, "SPOKE_GET_QUEUE_STATS", {}, timeout=15.0)
+        reply = ((resp or {}).get("payload", {}) or {}).get("data", resp) or {}
+        return {"status": "ok", "target": target,
+                "spoke_queue": reply.get("data", reply),
+                "hub_timeouts": dict(hub._request_timeouts_by_spoke.get(target, {}))}
+
     # Run the curated diagnostic bundle on a target in one call.
     @app.post("/admin/ops/spoke-diag")
     async def admin_ops_spoke_diag(request: Request):
