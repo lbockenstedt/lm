@@ -24,6 +24,9 @@ from typing import Any, Dict, Iterable, List, Set
 # so the registry must outlive that. Hosts seen in the last 24 hours are monitored.
 KEEP_SECONDS = 37 * 86400       # NetBox deletes after 7d + 30d unseen
 MONITOR_WINDOW = 24 * 3600      # in Zabbix while seen within a day
+# An unchanged host is re-pushed to NetBox at most hourly (its 7-day staleness clock
+# only needs an occasional refresh); every sweep pass re-pushing it overloads NetBox.
+PUSH_EVERY = 3600
 # Identity fields copied from a scan result into the registry entry.
 _FIELDS = ("hostname", "object_type", "snmp_credential_id")
 
@@ -82,6 +85,35 @@ def prune(registry: Dict[str, Dict[str, Any]], now: float,
     for ip in old:
         registry.pop(ip, None)
     return len(old)
+
+
+def _push_sig(entry: Dict[str, Any]) -> str:
+    """What NetBox gets for the entry, so a changed hostname/profile is re-pushed at once."""
+    return repr(netbox_records([entry])[0])
+
+
+def due_for_push(registry: Dict[str, Dict[str, Any]], ips: Iterable[str], now: float,
+                 every: float = PUSH_EVERY) -> List[str]:
+    """The ``ips`` (sorted) that NetBox needs: never pushed, changed since the
+    last push, or last pushed ``every`` seconds ago or more."""
+    out = []
+    for ip in sorted(set(ips)):
+        e = registry.get(ip)
+        if not e:
+            continue
+        if (e.get("pushed_sig") != _push_sig(e)
+                or now - float(e.get("pushed_at") or 0) >= every):
+            out.append(ip)
+    return out
+
+
+def mark_pushed(registry: Dict[str, Dict[str, Any]], ips: Iterable[str], now: float) -> None:
+    """Remember that NetBox accepted these hosts as they are now."""
+    for ip in ips:
+        e = registry.get(ip)
+        if e:
+            e["pushed_at"] = now
+            e["pushed_sig"] = _push_sig(e)
 
 
 def netbox_records(entries: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:

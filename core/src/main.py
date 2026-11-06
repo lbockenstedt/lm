@@ -2015,7 +2015,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 message_id=msg_id,
                 timestamp=time.time(),
                 sender_id="hub",
-                destination_id=spoke_id
+                destination_id=spoke_id,
+                # Tells the spoke when we stop waiting, so it can skip the
+                # command if it is still queued by then.
+                ttl=int(timeout) + 1,
             ),
             payload=MessagePayload(type=command_type, data=data)
         )
