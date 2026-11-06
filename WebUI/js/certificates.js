@@ -121,9 +121,17 @@ async function loadLEData(subMenu) {
     // so both the nested le shape and a flat sibling shape resolve the same way.
     const inner = b => (b && typeof b.data === 'object' && b.data !== null) ? b.data : (b || {});
 
+    // Status, certs and in-flight deploys load in parallel. Available targets
+    // are only needed by the Manage modal: prefetch them without waiting (the
+    // hub may need a live agent query for them).
+    const statusReq = _spokeFetch('/api/le/status').catch(() => null);
+    const certsReq = _spokeFetch('/api/le/certs?tenant=' + encodeURIComponent(currentTenant));
+    const inflightReq = _spokeFetch('/api/le/inflight').catch(() => null);
+    _leRefreshAvailableTargets();
+
     // Status bar from /api/le/status (best-effort — falls back to the certs call).
     try {
-        const s = await _spokeFetch('/api/le/status');
+        const s = await statusReq;
         const bar = document.getElementById('le-status-bar');
         if (bar && s.ok && s.data) {
             const d = inner(s.data);
@@ -135,7 +143,7 @@ async function loadLEData(subMenu) {
     } catch (e) { /* status is decorative; the certs call surfaces the real error */ }
 
     try {
-        const { ok, data: d, detail } = await _spokeFetch('/api/le/certs?tenant=' + encodeURIComponent(currentTenant));
+        const { ok, data: d, detail } = await certsReq;
         if (!ok) {
             container.innerHTML = `${_spokeErrorBanner(detail, 'Certificate (le) spoke not connected')}${_isSpokeUpdating(detail) ? '' : '<p class="px-4 pb-4 text-xs text-slate-500">Install the le spoke (install_all.sh, or its install_le.sh) and approve it in Setup → Spokes &amp; Agents.</p>'}`;
             return;
@@ -149,22 +157,13 @@ async function loadLEData(subMenu) {
         // deploying target shows yellow with a live elapsed timer instead of its
         // stale last_status. See startLeInflightPollers for the periodic refresh.
         try {
-            const ifr = await _spokeFetch('/api/le/inflight');
+            const ifr = await inflightReq;
             const ifb = (ifr && ifr.ok) ? inner(ifr.data) : null;
             const ifList = (ifb && Array.isArray(ifb.inflight)) ? ifb.inflight : [];
             const imap = {};
             for (const it of ifList) imap[`${it.domain}|${it.module_type}|${it.identifier || ''}`] = it.since;
             window._leInflightMap = imap;
         } catch (e) { window._leInflightMap = {}; }
-        // Available cert-capable targets (connected spokes/agents) — fetched once
-        // per load and cached for the Manage modal (showLeTargetsModal) so its
-        // module <select> lists only connected cert-capable spokes/agents. Adding
-        // /removing a target is done via Manage, not inline on the main screen.
-        try {
-            const ar = await _spokeFetch('/api/le/targets/available');
-            const ab = (ar && ar.ok) ? inner(ar.data) : null;
-            window._leAvailableTargets = (ab && Array.isArray(ab.targets)) ? ab.targets : [];
-        } catch (e) { window._leAvailableTargets = []; }
         const inflightMap = window._leInflightMap || {};
         // Friendly "how long ago" for a target's last_pushed_at — relative time
         // makes a re-push loop obvious at a glance (e.g. "2m ago" that keeps
@@ -732,7 +731,8 @@ function leTgtMtChange(mtSelId, idSelId) {
 async function _leRefreshAvailableTargets() {
     try {
         const r = await _spokeFetch('/api/le/targets/available');
-        const b = (r && r.ok) ? inner(r.data) : null;
+        const d = (r && r.ok) ? r.data : null;
+        const b = (d && typeof d.data === 'object' && d.data !== null) ? d.data : d;
         window._leAvailableTargets = (b && Array.isArray(b.targets)) ? b.targets : (window._leAvailableTargets || []);
     } catch (e) { /* keep whatever we have */ }
 }
