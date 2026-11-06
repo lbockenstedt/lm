@@ -1163,6 +1163,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         self._loop_lag_hist: "deque" = deque(maxlen=60)   # ~60s of samples
         # Total number of request timeouts since start.
         self._request_timeouts_total: int = 0
+        # Timeouts since start, keyed spoke_id -> command_type -> count.
+        self._request_timeouts_by_spoke: Dict[str, Dict[str, int]] = {}
         # Aligned with DRAIN_WINDOW_S (a spoke mid self-update can take up to
         # ~180s to git-pull, os._exit, relaunch, then flush its late FAILED
         # replies). A request that times out EARLY in that window gets its late
@@ -2126,6 +2128,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # Count the timeout.
             try:
                 self._request_timeouts_total += 1
+                per_spoke = self._request_timeouts_by_spoke.setdefault(spoke_id, {})
+                per_spoke[command_type] = per_spoke.get(command_type, 0) + 1
             except Exception:  # noqa: BLE001
                 pass
             # Return a timeout error.
