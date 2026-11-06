@@ -66,9 +66,22 @@ var _lmNavSeq = 0, _lmActiveFetchCount = 0, currentUser = null;
 function _lmNotifyFetchState() {}
 function _lmIsAuthSubmitEndpoint() { return false; }
 function handleSessionExpired() {}
-var _parked = [];
-function _lmOrigFetch() {
-    return new Promise(function (res, rej) { _parked.push({ res: res, rej: rej }); });
+if (typeof AbortController === 'undefined') {           // jsc has no DOM APIs
+    globalThis.AbortController = function () {
+        var sig = { aborted: false, _fns: [], addEventListener: function (_, f) { this._fns.push(f); } };
+        this.signal = sig;
+        this.abort = function () { if (!sig.aborted) { sig.aborted = true; sig._fns.forEach(function (f) { f(); }); } };
+    };
+    globalThis.AbortSignal = {};
+}
+var _parked = [], aborted = 0;
+function _lmOrigFetch(input, init) {
+    return new Promise(function (res, rej) {
+        _parked.push({ res: res, rej: rej });
+        if (init && init.signal) init.signal.addEventListener('abort', function () {
+            aborted++; rej(new Error('AbortError'));
+        });
+    });
 }
 function release() { _parked.forEach(function (p) { p.res({ status: 200 }); }); }
 function fail() { _parked.forEach(function (p) { p.rej(new Error('net down')); }); }
@@ -83,7 +96,9 @@ function track(p) {
 
 def _fetch_js(body):
     src = _src()
-    return (_FETCH_HARNESS + _extract("_lmLeftPageSince", src) + "\n"
+    return (_FETCH_HARNESS + "var _lmPageReads = new Set();\n"
+            + _extract("_lmNavigated", src) + "\n"
+            + _extract("_lmLeftPageSince", src) + "\n"
             + _extract("lmFetch", src) + "\n(async function () {\n" + body
             + "\n})();")
 
@@ -101,6 +116,27 @@ def test_tab_switch_drops_the_old_tabs_response(tmp_path):
     """)
     assert _run(js, tmp_path) == [
         "overview=pending diag=resolved active=0"]
+
+
+def test_navigation_cancels_the_old_pages_reads(tmp_path):
+    """A read from a page the user left must free its browser connection (the
+    hub is HTTP/1.1: ~6 per host) instead of holding it until the spoke answers;
+    pages stalled until a refresh once a few such reads piled up."""
+    js = _fetch_js("""
+        _lmNavSeq = 1;
+        var old = track(lmFetch('/api/pxmx/vms'));
+        var write = track(lmFetch('/api/x', { method: 'POST' }));
+        _lmNavigated();
+        var cur = track(lmFetch('/api/pxmx/diagnostics'));
+        await drain();
+        out('aborted=' + aborted + ' old=' + old.state + ' write=' + write.state
+            + ' tracked=' + _lmPageReads.size);
+        release(); await drain();
+        out('cur=' + cur.state + ' write=' + write.state + ' tracked=' + _lmPageReads.size);
+    """)
+    assert _run(js, tmp_path) == [
+        "aborted=1 old=pending write=pending tracked=1",
+        "cur=resolved write=resolved tracked=0"]
 
 
 def test_failed_old_request_does_not_paint_an_error_either(tmp_path):
@@ -149,6 +185,6 @@ def test_every_navigation_entry_point_bumps_the_counter():
     src = _src()
     for name in ("setView", "setSubView", "setSubChild", "setSubGrandchild",
                  "refreshCurrentView"):
-        assert "_lmNavSeq++" in _extract(name, src), (
-            "%s must bump _lmNavSeq so the page it leaves can't paint over "
+        assert "_lmNavigated()" in _extract(name, src), (
+            "%s must call _lmNavigated() so the page it leaves can't paint over "
             "the new one" % name)
