@@ -2897,12 +2897,30 @@ def register(app, hub, ctx):
             "LE_DELETE_DNS_CRED", {"tenant_id": _le_tenant(request), "name": name})
         return payload
 
+    # _dns_hosts results by network set: {key: (expires_at, hosts, any_source)}.
+    _dns_hosts_cache = {}
+    _DNS_HOSTS_TTL = 60.0
+
     async def _dns_hosts(nets):
         """A/AAAA hostnames from BOTH DNS sources — the DNS module (Unbound spoke)
         AND every connected OPNsense firewall's Unbound host-overrides. ``nets`` =
         list of ip_network to keep (only hosts whose IP is in one), or None to keep
-        ALL hosts. Returns (hostnames:set, any_source_reachable:bool)."""
-        import ipaddress
+        ALL hosts. Returns (hostnames:set, any_source_reachable:bool).
+
+        Cached for ``_DNS_HOSTS_TTL`` seconds: the Certificates page calls this
+        on every load, and each call pulls every DNS record plus every
+        firewall's overrides."""
+        key = None if nets is None else tuple(sorted(str(n) for n in nets))
+        hit = _dns_hosts_cache.get(key)
+        if hit and hit[0] > time.time():
+            return set(hit[1]), hit[2]
+        hosts, any_source = await _dns_hosts_live(nets)
+        if any_source:
+            _dns_hosts_cache[key] = (time.time() + _DNS_HOSTS_TTL, set(hosts), any_source)
+        return hosts, any_source
+
+    async def _dns_hosts_live(nets):
+        """Uncached body of :func:`_dns_hosts`."""
 
         def _in(ip):
             """True when the IP is inside one of the networks."""
@@ -2952,18 +2970,23 @@ def register(app, hub, ctx):
             firewalls = (hub.state.system_state.get("global_config", {}) or {}).get("firewalls", []) or []
         except Exception:  # noqa: BLE001
             firewalls = []
-        # Each connected firewall's host overrides; one failure does not stop the others.
-        for sid in {fw.get("spoke_id") for fw in firewalls if fw.get("spoke_id")}:
-            if hub._primary_key(sid) not in getattr(hub, "active_connections", {}):
+        # Each connected firewall's host overrides, all at once; one failure
+        # does not stop the others.
+        sids = [sid for sid in {fw.get("spoke_id") for fw in firewalls if fw.get("spoke_id")}
+                if hub._primary_key(sid) in getattr(hub, "active_connections", {})]
+        results = await asyncio.gather(
+            *(hub.request_response(sid, "OPNSENSE_GET_DNS_RECORDS", {}, timeout=60.0) for sid in sids),
+            return_exceptions=True)
+        for fres in results:
+            if isinstance(fres, BaseException):
                 continue
-            try:
-                fres = await hub.request_response(sid, "OPNSENSE_GET_DNS_RECORDS", {}, timeout=60.0)
-                any_source = True
+            any_source = True
+            if isinstance(fres, list):
+                recs = fres
+            else:
                 recs = (fres or {}).get("data") or (fres or {}).get("dns_records") \
-                    or (fres or {}).get("records") or (fres if isinstance(fres, list) else [])
-                _collect(recs, ("hostname", "host", "name"), ("ip", "value", "server"))
-            except Exception:  # noqa: BLE001 — one bad firewall never blocks the rest
-                continue
+                    or (fres or {}).get("records") or []
+            _collect(recs, ("hostname", "host", "name"), ("ip", "value", "server"))
         return hosts, any_source
 
     def _le_certs_holder(data):
@@ -3069,23 +3092,31 @@ def register(app, hub, ctx):
                 nets.append(ipaddress.ip_network(p, strict=False))
             except ValueError:
                 continue
-        # The tenant's DNS hostnames, and whether any DNS source answered.
-        tenant_hosts, any_source = await _dns_hosts(nets) if nets else (set(), True)
-        if nets and not any_source and not shared_hidden:
-            return data  # both DNS sources unreachable → fail open
-
-        def _match(cert):
-            """True when the caller should see this cert."""
+        def _owner_match(cert):
+            """Visibility from explicit ownership, or None when the cert has no
+            owners (then the legacy DNS-subnet match decides)."""
             # Shared spoke hidden: only certs this tenant owns.
             if shared_hidden:
                 return _vt in {access._norm_tenant_id(t)
                                for t in _lca.get_tenants(hub, cert.get("domain"))}
-            # Explicit per-cert tenant ownership takes precedence: an owned or
-            # shared cert is always visible; a cert owned by OTHER tenants only
-            # is hidden — regardless of DNS. Certs with no explicit owners fall
-            # back to the legacy DNS-subnet match below (backward compatible).
-            own = _lca.visible_to(hub, sess, cert.get("domain"), want_tenants,
-                                  admin_all=not explicit_scope)
+            # An owned or shared cert is always visible; a cert owned only by
+            # OTHER tenants is hidden — regardless of DNS.
+            return _lca.visible_to(hub, sess, cert.get("domain"), want_tenants,
+                                   admin_all=not explicit_scope)
+
+        # The DNS lookup (every DNS record + every firewall's overrides) is only
+        # needed for certs with no explicit owners — skip it when there are none.
+        need_dns = bool(nets) and any(
+            isinstance(c, dict) and _owner_match(c) is None
+            for c in (_le_certs_holder(data) or []))
+        # The tenant's DNS hostnames, and whether any DNS source answered.
+        tenant_hosts, any_source = await _dns_hosts(nets) if need_dns else (set(), True)
+        if need_dns and not any_source:
+            return data  # both DNS sources unreachable → fail open
+
+        def _match(cert):
+            """True when the caller should see this cert."""
+            own = _owner_match(cert)
             if own is not None:
                 return own
             # No tenant hostnames: hide it.
@@ -3619,8 +3650,8 @@ def register(app, hub, ctx):
         entry per connected spoke of those types. Offline / non-cert-capable
         spokes are omitted — they'd only ERROR on distribute. Returns
         {targets: [{module_type, identifier, label, spoke_id?}]}. The per-node
-        agent list reuses the /api/pxmx/agents stale-while-revalidate cache so
-        opening the modal doesn't block on a fresh GET_AGENTS fan-out. List
+        agent list reuses the /api/pxmx/agents stale-while-revalidate cache
+        (``cached_agents``) so it doesn't block on a fresh GET_AGENTS fan-out. List
         shaping is in cert_distribution.build_available_targets (pure, tested).
 
         Tenant scoping: a non-admin (tenant-admin) sees ONLY targets bound to one
@@ -3637,7 +3668,7 @@ def register(app, hub, ctx):
         if agent_spokes:
             try:
                 from routes import pxmx as _pxmx
-                agg = await _pxmx._maybe_refresh_agents(hub, agent_spokes)
+                agg = await _pxmx.cached_agents(hub, agent_spokes)
                 agents = (agg or {}).get("agents", []) or []
             except Exception as e:  # noqa: BLE001 - modal still usable w/o agents
                 logger.debug("le_available_targets: agents gather failed: %s", e)
