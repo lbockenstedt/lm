@@ -62,6 +62,29 @@ def test_put_requires_psk(hub):
         run(cv.put_secret(hub, "t1", "he", {"user": "a"}, psk="nope"))
 
 
+def test_automation_get_caches_cloud_reads_and_update_misses(hub):
+    run(cv.set_bucket_psk(hub, cv.ADMIN_BUCKET, "adminpass1"))
+    run(cv.put_secret(hub, cv.ADMIN_BUCKET, "k", {"v": "1"}, mode="hub",
+                      psk="adminpass1", actor="admin"))
+    reads = []
+    real = cv._cv.get_secret
+
+    async def counting(h, name, http=None):
+        reads.append(name)
+        return await real(h, name, http=http)
+    cv._cv.get_secret = counting
+    try:
+        first = run(cv.automation_get(hub, cv.ADMIN_BUCKET, "k"))
+        first["v"] = "mutated"
+        assert run(cv.automation_get(hub, cv.ADMIN_BUCKET, "k")) == {"v": "1"}
+        assert len(reads) == 1
+        run(cv.put_secret(hub, cv.ADMIN_BUCKET, "k", {"v": "2"}, mode="hub",
+                          psk="adminpass1", actor="admin"))
+        assert run(cv.automation_get(hub, cv.ADMIN_BUCKET, "k")) == {"v": "2"}
+    finally:
+        cv._cv.get_secret = real
+
+
 def test_psk_mode_roundtrip_and_wrong_psk(hub):
     run(cv.set_bucket_psk(hub, "t1", "hunter2pass"))
     run(cv.put_secret(hub, "t1", "he", {"username": "u", "password": "p"},

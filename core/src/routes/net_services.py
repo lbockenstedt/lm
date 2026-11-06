@@ -5334,6 +5334,15 @@ def register(app, hub, ctx):
                                   "DHCP_HA_APPLY", {},
                                   log_name="dhcp_ha_apply", timeout=120)
 
+    @app.post("/api/dhcp/declines/release")
+    async def dhcp_release_declines(request: Request, tenant: str = None):
+        """Free every declined address on the DHCP server (both HA nodes) so
+        the pool can hand them out again (Global-Admin only — covered by
+        ``_ADMIN_INFRA_WRITE_PREFIXES``)."""
+        return await _relay_spoke(_dhcp_spoke_for_request(request, tenant),
+                                  "DHCP_RELEASE_DECLINES", {},
+                                  log_name="dhcp_release_declines", timeout=90)
+
     @app.get("/api/dhcp/dns-hook")
     async def dhcp_dns_hook_status(request: Request, tenant: str = None):
         """Real-time Kea -> Unbound DNS registration hook ("Option 1"):
