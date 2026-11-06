@@ -111,15 +111,15 @@ function _renderSettingsSection(subMenu) {
                 <div class="${card} p-5 flex flex-wrap items-center gap-3">
                     <div>
                         <p class="text-lg font-bold text-navy">Module Diagnostics</p>
-                        <p class="text-xs text-slate-500">Every producer behind the footer MODULE STATUS dot, with the evidence for each alert.</p>
+                        <p class="text-xs text-slate-500">Every alert behind the footer Module Status indicator, with the evidence for each.</p>
                     </div>
                     <div class="ml-auto flex items-center gap-2">
-                        <button onclick="copyModuleDiagnostics(this)" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-xs font-bold" title="Copy every alert + finding as plain text for a ticket or chat">⧉ Copy all</button>
-                        <button onclick="loadModuleDiagnostics()" class="text-xs px-3 py-1 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50">↻ Refresh</button>
+                        <button onclick="copyModuleDiagnostics(this)" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-xs font-bold" title="Copy every alert and finding as plain text for a ticket or chat">⧉ Copy</button>
+                        <button onclick="loadModuleDiagnostics(); loadServiceClusterSummary()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-xs font-bold" title="Reload alerts and clustered module status">↻ Refresh</button>
                     </div>
                 </div>
                 <div id="service-cluster-summary"></div>
-                <div id="module-diag-body"><p class="text-slate-500 italic text-xs">Loading…</p></div>
+                <div id="module-diag-body" class="space-y-4"><p class="text-slate-500 italic text-xs">Loading…</p></div>
             </div>`;
         loadModuleDiagnostics();
         loadServiceClusterSummary();
