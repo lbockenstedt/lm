@@ -508,7 +508,7 @@ class SpokeRegistryMixin:
         if shared:
             want.add(shared)
         # Helpers that work out a spoke's module type and whether a tenant owns its own spoke.
-        from access import spoke_module_type, tenant_has_own_spoke
+        from access import spoke_module_type, tenant_left_shared
         # Walk the candidates and keep those visible to the tenant.
         out = []
         for sid in cands:
@@ -523,7 +523,7 @@ class SpokeRegistryMixin:
                 continue
             # A tenant with its own spoke of this type is out of the shared
             # environment: only hosts scoped to the tenant itself remain.
-            if tenant_id not in effs and tenant_has_own_spoke(
+            if tenant_id not in effs and tenant_left_shared(
                     self, tenant_id, spoke_module_type(self, sid)):
                 continue
             # Visible: include it.
@@ -605,9 +605,10 @@ class SpokeRegistryMixin:
         # return None here) — do not "fix" it to match them.
         # A spoke bound to the SHARED tenant is the same shared server.
         # Helpers that detect the shared tenant and tenants owning their own spoke.
-        from access import tenant_is_shared, tenant_has_own_spoke
-        # A tenant with its own directory spoke must never fall through to the shared server.
-        if tenant_has_own_spoke(self, tenant_id, "directory"):
+        from access import tenant_is_shared, tenant_shared_fallback_blocked
+        # A tenant with its own directory spoke (or denied shared access) must
+        # never fall through to the shared server.
+        if tenant_shared_fallback_blocked(self, tenant_id, "directory"):
             return None  # own (offline) spoke → never the shared one
         # Otherwise use an unassigned or shared-tenant directory spoke (the shared OU server).
         shared = [sid for sid in cands
@@ -816,9 +817,11 @@ class SpokeRegistryMixin:
         # Find the tenant's own dedicated NAC spoke.
         own = self.get_cppm_spoke_for_tenant(tenant_id)
         # Helpers for the shared tenant id and own-spoke detection.
-        from access import shared_tenant_id as _shared_tenant_id, tenant_has_own_spoke
-        if own or tenant_has_own_spoke(self, tenant_id, "nac"):
-            # A tenant with its own ClearPass is out of the shared NAC environment.
+        from access import (shared_tenant_id as _shared_tenant_id,
+                            tenant_left_shared, tenant_shared_access)
+        if tenant_left_shared(self, tenant_id, "nac") or (
+                own and tenant_shared_access(self, tenant_id) == "auto"):
+            # Out of the shared NAC environment (own ClearPass, or shared access denied).
             return [own] if own else []
         # Otherwise add the shared tenant's NAC spoke, but only if a shared tenant exists.
         shared_tid = _shared_tenant_id()

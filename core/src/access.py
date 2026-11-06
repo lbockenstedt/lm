@@ -1635,22 +1635,57 @@ def tenant_has_own_firewall(hub, tenant_id) -> bool:
     return tenant_has_own_spoke(hub, t, "firewall")
 
 
+# Per-tenant "Shared access" setting (Global Admin, Setup → Tenants):
+#   auto  — default: hide a module's shared resources once the tenant owns its own
+#   allow — always see shared resources, even with its own spokes
+#   deny  — never see shared resources
+SHARED_ACCESS_MODES = ("auto", "allow", "deny")
+
+
+def tenant_shared_access(hub, tenant_id) -> str:
+    """The tenant's shared-access mode (``auto`` when unset or unknown)."""
+    t = _norm_tenant_id(tenant_id)
+    if not t:
+        return "auto"
+    tenants = (getattr(getattr(hub, "state", None), "tenant_state", None) or {}).get("tenants") or {}
+    rec = tenants.get(tenant_id)
+    if not isinstance(rec, dict):
+        rec = next((c for tid, c in tenants.items() if _norm_tenant_id(tid) == t), None)
+    mode = str((rec or {}).get("shared_access") or "auto").strip().lower()
+    return mode if mode in SHARED_ACCESS_MODES else "auto"
+
+
 def tenant_left_shared(hub, tenant_id, module_type) -> bool:
-    """True when ``tenant_id`` owns its own ``module_type`` (``"firewall"`` →
-    ``tenant_has_own_firewall``), so that module's shared resources are hidden
-    from it. No tenant (Global Admin, nothing selected) → False."""
+    """True when ``module_type``'s shared resources are hidden from ``tenant_id``.
+    Follows the tenant's shared-access mode; ``auto`` hides them once the tenant
+    owns its own ``module_type`` (``"firewall"`` → ``tenant_has_own_firewall``).
+    No tenant, ADMIN or the shared tenant itself → False."""
+    t = _norm_tenant_id(tenant_id)
+    if not t or t == ADMIN_TENANT_ID or tenant_is_shared(t):
+        return False
+    mode = tenant_shared_access(hub, t)
+    if mode != "auto":
+        return mode == "deny"
     if canon_module_type(module_type) == "firewall":
         return tenant_has_own_firewall(hub, tenant_id)
     return tenant_has_own_spoke(hub, tenant_id, module_type)
+
+
+def tenant_shared_fallback_blocked(hub, tenant_id, module_type) -> bool:
+    """For single-spoke pickers: True when ``tenant_id`` must NOT fall back to the
+    shared ``module_type`` spoke — it owns one (use it, even offline) or its
+    shared access is denied."""
+    return (tenant_has_own_spoke(hub, tenant_id, module_type)
+            or tenant_left_shared(hub, tenant_id, module_type))
 
 
 def scoped_spoke_of_type(hub, tenant_id, module_type) -> Optional[str]:
     """Single-spoke pick for ``module_type``: the tenant's own connected spoke
     when it owns one (None if all of them are offline — never a shared
     fallback), else the first connected spoke of that type (legacy)."""
-    # Tenant has no own spoke: fall back to any spoke of the type.
+    # Tenant has no own spoke: fall back to any spoke of the type (unless denied).
     if not tenant_has_own_spoke(hub, tenant_id, module_type):
-        return hub.get_spoke_by_type(module_type)
+        return None if tenant_left_shared(hub, tenant_id, module_type) else hub.get_spoke_by_type(module_type)
     # Find the tenant's connected, approved spoke of this type.
     t = _norm_tenant_id(tenant_id)
     want = canon_module_type(module_type)
