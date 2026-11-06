@@ -612,6 +612,8 @@ const LDAP_ICONS = {
 
 // Currently-selected tenant id (the OU to manage). Populated by ensureLDAPTenants.
 window._ldapTenant = window._ldapTenant || '';
+// Header tenant last applied to the Directory picker.
+let _ldapGlobalTenant = null;
 
 async function ensureLDAPTenants(force) {
     if (!window._ldapTenants || force) {
@@ -629,10 +631,15 @@ async function ensureLDAPTenants(force) {
             sel.innerHTML = '<option value="">No tenants</option>';
             window._ldapTenant = '';
         } else {
-            // BUG: We are intentionally ignoring the global 'currentTenant' here.
-            // Even if a tenant is selected globally, we default to the first available
-            // LDAP tenant or keep the existing _ldapTenant, creating a state desync.
-            if (!window._ldapTenant) {
+            // Follow the header tenant picker: use it on first load and whenever it
+            // changes; a choice made in this dropdown sticks until then.
+            const g = (typeof currentTenant === 'string') ? currentTenant.toLowerCase() : '';
+            const match = ts.find(t => String(t.id).toLowerCase() === g);
+            if (match && _ldapGlobalTenant !== g) {
+                window._ldapTenant = match.id;
+            }
+            _ldapGlobalTenant = g;
+            if (!ts.some(t => t.id === window._ldapTenant)) {
                 window._ldapTenant = ts[0].id;
             }
             sel.innerHTML = ts.map(t => `<option value="${escapeHtml(t.id)}" ${t.id === window._ldapTenant ? 'selected' : ''}>${escapeHtml(t.name || t.id)}</option>`).join('');

@@ -265,3 +265,24 @@ def test_health_entra_reports_degraded_when_oidc_unconfigured(monkeypatch):
     assert entra["status"] == "degraded", entra
     assert entra["detail"] == "not configured", entra
     assert "not callable" not in entra["detail"]
+
+
+def test_health_polls_share_one_spoke_check(monkeypatch):
+    """Directory pages poll health every 10s; repeated polls inside the reuse
+    window must not each send LIST_OUS to the directory spoke."""
+    from cryptography.fernet import Fernet
+    monkeypatch.setenv("LM_FERNET_KEY", Fernet.generate_key().decode())
+    client, hub = _build(_admin_state())
+    hub._spokes_by_type["directory"] = "ldap-spoke-1"
+    calls = []
+
+    async def _rr(spoke_id, cmd, data, timeout=30.0):
+        calls.append(cmd)
+        return {"payload": {"data": {"status": "SUCCESS", "data": []}}}
+    hub.request_response = _rr
+    ck = _admin_login(client)
+    for _ in range(3):
+        r = client.get("/api/ldap/health", cookies={"lm_session": ck})
+        assert r.status_code == 200, r.text
+        assert r.json()["ldap"]["status"] == "healthy"
+    assert calls == ["LIST_OUS"]
