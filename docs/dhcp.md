@@ -91,8 +91,9 @@ Add `--ca-cert <coordinator cert>` (required), `--ha-user`/`--ha-password` (requ
 The `dhcp` spoke can install a Kea `run_script` hook (`libdhcp_run_script.so`) that
 calls `unbound-control local_data`/`local_data_remove` directly on every lease
 commit/renewal/release/expiry/decline — no dependency on the hub or the NetBox
-sync loop below (see the `dhcp` repo's README, "Real-Time DNS Registration",
-and `src/kea_dns_hook.py`). The spoke command (`DHCP_DNS_HOOK_CONFIG`/
+sync loop below (see `dhcp/src/kea_dns_hook.py`; it was briefly missing after the
+move from the retired standalone `dhcp` repo, so spokes answered these commands
+with "Unknown command" until redeployed). The spoke command (`DHCP_DNS_HOOK_CONFIG`/
 `DHCP_DNS_HOOK_STATUS`) existed for a while with **no hub route and no WebUI
 control** — nothing ever sent it, so the hook stayed permanently disabled
 (`enabled` defaults to `false`) no matter how it was documented. `GET`/`POST
