@@ -237,6 +237,15 @@ def test_ha_sync_configures_both_nodes_and_skips_the_local_manager(tmp_path):
     assert spoke.mgr.calls == []
 
 
+def test_ha_sync_then_button_release_declines_on_both_nodes(tmp_path):
+    spoke = _spoke(tmp_path, ["kea-a", "kea-b"])
+    _run(spoke.handle_command("DHCP_SYNC", {"subnets": [{"subnet": "10.0.1.0/24"}],
+                                            "reservations": []}))
+    assert {m for m, c in spoke._transport.sent if c == "KEAW_RELEASE_DECLINES"} == {"kea-a", "kea-b"}
+    out = _run(spoke.handle_command("DHCP_RELEASE_DECLINES", {}))
+    assert out["status"] == "SUCCESS" and out["member_errors"] == {}
+
+
 def test_ha_reservation_change_reapplies_the_whole_pair(tmp_path):
     spoke = _spoke(tmp_path, ["kea-a", "kea-b"])
     _run(spoke.handle_command("DHCP_SYNC", {

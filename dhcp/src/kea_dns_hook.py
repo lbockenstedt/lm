@@ -44,6 +44,7 @@ import logging
 import os
 import re
 import stat
+import subprocess
 from typing import Any, Dict, List
 
 logger = logging.getLogger("KeaDnsHook")
@@ -455,6 +456,38 @@ def write_hook_files(settings: Dict[str, Any]) -> None:
             | stat.S_IROTH | stat.S_IXOTH)  # 0755 — Kea execs it as itself
 
     _ensure_kea_writable_log_dir()
+    grant_apparmor_exec()
+
+
+#: Ubuntu's kea-dhcp4 AppArmor profile does not let Kea exec anything, so the
+#: run_script hook was silently denied ("apparmor=DENIED operation=exec").
+#: ``Ux`` runs the script unconfined so it can call python3 and unbound-control.
+APPARMOR_PROFILE = "/etc/apparmor.d/usr.sbin.kea-dhcp4"
+APPARMOR_OVERRIDE = "/etc/apparmor.d/local/usr.sbin.kea-dhcp4"
+APPARMOR_EXEC_RULE = f"  {DNS_HOOK_SCRIPT_PATH} Ux,\n"
+
+
+def grant_apparmor_exec() -> bool:
+    """Let kea-dhcp4 run the hook script. Returns False if AppArmor is not in
+    use or the profile could not be reloaded."""
+    if not os.path.isfile(APPARMOR_PROFILE):
+        return False
+    try:
+        existing = ""
+        if os.path.isfile(APPARMOR_OVERRIDE):
+            with open(APPARMOR_OVERRIDE) as fh:
+                existing = fh.read()
+        if APPARMOR_EXEC_RULE.strip() in existing:
+            return True
+        with open(APPARMOR_OVERRIDE, "a") as fh:
+            fh.write(APPARMOR_EXEC_RULE)
+        subprocess.run(["apparmor_parser", "-r", APPARMOR_PROFILE],
+                       capture_output=True, text=True, timeout=15, check=True)
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning("could not let kea-dhcp4 run %s under AppArmor: %s",
+                       DNS_HOOK_SCRIPT_PATH, e)
+        return False
 
 
 def _ensure_kea_writable_log_dir() -> None:

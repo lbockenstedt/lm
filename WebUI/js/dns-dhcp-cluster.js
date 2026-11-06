@@ -774,6 +774,22 @@ async function syncDhcpFromNetbox() {
     loadDHCPData('Diagnostics');
 }
 
+// Free every declined address (on both HA nodes) so the pool can reuse it.
+async function releaseDhcpDeclines() {
+    if (!confirm('Release every declined DHCP address? Devices that declined them may decline them again if the address really is in use.')) return;
+    try {
+        const res = await fetch('/api/dhcp/declines/release' + _tenantQS(), { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { showToast(data.detail || 'Release failed', 'error'); return; }
+        const n = (data.released || []).length;
+        showToast(data.status === 'SUCCESS'
+            ? (n ? `Released ${n} declined address(es)` : 'No declined addresses to release')
+            : (data.message || `Release reported ${data.status}`),
+            data.status === 'SUCCESS' ? 'success' : 'error');
+    } catch (e) { showToast(e.message, 'error'); }
+    loadDHCPData('Diagnostics');
+}
+
 async function applyDhcpHaConfig() {
     try {
         const res = await fetch('/api/dhcp/ha/apply' + _tenantQS(),
