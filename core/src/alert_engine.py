@@ -67,30 +67,27 @@ def _human_body(label, state, tenant, item, sev, detail, ts, is_bad, extra):
     status pill, a 30-day health-trend strip (``extra['daily']``) and/or client-
     count trend numbers (``extra['trend']``) when available — the same visual
     language as the scheduled report / dashboard."""
-    # Shared inline CSS font stack (email clients ignore stylesheets).
-    P = "font-family:Arial,Helvetica,sans-serif"
+    # HPE Design System colors/font, shared with the scheduled report (inline:
+    # email clients ignore stylesheets).
+    from simulations import email_report as R
+    P = R.FONT
     # Header colour: red for a breach, green for a recovery.
-    hdr = "#c0322a" if is_bad else "#0f7a58"
-    # Reuse the scheduled report's trend-strip and status-pill widgets when available.
-    try:
-        from simulations.email_report import _strip, _pill  # reuse the report's widgets
-    # Report module unavailable: fall back to no strip and a plain escaped status.
-    except Exception:  # noqa: BLE001
-        _strip = lambda d: ""  # noqa: E731
-        _pill = lambda s: _esc(s)  # noqa: E731
+    hdr = R.CRIT_TEXT if is_bad else R.OK_TEXT
+    _pill = R._pill
+    # The report's 30-day trend strip, when that widget exists.
+    _strip = getattr(R, "_strip", None) or (lambda d: "")
     # Coloured pill for known statuses; plain escaped text otherwise.
     pill = _pill(sev) if sev in ("ok", "warning", "error", "no_data") else _esc(sev)
     # Optional 30-day trend strip, only when daily history was supplied.
     strip_html = ""
     if isinstance(extra, dict) and extra.get("daily"):
-        strip_html = (f'<div style="{P};font-size:11px;color:#6b7280;margin-top:14px;'
-                      f'text-transform:uppercase;letter-spacing:.04em">30-day trend</div>'
+        strip_html = (f'<div style="{P};font-size:12px;font-weight:bold;color:{R.WEAK};margin-top:14px">30-day trend</div>'
                       f'<div style="margin-top:5px">{_strip(extra["daily"])}</div>'
-                      f'<div style="{P};font-size:10px;color:#6b7280;margin-top:5px">'
-                      f'<span style="color:#10b981">■</span> healthy '
-                      f'<span style="color:#f59e0b">■</span> degraded '
-                      f'<span style="color:#ef4444">■</span> failing '
-                      f'<span style="color:#cbd5e1">■</span> no data</div>')
+                      f'<div style="{P};font-size:12px;color:{R.WEAK};margin-top:5px">'
+                      f'<span style="color:{R.OK}">■</span> healthy '
+                      f'<span style="color:{R.WARN}">■</span> degraded '
+                      f'<span style="color:{R.CRIT}">■</span> failing '
+                      f'<span style="color:{R.NONE}">■</span> no data</div>')
     # Optional client-count trend table, only when trend numbers were supplied.
     trend_html = ""
     tr = extra.get("trend") if isinstance(extra, dict) else None
@@ -102,23 +99,25 @@ def _human_body(label, state, tenant, item, sev, detail, ts, is_bad, extra):
                  ("30-day peak", tr.get("max_30day"))]
         # One table row per value that is present.
         cells = "".join(
-            f'<tr><td style="color:#6b7280;padding:2px 14px 2px 0">{k}</td>'
-            f'<td style="color:#1f2937;font-weight:bold">{_esc(v)}</td></tr>'
+            f'<tr><td style="color:{R.WEAK};padding:2px 14px 2px 0">{k}</td>'
+            f'<td style="color:{R.TEXT};font-weight:bold">{_esc(v)}</td></tr>'
             for k, v in pairs if v is not None)
         # Only render the table if at least one row exists.
         if cells:
-            trend_html = f'<table role="presentation" style="{P};font-size:12px;margin-top:12px;border-collapse:collapse">{cells}</table>'
+            trend_html = f'<table role="presentation" style="{P};font-size:13px;margin-top:12px;border-collapse:collapse">{cells}</table>'
     # Small helper that renders one label/value table row.
-    row = lambda k, v: (f'<tr><td style="color:#6b7280;padding:3px 14px 3px 0">{k}</td>'  # noqa: E731
-                        f'<td style="color:#1f2937">{v}</td></tr>')
+    row = lambda k, v: (f'<tr><td style="color:{R.WEAK};padding:3px 14px 3px 0">{k}</td>'  # noqa: E731
+                        f'<td style="color:{R.TEXT}">{v}</td></tr>')
     # Assemble the full HTML email: header bar, details table, then trend table and strip.
-    html = (f'<div style="background:#f5f7f6;padding:20px 0;{P}">'
-            f'<div style="max-width:560px;margin:0 auto;background:#fff;border:1px solid #e8ecea;border-radius:10px;overflow:hidden">'
+    html = (f'<div style="background:{R.BG};padding:20px 0;{P}">'
+            f'<div style="max-width:560px;margin:0 auto;background:#fff;border:1px solid {R.BORDER};border-radius:12px;overflow:hidden">'
+            f'<div style="background:{R.NAVY};padding:12px 20px;border-bottom:3px solid {R.BRAND};{P};font-size:14px;color:#fff">'
+            f'<b>HPE</b> &nbsp;|&nbsp; Lab Manager alert</div>'
             f'<div style="padding:16px 20px;border-bottom:3px solid {hdr}">'
-            f'<div style="{P};font-size:15px;font-weight:bold;color:{hdr}">{_esc(label)} — {state.upper()}</div>'
-            f'<div style="{P};font-size:12px;color:#6b7280;margin-top:2px">{_esc(item)}</div></div>'
+            f'<div style="{P};font-size:16px;font-weight:bold;color:{hdr}">{_esc(label)} — {_esc(state.capitalize())}</div>'
+            f'<div style="{P};font-size:13px;color:{R.WEAK};margin-top:2px">{_esc(item)}</div></div>'
             f'<div style="padding:16px 20px">'
-            f'<table role="presentation" style="{P};font-size:12px;border-collapse:collapse">'
+            f'<table role="presentation" style="{P};font-size:13px;border-collapse:collapse">'
             + row("Tenant", _esc(tenant)) + row("Status", pill)
             + (row("Detail", _esc(detail)) if detail else "") + row("Time", _esc(ts))
             + f'</table>{trend_html}{strip_html}</div></div></div>')
@@ -172,7 +171,9 @@ class AlertEngine:
         # Imported lazily; only needed when an email is actually sent.
         import datetime as _dt
         # Timestamp shown in the email.
-        ts = _dt.datetime.now().isoformat(timespec="seconds")
+        now = _dt.datetime.now().astimezone()
+        ts = now.isoformat(timespec="seconds")              # raw JSON: ISO 8601 with offset
+        ts_human = now.strftime("%Y-%m-%d %H:%M:%S %Z")     # email: shows the time zone
         # Group recipients by requested format so each set gets ONE email.
         by_fmt: Dict[str, set] = {}
         # Each rule asks for "raw" (JSON) or "human" (formatted) emails; collect recipients per
@@ -207,7 +208,7 @@ class AlertEngine:
                 # Human format: formatted subject and text+HTML body.
                 else:
                     subj = f"[LM {'ALERT' if is_bad else 'OK'}] {label}: {item}"
-                    text, html = _human_body(label, state, tenant, item, sev, detail, ts, is_bad, extra)
+                    text, html = _human_body(label, state, tenant, item, sev, detail, ts_human, is_bad, extra)
                     await _n.send_email(self.hub, subj, text, to_emails=recips, html=html)
             # Log the failure and carry on.
             except Exception as e:  # noqa: BLE001

@@ -31,12 +31,21 @@ logger = logging.getLogger("EmailReport")
 # How often (seconds) the scheduler wakes up to check for due reports.
 _POLL_S = 300  # scheduler tick (fires when the configured hour is reached)
 
+# HPE Design System (see docs/webui-style.md), inline because mail clients
+# ignore <style>. Status "icon" colors fill bars and swatches; the *_TEXT
+# colors are the AA-contrast versions used for text on white.
+FONT = "font-family:'HPE Graphik',Arial,Helvetica,sans-serif"
+TEXT, WEAK, BORDER, BG = "#292D3A", "#606A70", "#E0E0E0", "#F7F7F7"
+BRAND, NAVY = "#01A982", "#263040"
+OK, WARN, CRIT, NONE = "#009A71", "#D36D00", "#CC1F1A", "#CCCCCC"
+OK_TEXT, WARN_TEXT, CRIT_TEXT = "#006750", "#9B4F00", "#CC1F1A"
+
 # status -> (label, bg, fg) — the pill colors, matching the WebUI badges.
 _PILL = {
-    "ok": ("OK", "#e7f7f0", "#0f7a58"),
-    "warning": ("Warning", "#fdf2df", "#9a6a06"),
-    "error": ("Failing", "#fdeaea", "#c0322a"),
-    "no_data": ("No data", "#eef2f1", "#5c6b65"),
+    "ok": ("OK", "#E3FDF4", OK_TEXT),
+    "warning": ("Warning", "#FFF3DD", WARN_TEXT),
+    "error": ("Failing", "#FFECEC", CRIT_TEXT),
+    "no_data": ("No data", "#F2F2F2", WEAK),
 }
 
 
@@ -49,9 +58,9 @@ def _pill(status: str) -> str:
     """Render a status as a colored pill badge, like the WebUI."""
     # Look up label and colors; unknown statuses render as "No data".
     label, bg, fg = _PILL.get(str(status).lower(), _PILL["no_data"])
-    return (f'<span style="display:inline-block;font-family:Arial,sans-serif;font-size:11px;'
-            f'font-weight:bold;text-transform:uppercase;color:{fg};background:{bg};'
-            f'padding:2px 9px;border-radius:10px;white-space:nowrap">{label}</span>')
+    return (f'<span style="display:inline-block;{FONT};font-size:12px;'
+            f'font-weight:bold;color:{fg};background:{bg};'
+            f'padding:2px 10px;border-radius:9999px;white-space:nowrap">{label}</span>')
 
 
 def _num(v: Any) -> str:
@@ -63,9 +72,8 @@ def _pct(v: Any) -> str:
     """Success-% cell: colored green/amber/red by band, '—' when no graded samples."""
     # No graded samples: show a grey dash.
     if v is None:
-        return '<span style="color:#9ca3af">—</span>'
-    # Green at >=99%, amber at >=95%, red below.
-    col = "#10b981" if v >= 99 else ("#b8860b" if v >= 95 else "#ef4444")
+        return f'<span style="color:{WEAK}">—</span>'
+    col = _text_color(v)
     # Show whole numbers without a trailing ".0".
     n = int(v) if float(v).is_integer() else v
     return f'<span style="color:{col};font-weight:bold">{n}%</span>'
@@ -100,27 +108,29 @@ async def build_report(hub, service: SimulationsService, tenant_id: str,
     from .central_hub_poller import gather_compliance
     comp = gather_compliance(hub, service, tenant_id)
     month = (comp["overall"].get("d30") or {}).get("pct")
-    today = datetime.datetime.now().strftime("%a, %b %d, %Y")
+    today = datetime.datetime.now().astimezone().strftime("%a, %b %d, %Y %H:%M %Z")
 
     # ── HTML (inline styles only; mail clients ignore <style>) ─────────────
-    P = 'font-family:Arial,Helvetica,sans-serif'
-    th = f'style="{P};font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:#6b7280;font-weight:bold;text-align:left;padding:6px 8px;border-bottom:1px solid #e8ecea"'
+    P = FONT
+    th = f'style="{P};font-size:12px;color:{WEAK};font-weight:bold;text-align:left;padding:6px 8px;border-bottom:1px solid {BORDER}"'
     thr = th.replace("text-align:left", "text-align:right")
-    td = f'style="{P};font-size:12px;color:#1f2937;padding:8px;border-bottom:1px solid #f0f2f1"'
-    tdn = f'style="{P};font-size:12px;color:#1f2937;padding:8px;border-bottom:1px solid #f0f2f1;text-align:right"'
-    h2 = f'style="{P};font-size:13px;font-weight:bold;color:#1f2937;margin-bottom:8px"'
+    td = f'style="{P};font-size:13px;color:{TEXT};padding:8px;border-bottom:1px solid {BORDER}"'
+    tdn = f'style="{P};font-size:13px;color:{TEXT};padding:8px;border-bottom:1px solid {BORDER};text-align:right"'
+    h2 = f'style="{P};font-size:16px;font-weight:bold;color:{NAVY};margin-bottom:8px"'
 
     parts: List[str] = []
     parts.append(f'''
-<div style="background:#f5f7f6;padding:20px 0;{P}">
- <div style="max-width:680px;margin:0 auto;background:#ffffff;border:1px solid #e8ecea;border-radius:10px;overflow:hidden">
-  <div style="padding:20px 22px 16px;border-bottom:3px solid #01A982">
+<div style="background:{BG};padding:20px 0;{P}">
+ <div style="max-width:680px;margin:0 auto;background:#ffffff;border:1px solid {BORDER};border-radius:12px;overflow:hidden">
+  <div style="background:{NAVY};padding:16px 22px;border-bottom:3px solid {BRAND}">
    <table role="presentation" width="100%"><tr>
-     <td style="{P};font-size:15px;font-weight:bold;color:#1f2937">◈ LM Compliance Report</td>
-     <td style="{P};font-size:11px;color:#6b7280;text-align:right">As of<br><b>{today}</b></td>
+     <td style="{P};font-size:16px;color:#ffffff"><b>HPE</b> &nbsp;|&nbsp; Lab Manager compliance report</td>
+     <td style="{P};font-size:12px;color:#B1B9BE;text-align:right">As of<br><b style="color:#ffffff">{today}</b></td>
    </tr></table>
-   <div style="{P};font-size:19px;font-weight:bold;color:#1f2937;margin-top:12px">Simulation compliance — {_esc(tenant_name)}</div>
-   <div style="{P};font-size:12px;color:#6b7280;margin-top:2px">Share of check polls that were OK · week, month, quarter and year</div>
+  </div>
+  <div style="padding:16px 22px 4px">
+   <div style="{P};font-size:22px;font-weight:bold;color:{NAVY}">Simulation compliance — {_esc(tenant_name)}</div>
+   <div style="{P};font-size:13px;color:{WEAK};margin-top:2px">Share of check polls that were OK · week, month, quarter and year</div>
   </div>''')
 
     if sections.get("checks", True):
@@ -130,7 +140,7 @@ async def build_report(hub, service: SimulationsService, tenant_id: str,
         parts.append(await _clients_html(service, tenant_id, P, th, td, tdn, h2))
 
     parts.append(f'''
-  <div style="padding:14px 22px 20px;border-top:1px solid #f0f2f1;background:#f5f7f6;{P};font-size:11px;color:#6b7280">
+  <div style="padding:14px 22px 20px;border-top:1px solid {BORDER};background:{BG};{P};font-size:12px;color:{WEAK}">
     Sent by <b>LM</b> because Email Reports is on for your tenant · manage in Setup → Notifications.
   </div>
  </div>
@@ -153,20 +163,27 @@ def _fmt(v: Any) -> str:
 
 
 def _color(v: Any) -> str:
-    """Green at >=99%, amber at >=95%, red below, grey when unknown."""
+    """Bar/swatch fill: green at >=99%, amber at >=95%, red below, grey when unknown."""
     if v is None:
-        return "#cbd5e1"
-    return "#10b981" if v >= 99 else ("#f59e0b" if v >= 95 else "#ef4444")
+        return NONE
+    return OK if v >= 99 else (WARN if v >= 95 else CRIT)
+
+
+def _text_color(v: Any) -> str:
+    """Same bands as _color, in the AA-contrast text colors."""
+    if v is None:
+        return WEAK
+    return OK_TEXT if v >= 99 else (WARN_TEXT if v >= 95 else CRIT_TEXT)
 
 
 def _delta(cur: Any, prev: Any) -> str:
     """"▲ 0.4 pts vs previous" line under a period card."""
     if cur is None or prev is None:
-        return '<span style="color:#9ca3af">no previous period yet</span>'
+        return f'<span style="color:{WEAK}">no previous period yet</span>'
     d = round(cur - prev, 1)
     if d == 0:
-        return '<span style="color:#6b7280">no change vs previous</span>'
-    col, arrow = ("#10b981", "▲") if d > 0 else ("#ef4444", "▼")
+        return f'<span style="color:{WEAK}">no change vs previous</span>'
+    col, arrow = (OK_TEXT, "▲") if d > 0 else (CRIT_TEXT, "▼")
     return f'<span style="color:{col}">{arrow} {_fmt(abs(d))} pts vs previous</span>'
 
 
@@ -181,12 +198,12 @@ def _compliance_html(comp: Dict[str, Any], P: str, th: str, thr: str,
         pct = w.get("pct")
         days = w.get("days") or 0
         cover = f"based on {days} day{'' if days == 1 else 's'} of data" if days else "no data"
-        cards += (f'<td width="25%" valign="top" style="padding:4px"><div style="border:1px solid #e8ecea;border-radius:8px;padding:10px">'
-                  f'<div style="{P};font-size:10px;text-transform:uppercase;color:#6b7280;font-weight:bold">{label}'
-                  f' <span style="font-weight:normal;text-transform:none">· last {span}</span></div>'
-                  f'<div style="{P};font-size:24px;font-weight:bold;color:{_color(pct)};margin-top:4px">{_fmt(pct) + "%" if pct is not None else "—"}</div>'
-                  f'<div style="{P};font-size:10px;margin-top:2px">{_delta(pct, w.get("prev"))}</div>'
-                  f'<div style="{P};font-size:10px;color:#9ca3af;margin-top:2px">{cover}</div></div></td>')
+        cards += (f'<td width="25%" valign="top" style="padding:4px"><div style="border:1px solid {BORDER};border-radius:12px;padding:10px">'
+                  f'<div style="{P};font-size:13px;color:{TEXT};font-weight:bold">{label}'
+                  f' <span style="font-weight:normal;color:{WEAK}">· last {span}</span></div>'
+                  f'<div style="{P};font-size:24px;font-weight:bold;color:{_text_color(pct)};margin-top:4px">{_fmt(pct) + "%" if pct is not None else "—"}</div>'
+                  f'<div style="{P};font-size:12px;margin-top:2px">{_delta(pct, w.get("prev"))}</div>'
+                  f'<div style="{P};font-size:12px;color:{WEAK};margin-top:2px">{cover}</div></div></td>')
 
     # 12 vertical bars; bar height is the month's % of a 100px column.
     bars, labels = "", ""
@@ -195,27 +212,27 @@ def _compliance_html(comp: Dict[str, Any], P: str, th: str, thr: str,
         h = 0 if pct is None else max(2, int(round(pct)))
         y, mo = m["m"].split("-")
         bars += (f'<td valign="bottom" align="center" style="padding:0 2px;height:118px">'
-                 f'<div style="{P};font-size:9px;font-weight:bold;color:{_color(pct)}">{_fmt(pct) + "%" if pct is not None else ""}</div>'
+                 f'<div style="{P};font-size:12px;font-weight:bold;color:{_text_color(pct)}">{_fmt(pct) + "%" if pct is not None else ""}</div>'
                  f'<div style="background:{_color(pct)};height:{h}px;line-height:{h}px;font-size:0;border-radius:3px 3px 0 0">&nbsp;</div></td>')
-        labels += f'<td align="center" style="{P};font-size:9px;color:#6b7280;padding-top:3px">{_MONTHS[int(mo) - 1]} {y[2:]}</td>'
+        labels += f'<td align="center" style="{P};font-size:12px;color:{WEAK};padding-top:3px">{_MONTHS[int(mo) - 1]} {y[2:]}</td>'
 
     quarters = "".join(
-        f'<td width="25%" align="center" style="padding:4px"><div style="border:1px solid #e8ecea;border-radius:8px;padding:8px">'
-        f'<div style="{P};font-size:11px;color:#6b7280;font-weight:bold">{_esc(q["q"])}</div>'
-        f'<div style="{P};font-size:16px;font-weight:bold;color:{_color(q.get("pct"))}">{_fmt(q["pct"]) + "%" if q.get("pct") is not None else "—"}</div></div></td>'
+        f'<td width="25%" align="center" style="padding:4px"><div style="border:1px solid {BORDER};border-radius:12px;padding:8px">'
+        f'<div style="{P};font-size:12px;color:{WEAK};font-weight:bold">{_esc(q["q"])}</div>'
+        f'<div style="{P};font-size:18px;font-weight:bold;color:{_text_color(q.get("pct"))}">{_fmt(q["pct"]) + "%" if q.get("pct") is not None else "—"}</div></div></td>'
         for q in comp["quarters"])
 
     def row(name: str, sites: str, vals: List[Any], bold: bool = False) -> str:
-        bg = "background:#f5f7f6;font-weight:bold;" if bold else ""
+        bg = f"background:{BG};font-weight:bold;" if bold else ""
         return (f'<tr style="{bg}"><td {td}>{name}</td><td {tdn}>{sites}</td>'
                 + "".join(f"<td {tdn}>{_pct(v)}</td>" for v in vals) + "</tr>")
 
     keys = [k for k, _, _ in _WINDOWS]
     rows = row("Overall", "", [(o.get(k) or {}).get("pct") for k in keys], bold=True)
     for c in comp["checks"]:
-        tag = (f'<span style="font-size:9px;text-transform:uppercase;color:#9ca3af">{_esc(c["product"])}</span> '
+        tag = (f'<span style="font-size:12px;color:{WEAK}">{_esc(c["product"])}</span> '
                if c.get("product") else "")
-        rows += row(f'{tag}<span style="font-family:monospace;font-size:11px">{_esc(c["check"])}</span>',
+        rows += row(f'{tag}<span style="font-family:monospace;font-size:12px">{_esc(c["check"])}</span>',
                     str(c.get("sites") or ""), [c.get(k) for k in keys])
     heads = "".join(f"<th {thr}>{label}</th>" for _, label, _ in _WINDOWS)
 
@@ -237,14 +254,14 @@ def _compliance_html(comp: Dict[str, Any], P: str, th: str, thr: str,
    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>{quarters}</tr></table>
   </div>
   <div style="padding:12px 22px 8px">
-   <div {h2}>All checks <span style="font-weight:normal;color:#6b7280;font-size:11px">· worst month first</span></div>
+   <div {h2}>All checks <span style="font-weight:normal;color:{WEAK};font-size:12px">· worst month first</span></div>
    <table role="presentation" width="100%" style="border-collapse:collapse">
      <tr><th {th}>Check</th><th {thr}>Sites</th>{heads}</tr>
      {rows}
    </table>
-   <div style="{P};font-size:10px;color:#6b7280;padding:8px 0 4px">
-     <span style="color:#10b981">■</span> ≥ 99% &nbsp; <span style="color:#f59e0b">■</span> 95–99% &nbsp;
-     <span style="color:#ef4444">■</span> &lt; 95% &nbsp;·&nbsp; {since}Compliance = share of polls where the check was OK
+   <div style="{P};font-size:12px;color:{WEAK};padding:8px 0 4px">
+     <span style="color:{OK}">■</span> ≥ 99% &nbsp; <span style="color:{WARN}">■</span> 95–99% &nbsp;
+     <span style="color:{CRIT}">■</span> &lt; 95% &nbsp;·&nbsp; {since}Compliance = share of polls where the check was OK
      (polls with no data are left out). Months and quarters are UTC calendar periods.</div>
   </div>'''
 
@@ -262,18 +279,18 @@ async def _clients_html(service: SimulationsService, tenant_id: str, P: str,
     for r in sorted(ccrows, key=lambda x: x.get("site_name") or x.get("site") or ""):
         # Highlight a client-count drop in amber; otherwise grey.
         drop = r.get("drop_pct")
-        dcol = "#b8860b" if (drop or 0) > 0 else "#6b7280"
+        dcol = WARN_TEXT if (drop or 0) > 0 else WEAK
         rows.append(
-            f'<tr><td {td}><span style="font-family:monospace;font-size:11px;color:#374151">{_esc(r.get("site_name") or r.get("site"))}</span></td>'
+            f'<tr><td {td}><span style="font-family:monospace;font-size:12px;color:{TEXT}">{_esc(r.get("site_name") or r.get("site"))}</span></td>'
             f'<td {td}>{_pill(r.get("status") or "no_data")}</td>'
             f'<td {tdn}><b>{_num(r.get("current"))}</b></td><td {tdn}>{_num(r.get("wired"))}</td>'
             f'<td {tdn}>{_num(r.get("wireless"))}</td><td {tdn}>{_num(r.get("hourly_avg"))}</td>'
-            f'<td style="{P};font-size:12px;color:{dcol};padding:8px;border-bottom:1px solid #f0f2f1;text-align:right">{_num(drop)}{"%" if drop is not None else ""}</td>'
+            f'<td style="{P};font-size:13px;color:{dcol};padding:8px;border-bottom:1px solid {BORDER};text-align:right">{_num(drop)}{"%" if drop is not None else ""}</td>'
             f'<td {tdn}>{_num(r.get("max_7day"))}</td><td {tdn}>{_num(r.get("max_30day"))}</td></tr>')
     return f'''
   <div style="padding:8px 22px 8px">
-   <div {h2}>Client Count
-     <span style="font-weight:normal;color:#6b7280;font-size:11px">· per site · last poll</span></div>
+   <div {h2}>Client count
+     <span style="font-weight:normal;color:{WEAK};font-size:12px">· per site · last poll</span></div>
    <table role="presentation" width="100%" style="border-collapse:collapse">
      <tr><th {th}>Site</th><th {th}>Status</th><th {th} style="text-align:right">Current</th><th {th} style="text-align:right">Wired</th>
        <th {th} style="text-align:right">Wireless</th><th {th} style="text-align:right">Hourly avg</th>
