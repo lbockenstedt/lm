@@ -25,6 +25,13 @@ if "LM_FERNET_KEY" not in os.environ:
 # into the test interpreter. Production never sets this.
 os.environ.setdefault("LM_DEP_GUARD_DISABLE", "1")
 
+# security.mtls_ca reads its CA directory once, at import. Point it at a temp
+# dir before any test imports it; the /opt/lm default isn't writable on a dev box.
+if "LM_MTLS_CLIENT_CA_DIR" not in os.environ:
+    import tempfile as _tempfile
+    os.environ["LM_MTLS_CLIENT_CA_DIR"] = _tempfile.mkdtemp(prefix="lm-test-ca-")
+    del _tempfile
+
 SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
