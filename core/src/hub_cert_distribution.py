@@ -195,7 +195,9 @@ class HubCertDistributionMixin:
 
     def _cert_target_device_key(self, module_type: str, identifier: str = ""):
         """Fingerprint of the device(s) behind a cert target — today the
-        firewall(s) bound to an OPNsense spoke (sorted host:port). ``None`` for
+        firewall(s) bound to an OPNsense spoke (sorted host:port:key|nokey).
+        Whether API credentials are set is part of it, so adding a missing key
+        re-pushes a target that only reached the other firewall. ``None`` for
         types without a hub-side device record (not tracked)."""
         # Only firewalls have a hub-side device record.
         if module_type != "firewall":
@@ -204,8 +206,14 @@ class HubCertDistributionMixin:
         sid = identifier or self._cert_target_spoke(module_type, identifier)
         if not sid:
             return None
-        # Sorted host:port list of its firewalls.
-        return ",".join(sorted(f"{(f.get('host') or '').strip()}:{f.get('port') or ''}"
+        # Sorted host:port:key list of its firewalls.
+        import instance_vault
+
+        def _creds(f):
+            """'key' if the firewall has API credentials (inline or vault), else 'nokey'."""
+            has = instance_vault.has_vault_ref(f) or (f.get("api_key") and f.get("api_secret"))
+            return "key" if has else "nokey"
+        return ",".join(sorted(f"{(f.get('host') or '').strip()}:{f.get('port') or ''}:{_creds(f)}"
                                for f in self._firewalls_for_spoke(sid)))
 
     def _firewalls_for_spoke(self, spoke_id: str) -> list:
