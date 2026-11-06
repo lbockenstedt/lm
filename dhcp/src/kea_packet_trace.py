@@ -518,8 +518,10 @@ def verdict_for_client(mac: str, events: List[Dict[str, Any]],
     if "DECLINE" in rx:
         code, msg = "DECLINED", (
             f"Client sent DHCPDECLINE — it detected that the offered address "
-            f"is already in use (ARP conflict). Find the device squatting on "
-            f"{allocated[-1] if allocated else 'the address'} or exclude it from the pool.")
+            f"is already in use (ARP conflict). Either another device holds "
+            f"{allocated[-1] if allocated else 'the address'} (exclude it from the pool), "
+            f"or the client already had it up and answered its own probe "
+            f"(give it a reservation for that address).")
     # Kea ACKed: the server side finished.
     elif "ACK" in tx:
         lease = f" lease {allocated[-1]}" if allocated else ""
@@ -547,9 +549,9 @@ def verdict_for_client(mac: str, events: List[Dict[str, Any]],
             f"ACK/NAK. A non-authoritative Kea silently drops this when it has "
             f"no lease for the client (typically the device moved VLANs and "
             f"still holds an address from the old subnet), so the client keeps "
-            f"retrying until that lease expires. LM pushes \"authoritative\": "
-            f"true on DHCP sync so Kea NAKs it and the client re-DISCOVERs; if "
-            f"this persists, re-run a DHCP sync, or release/renew on the client.")
+            f"retrying until that lease expires. LM keeps Kea non-authoritative "
+            f"(NAKing makes devices that already hold their address decline "
+            f"it); release/renew on the client or give it a reservation.")
     # Plain REQUEST with no ACK/NAK.
     elif "REQUEST" in rx:
         code, msg = "REQUEST_UNANSWERED", (

@@ -551,6 +551,33 @@ async function saveDnsHookConfig() {
     }
 }
 
+// ── DHCP declined-address hold (System → Sync; global_config.dhcp_kea) ──
+async function loadDhcpDeclineConfig() {
+    try {
+        const r = await setupFetch('/setup/config');
+        if (!r.ok) return;
+        const cfg = ((await r.json()).global_config || {}).dhcp_kea || {};
+        const box = document.getElementById('dhcp-decline-hold');
+        if (box) box.checked = cfg.hold_declined === true;
+    } catch (e) { console.error('loadDhcpDeclineConfig failed', e); }
+}
+
+async function saveDhcpDeclineConfig() {
+    const r0 = await setupFetch('/setup/config');
+    const prev = r0.ok ? (((await r0.json()).global_config || {}).dhcp_kea || {}) : {};
+    const hold_declined = !!document.getElementById('dhcp-decline-hold')?.checked;
+    try {
+        const r = await setupFetch('/setup/config', {
+            method: 'POST',
+            body: JSON.stringify({ config: { dhcp_kea: { ...prev, hold_declined } } })
+        });
+        if (r.ok) showToast(`Declined addresses will be held ${hold_declined ? '24 hours' : '60 seconds'} — applied on the next sync cycle.`, 'success');
+        else showToast('Failed to save.', 'error');
+    } catch (e) {
+        showToast('Error saving: ' + e.message, 'error');
+    }
+}
+
 async function saveRealtimeNacSyncConfig() {
     const enabled = document.getElementById('rt-nac-sync-enabled')?.checked ? true : false;
     const intervalMin = Math.max(1, parseInt(document.getElementById('rt-nac-sync-interval')?.value, 10) || 1);

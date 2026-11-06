@@ -315,6 +315,12 @@ class DnsDhcpSyncMixin:
             "interval": int(cfg.get("interval", _DEFAULT_INTERVAL) or _DEFAULT_INTERVAL),
         }
 
+    def _dhcp_hold_declined(self) -> bool:
+        """global_config.dhcp_kea.hold_declined: keep DECLINEd addresses out of
+        use for Kea's 24h default (True) or only 60s (False, the default)."""
+        gc = self.state.system_state.get("global_config", {}) or {}
+        return bool((gc.get("dhcp_kea") or {}).get("hold_declined", False))
+
     def _dns_hook_desired(self) -> Dict[str, Any]:
         """Desired real-time DNS hook settings, normalized the way the dhcp
         spoke stores them (kea_dns_hook.validate_settings) so a converged node
@@ -539,6 +545,22 @@ class DnsDhcpSyncMixin:
         """Return the hash-cache key for a side and scope ("dns" or "dns|tenant:x")."""
         return side if not scope_key else f"{side}|{scope_key}"
 
+    @staticmethod
+    def _push_error(result) -> str:
+        """Why a spoke push failed ("" when it worked).
+
+        A spoke that ran but failed (e.g. Kea rejected the config-set and kept
+        its OLD config) replies ``{"status": "ERROR"}`` instead of raising. It
+        must count as a failure, or the payload hash latches and the change is
+        never retried while the WebUI shows "ok".
+        """
+        if isinstance(result, Exception):
+            return str(result) or type(result).__name__
+        reply = unwrap_spoke(result)
+        if isinstance(reply, dict) and str(reply.get("status", "")).upper() == "ERROR":
+            return str(reply.get("message") or reply.get("error") or "spoke reported ERROR")
+        return ""
+
     async def _scoped_push(self, side: str, spokes: List[str]):
         """On-demand (non-hashed) push of one side to ``spokes``, one NetBox
         fetch per tenant scope. Returns ``(counts, spoke_results, skipped)``;
@@ -558,16 +580,18 @@ class DnsDhcpSyncMixin:
                 counts["records_synced"] += len(records)
             else:
                 subnets, reservations = build_dhcp_payload(pfx_data, ips_data)
-                payload, cmd = {"subnets": subnets, "reservations": reservations}, "DHCP_SYNC"
+                payload = {"subnets": subnets, "reservations": reservations,
+                           "hold_declined": self._dhcp_hold_declined()}
+                cmd = "DHCP_SYNC"
                 counts["subnets_synced"] += len(subnets)
                 counts["reservations_synced"] += len(reservations)
             # Push to all spokes in this scope in parallel; any failure is raised.
             results = await asyncio.gather(*[
                 self.request_response(sid, cmd, payload, timeout=30.0) for sid in sids
             ], return_exceptions=True)
-            errs = [r for r in results if isinstance(r, Exception)]
+            errs = [e for e in map(self._push_error, results) if e]
             if errs:
-                raise errs[0]
+                raise RuntimeError(errs[0])
             # Collect the unwrapped spoke results.
             spoke_results.extend(unwrap_spoke(r) for r in results)
         return counts, spoke_results, skipped
@@ -714,7 +738,8 @@ class DnsDhcpSyncMixin:
                     st[side]["records_synced"] += len(records)
                 else:
                     subnets, reservations = build_dhcp_payload(pfx, ips)
-                    payload = {"subnets": subnets, "reservations": reservations}
+                    payload = {"subnets": subnets, "reservations": reservations,
+                               "hold_declined": self._dhcp_hold_declined()}
                     h = hashlib.sha256(json.dumps(payload, sort_keys=True,
                                                   default=str).encode()).hexdigest()
                     st[side]["subnets_synced"] += len(subnets)
@@ -738,7 +763,7 @@ class DnsDhcpSyncMixin:
         # transiently-offline spoke is retried next cycle.
         for side, hk, h, indices in push_groups:
             res = [results[i] for i in indices]
-            errs = [r for r in res if isinstance(r, Exception)]
+            errs = [e for e in map(self._push_error, res) if e]
             if errs:
                 logger.warning("%s auto-sync push failed: %s", side.upper(), errs[0])
                 if st[side]["error"] is None:
