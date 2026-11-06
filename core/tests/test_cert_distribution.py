@@ -974,6 +974,27 @@ def test_sweep_repushes_when_device_behind_target_changes():
     assert tracker.changed("d", t) is False          # recorded after success
 
 
+def test_device_key_changes_when_firewall_api_key_is_added():
+    """A firewall saved without API creds and later given a key must change the
+    target fingerprint, so a SUCCESS target is re-pushed to it."""
+    from hub_cert_distribution import HubCertDistributionMixin as M
+
+    class _Hub:
+        _primary_key = staticmethod(lambda s: s)
+        fws = [{"spoke_id": "fw-spoke", "host": "10.0.0.1", "port": 443, "api_key": "k", "api_secret": "s"},
+               {"spoke_id": "fw-spoke", "host": "10.0.0.2", "port": 443}]
+
+        class state:
+            system_state = {}
+        _firewalls_for_spoke = lambda self, sid: self.fws
+
+    hub = _Hub()
+    before = M._cert_target_device_key(hub, "firewall", "fw-spoke")
+    assert before == "10.0.0.1:443:key,10.0.0.2:443:nokey"
+    hub.fws[1].update(api_key="k2", api_secret="s2")
+    assert M._cert_target_device_key(hub, "firewall", "fw-spoke") != before
+
+
 def test_target_payload_extras_reach_install_cert():
     """Firewall targets carry every bound firewall (``devices``) in INSTALL_CERT."""
     import asyncio

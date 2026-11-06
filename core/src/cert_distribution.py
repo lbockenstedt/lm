@@ -181,7 +181,9 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
         else:
             target_sid = get_by_type(mt, ident)
             if not target_sid:
-                entry.update(status="ERROR", message=f"no connected {mt} spoke")
+                entry.update(status="ERROR",
+                             message=f"{mt} spoke {ident} not connected — will retry" if ident
+                             else f"no connected {mt} spoke")
                 logger.warning("[cert] %s → %s: no connected %s spoke", domain, tgt_label, mt)
             else:
                 # The hypervisor + simulation paths forward INSTALL_CERT to a
