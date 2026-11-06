@@ -114,6 +114,14 @@ still no panel for editing `targets`/`domain`/`ttl`/`register_ptr`
 themselves — change those via a direct `POST /api/dhcp/dns-hook` call (or the
 `DHCP_DNS_HOOK_CONFIG` admin-ops lever) until a full settings form exists.
 
+**AppArmor.** Ubuntu's `kea-dhcp4` profile does not let Kea exec the script, so
+every lease event was denied (`apparmor="DENIED" operation="exec"` in the
+journal) and the hook log stayed empty. `kea_dns_hook.grant_apparmor_exec()`
+(run on every `DHCP_DNS_HOOK_CONFIG`) and `install_dhcp.sh` add
+`/etc/kea/scripts/lm-dns-sync.sh Ux,` to `/etc/apparmor.d/local/usr.sbin.kea-dhcp4`
+and reload the profile. On an HA pair the status reply also carries top-level
+`settings` (from the first member that answered), which the toggle needs.
+
 **On by default, hub-managed.** The desired state lives in `global_config.dhcp_dns_hook` (`enabled` default **true**, plus optional `targets`/`domain`/`ttl`/`register_ptr`). Every DNS/DHCP sync tick (`run_dns_dhcp_sync_loop`, even while `dns_dhcp_sync` itself is disabled), `DnsDhcpSyncMixin._reconcile_dns_hook` reads `DHCP_DNS_HOOK_STATUS` from each DHCP spoke (each HA member), and sends `DHCP_DNS_HOOK_CONFIG` only to a node that has drifted. The on/off knob is **System → Sync → DHCP → DNS (real-time)**, which also offers *Also register PTR records*. The Diagnostics *Enable*/*Disable* button and `POST /api/dhcp/dns-hook` save their settings into the same key, so the reconcile never reverts them. The last check is reported as `status.dns_hook` in `GET /api/dns-dhcp/sync-status`. The default `127.0.0.1@8953` target assumes Unbound runs on the Kea host.
 
 **Domain.** A single-label lease hostname gets the `domain-name` option of the lease's own Kea subnet (the scope's NetBox `domain_name`), falling back to the hook's global `domain`. This matches the NetBox → DNS sync.

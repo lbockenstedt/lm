@@ -373,6 +373,25 @@ def test_write_hook_files_writes_config_and_executable_script(tmp_path, monkeypa
     assert status["script_installed"] is True
 
 
+def test_grant_apparmor_exec_adds_rule_once_and_reloads(tmp_path, monkeypatch):
+    profile = tmp_path / "usr.sbin.kea-dhcp4"
+    profile.write_text("profile kea-dhcp4 {}\n")
+    override = tmp_path / "local-usr.sbin.kea-dhcp4"
+    override.write_text("  /etc/kea/kea-dhcp4.conf rw,\n")
+    monkeypatch.setattr(h, "APPARMOR_PROFILE", str(profile))
+    monkeypatch.setattr(h, "APPARMOR_OVERRIDE", str(override))
+    reloads = []
+    monkeypatch.setattr(h.subprocess, "run", lambda cmd, **kw: reloads.append(cmd))
+
+    assert h.grant_apparmor_exec() is True
+    assert h.grant_apparmor_exec() is True
+
+    text = override.read_text()
+    assert "/etc/kea/kea-dhcp4.conf rw," in text
+    assert text.count("/etc/kea/scripts/lm-dns-sync.sh Ux,") == 1
+    assert reloads == [["apparmor_parser", "-r", str(profile)]]
+
+
 # ─────────────────────────── KeaManager wiring ─────────────────────────────
 
 def test_configure_dns_hook_mutates_only_its_own_hooks_libraries_entry(tmp_path, monkeypatch):
