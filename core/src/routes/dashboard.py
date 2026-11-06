@@ -196,7 +196,7 @@ def register(app, hub, ctx):
             # VMs still count. A spoke bound to a DIFFERENT tenant is excluded.
             _gs = hub.get_hypervisor_spoke()
             if (_gs and _gs not in hv_spokes and access.spoke_is_unbound(hub, _gs)
-                    and not access.tenant_has_own_spoke(
+                    and not access.tenant_left_shared(
                         hub, _tid, access.spoke_module_type(hub, _gs))):
                 hv_spokes.append(_gs)
         else:
@@ -677,7 +677,7 @@ def register(app, hub, ctx):
         # shared directory spoke returns only the tenant's own OU.
         if resolved and resolved != "default":
             spoke_directory = (hub.get_directory_spoke_for_tenant(resolved)
-                               or (None if access.tenant_has_own_spoke(hub, resolved, "directory")
+                               or (None if access.tenant_shared_fallback_blocked(hub, resolved, "directory")
                                    else hub.get_spoke_by_type("directory")))
         else:
             spoke_directory = hub.get_spoke_by_type("directory")
