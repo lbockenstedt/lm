@@ -194,6 +194,17 @@ def _ws_keepalive_env(name: str, default: float) -> float:
         return default
 
 
+def _hub_wait_s(msg) -> Optional[float]:
+    """How long the hub waits for this command's reply (header ``ttl``).
+
+    Older hubs send the 24h default, which never drops anything.
+    """
+    try:
+        ttl = float((msg.get("header") or {}).get("ttl") or 0)
+    except (TypeError, ValueError):
+        return None
+    return ttl if ttl > 0 else None
+
 class _SpokeLogRelayHandler(logging.Handler):
     """Captures ALL log records (INFO+) into a queue for async relay to the Hub.
 
@@ -1985,7 +1996,8 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 # Handle + ack in a bounded concurrent task so the receive loop
                 # keeps draining the socket while a slow handler runs.
                 task = asyncio.create_task(self._handle_one_command(
-                    websocket, cmd_type, data, corr_id, cmd_send_lock, cmd_sem))
+                    websocket, cmd_type, data, corr_id, cmd_send_lock, cmd_sem,
+                    max_wait_s=_hub_wait_s(msg)))
                 cmd_tasks.add(task)
                 task.add_done_callback(cmd_tasks.discard)
             finally:
@@ -2222,7 +2234,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             logger.debug("spoke progress emitter stopped for %s: %s", cmd_type, e)
 
     async def _handle_one_command(self, websocket, cmd_type, data, corr_id,
-                                  send_lock, sem) -> None:
+                                  send_lock, sem, max_wait_s=None) -> None:
         """Handle one hub command concurrently and send its COMMAND_RESULT ack.
 
         Isolated from the receive loop so a slow handler cannot block reading
@@ -2232,8 +2244,21 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         dispatch order: system command → module match → first-module fallback →
         ``*_GET_STATUS`` get_status() fallback.
         """
+        queued_at = time.monotonic()
         # Hold a concurrency slot for the whole handler.
         async with sem:
+            # The hub stops waiting after max_wait_s (its request timeout). A
+            # command that sat queued that long has no one to answer, so skip
+            # it instead of spending a slot on it — a backlog of these is what
+            # fills the queue and turns new saves into "queue full".
+            waited = time.monotonic() - queued_at
+            if max_wait_s and waited > max_wait_s:
+                logger.warning("dropped %s: queued %.0fs, past the hub's %.0fs wait",
+                               cmd_type, waited, max_wait_s)
+                await self._send_cmd_result(
+                    websocket, corr_id,
+                    {"status": "ERROR", "message": "spoke busy, try again"}, send_lock)
+                return
             # No result yet, and no module has claimed the command.
             result: Optional[Dict[str, Any]] = None
             handled_by_module = None

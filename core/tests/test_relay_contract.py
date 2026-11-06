@@ -142,3 +142,10 @@ def test_dhcp_stats_rescope_cannot_emit_none_for_shared_tenant():
     # _spoke_payload_or_raise now stops None before it ever reaches the filter.
     with pytest.raises(HTTPException):
         _spoke_payload_or_raise(_dhcp_rescope_stats(None, None))
+
+
+def test_overloaded_spoke_is_a_retryable_503():
+    for msg in ("spoke command queue full", "spoke busy, try again"):
+        with pytest.raises(HTTPException) as exc:
+            _spoke_payload_or_raise({"status": "ERROR", "message": msg})
+        assert exc.value.status_code == 503 and "try again" in exc.value.detail
