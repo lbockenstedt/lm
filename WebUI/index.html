@@ -332,6 +332,9 @@
             color: #94a3b8;
         }
         :is(#login-overlay, .bg-navy, .bg-slate-800, .bg-slate-900) ::placeholder { color: #94a3b8; }
+        /* HPE focus indicator: 2px focus color for keyboard users only. */
+        :focus-visible { outline: 2px solid #292D3A; outline-offset: 2px; }
+        :is(#login-overlay, footer, .hpe-topbar, .bg-navy, .bg-slate-800, .bg-slate-900, .bg-black) :focus-visible { outline-color: #FFFFFF; }
     </style>
 </head>
 <body class="flex flex-col h-screen w-screen overflow-hidden">
@@ -788,6 +791,7 @@
     <script src="js/external-dns-dhcp.js?v=__WEBUI_VERSION__"></script>
     <script src="js/cppm-ldap-users.js?v=__WEBUI_VERSION__"></script>
     <script src="js/module-management.js?v=__WEBUI_VERSION__"></script>
+    <script src="js/a11y.js?v=__WEBUI_VERSION__"></script>
     <script src="js/dashboard-search-login.js?v=__WEBUI_VERSION__"></script>
     <script src="sim-views.js?v=__WEBUI_VERSION__"></script>
     <script src="update_handler.js?v=__WEBUI_VERSION__"></script>
