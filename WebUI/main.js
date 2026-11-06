@@ -480,7 +480,7 @@ function updateHeaderModule() {
 // overlapped this footer). cs gets force=true to bypass the auto-refresh
 // throttle, matching the former FAB.
 function refreshCurrentView() {
-    _lmNavSeq++;
+    _lmNavigated();
     if (currentView === 'cs') {
         loadCSData(currentSubView, currentSubChild, true);
         return;
@@ -834,6 +834,21 @@ function _lmLeftPageSince(navAtStart, input, init) {
     return method.toUpperCase() === 'GET';
 }
 
+// Page reads still in flight, cancelled when the user navigates. The hub
+// speaks HTTP/1.1, so the browser opens only ~6 connections to it; a slow read
+// from a page the user already left kept holding one until the spoke answered,
+// and after a few clicks the new page's requests queued behind them (the
+// "page stalls until I refresh" symptom). Their responses were already
+// discarded, so cancelling them changes nothing else.
+const _lmPageReads = new Set();
+
+// Call wherever the user moves to another page/tab (bumps the nav counter).
+function _lmNavigated() {
+    _lmNavSeq++;
+    _lmPageReads.forEach(c => c.abort());
+    _lmPageReads.clear();
+}
+
 window.fetch = async function lmFetch(input, init) {
     const navAtStart = _lmNavSeq;
     let isBg = false;
@@ -853,6 +868,17 @@ window.fetch = async function lmFetch(input, init) {
         _lmNotifyFetchState();
     }
 
+    // A page read (one lmFetch would drop after navigation) gets cancelled then.
+    let pageCtrl = null;
+    if (!isBg && _lmNavSeq !== 0 && !(init && init._keepOnNavigate)
+            && ((init && init.method) || (input && input.method) || 'GET').toUpperCase() === 'GET'
+            && (!(init && init.signal) || typeof AbortSignal.any === 'function')) {
+        pageCtrl = new AbortController();
+        _lmPageReads.add(pageCtrl);
+        const signal = (init && init.signal) ? AbortSignal.any([init.signal, pageCtrl.signal]) : pageCtrl.signal;
+        init = { ...(init || {}), signal };
+    }
+
     let res;
     try {
         res = await _lmOrigFetch(input, init);
@@ -860,6 +886,7 @@ window.fetch = async function lmFetch(input, init) {
         if (!isBg && _lmLeftPageSince(navAtStart, input, init)) return new Promise(() => {});
         throw err;
     } finally {
+        if (pageCtrl) _lmPageReads.delete(pageCtrl);
         if (!isBg) {
             _lmActiveFetchCount = Math.max(0, _lmActiveFetchCount - 1);
             _lmNotifyFetchState();
@@ -4397,7 +4424,7 @@ async function setView(viewId) {
     currentSubView = (VIEW_SUBMENUS[currentView] || ['General'])[0];
     currentSubChild = _csDefaultChild(currentView, currentSubView);
     currentSubGrandchild = _csDefaultGrandchild(currentView, currentSubView, currentSubChild);
-    _lmNavSeq++;
+    _lmNavigated();
     document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
     const navItem = document.getElementById(`nav-${isClass ? viewId : currentView}`);
     if (navItem) navItem.classList.add('active');
@@ -4476,7 +4503,7 @@ const VIEW_LOADERS = {
 
 async function setSubView(subMenu) {
     if (subMenu === 'Diagnostics' && !isAdmin()) return;
-    _lmNavSeq++;
+    _lmNavigated();
     currentSubView = subMenu;
     // Leaving the Certificates tab: stop the in-flight distribution poller/
     // ticker so it doesn't keep fetching /api/le/inflight in the background.
@@ -4624,7 +4651,7 @@ function renderTertiaryNav(viewId) {
 // grandchild, updates the secondary strip's active state + the tertiary strip,
 // and dispatches the child renderer.
 async function setSubChild(child) {
-    _lmNavSeq++;
+    _lmNavigated();
     currentSubChild = child;
     currentSubGrandchild = _csDefaultGrandchild(currentView, currentSubView, child);
     document.querySelectorAll('#top-nav-secondary .sub-nav-item').forEach(el => {
@@ -4645,7 +4672,7 @@ window.setSubChild = setSubChild;
 // Settings → Cloud → Azure → 'NSG'). Sets currentSubGrandchild, updates the
 // tertiary strip's active state, and re-renders the settings tile.
 function setSubGrandchild(gchild) {
-    _lmNavSeq++;
+    _lmNavigated();
     currentSubGrandchild = gchild;
     document.querySelectorAll('#top-nav-tertiary .sub-nav-item').forEach(el => {
         el.classList.toggle('active', el.dataset.subgrandchild === gchild);
