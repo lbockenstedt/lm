@@ -677,14 +677,23 @@ def register(app, hub, ctx):
         if ep.get("hostname"):
             sources["hostname"] = "ClearPass"
 
-        # Fill gaps from the first matching DHCP lease on each firewall (stop once complete).
+        # Fill gaps from DHCP leases. Ask every firewall at once with a short
+        # timeout: one at a time, a slow firewall held the modal for a minute.
         norm_target = _norm_mac(mac)
-        for spoke_id in fw_spokes:
+
+        async def _leases(spoke_id):
+            """One firewall's DHCP leases, or [] on error/timeout."""
             try:
-                dhcp_raw = await hub.request_response(spoke_id, "OPNSENSE_GET_DHCP_LEASES", {})
-                leases = dhcp_raw.get("payload", {}).get("data", []) if isinstance(dhcp_raw, dict) else []
-                if not isinstance(leases, list):
-                    continue
+                raw = await hub.request_response(spoke_id, "OPNSENSE_GET_DHCP_LEASES", {}, timeout=10.0)
+                data = raw.get("payload", {}).get("data", []) if isinstance(raw, dict) else []
+                return data if isinstance(data, list) else []
+            except Exception:  # noqa: BLE001
+                return []
+
+        need_dhcp = not (ep.get("ip") and ep.get("hostname"))
+        all_leases = await asyncio.gather(*(_leases(s) for s in fw_spokes)) if need_dhcp else []
+        for leases in all_leases:
+            try:
                 lease = next((l for l in leases if _norm_mac(l.get("mac", "")) == norm_target), None)
                 if lease:
                     if not ep.get("ip") and lease.get("ip") and lease["ip"] != "unknown":
