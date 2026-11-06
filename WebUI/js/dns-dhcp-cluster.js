@@ -506,26 +506,38 @@ async function loadServiceClusterSummary() {
         grab('/api/dns/cluster' + _tenantQS()),
         grab('/api/dhcp/ha' + _tenantQS())]);
     const rows = [];
+    // Plain-text lines for the page's Copy button.
+    const text = [];
     if (dns) {
-        rows.push(`<tr class="border-b border-slate-100">
-            <td class="px-4 py-2 font-medium">DNS resolvers</td>
+        rows.push(`<tr class="border-b border-slate-100 last:border-0">
+            <td class="px-4 py-2 font-mono text-xs text-slate-700">DNS</td>
             <td class="px-4 py-2">${_ddClusterBadge(dns.state)}</td>
             <td class="px-4 py-2 text-xs">${dns.converged_count || 0}/${dns.member_count || 0} converged · desired v${(dns.desired || {}).version == null ? '?' : dns.desired.version}</td>
-            <td class="px-4 py-2 text-xs text-slate-500">${escapeHtml(((dns.recommendations || [])[0]) || 'No findings.')}</td>
+            <td class="px-4 py-2 text-xs text-slate-500">${escapeHtml(((dns.recommendations || [])[0]) || 'None')}</td>
         </tr>`);
+        text.push(`  DNS [${dns.state}] ${dns.converged_count || 0}/${dns.member_count || 0} converged — ${((dns.recommendations || [])[0]) || 'None'}`);
     }
     if (dhcp) {
-        rows.push(`<tr class="border-b border-slate-100">
-            <td class="px-4 py-2 font-medium">Kea HA pair</td>
+        rows.push(`<tr class="border-b border-slate-100 last:border-0">
+            <td class="px-4 py-2 font-mono text-xs text-slate-700">DHCP</td>
             <td class="px-4 py-2">${_ddClusterBadge(dhcp.state)}</td>
             <td class="px-4 py-2 text-xs">${escapeHtml(dhcp.mode || 'hot-standby')} · ${dhcp.healthy_count || 0}/${dhcp.member_count || 0} in sync · config ${dhcp.config_converged ? 'matched' : 'MISMATCHED'}</td>
-            <td class="px-4 py-2 text-xs text-slate-500">${escapeHtml(((dhcp.recommendations || [])[0]) || 'No findings.')}</td>
+            <td class="px-4 py-2 text-xs text-slate-500">${escapeHtml(((dhcp.recommendations || [])[0]) || 'None')}</td>
         </tr>`);
+        text.push(`  DHCP [${dhcp.state}] ${dhcp.healthy_count || 0}/${dhcp.member_count || 0} in sync — ${((dhcp.recommendations || [])[0]) || 'None'}`);
     }
+    el.dataset.copyText = rows.length ? `CLUSTERED MODULES (${rows.length})\n${text.join('\n')}\n` : '';
     if (!rows.length) { el.innerHTML = ''; return; }
-    el.innerHTML = `<div class="bg-white border border-slate-200 rounded-lg overflow-hidden">
-        <div class="px-4 py-3 text-sm font-semibold text-slate-700 border-b border-slate-200">Clustered service modules</div>
-        ${tableWrap(tableHead(['Service', 'State', 'Members', 'Top finding']) + `<tbody>${rows.join('')}</tbody>`)}
+    el.innerHTML = `<div class="hpe-card rounded-lg p-5 shadow-sm">
+        <p class="text-sm font-bold text-slate-500">Clustered Modules <span class="text-slate-500 normal-case font-normal">(${rows.length})</span></p>
+        <p class="text-xs text-slate-500 mb-3">Modules that run on more than one host.</p>
+        <div class="overflow-x-auto"><table class="w-full text-sm">
+          <thead class="bg-slate-50 text-xs text-slate-500"><tr>
+            <th class="px-4 py-2 text-left font-medium">Module</th>
+            <th class="px-4 py-2 text-left font-medium">Status</th>
+            <th class="px-4 py-2 text-left font-medium">Members</th>
+            <th class="px-4 py-2 text-left font-medium">Finding</th>
+          </tr></thead><tbody>${rows.join('')}</tbody></table></div>
     </div>`;
 }
 
