@@ -946,6 +946,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                     </div>
                     <div class="flex items-center gap-2">
                         ${serviceClusterButton('dhcp', haCluster)}
+                        ${(typeof isAdmin !== 'function' || isAdmin()) ? `<button onclick="releaseDhcpDeclines()" title="Free every declined address so the pool can hand it out again" class="px-3 py-1.5 rounded-full text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Release declined</button>` : ''}
                         <button onclick="loadDHCPData('Diagnostics')" title="Run DHCP diagnostics again" class="px-3 py-1.5 rounded-full text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Run again</button>
                     </div>
                 </div>

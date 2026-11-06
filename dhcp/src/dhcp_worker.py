@@ -1126,6 +1126,11 @@ class DhcpWorkerOps:
                       or status.get("running_config_error") else "SUCCESS")
         return {"status": top_status, **status}
 
+    def release_declines(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """``KEAW_RELEASE_DECLINES`` — free declined addresses on this node: all
+        of them with ``all``, else those held past its current probation."""
+        return self.mgr.release_held_declines(release_all=bool(data.get("all")))
+
     def op_table(self) -> Dict[str, Any]:
         """Return the complete map of command names this worker accepts to handler methods."""
         # Anything not in this table is rejected by the transport.
@@ -1148,6 +1153,7 @@ class DhcpWorkerOps:
             "KEAW_LIST_LEASES": self.list_leases,
             "KEAW_LIST_RES": self.list_reservations,
             "KEAW_DEL_LEASE": self.delete_lease,
+            "KEAW_RELEASE_DECLINES": self.release_declines,
             "KEAW_LIST_SUBNETS6": self.list_subnets6,
             "KEAW_LIST_LEASES6": self.list_leases6,
             "KEAW_LIST_RES6": self.list_reservations6,

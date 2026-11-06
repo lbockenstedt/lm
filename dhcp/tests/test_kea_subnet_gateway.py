@@ -84,3 +84,40 @@ def test_hold_declined_toggles_probation_and_persists(tmp_path, monkeypatch):
     kea_manager.set_hold_declined(False)
     assert kea_manager.DHCP4_COORDINATOR_GLOBALS["decline-probation-period"] == 60
     assert kea_manager._read_hold_declined() is False
+
+
+class _DeclineMgr(kea_manager.KeaManager):
+    """KeaManager over a fixed lease table; records lease4-del calls."""
+
+    def __init__(self, period):
+        self.period, self.deleted = period, []
+        self.leases = [
+            {"ip-address": "10.21.0.10", "state": 1, "valid-lft": 86400},  # held under the old 24h
+            {"ip-address": "10.21.0.11", "state": 1, "valid-lft": 60},     # current probation
+            {"ip-address": "10.21.0.12", "state": 0, "valid-lft": 86400},  # active lease
+        ]
+
+    def get_config(self):
+        return {"decline-probation-period": self.period}
+
+    def list_leases(self, subnet=None):
+        return self.leases
+
+    def delete_lease(self, ip):
+        self.deleted.append(ip)
+
+
+def test_declines_held_past_the_current_probation_are_released():
+    mgr = _DeclineMgr(period=60)
+    assert mgr.release_held_declines()["released"] == ["10.21.0.10"]
+    assert mgr.deleted == ["10.21.0.10"]
+
+
+def test_declines_are_kept_while_hold_is_on():
+    mgr = _DeclineMgr(period=86400)
+    assert mgr.release_held_declines()["released"] == []
+
+
+def test_release_all_frees_every_declined_address_but_no_active_lease():
+    mgr = _DeclineMgr(period=86400)
+    assert mgr.release_held_declines(release_all=True)["released"] == ["10.21.0.10", "10.21.0.11"]
