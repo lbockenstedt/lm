@@ -57,7 +57,7 @@ function showAddNwDeviceModal(prefillDevice) {
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3 sticky bottom-0">
                 <button onclick="closeNwDeviceModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
-                <button onclick="saveNwDevice()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save Device</button>
+                <button onclick="saveNwDevice()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm">Save Device</button>
             </div>
         </div>
     `;
@@ -270,7 +270,7 @@ function showAddTruenasApplianceModal() {
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3 sticky bottom-0">
                 <button onclick="closeTruenasApplianceModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors" title="Cancel and close dialog">Cancel</button>
-                <button onclick="saveTruenasAppliance()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm" title="Save appliance credentials and settings">Save Appliance</button>
+                <button onclick="saveTruenasAppliance()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm" title="Save appliance credentials and settings">Save Appliance</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
@@ -678,7 +678,7 @@ ${schemaBtnHtml}
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="closeInstanceModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
-                <button onclick="saveInstance('${productKey}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save</button>
+                <button onclick="saveInstance('${productKey}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm">Save</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
@@ -1072,7 +1072,7 @@ function showAddDeviceModal(editTypeKey, editItem) {
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3 sticky bottom-0">
                 <button onclick="closeDeviceModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
-                <button onclick="saveDevice()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save</button>
+                <button onclick="saveDevice()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm">Save</button>
             </div>
         </div>`;
     document.body.appendChild(modal);

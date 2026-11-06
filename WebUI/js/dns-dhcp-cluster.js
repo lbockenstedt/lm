@@ -110,7 +110,7 @@ function _showDhcpConfigDetailsModal() {
             <pre class="bg-slate-900 text-slate-100 p-3 rounded font-mono text-xs whitespace-pre-wrap max-h-96 overflow-y-auto">${escapeHtml(text)}</pre>
         </div>
         <div class="flex justify-end pt-3">
-            <button onclick="document.getElementById('dhcp-cfg-details-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Close</button>
+            <button onclick="document.getElementById('dhcp-cfg-details-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm font-medium">Close</button>
         </div>`, { card: 'w-full max-w-2xl p-6 space-y-3 max-h-[90vh] overflow-y-auto', backdropClose: true });
 }
 
@@ -205,7 +205,7 @@ function _dnsClusterPanel(c) {
                 ${Object.entries(commit.errors || {}).map(([k, v]) => `<div class="mt-1 font-mono">${escapeHtml(k)}: ${escapeHtml(String(v))}</div>`).join('')}
             </div>` : ''}
             <div class="px-4 py-3 border-t border-slate-200">
-                <button onclick="reconcileDnsCluster()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Reconcile now</button>
+                <button onclick="reconcileDnsCluster()" class="px-3 py-1.5 rounded-full text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Reconcile now</button>
                 <span class="text-xs text-slate-500 ml-2">Re-pushes the desired record set to any resolver that has drifted.</span>
             </div>
         </div>`;
@@ -303,9 +303,9 @@ function _dhcpHaPanel(c) {
                 ${Object.entries(apply.errors || {}).map(([k, v]) => `<div class="mt-1 font-mono">${escapeHtml(k)}: ${escapeHtml(String(v))}</div>`).join('')}
             </div>` : ''}
             <div class="px-4 py-3 border-t border-slate-200">
-                <button onclick="applyDhcpHaConfig()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Re-apply configuration to both nodes</button>
+                <button onclick="applyDhcpHaConfig()" class="px-3 py-1.5 rounded-full text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Re-apply configuration to both nodes</button>
                 <span class="text-xs text-slate-500 ml-2">Validates both nodes, then applies standby first and primary last.</span>
-                <button onclick="syncDhcpFromNetbox()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50 ml-2">Sync from NetBox</button>
+                <button onclick="syncDhcpFromNetbox()" class="px-3 py-1.5 rounded-full text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50 ml-2">Sync from NetBox</button>
                 <span class="text-xs text-slate-500 ml-2">Pulls subnets/reservations from NetBox first — needed before Re-apply if nothing has synced yet.</span>
             </div>
         </div>`;
@@ -608,10 +608,10 @@ function openServiceClusterModal(kind, current) {
     const wrapped = `
         <div class="flex-1 overflow-y-auto space-y-4 p-6">${body}</div>
         <div class="shrink-0 flex justify-between items-center gap-2 px-6 py-4 border-t border-slate-100">
-            ${alreadyEnabled ? `<button onclick="deleteServiceCluster('${escapeHtml(kind)}')" class="px-4 py-1.5 text-sm rounded-md border border-red-300 text-red-600 hover:bg-red-50 font-bold">Delete cluster</button>` : '<span></span>'}
+            ${alreadyEnabled ? `<button onclick="deleteServiceCluster('${escapeHtml(kind)}')" class="px-4 py-1.5 text-sm rounded-full border border-red-300 text-red-600 hover:bg-red-50 font-bold">Delete cluster</button>` : '<span></span>'}
             <div class="flex gap-2">
-                <button onclick="document.getElementById('svc-cluster-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
-                <button onclick="saveServiceCluster('${escapeHtml(kind)}', ${alreadyEnabled}, ${!!m(0).ha_password_set})" class="px-4 py-1.5 text-sm rounded-md bg-primary text-white font-bold hover:bg-primary-hover">Save</button>
+                <button onclick="document.getElementById('svc-cluster-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-full border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
+                <button onclick="saveServiceCluster('${escapeHtml(kind)}', ${alreadyEnabled}, ${!!m(0).ha_password_set})" class="px-4 py-1.5 text-sm rounded-full bg-primary text-white font-bold hover:bg-primary-hover">Save</button>
             </div>
         </div>`;
     openModal('svc-cluster-modal', wrapped, {
@@ -728,7 +728,7 @@ function serviceClusterButton(kind, cluster) {
     const label = cluster ? 'Edit cluster' : (kind === 'dns' ? 'Configure resolver cluster' : 'Configure HA pair');
     window._svcClusterState = window._svcClusterState || {};
     window._svcClusterState[kind] = cluster || null;
-    return `<button onclick="openServiceClusterModal('${kind}', (window._svcClusterState||{})['${kind}'])" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">${label}</button>`;
+    return `<button onclick="openServiceClusterModal('${kind}', (window._svcClusterState||{})['${kind}'])" class="px-3 py-1.5 rounded-full text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">${label}</button>`;
 }
 
 async function reconcileDnsCluster() {
@@ -800,7 +800,7 @@ function _dhcpPacketTracePanel() {
                     <input id="dhcp-trace-minutes" type="number" min="1" max="1440" value="${escapeHtml(String(last.minutes || 30))}" class="mt-1 block w-24 px-2 py-1.5 border border-slate-300 rounded text-xs"></label>
                 <label class="text-xs text-slate-600">Live capture (s, 0–60)
                     <input id="dhcp-trace-capture" type="number" min="0" max="60" value="${escapeHtml(String(last.capture_seconds != null ? last.capture_seconds : 20))}" class="mt-1 block w-24 px-2 py-1.5 border border-slate-300 rounded text-xs"></label>
-                <button id="dhcp-trace-btn" onclick="runDhcpPacketTrace()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-primary text-white hover:bg-primary-hover">Trace</button>
+                <button id="dhcp-trace-btn" onclick="runDhcpPacketTrace()" class="px-3 py-1.5 rounded-full text-xs font-bold bg-primary text-white hover:bg-primary-hover">Trace</button>
             </div>
             <div id="dhcp-trace-result" class="mt-4">${window._dhcpPacketTraceHtml || ''}</div>
         </div>`;
@@ -892,7 +892,7 @@ function _dhcpDnsHookPanel(dnsHook) {
                     <div class="text-sm font-semibold text-slate-700">Real-time DNS registration (Kea → Unbound)</div>
                     <div class="text-xs text-slate-500">Registers/retracts a client's DNS record in Unbound the instant a Kea lease is committed, renewed, released, expired, or declined — no dependency on the NetBox sync loop above.</div>
                 </div>
-                ${admin ? `<button onclick="toggleDhcpDnsHook(${enabled ? 'false' : 'true'})" class="px-3 py-1.5 rounded-md text-xs font-bold ${enabled ? 'bg-white border border-slate-300 hover:bg-slate-50' : 'bg-primary text-white hover:bg-[#018a6c]'} flex-shrink-0">${enabled ? 'Disable' : 'Enable'}</button>` : ''}
+                ${admin ? `<button onclick="toggleDhcpDnsHook(${enabled ? 'false' : 'true'})" class="px-3 py-1.5 rounded-full text-xs font-bold ${enabled ? 'bg-white border border-slate-300 hover:bg-slate-50' : 'bg-primary text-white hover:bg-[#018a6c]'} flex-shrink-0">${enabled ? 'Disable' : 'Enable'}</button>` : ''}
             </div>
             <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
                 ${_ddTile('Hook', enabled ? 'ENABLED' : 'DISABLED', enabled ? `targets: ${escapeHtml(targets)}` : 'not configured', enabled ? 'text-emerald-600' : 'text-slate-500')}
@@ -1022,16 +1022,16 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
     // actually worked for this module.
     if (navActions) {
         const addRecordBtn = ((subMenu === 'Records') && (isAdmin() || isTenantAdmin()))
-            ? `<button id="dns-add-btn" onclick="showDnsRecordModal()" title="Add a new DNS record" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Record</button>`
+            ? `<button id="dns-add-btn" onclick="showDnsRecordModal()" title="Add a new DNS record" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-full text-xs font-bold transition-all shadow-sm">+ Add Record</button>`
             : '';
         const addForwarderBtn = (subMenu === 'Forwarders' && isAdmin())
-            ? `<button id="dns-forwarder-add-btn" onclick="showDnsForwarderModal()" title="Add a new persistent upstream DNS forwarder" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Forwarder</button>`
+            ? `<button id="dns-forwarder-add-btn" onclick="showDnsForwarderModal()" title="Add a new persistent upstream DNS forwarder" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-full text-xs font-bold transition-all shadow-sm">+ Add Forwarder</button>`
             : '';
         const addProfileBtn = (subMenu === 'Overrides' && isAdmin())
-            ? `<button id="dns-override-profile-add-btn" onclick="showDnsOverrideProfileModal()" title="Define a new DNS override profile (custom answers for chosen clients)" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Profile</button>`
+            ? `<button id="dns-override-profile-add-btn" onclick="showDnsOverrideProfileModal()" title="Define a new DNS override profile (custom answers for chosen clients)" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-full text-xs font-bold transition-all shadow-sm">+ Add Profile</button>`
             : '';
         const assignOverrideBtn = (subMenu === 'Overrides' && (isAdmin() || isTenantAdmin()))
-            ? `<button id="dns-override-assign-btn" onclick="showDnsOverrideAssignModal()" title="Apply an override profile to a device IP or subnet" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm ml-2">+ Assign</button>`
+            ? `<button id="dns-override-assign-btn" onclick="showDnsOverrideAssignModal()" title="Apply an override profile to a device IP or subnet" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-full text-xs font-bold transition-all shadow-sm ml-2">+ Assign</button>`
             : '';
         navActions.innerHTML = addRecordBtn + addForwarderBtn + addProfileBtn + assignOverrideBtn;
     }
@@ -1188,7 +1188,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                                 <option value="60">Last 60 min</option>
                                 <option value="300">Last 300 min</option>
                             </select>
-                            <button id="dns-client-go" class="text-xs bg-brand/10 text-primary-text border border-brand px-3 py-1 rounded-md font-bold">Show</button>
+                            <button id="dns-client-go" class="text-xs bg-brand/10 text-primary-text border border-brand px-3 py-1 rounded-full font-bold">Show</button>
                         </div>
                     </div>
                     <div id="dns-client-list"><p class="text-slate-500 italic text-sm">Enter a device IP to list every DNS query it made in the chosen window.</p></div>
@@ -1287,7 +1287,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                     </div>
                     <div class="flex items-center gap-2">
                         ${serviceClusterButton('dns', cluster)}
-                        <button onclick="loadDNSData('Diagnostics')" title="Run DNS diagnostics again" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Run again</button>
+                        <button onclick="loadDNSData('Diagnostics')" title="Run DNS diagnostics again" class="px-3 py-1.5 rounded-full text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Run again</button>
                     </div>
                 </div>
                 ${clusterPanel}

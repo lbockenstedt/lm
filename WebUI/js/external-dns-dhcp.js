@@ -252,7 +252,7 @@ async function loadHenet() {
     // always pinned to their own tenant server-side, so scope is irrelevant.
     const adminScope = admin ? ((currentTenant && currentTenant !== 'default') ? currentTenant : '') : null;
     const backBar = _extDnsBackBar('HE.NET');
-    const btnCls = 'bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-md text-xs font-bold shadow-sm';
+    const btnCls = 'bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-full text-xs font-bold shadow-sm';
     const btnClsDanger = 'bg-red-50 hover:bg-red-100 text-red-600 border border-red-300 px-3 py-1.5 rounded-md text-xs font-bold shadow-sm';
     const editIcon = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>`;
     const delIcon  = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>`;
@@ -417,8 +417,8 @@ async function showHenetRecordModal(editItem) {
             <p class="text-xs text-slate-500">Records are created/updated directly in your HE.NET zone using the assigned account login${cred ? ` (<span class="font-mono">🔐 ${escapeHtml(cred.name)}</span>)` : ''} — no per-record DDNS key needed.${editing && isAdmin() ? ` To just move this record to another tenant's tab, change <b>Tenant</b> and leave <b>Value</b> unchanged — it's re-homed without touching HE.NET.` : ''}</p>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="saveHenetRecord()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold" title="${editing ? 'Save changes to this HE.NET record' : 'Add record to HE.NET management'}">${editing ? 'Save Changes' : 'Add Record'}</button>
-            <button onclick="document.getElementById('henet-record-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Cancel and close dialog">Cancel</button>
+            <button onclick="saveHenetRecord()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold" title="${editing ? 'Save changes to this HE.NET record' : 'Add record to HE.NET management'}">${editing ? 'Save Changes' : 'Add Record'}</button>
+            <button onclick="document.getElementById('henet-record-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm" title="Cancel and close dialog">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     if (editing) { modal.dataset.editName = editItem.name; modal.dataset.editType = editItem.type; modal.dataset.editTenant = String(editItem.tenant_id || ''); modal.dataset.editValue = String(editItem.value || ''); }
 }
@@ -449,9 +449,9 @@ async function showHenetCredModal() {
             : `<p class="text-sm text-amber-600 italic">No automation-readable Hurricane Electric credential found in the Credential Vault. Add a <b>DNS → Hurricane Electric (account login)</b> secret first (it serves both certs and DNS).</p>`}
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            ${assigned ? `<button onclick="_henetClearCred()" class="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 px-4 py-2 rounded-md text-sm mr-auto" title="Clear assigned HE.NET DDNS credential">Clear</button>` : ''}
-            ${creds.length ? `<button onclick="_henetSaveCred()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold" title="Save assigned HE.NET credential">Save</button>` : ''}
-            <button onclick="document.getElementById('henet-cred-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Cancel and close dialog">Cancel</button>
+            ${assigned ? `<button onclick="_henetClearCred()" class="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 px-4 py-2 rounded-full text-sm mr-auto" title="Clear assigned HE.NET DDNS credential">Clear</button>` : ''}
+            ${creds.length ? `<button onclick="_henetSaveCred()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold" title="Save assigned HE.NET credential">Save</button>` : ''}
+            <button onclick="document.getElementById('henet-cred-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm" title="Cancel and close dialog">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
 }
 
@@ -536,8 +536,8 @@ async function showHenetScheduleModal() {
           <input type="time" id="henet-sched-daily" value="${escapeHtml(String(cfg.daily_time || '02:00'))}" class="${inputCls}" title="Time of day (24-hour HH:MM) to run daily HE.NET synchronization">
         </div>
         <div class="flex justify-end gap-2 pt-2">
-          <button onclick="_henetSaveSchedule()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold" title="Save scheduled auto-sync settings">Save</button>
-          <button onclick="document.getElementById('henet-schedule-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Cancel and close dialog">Cancel</button>
+          <button onclick="_henetSaveSchedule()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold" title="Save scheduled auto-sync settings">Save</button>
+          <button onclick="document.getElementById('henet-schedule-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm" title="Cancel and close dialog">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     const modeSel = document.getElementById('henet-sched-mode');
     if (modeSel) modeSel.onchange = () => {
@@ -698,8 +698,8 @@ async function showHenetMoveAllModal() {
         <p class="text-xs text-slate-500">Re-home all ${recs.length} record(s) currently shown (<span class="font-medium">${escapeHtml(_henetCurrentScopeLabel())}</span>) to another tenant. Metadata only — the HE.NET zone at dns.he.net is untouched.</p>
         <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Destination</label><select id="henet-moveall-target" class="${inputCls}" title="Select destination tenant to re-home these records to">${opts}</select></div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="_henetMoveAll()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold" title="Move all records in current view to selected destination tenant">Move all</button>
-            <button onclick="document.getElementById('henet-moveall-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Cancel and close dialog">Cancel</button>
+            <button onclick="_henetMoveAll()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold" title="Move all records in current view to selected destination tenant">Move all</button>
+            <button onclick="document.getElementById('henet-moveall-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm" title="Cancel and close dialog">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
 }
 
@@ -785,7 +785,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
     const navActions = document.getElementById('top-nav-actions');
     if (navActions) {
         const addResBtn = (subMenu === 'Reservations' && (isAdmin() || isTenantAdmin()))
-            ? `<button id="dhcp-add-btn" onclick="showDhcpReservationModal()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm" title="Create a new static DHCP host reservation">+ Add Reservation</button>`
+            ? `<button id="dhcp-add-btn" onclick="showDhcpReservationModal()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-full text-xs font-bold transition-all shadow-sm" title="Create a new static DHCP host reservation">+ Add Reservation</button>`
             : '';
         navActions.innerHTML = addResBtn;
     }
@@ -936,7 +936,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                     </div>
                     <div class="flex items-center gap-2">
                         ${serviceClusterButton('dhcp', haCluster)}
-                        <button onclick="loadDHCPData('Diagnostics')" title="Run DHCP diagnostics again" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Run again</button>
+                        <button onclick="loadDHCPData('Diagnostics')" title="Run DHCP diagnostics again" class="px-3 py-1.5 rounded-full text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Run again</button>
                     </div>
                 </div>
                 ${haPanel}
@@ -1049,7 +1049,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                     <td class="px-4 py-2 text-xs"><span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border ${stateBadge}">${escapeHtml(stateLabel)}</span></td>
                     <td class="px-4 py-2 font-mono text-xs">${escapeHtml(validUntil)}</td>
                     <td class="px-4 py-2 whitespace-nowrap text-right">
-                        ${ip && mac ? `<button onclick="convertLeaseToReservation('${eIp}', '${eSpoke}')" title="Convert to static reservation" class="text-xs bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-2.5 py-1 rounded transition-colors font-medium">Reserve</button>` : ''}
+                        ${ip && mac ? `<button onclick="convertLeaseToReservation('${eIp}', '${eSpoke}')" title="Convert to static reservation" class="text-xs bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-2.5 py-1 rounded-full transition-colors font-medium">Reserve</button>` : ''}
                         ${ip ? `<button onclick="deleteDhcpLease('${eIp}', '${eSpoke}')" title="Delete lease" class="p-1 text-slate-500 hover:text-red-500 transition-colors ml-1">${delIcon}</button>` : ''}
                     </td>
                 </tr>`;
@@ -1198,8 +1198,8 @@ function showDhcpReservationModal(editItem, isConvert = false, prefillOnly = fal
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Hostname (optional)</label><input id="dhcp-res-host" value="${val(editItem?.hostname)}" class="${inputCls}" placeholder="printer-01" title="Optional client hostname"></div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="saveDhcpReservation()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold" title="${btnText}">${btnText}</button>
-            <button onclick="document.getElementById('dhcp-res-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Cancel and close dialog">Cancel</button>
+            <button onclick="saveDhcpReservation()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold" title="${btnText}">${btnText}</button>
+            <button onclick="document.getElementById('dhcp-res-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm" title="Cancel and close dialog">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     if (editing) modal.dataset.editIp = editItem.ip;
     if (isConvert && editItem?.ip) modal.dataset.oldLeaseIp = editItem.ip;

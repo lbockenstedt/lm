@@ -73,8 +73,8 @@ function renderGlvPending() {
             ${v.floor != null ? `<span class="text-slate-500">floor ${escapeHtml(String(v.floor))}</span>` : ''}
             <span class="text-slate-500">knobs: ${knobStr}</span>
             <div class="ml-auto flex gap-2">
-              <button onclick="approveGlvPending('${escJsAttr(k)}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md text-xs font-bold">Approve</button>
-              <button onclick="rejectGlvPending('${escJsAttr(k)}')" class="bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 px-3 py-1 rounded-md text-xs font-bold">Reject</button>
+              <button onclick="approveGlvPending('${escJsAttr(k)}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-full text-xs font-bold">Approve</button>
+              <button onclick="rejectGlvPending('${escJsAttr(k)}')" class="bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 px-3 py-1 rounded-full text-xs font-bold">Reject</button>
             </div>
         </div>`;
     }).join('');
@@ -156,7 +156,7 @@ function renderGlvCandidates() {
                     <span class="text-slate-600">op <b>${escapeHtml(String(r.op))}</b></span>
                     ${r.floor != null ? `<span class="text-slate-500">floor ${escapeHtml(String(r.floor))}</span>` : ''}
                     <span class="text-slate-500">${escapeHtml(r.source_tenant)} · ${escapeHtml(r.site || 'all sites')}</span>
-                    <button onclick="publishGlv('${escJsAttr(ak)}', ${Number(r.op)||0}, ${r.floor!=null?Number(r.floor):'null'}, '${escJsAttr(r.source_tenant)}')" class="ml-auto ${isPublished && r === rows[0] ? 'bg-emerald-100 text-emerald-700 border border-emerald-300' : 'bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand'} px-3 py-1 rounded-md text-xs font-bold">${isPublished && r === rows[0] ? 'Published' : 'Publish'}</button>
+                    <button onclick="publishGlv('${escJsAttr(ak)}', ${Number(r.op)||0}, ${r.floor!=null?Number(r.floor):'null'}, '${escJsAttr(r.source_tenant)}')" class="ml-auto ${isPublished && r === rows[0] ? 'bg-emerald-100 text-emerald-700 border border-emerald-300' : 'bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand'} px-3 py-1 rounded-full text-xs font-bold">${isPublished && r === rows[0] ? 'Published' : 'Publish'}</button>
                 </div>`).join('')}
             </div>
         </div>`;
@@ -1677,7 +1677,7 @@ async function loadUsbOverview() {
             <span class="font-mono text-xs text-slate-700 w-28">${escapeHtml(d.vidpid)}</span>
             <span class="text-xs text-slate-600 flex-1 min-w-[8rem]">${escapeHtml(d.label && d.label !== d.vidpid ? d.label : (usbDeviceName(d.vidpid) || '—'))}</span>
             <span class="px-2 py-0.5 rounded text-xs font-bold bg-green-100 text-green-700">Certified globally</span>
-            <button onclick="removeGlobalUsbCert('${d.vidpid}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-1 rounded text-xs font-bold">Un-approve</button>
+            <button onclick="removeGlobalUsbCert('${d.vidpid}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-1 rounded-full text-xs font-bold">Un-approve</button>
           </div>`).join('')
         : '<p class="text-xs text-slate-500 italic">None certified.</p>';
     ignWrap.innerHTML = (g.ignored || []).length
@@ -1685,7 +1685,7 @@ async function loadUsbOverview() {
             <span class="font-mono text-xs text-slate-700 w-28">${escapeHtml(vp)}</span>
             <span class="text-xs text-slate-600 flex-1 min-w-[8rem]">${escapeHtml(usbDeviceName(vp) || '—')}</span>
             <span class="px-2 py-0.5 rounded text-xs font-bold bg-slate-200 text-slate-600">Ignored globally</span>
-            <button onclick="removeGlobalUsbIgnore('${vp}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-1 rounded text-xs font-bold">Un-ignore</button>
+            <button onclick="removeGlobalUsbIgnore('${vp}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-1 rounded-full text-xs font-bold">Un-ignore</button>
           </div>`).join('')
         : '<p class="text-xs text-slate-500 italic">None ignored.</p>';
 
@@ -1696,12 +1696,12 @@ async function loadUsbOverview() {
         const cert = (t.certified || []).map(d => `<div class="flex flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5 border border-slate-200 rounded-md">
                 <span class="font-mono text-xs text-slate-700">${escapeHtml(d.vidpid)}</span>
                 <span class="text-xs text-slate-500 flex-1 min-w-[6rem]">${escapeHtml(usbDeviceName(d.vidpid) || d.type || '—')}</span>
-                <button onclick="tenantUsbRemove('${t.id}','${d.vidpid}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-0.5 rounded text-xs font-bold">Un-approve</button>
+                <button onclick="tenantUsbRemove('${t.id}','${d.vidpid}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-0.5 rounded-full text-xs font-bold">Un-approve</button>
               </div>`).join('') || '<span class="text-xs text-slate-500 italic">none</span>';
         const ign = (t.ignored || []).map(vp => `<div class="flex flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5 border border-slate-200 rounded-md">
                 <span class="font-mono text-xs text-slate-700">${escapeHtml(vp)}</span>
                 <span class="text-xs text-slate-500 flex-1 min-w-[6rem]">${escapeHtml(usbDeviceName(vp) || '—')}</span>
-                <button onclick="tenantUsbRemove('${t.id}','${vp}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-0.5 rounded text-xs font-bold">Un-ignore</button>
+                <button onclick="tenantUsbRemove('${t.id}','${vp}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-0.5 rounded-full text-xs font-bold">Un-ignore</button>
               </div>`).join('') || '<span class="text-xs text-slate-500 italic">none</span>';
         return `<div class="border border-slate-200 rounded-md p-3">
             <div class="flex items-center justify-between mb-2">
@@ -1714,8 +1714,8 @@ async function loadUsbOverview() {
             <div class="flex gap-1 mt-2">
                 <input id="tusbc-${t.id}" placeholder="1a2b:3c4d" class="w-28 font-mono text-xs ${'w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500 text-slate-800'}" onkeydown="if(event.key==='Enter')tenantUsbAdd('${t.id}','certify')">
                 <select id="tusbt-${t.id}" title="Dongle type" class="text-xs ${'w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500 text-slate-800'}"><option>wireless</option><option>wired</option><option>storage</option><option>other</option></select>
-                <button onclick="tenantUsbAdd('${t.id}','certify')" class="bg-green-100 text-green-700 px-2 py-1 rounded text-xs font-bold">Certify</button>
-                <button onclick="tenantUsbAdd('${t.id}','ignore')" class="bg-slate-200 text-slate-600 px-2 py-1 rounded text-xs font-bold">Ignore</button>
+                <button onclick="tenantUsbAdd('${t.id}','certify')" class="bg-green-100 text-green-700 px-2 py-1 rounded-full text-xs font-bold">Certify</button>
+                <button onclick="tenantUsbAdd('${t.id}','ignore')" class="bg-slate-200 text-slate-600 px-2 py-1 rounded-full text-xs font-bold">Ignore</button>
             </div>
         </div>`;
     }).join('');
@@ -1756,16 +1756,16 @@ async function loadDiscoveredUsb() {
         // pxmx agent uses as each provisioned VM's sim_phy. Defaults to
         // wireless (the agent's own default); hidden once already global.
         const approveBtn = d.is_global
-            ? `<button onclick="removeGlobalUsbCert('${vp}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-1 rounded text-xs font-bold">Un-approve globally</button>`
+            ? `<button onclick="removeGlobalUsbCert('${vp}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-1 rounded-full text-xs font-bold">Un-approve globally</button>`
             : `<select id="gusbt-${esc(vp)}" title="Dongle type" class="text-xs bg-white border border-slate-300 rounded-md px-2 py-1 outline-none focus:ring-2 focus:ring-green-500 text-slate-800"><option>wireless</option><option>wired</option><option>storage</option><option>other</option></select>
-               <button onclick="approveGlobalUsb('${vp}')" class="bg-green-100 text-green-700 px-2 py-1 rounded text-xs font-bold">Approve globally</button>`;
+               <button onclick="approveGlobalUsb('${vp}')" class="bg-green-100 text-green-700 px-2 py-1 rounded-full text-xs font-bold">Approve globally</button>`;
         const ignoreBtn = d.is_global_ignored
-            ? `<button onclick="removeGlobalUsbIgnore('${vp}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-1 rounded text-xs font-bold">Un-ignore globally</button>`
-            : `<button onclick="ignoreGlobalUsb('${vp}')" class="bg-slate-200 text-slate-600 px-2 py-1 rounded text-xs font-bold">Ignore globally</button>`;
+            ? `<button onclick="removeGlobalUsbIgnore('${vp}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-1 rounded-full text-xs font-bold">Un-ignore globally</button>`
+            : `<button onclick="ignoreGlobalUsb('${vp}')" class="bg-slate-200 text-slate-600 px-2 py-1 rounded-full text-xs font-bold">Ignore globally</button>`;
         // Per-tenant LOCAL un-approve — one button per tenant that certified this
         // device locally (drops it from that tenant's usb_vidpids).
         const localBtns = (d.locally_certified || []).map(c =>
-            `<button onclick="tenantUsbRemove('${esc(c.tenant_id)}','${vp}')" title="Un-approve locally for ${esc(c.tenant_name)}" class="bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 px-2 py-1 rounded text-xs font-bold">Un-approve @${esc(c.tenant_name)}</button>`
+            `<button onclick="tenantUsbRemove('${esc(c.tenant_id)}','${vp}')" title="Un-approve locally for ${esc(c.tenant_name)}" class="bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 px-2 py-1 rounded-full text-xs font-bold">Un-approve @${esc(c.tenant_name)}</button>`
         ).join('');
         return `<div class="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 border border-slate-200 rounded-md">
             <span class="font-mono text-xs text-slate-700 w-28">${esc(vp)}</span>

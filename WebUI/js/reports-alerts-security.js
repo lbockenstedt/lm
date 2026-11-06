@@ -32,7 +32,7 @@ async function loadReportsData() {
     el.innerHTML = `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <div class="flex items-center justify-between mb-3">
         <p class="text-xs text-slate-500 max-w-2xl">Emailed reports — each sends a tenant's Dashboard <b>Compliance</b> (week / month / quarter / year, every check) + optional <b>Client Count</b> to its recipients on a schedule (via the provider under Setup → Notifications). A Global Admin can target any tenant; a tenant user sees only its own.</p>
-        <button onclick="editReport('')" class="shrink-0 bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-md text-sm font-bold">+ Add report</button>
+        <button onclick="editReport('')" class="shrink-0 bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-full text-sm font-bold">+ Add report</button>
       </div>
       <div class="overflow-x-auto"><table class="w-full text-sm"><thead class="text-xs text-slate-500"><tr><th class="px-3 py-1 text-left">Name</th><th class="px-3 py-1 text-left">Tenant</th><th class="px-3 py-1 text-left">Sections</th><th class="px-3 py-1 text-left">Recipients</th><th class="px-3 py-1 text-left">Schedule</th><th class="px-3 py-1 text-left">On</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
     </div>
@@ -84,7 +84,7 @@ async function loadAlertRules() {
     el.innerHTML = `
       <div class="flex items-center justify-between mb-3">
         <div><p class="text-sm font-bold text-slate-600">Alert Rules <span class="text-slate-500 font-normal">— ${escapeHtml(currentTenant || 'default')}</span></p><p class="text-xs text-slate-500 max-w-xl">One email when a monitored source breaches, one on recovery; Cert Monitor rules can also remind on a schedule. Pick a source + who to notify. Delivered via Setup → Notifications.</p></div>
-        <button onclick="editAlertRule('')" class="shrink-0 bg-amber-500/10 hover:bg-amber-500/20 text-amber-700 border border-amber-500 px-3 py-1.5 rounded-md text-sm font-bold">+ Add alert</button>
+        <button onclick="editAlertRule('')" class="shrink-0 bg-amber-500/10 hover:bg-amber-500/20 text-amber-700 border border-amber-500 px-3 py-1.5 rounded-full text-sm font-bold">+ Add alert</button>
       </div>
       ${certErr ? `<p class="text-xs text-red-500 mb-2">Could not load Cert Monitor alert rules: ${escapeHtml(certErr)}</p>` : ''}
       <div class="overflow-x-auto"><table class="w-full text-sm"><thead class="text-xs text-slate-500"><tr><th class="px-3 py-1 text-left">Name</th><th class="px-3 py-1 text-left">Source</th><th class="px-3 py-1 text-left">Format</th><th class="px-3 py-1 text-left">Recipients</th><th class="px-3 py-1 text-left">On</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
@@ -172,7 +172,7 @@ function editAlertRule(id, kind) {
       <label class="block text-xs text-slate-500">Recipients <span class="text-slate-500">(comma-separated)</span><input id="alr-recips" value="${escapeHtml(existing ? (existing.recipients || []).join(', ') : '')}" placeholder="noc@acme.com" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm"></label>
       <label class="flex items-center gap-2 text-xs text-slate-600 pt-1"><input type="checkbox" id="alr-enabled" ${!existing || existing.enabled ? 'checked' : ''} class="w-4 h-4 rounded"> Enabled</label>
       <div id="alr-result" class="text-xs"></div>
-      <div class="flex justify-end gap-2 pt-1"><button class="alr-cancel bg-slate-200 text-slate-700 px-4 py-2 rounded text-sm font-bold">Cancel</button><button id="alr-save" class="bg-amber-500/10 hover:bg-amber-500/20 text-amber-700 border border-amber-500 px-4 py-2 rounded text-sm font-bold">Save</button></div>`;
+      <div class="flex justify-end gap-2 pt-1"><button class="alr-cancel bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm font-bold">Cancel</button><button id="alr-save" class="bg-amber-500/10 hover:bg-amber-500/20 text-amber-700 border border-amber-500 px-4 py-2 rounded-full text-sm font-bold">Save</button></div>`;
     modal.appendChild(inner);
     modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
     inner.querySelector('.alr-close').addEventListener('click', () => modal.remove());
@@ -260,7 +260,7 @@ async function editReport(id) {
       </div>
       <label class="flex items-center gap-2 text-xs text-slate-600 pt-1"><input type="checkbox" id="rpt-enabled" ${existing && existing.enabled ? 'checked' : ''} class="w-4 h-4 rounded"> Enabled (send on the schedule)</label>
       <div id="rpt-result" class="text-xs"></div>
-      <div class="flex justify-end gap-2 pt-1"><button class="rpt-cancel bg-slate-200 text-slate-700 px-4 py-2 rounded text-sm font-bold">Cancel</button><button id="rpt-save" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded text-sm font-bold">Save</button></div>`;
+      <div class="flex justify-end gap-2 pt-1"><button class="rpt-cancel bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm font-bold">Cancel</button><button id="rpt-save" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-sm font-bold">Save</button></div>`;
     modal.appendChild(inner);
     modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
     inner.querySelector('.rpt-close').addEventListener('click', () => modal.remove());
@@ -412,7 +412,7 @@ async function loadCertMonData() {
         const trust = r.trusted ? '' : (r.verify_error ? `<span class="ml-1 text-xs text-slate-500" title="${escapeHtml(r.verify_error)}">(private CA / untrusted)</span>` : '');
         const err = r.error ? `<div class="text-xs text-red-600">${escapeHtml(r.error)}</div>` : '';
         const san = r.san_count ? `<div class="text-xs text-slate-500" title="${escapeHtml((r.san || []).join(', '))}">CN ${escapeHtml(r.subject_cn || '')} · ${r.san_count} SAN</div>` : (r.subject_cn ? `<div class="text-xs text-slate-500">CN ${escapeHtml(r.subject_cn)}</div>` : '');
-        const ignBtn = `<button onclick="certMonSetIgnored(this, ${escapeHtml(JSON.stringify(r.host || ''))}, ${Number(r.port) || 443}, ${r.ignored ? 'false' : 'true'})" class="text-xs px-2 py-0.5 rounded-md border ${r.ignored ? 'border-brand text-primary-text hover:bg-green-50' : 'border-slate-300 text-slate-600 hover:bg-slate-100'}" title="${r.ignored ? 'Count this cert in the status totals and alerts again' : 'Keep listing this cert but leave it out of the status totals and alerts'}">${r.ignored ? 'Un-ignore' : 'Ignore'}</button>`;
+        const ignBtn = `<button onclick="certMonSetIgnored(this, ${escapeHtml(JSON.stringify(r.host || ''))}, ${Number(r.port) || 443}, ${r.ignored ? 'false' : 'true'})" class="text-xs px-2 py-0.5 rounded-full border ${r.ignored ? 'border-brand text-primary-text hover:bg-green-50' : 'border-slate-300 text-slate-600 hover:bg-slate-100'}" title="${r.ignored ? 'Count this cert in the status totals and alerts again' : 'Keep listing this cert but leave it out of the status totals and alerts'}">${r.ignored ? 'Un-ignore' : 'Ignore'}</button>`;
         return `<tr class="${r.ignored ? 'bg-slate-50 text-slate-500' : (rowCls[r.status] || '')}">
             <td class="px-3 py-2 whitespace-nowrap">${statusCell(r)}</td>
             <td class="px-3 py-2 font-mono text-xs">${escapeHtml(r.host)}${r.port && r.port !== 443 ? ':' + r.port : ''}${san}${err}</td>
@@ -430,7 +430,7 @@ async function loadCertMonData() {
           <div class="text-xs text-slate-500">Last check: <b>${escapeHtml(lastRun)}</b>${d.duration_s != null ? ` (${d.duration_s}s)` : ''} · Next: <b>${escapeHtml(nextRun)}</b> · ${(d.results || []).length} hosts${c.ignored ? ` (${c.ignored} ignored — not counted)` : ''}${c.deprecated ? ` (${c.deprecated} deprecated — not counted)` : ''}${d.running ? ' · <span class="text-primary-text font-semibold animate-pulse">checking…</span>' : ''}</div>
           <div class="flex items-center gap-2">
             <input id="certmon-filter" type="text" placeholder="Filter…" value="${escapeHtml(window._certMonFilter || '')}" oninput="window._certMonFilter=this.value; clearTimeout(window._certMonFt); window._certMonFt=setTimeout(loadCertMonData, 250)" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-xs outline-none focus:ring-2 focus:ring-green-500">
-            <button onclick="certMonRunNow(this)" class="text-xs bg-primary hover:bg-primary-hover text-white px-3 py-1 rounded-md font-medium" ${d.running ? 'disabled' : ''}>Check now</button>
+            <button onclick="certMonRunNow(this)" class="text-xs bg-primary hover:bg-primary-hover text-white px-3 py-1 rounded-full font-medium" ${d.running ? 'disabled' : ''}>Check now</button>
           </div>
         </div>
         <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
@@ -454,7 +454,7 @@ async function loadCertMonData() {
         <h3 class="text-sm font-bold text-slate-500 mb-1">Custom hosts</h3>
         <p class="text-xs text-slate-500 mb-2">Extra endpoints to monitor, one per line (<span class="font-mono">host</span> or <span class="font-mono">host:port</span>). The ${(d.builtin_hosts || []).length} endpoints from the shipped catalog (kept current by the daily source refresh) are always included${(cfg.disabled_builtin || []).length ? ` (${cfg.disabled_builtin.length} disabled)` : ''}.</p>
         <textarea id="certmon-custom" rows="4" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-xs font-mono outline-none focus:ring-2 focus:ring-green-500">${escapeHtml((cfg.custom_hosts || []).join('\n'))}</textarea>
-        <div class="flex justify-end mt-2"><button onclick="certMonSaveCustom(this)" class="text-xs px-3 py-1 rounded-md bg-green-600 text-white hover:bg-green-700">Save</button></div>
+        <div class="flex justify-end mt-2"><button onclick="certMonSaveCustom(this)" class="text-xs px-3 py-1 rounded-full bg-green-600 text-white hover:bg-green-700">Save</button></div>
       </div>
       <div class="${card}">
         <h3 class="text-sm font-bold text-slate-500 mb-1">Built-in host list</h3>
@@ -555,7 +555,7 @@ async function loadSecurityData() {
       <div class="${card}">
         <div class="flex items-center justify-between mb-3">
           <h3 class="text-sm font-bold text-slate-500">Policy</h3>
-          <button onclick="securityReconcile()" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md font-medium" title="Push the trusted allow-list and the blocked-IP set onto the active cloud NSG (Azure or OCI) now">Sync NSG now</button>
+          <button onclick="securityReconcile()" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-full font-medium" title="Push the trusted allow-list and the blocked-IP set onto the active cloud NSG (Azure or OCI) now">Sync NSG now</button>
         </div>
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
           <label class="flex items-center gap-2 text-slate-600 col-span-2"><input type="checkbox" id="sec-enabled" ${c.enabled ? 'checked' : ''} class="w-4 h-4 rounded"> Detection enabled (log invalid attempts)</label>
@@ -575,7 +575,7 @@ async function loadSecurityData() {
             </div>`;
           })()}
         </div>
-        <div class="flex justify-end mt-3"><button onclick="saveSecurityConfig()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold">Save</button></div>
+        <div class="flex justify-end mt-3"><button onclick="saveSecurityConfig()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-full text-sm font-bold">Save</button></div>
       </div>`;
 
     // One unified "Blocked IPs" list: permanent ∪ temporary = every current
@@ -590,7 +590,7 @@ async function loadSecurityData() {
     const blockedTile = `<div class="${card}">
         <div class="flex items-center justify-between mb-1">
           <h3 class="text-sm font-bold text-red-700">Blocked IPs <span class="text-slate-500 font-normal">(${allBlocks.length})</span></h3>
-          <button onclick="securityBlocksModal('all')" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md font-medium">Search / view all →</button>
+          <button onclick="securityBlocksModal('all')" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-full font-medium">Search / view all →</button>
         </div>
         <p class="text-xs text-slate-500 mb-2">Each entry is tagged <b>Perm</b>, <b>24h&nbsp;TTL</b>, or <b>Manual</b> — the full list is searchable via the button.</p>
         <div class="text-xs">${allBlocks.length
@@ -615,7 +615,7 @@ async function loadSecurityData() {
         <div class="flex gap-2 mb-2">
           <input id="sec-never-ip" placeholder="IP or CIDR" class="flex-1 border border-slate-300 rounded px-2 py-1 text-xs font-mono">
           <input id="sec-never-desc" placeholder="description (optional)" class="flex-1 border border-slate-300 rounded px-2 py-1 text-xs">
-          <button onclick="securityNeverAdd()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded text-xs font-medium whitespace-nowrap">Add</button>
+          <button onclick="securityNeverAdd()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-full text-xs font-medium whitespace-nowrap">Add</button>
         </div>
         <div class="text-xs max-h-56 overflow-y-auto">${trusted.length ? trusted.map(neverRow).join('') : '<p class="text-slate-500 italic">none</p>'}</div>
       </div>`;
@@ -642,7 +642,7 @@ async function loadSecurityData() {
           <input id="sec-mb-ip" placeholder="IP" class="border border-slate-300 rounded px-2 py-1 w-40">
           <input id="sec-mb-reason" placeholder="reason (optional)" class="border border-slate-300 rounded px-2 py-1 flex-1">
           <label class="flex items-center gap-1 text-slate-600"><input type="checkbox" id="sec-mb-perm" class="w-4 h-4 rounded"> permanent</label>
-          <button onclick="securityBlock()" class="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded font-bold">Block</button>
+          <button onclick="securityBlock()" class="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded-full font-bold">Block</button>
         </div></div>`;
 
     const t = d.totals || {};
@@ -657,7 +657,7 @@ async function loadSecurityData() {
         <div class="flex items-center justify-between mb-3 flex-wrap gap-1">
           <h3 class="text-sm font-bold text-slate-500">Lifetime activity <span class="text-slate-500 normal-case font-normal">— cumulative; survives block expiry / unblock</span></h3>
           <div class="flex items-center gap-2">
-            <button onclick="securitySelfTest()" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md font-medium" title="Record a synthetic detection signal to confirm the pipeline is live (never blocks anyone)">Run self-test</button>
+            <button onclick="securitySelfTest()" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-full font-medium" title="Record a synthetic detection signal to confirm the pipeline is live (never blocks anyone)">Run self-test</button>
             <span class="text-xs text-slate-500">since ${fmtTs(t.since)}${t.last_ts ? ` · last signal ${fmtTs(t.last_ts)}` : ''}</span>
           </div>
         </div>
@@ -754,10 +754,10 @@ async function _loadSubscription() {
         <h3 class="text-sm font-bold text-slate-500">Threat Monitor Subscription</h3>
         <div class="flex gap-2">
           ${d.credential_set || d.status !== 'not_enrolled'
-            ? '<button onclick="unsubscribeData(event)" class="text-xs bg-slate-100 hover:bg-red-100 text-red-600 px-3 py-1 rounded-md font-medium" title="Stop taking part and forget the stored credential">Unsubscribe</button>'
+            ? '<button onclick="unsubscribeData(event)" class="text-xs bg-slate-100 hover:bg-red-100 text-red-600 px-3 py-1 rounded-full font-medium" title="Stop taking part and forget the stored credential">Unsubscribe</button>'
             : ''}
-          <button onclick="enrollSubscription(event)" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md font-medium" title="Register this install with the exchange">${d.credential_set ? 'Re-enroll' : 'Enroll'}</button>
-          <button onclick="saveSubscription(event)" class="text-xs bg-primary hover:bg-[#018f6f] text-white px-3 py-1 rounded-md font-medium">Save</button>
+          <button onclick="enrollSubscription(event)" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-full font-medium" title="Register this install with the exchange">${d.credential_set ? 'Re-enroll' : 'Enroll'}</button>
+          <button onclick="saveSubscription(event)" class="text-xs bg-primary hover:bg-[#018f6f] text-white px-3 py-1 rounded-full font-medium">Save</button>
         </div>
       </div>
       <div class="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
@@ -982,7 +982,7 @@ function securityEventDetail(i) {
         ${metaRows ? `<div class="pt-2 mt-1 border-t border-slate-200"><div class="text-xs text-primary-text font-bold mb-1">Evidence</div>${metaRows}</div>`
             : '<p class="text-xs text-slate-500 italic pt-2 border-t border-slate-200 mt-1">No structured evidence captured for this event.</p>'}
         <div class="flex justify-end pt-2">
-          <button onclick="document.getElementById('sec-event-detail-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Close</button>
+          <button onclick="document.getElementById('sec-event-detail-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-full border border-slate-200 text-slate-600 hover:bg-slate-50">Close</button>
         </div>`;
     openModal('sec-event-detail-modal', body, { backdropClose: true, card: 'w-full max-w-lg p-6 space-y-3 max-h-[90vh] overflow-y-auto', overlay: 'z-[60]' });
 }
@@ -1052,7 +1052,7 @@ function _secBlocksRender() {
     const fb = document.getElementById('sec-blocks-filters');
     if (fb) {
         const active = 'bg-slate-700 text-white', idle = 'bg-slate-100 text-slate-600 hover:bg-slate-200';
-        const btn = (key, label) => `<button onclick="_secBlocksSetFilter('${key}')" class="px-2.5 py-1 rounded text-xs font-bold ${f === key ? active : idle}">${label} <span class="opacity-70">${counts[key]}</span></button>`;
+        const btn = (key, label) => `<button onclick="_secBlocksSetFilter('${key}')" class="px-2.5 py-1 rounded-full text-xs font-bold ${f === key ? active : idle}">${label} <span class="opacity-70">${counts[key]}</span></button>`;
         fb.innerHTML = btn('all', 'All') + btn('perm', 'Perm') + btn('24h', '24h') + btn('manual', 'Manual');
     }
     const cnt = document.getElementById('sec-blocks-count');
@@ -1406,8 +1406,8 @@ function _cvRenderShell() {
           </div>
         </div>
         <div class="flex items-center gap-2">
-          <button onclick="_cvSetPskModal()" class="px-3 py-1.5 text-xs rounded-md border border-slate-300 hover:bg-slate-50">Set / change pass-phrase</button>
-          <button onclick="_cvAddSecretModal()" class="px-3 py-1.5 text-xs rounded-md bg-primary text-white font-bold hover:bg-primary-hover">+ Add secret</button>
+          <button onclick="_cvSetPskModal()" class="px-3 py-1.5 text-xs rounded-full border border-slate-300 hover:bg-slate-50">Set / change pass-phrase</button>
+          <button onclick="_cvAddSecretModal()" class="px-3 py-1.5 text-xs rounded-full bg-primary text-white font-bold hover:bg-primary-hover">+ Add secret</button>
         </div>
         <div id="cv-secrets"><p class="text-sm text-slate-500 italic">Loading secrets…</p></div>
       </div>`;
@@ -1437,14 +1437,14 @@ async function _cvRenderBucketBody() {
           <div class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2 mb-3 space-y-2">
             <p><b>This bucket matches no tenant.</b> Credential sets are matched by tenant id, so nothing can reference what is stored here and no tenant-admin can reach it. It is not the Global Admin slot — that one is <span class="font-mono">${escapeHtml(_cvAdminSlot)}</span>.</p>
             <div class="flex gap-2">
-              <button onclick="_cvMoveSecretModal()" class="px-2 py-1 rounded border border-amber-300 bg-white hover:bg-amber-100 font-semibold">Move a secret out…</button>
-              <button onclick="_cvDeleteBucketModal()" class="px-2 py-1 rounded bg-red-600 text-white font-semibold hover:bg-red-700">Delete this bucket</button>
+              <button onclick="_cvMoveSecretModal()" class="px-2 py-1 rounded-full border border-amber-300 bg-white hover:bg-amber-100 font-semibold">Move a secret out…</button>
+              <button onclick="_cvDeleteBucketModal()" class="px-2 py-1 rounded-full bg-red-600 text-white font-semibold hover:bg-red-700">Delete this bucket</button>
             </div>
           </div>` : '';
         if (!d.has_psk) {
             el.innerHTML = orphanBanner + `<div class="text-sm text-amber-600 space-y-2">
               <p>This bucket has no pass-phrase yet. A pass-phrase is required before you can add or reveal secrets.</p>
-              <button onclick="_cvSetPskModal()" class="px-3 py-1.5 text-xs rounded-md bg-primary text-white font-bold hover:bg-primary-hover">Set a pass-phrase</button>
+              <button onclick="_cvSetPskModal()" class="px-3 py-1.5 text-xs rounded-full bg-primary text-white font-bold hover:bg-primary-hover">Set a pass-phrase</button>
             </div>`;
             return;
         }
@@ -1515,9 +1515,9 @@ function _cvRenderSecretRow(s) {
       <td>${mode}</td>
       <td class="text-slate-500">${escapeHtml(s.description || '')}</td>
       <td class="text-right whitespace-nowrap">
-        <button onclick="_cvRevealModal('${enc}')" class="px-2 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50">Reveal</button>
-        <button onclick="_cvEditModal('${enc}')" class="px-2 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50">Edit</button>
-        <button onclick="_cvDeleteModal('${enc}')" class="px-2 py-1 text-xs rounded-md border border-red-200 text-red-600 hover:bg-red-50">Delete</button>
+        <button onclick="_cvRevealModal('${enc}')" class="px-2 py-1 text-xs rounded-full border border-slate-300 hover:bg-slate-50">Reveal</button>
+        <button onclick="_cvEditModal('${enc}')" class="px-2 py-1 text-xs rounded-full border border-slate-300 hover:bg-slate-50">Edit</button>
+        <button onclick="_cvDeleteModal('${enc}')" class="px-2 py-1 text-xs rounded-full border border-red-200 text-red-600 hover:bg-red-50">Delete</button>
       </td>
     </tr>`;
 }
@@ -1534,8 +1534,8 @@ function _cvSetPskModal() {
       <input id="cv-new-psk" type="password" autocomplete="off" placeholder="new pass-phrase (min 8 chars)" class="${_CV_INP}">
       ${(hasPsk && _cvIsGlobalAdmin) ? `<p class="text-xs text-slate-500">Lost the current pass-phrase? <button onclick="_cvResetPskModal()" class="text-primary-text font-semibold hover:underline">Reset it</button> (Global Admin only).</p>` : ''}
       <div class="flex justify-end gap-2 pt-2">
-        <button onclick="document.getElementById('cv-psk-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
-        <button onclick="_cvDoSetPsk()" class="px-4 py-1.5 text-sm rounded-md bg-primary text-white font-bold hover:bg-primary-hover">Save</button>
+        <button onclick="document.getElementById('cv-psk-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-full border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
+        <button onclick="_cvDoSetPsk()" class="px-4 py-1.5 text-sm rounded-full bg-primary text-white font-bold hover:bg-primary-hover">Save</button>
       </div>`;
     openModal('cv-psk-modal', body, { backdropClose: true });
 }
@@ -1567,8 +1567,8 @@ function _cvResetPskModal() {
       ${impact}
       <input id="cv-reset-psk" type="password" autocomplete="off" placeholder="new pass-phrase (min 8 chars)" class="${_CV_INP}">
       <div class="flex justify-end gap-2 pt-2">
-        <button onclick="document.getElementById('cv-reset-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
-        <button onclick="_cvDoResetPsk()" class="px-4 py-1.5 text-sm rounded-md bg-red-600 text-white font-bold hover:bg-red-700">Reset pass-phrase</button>
+        <button onclick="document.getElementById('cv-reset-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-full border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
+        <button onclick="_cvDoResetPsk()" class="px-4 py-1.5 text-sm rounded-full bg-red-600 text-white font-bold hover:bg-red-700">Reset pass-phrase</button>
       </div>`;
     openModal('cv-reset-modal', body, { backdropClose: true });
 }
@@ -1617,8 +1617,8 @@ function _cvMoveSecretModal() {
         <input id="cv-move-to-psk" type="password" autocomplete="off" placeholder="destination bucket's pass-phrase" class="${_CV_INP}">
       </div>
       <div class="flex justify-end gap-2 pt-2">
-        <button onclick="document.getElementById('cv-move-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
-        <button onclick="_cvDoMoveSecret()" class="px-4 py-1.5 text-sm rounded-md bg-primary text-white font-bold hover:bg-primary-hover">Move secret</button>
+        <button onclick="document.getElementById('cv-move-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-full border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
+        <button onclick="_cvDoMoveSecret()" class="px-4 py-1.5 text-sm rounded-full bg-primary text-white font-bold hover:bg-primary-hover">Move secret</button>
       </div>`;
     openModal('cv-move-modal', body, { backdropClose: true });
     _cvMoveOnPick();
@@ -1661,8 +1661,8 @@ function _cvDeleteBucketModal() {
       <p class="text-sm text-slate-500">Removes the bucket and its pass-phrase. This cannot be undone.</p>
       ${impact}
       <div class="flex justify-end gap-2 pt-2">
-        <button onclick="document.getElementById('cv-delbucket-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
-        <button onclick="_cvDoDeleteBucket()" class="px-4 py-1.5 text-sm rounded-md bg-red-600 text-white font-bold hover:bg-red-700">Delete bucket</button>
+        <button onclick="document.getElementById('cv-delbucket-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-full border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
+        <button onclick="_cvDoDeleteBucket()" class="px-4 py-1.5 text-sm rounded-full bg-red-600 text-white font-bold hover:bg-red-700">Delete bucket</button>
       </div>`;
     openModal('cv-delbucket-modal', body, { backdropClose: true });
 }
@@ -1740,14 +1740,14 @@ function _cvAddSecretModal(preset) {
       </div>
       ${editing ? `<div class="flex items-start gap-2">
         <p class="text-xs text-slate-500 flex-1">Name is fixed. Values are stored encrypted and are never pre-filled. Enter the bucket pass-phrase below, then <b>Reveal current values</b> to load them here for editing — or just type new ones to overwrite. You may also change the type or mode.</p>
-        <button type="button" id="cv-add-reveal-btn" onclick="_cvRevealIntoEdit('${encName}')" title="Load the stored values into this form so you can edit them instead of retyping from scratch" class="shrink-0 px-2 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50">Reveal current values</button>
+        <button type="button" id="cv-add-reveal-btn" onclick="_cvRevealIntoEdit('${encName}')" title="Load the stored values into this form so you can edit them instead of retyping from scratch" class="shrink-0 px-2 py-1 text-xs rounded-full border border-slate-300 hover:bg-slate-50">Reveal current values</button>
       </div>` : ''}
       <div id="cv-add-fields"></div>
       <input id="cv-add-desc" type="text" autocomplete="off" value="${editing ? escapeHtml(preset.description || '') : ''}" placeholder="description (optional)" class="${_CV_INP}">
       <input id="cv-add-psk" type="password" autocomplete="off" placeholder="bucket pass-phrase (the one you set for this bucket)" title="The bucket pass-phrase you set — required to encrypt/store the secret" class="${_CV_INP}">
       <div class="flex justify-end gap-2 pt-2">
-        <button onclick="_cvClearAddSecret()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
-        <button onclick="_cvDoAddSecret()" class="px-4 py-1.5 text-sm rounded-md bg-primary text-white font-bold hover:bg-primary-hover">Save</button>
+        <button onclick="_cvClearAddSecret()" class="px-4 py-1.5 text-sm rounded-full border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
+        <button onclick="_cvDoAddSecret()" class="px-4 py-1.5 text-sm rounded-full bg-primary text-white font-bold hover:bg-primary-hover">Save</button>
       </div>`;
     const m = openModal('cv-add-modal', body, { backdropClose: true });
     // Reveal can load plaintext into these inputs, so blank them before the
@@ -2077,8 +2077,8 @@ function _cvRevealModal(enc) {
       <input id="cv-rev-psk" type="password" autocomplete="off" placeholder="bucket pass-phrase" class="${_CV_INP}">
       <div id="cv-rev-out"></div>
       <div class="flex justify-end gap-2 pt-2">
-        <button onclick="_cvClearReveal()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Close</button>
-        <button id="cv-rev-btn" onclick="_cvDoReveal('${enc}')" class="px-4 py-1.5 text-sm rounded-md bg-primary text-white font-bold hover:bg-primary-hover">Reveal</button>
+        <button onclick="_cvClearReveal()" class="px-4 py-1.5 text-sm rounded-full border border-slate-200 text-slate-600 hover:bg-slate-50">Close</button>
+        <button id="cv-rev-btn" onclick="_cvDoReveal('${enc}')" class="px-4 py-1.5 text-sm rounded-full bg-primary text-white font-bold hover:bg-primary-hover">Reveal</button>
       </div>`;
     const m = openModal('cv-rev-modal', body, { backdropClose: true });
     // Purge any revealed plaintext from the DOM if the dialog is dismissed.
@@ -2102,7 +2102,7 @@ function _cvShowRevealed(value) {
         return `<div class="flex items-center gap-2 py-1">
           <span class="text-xs font-bold text-slate-500 w-24 shrink-0">${escapeHtml(k)}</span>
           <code class="cv-rev-val flex-1 px-2 py-1 bg-slate-100 rounded text-sm break-all" data-k="${enc}">${escapeHtml(String(value[k]))}</code>
-          <button onclick="_cvCopy('${enc}')" class="px-2 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50">Copy</button>
+          <button onclick="_cvCopy('${enc}')" class="px-2 py-1 text-xs rounded-full border border-slate-300 hover:bg-slate-50">Copy</button>
         </div>`;
     }).join('');
     out.innerHTML = `<div class="mt-2 border-t border-slate-200 pt-2">${rows}</div>`;
@@ -2138,8 +2138,8 @@ function _cvDeleteModal(enc) {
       <p class="text-sm text-slate-500">This permanently removes the secret from the vault. The bucket pass-phrase is required.</p>
       <input id="cv-del-psk" type="password" autocomplete="off" placeholder="bucket pass-phrase" class="${_CV_INP}">
       <div class="flex justify-end gap-2 pt-2">
-        <button onclick="document.getElementById('cv-del-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
-        <button onclick="_cvDoDelete('${enc}')" class="px-4 py-1.5 text-sm rounded-md bg-red-600 text-white font-bold hover:bg-red-700">Delete</button>
+        <button onclick="document.getElementById('cv-del-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-full border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
+        <button onclick="_cvDoDelete('${enc}')" class="px-4 py-1.5 text-sm rounded-full bg-red-600 text-white font-bold hover:bg-red-700">Delete</button>
       </div>`;
     openModal('cv-del-modal', body, { backdropClose: true });
 }
@@ -2184,13 +2184,13 @@ function _renderLogsSection(subMenu) {
     // AI Log Analysis — delegated to the ab spoke's LLM. Not a log source, so
     // it's hidden on the Bug Reports / Feature Requests tabs.
     const analysisBtn = (isBugs || isFeatures) ? '' :
-        `<button id="lm-log-analysis-btn" onclick="runLmLogAnalysis('${module}')" class="text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 px-2 py-1 rounded">✨ Log Analysis</button>`;
+        `<button id="lm-log-analysis-btn" onclick="runLmLogAnalysis('${module}')" class="text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 px-2 py-1 rounded-full">✨ Log Analysis</button>`;
     // Debug-logging toggle is a Global-Admin log control, not a bug-store action —
     // hidden on Bug Reports / Feature Requests (and it would 403 for a read-only
     // tenant admin who now reaches those tabs).
     const debugToggleBtn = (isBugs || isFeatures) ? '' :
         `<button id="debug-toggle-btn" onclick="toggleDebugLogging()"
-                        class="text-xs bg-white border border-slate-300 px-2 py-1 rounded hover:bg-slate-50 transition-colors font-medium flex items-center gap-1">
+                        class="text-xs bg-white border border-slate-300 px-2 py-1 rounded-full hover:bg-slate-50 transition-colors font-medium flex items-center gap-1">
                         <span id="debug-mode-text">Debug Logging: OFF</span>
                     </button>`;
     const analysisPanel = (isBugs || isFeatures) ? '' : `
@@ -2337,11 +2337,11 @@ function _stateResetCardHtml() {
                         <option value="">— select a tenant —</option>
                     </select>
                     <button onclick="resetDerivedState('tenant')"
-                        class="bg-amber-100 hover:bg-amber-200 text-amber-800 border border-amber-300 px-3 py-1.5 rounded-md text-xs font-bold">
+                        class="bg-amber-100 hover:bg-amber-200 text-amber-800 border border-amber-300 px-3 py-1.5 rounded-full text-xs font-bold">
                         Wipe this tenant's cached data</button>
                     <span class="text-slate-500">|</span>
                     <button onclick="resetDerivedState('global')"
-                        class="bg-red-100 hover:bg-red-200 text-red-700 border border-red-300 px-3 py-1.5 rounded-md text-xs font-bold">
+                        class="bg-red-100 hover:bg-red-200 text-red-700 border border-red-300 px-3 py-1.5 rounded-full text-xs font-bold">
                         Wipe ALL cached data</button>
                 </div>
                 <div id="state-reset-status" class="text-xs"></div>
@@ -2499,7 +2499,7 @@ async function loadBugReports(typeFilter) {
                 // Awaiting admin approval — offer the Approve action inline
                 // (Global Admin only; a tenant admin's view is read-only).
                 status = (typeof isAdmin === 'function' && isAdmin())
-                    ? `<button onclick="event.stopPropagation(); approveBugReport('${escapeHtml(r.id)}')" class="px-2 py-0.5 rounded text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700" title="Approve this feature so AppBuilder can file &amp; work it">Approve</button>`
+                    ? `<button onclick="event.stopPropagation(); approveBugReport('${escapeHtml(r.id)}')" class="px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700" title="Approve this feature so AppBuilder can file &amp; work it">Approve</button>`
                     : `<span class="text-amber-600" title="Awaiting a Global Admin's approval">Pending approval</span>`;
             } else if (isFeat && _st === 'approved') {
                 status = `<span class="text-emerald-600 font-medium" title="Approved — AppBuilder will file &amp; work it">Approved</span>`;
@@ -2570,7 +2570,7 @@ window.openClientDebugLog = function (host, tenantRaw) {
       </div>
       <div class="flex justify-end gap-2 mb-2">
         <button onclick="window._clientDebugStop('${escapeHtml(host)}','${escapeHtml(tenantRaw || '')}')"
-          class="bg-red-100 hover:bg-red-200 text-red-700 px-3 py-1 rounded text-xs font-bold">Stop Debug</button>
+          class="bg-red-100 hover:bg-red-200 text-red-700 px-3 py-1 rounded-full text-xs font-bold">Stop Debug</button>
       </div>
       <div id="client-debug-log-body" class="h-[34rem] overflow-y-auto bg-white border border-slate-200 rounded-md text-slate-700"></div>
       <p class="text-xs text-slate-500 mt-2">Live logs from the client's <code>sim.log</code> + debug logs (advanced adds journal/dmesg). Ephemeral — cleared on hub restart. 30-min auto-off. Times are UTC.</p>`;
@@ -2637,7 +2637,7 @@ async function showBugReport(rid) {
             <div class="px-5 py-3 border-b border-slate-200 flex justify-between items-center bg-slate-50">
                 <h3 id="bug-detail-title" class="text-sm font-bold text-slate-700">Bug Report <span class="font-mono text-slate-500">${escapeHtml(rid)}</span></h3>
                 <div class="flex items-center gap-3">
-                    <button onclick="deleteBugReport('${escapeHtml(rid)}')" title="Delete report" class="text-xs font-bold text-red-500 hover:text-red-700 border border-red-200 hover:border-red-300 px-3 py-1 rounded transition-colors">Delete</button>
+                    <button onclick="deleteBugReport('${escapeHtml(rid)}')" title="Delete report" class="text-xs font-bold text-red-500 hover:text-red-700 border border-red-200 hover:border-red-300 px-3 py-1 rounded-full transition-colors">Delete</button>
                     <button onclick="document.getElementById('bug-detail-overlay').remove()" class="text-slate-500 hover:text-slate-600 text-xl">✕</button>
                 </div>
             </div>
@@ -2671,7 +2671,7 @@ async function showBugReport(rid) {
             status = `<a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-blue-500 hover:underline break-all">${escapeHtml(r.issue_url || 'Filed')}</a>`;
         } else if (isFeat && _dst !== 'approved') {
             const _approveBtn = (typeof isAdmin === 'function' && isAdmin())
-                ? ` <button onclick="approveBugReport('${escapeHtml(rid)}')" class="ml-2 px-2 py-0.5 rounded text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700">Approve</button>`
+                ? ` <button onclick="approveBugReport('${escapeHtml(rid)}')" class="ml-2 px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700">Approve</button>`
                 : '';
             status = `<span class="text-amber-600">Awaiting approval</span>${_approveBtn}`;
         } else if (isFeat && _dst === 'approved') {

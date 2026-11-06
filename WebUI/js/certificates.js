@@ -213,7 +213,7 @@ async function loadLEData(subMenu) {
             const statusTxt = t.last_status || 'not pushed yet';
             const msgPart = t.last_message ? ` — ${t.last_message}` : '';
             const tip = `${label}: ${statusTxt}${msgPart} (last push: ${when}). Click to deploy now.`;
-            const btn = `<button onclick="leDeployTarget('${dEsc}','${mtEsc}','${idEsc}')" class="px-1.5 py-0.5 rounded text-xs font-medium ${cls} cursor-pointer hover:brightness-95 active:scale-95 transition" title="${escJsAttr(tip)}">${mark} ${bfStar}${label}</button>`;
+            const btn = `<button onclick="leDeployTarget('${dEsc}','${mtEsc}','${idEsc}')" class="px-1.5 py-0.5 rounded-full text-xs font-medium ${cls} cursor-pointer hover:brightness-95 active:scale-95 transition" title="${escJsAttr(tip)}">${mark} ${bfStar}${label}</button>`;
             // Fleet spokes (nw): the spoke-level badge above is the success
             // signal (spoke holds the cert). The per-device detail lives in a
             // collapsed, lazy-loaded section BELOW the targets (leFleetDetail) —
@@ -306,10 +306,10 @@ async function loadLEData(subMenu) {
             // Change ops (Renew/Revoke) require ownership; a read-only (shared,
             // not-owned) cert only exposes Manage (→ deploy to your own devices).
             const canEdit = (c.can_edit !== false);
-            const manageBtn = `<button onclick="showLeTargetsModal('${dEsc}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="${canEdit ? 'Manage distribution targets, AppBuilder identity + clientAuth' : 'Deploy this shared certificate to your own devices'}">${canEdit ? 'Manage' : 'Deploy'}</button>`;
+            const manageBtn = `<button onclick="showLeTargetsModal('${dEsc}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-full text-xs font-bold transition-all shadow-sm" title="${canEdit ? 'Manage distribution targets, AppBuilder identity + clientAuth' : 'Deploy this shared certificate to your own devices'}">${canEdit ? 'Manage' : 'Deploy'}</button>`;
             const changeBtns = canEdit
-                ? `<button onclick="leRenewCert('${dEsc}')" class="bg-slate-700/10 hover:bg-slate-700/20 text-slate-700 border border-slate-700 px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Renew this cert">Renew</button>
-                            <button onclick="leRevokeCert('${dEsc}')" class="bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Revoke + remove from managed list">Revoke</button>`
+                ? `<button onclick="leRenewCert('${dEsc}')" class="bg-slate-700/10 hover:bg-slate-700/20 text-slate-700 border border-slate-700 px-3 py-1.5 rounded-full text-xs font-bold transition-all shadow-sm" title="Renew this cert">Renew</button>
+                            <button onclick="leRevokeCert('${dEsc}')" class="bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-3 py-1.5 rounded-full text-xs font-bold transition-all shadow-sm" title="Revoke + remove from managed list">Revoke</button>`
                 : '';
             // 2-row group per cert: row 1 = the data (domain, email, challenge,
             // staging, expiry+renew-window) WITH the Manage/Renew/Revoke actions
@@ -775,11 +775,11 @@ async function showLeTargetsModal(domain) {
                 <label class="text-xs text-slate-500 mb-1">Device</label>
                 <select id="le-tgt-id" title="Select target device or node identifier" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></select>
             </div>
-            <button onclick="addLeTarget('${esc(domain)}')" title="Add distribution target for this certificate" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold">Add target</button>
-            <button onclick="leDistributeCert('${esc(domain)}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold" title="Deploy this certificate to all of its targets">Distribute now</button>
-            <button onclick="document.getElementById('le-targets-modal').remove()" title="Close dialog" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Close</button>
+            <button onclick="addLeTarget('${esc(domain)}')" title="Add distribution target for this certificate" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-sm font-bold">Add target</button>
+            <button onclick="leDistributeCert('${esc(domain)}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-sm font-bold" title="Deploy this certificate to all of its targets">Distribute now</button>
+            <button onclick="document.getElementById('le-targets-modal').remove()" title="Close dialog" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm font-medium">Close</button>
         </div>` : `<div class="flex border-t border-slate-200 pt-4">
-            <button onclick="document.getElementById('le-targets-modal').remove()" title="Close dialog" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Close</button>
+            <button onclick="document.getElementById('le-targets-modal').remove()" title="Close dialog" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm font-medium">Close</button>
         </div>`;
     const modal = openModal('le-targets-modal', `
         <h3 class="text-lg font-bold mb-1">Distribution targets — <span class="font-mono">${esc(domain)}</span></h3>
@@ -846,8 +846,8 @@ async function _leRenderTenantsSection(domain, cert, canEdit) {
                 <label class="text-xs text-slate-500 mb-1">Add a tenant (or the shared tenant to share)</label>
                 <select id="le-tenant-add" title="Select tenant to grant certificate ownership or sharing" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">— select —</option>${opts}</select>
             </div>
-            <button onclick="_leAddTenantChip()" title="Add selected tenant to owners" class="bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 px-3 py-2 rounded-md text-sm font-medium">Add</button>
-            <button onclick="_leSaveTenants()" title="Save tenant ownership list" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold">Save tenants</button>
+            <button onclick="_leAddTenantChip()" title="Add selected tenant to owners" class="bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 px-3 py-2 rounded-full text-sm font-medium">Add</button>
+            <button onclick="_leSaveTenants()" title="Save tenant ownership list" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-sm font-bold">Save tenants</button>
         </div>`);
 }
 
@@ -1460,13 +1460,13 @@ async function showLeIssueModal(prefill) {
                         <label class="text-xs text-slate-500 mb-0.5">Device</label>
                         <select id="le-issue-tgt-id" title="Select target device or node identifier" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></select>
                     </div>
-                    <button onclick="leIssueAddTarget()" type="button" title="Add distribution target" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-md text-sm font-medium">Add</button>
+                    <button onclick="leIssueAddTarget()" type="button" title="Add distribution target" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-full text-sm font-medium">Add</button>
                 </div>
             </div>
         </div>
         <div class="flex justify-end gap-2 mt-5">
-            <button onclick="document.getElementById('le-issue-modal').remove()" title="Cancel and close dialog" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Cancel</button>
-            <button id="le-issue-submit" onclick="leIssueCert()" title="Submit certificate issuance request" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold">Issue certificate</button>
+            <button onclick="document.getElementById('le-issue-modal').remove()" title="Cancel and close dialog" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm font-medium">Cancel</button>
+            <button id="le-issue-submit" onclick="leIssueCert()" title="Submit certificate issuance request" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-sm font-bold">Issue certificate</button>
         </div>`, { card: 'max-w-2xl w-full p-6 my-auto', overlay: 'overflow-y-auto py-6' });
     leIssuePopulateDomains();
     leIssueRenderTargets();
@@ -1814,7 +1814,7 @@ async function showDnsCredentialsModal() {
             <div id="dns-cred-fields" class="grid grid-cols-2 gap-3 mt-3"></div>
             <div class="flex justify-end gap-2 mt-3">
               <button onclick="dnsCredResetForm()" title="Clear form fields" class="px-3 py-1.5 text-sm text-slate-600 hover:text-slate-800">Clear</button>
-              <button onclick="saveDnsCredential()" title="Save DNS provider credential" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold">Save credential</button>
+              <button onclick="saveDnsCredential()" title="Save DNS provider credential" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-full text-sm font-bold">Save credential</button>
             </div>
           </div>`;
     modal.innerHTML = `
@@ -1916,13 +1916,13 @@ async function dnsCredReloadList() {
     box.innerHTML = warnBanner + creds.map(c => {
         const label = (DNS_CRED_PROVIDERS[c.provider] || {}).label || c.provider;
         const editBtn = vaultOn ? '' :
-            `<button onclick='dnsCredEdit(${escapeHtml(JSON.stringify(c))})' title="Edit this stored DNS provider credential" class="text-xs text-slate-600 hover:text-slate-800 border border-slate-200 rounded px-2 py-1">Edit</button>`;
+            `<button onclick='dnsCredEdit(${escapeHtml(JSON.stringify(c))})' title="Edit this stored DNS provider credential" class="text-xs text-slate-600 hover:text-slate-800 border border-slate-200 rounded-full px-2 py-1">Edit</button>`;
         return `<div class="flex items-center justify-between border border-slate-200 rounded-md px-3 py-2">
           <div><span class="text-sm font-medium text-slate-700">${escapeHtml(c.name)}</span>
             <span class="text-xs text-slate-500 ml-2">${escapeHtml(label)}</span></div>
           <div class="flex gap-2">
             ${editBtn}
-            <button onclick="deleteDnsCredential(${escapeHtml(JSON.stringify(c.name))})" class="text-xs text-red-500 hover:text-red-700 border border-red-200 rounded px-2 py-1" title="Delete this stored DNS provider credential">Delete</button>
+            <button onclick="deleteDnsCredential(${escapeHtml(JSON.stringify(c.name))})" class="text-xs text-red-500 hover:text-red-700 border border-red-200 rounded-full px-2 py-1" title="Delete this stored DNS provider credential">Delete</button>
           </div></div>`;
     }).join('');
 }
@@ -2190,12 +2190,12 @@ function _spokeRegistryDiagHtml(d) {
     const nOffline = rows.filter(r => !r.connected && !r.is_relayed_agent).length;
     const nTwins = rows.filter(r => r.legacy_twin_of).length;
     html += `<div class="flex flex-wrap items-center gap-2 mb-2 text-xs">
-        <button type="button" onclick="srdSelect('offline')" class="px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50" title="Select all offline spoke registrations">Select offline (${nOffline})</button>
-        <button type="button" onclick="srdSelect('twins')" class="px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50" title="Select legacy pre-rename spoke twin registrations">Select pre-rename twins (${nTwins})</button>
-        <button type="button" onclick="srdSelect('none')" class="px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50" title="Clear all selections">Clear</button>
+        <button type="button" onclick="srdSelect('offline')" class="px-2 py-1 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50" title="Select all offline spoke registrations">Select offline (${nOffline})</button>
+        <button type="button" onclick="srdSelect('twins')" class="px-2 py-1 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50" title="Select legacy pre-rename spoke twin registrations">Select pre-rename twins (${nTwins})</button>
+        <button type="button" onclick="srdSelect('none')" class="px-2 py-1 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50" title="Clear all selections">Clear</button>
         <span class="flex-1"></span>
         <button type="button" id="srd-del-btn" onclick="srdDeleteSelected()" disabled
-                class="px-3 py-1 rounded border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed font-bold" title="Delete selected offline spoke registrations from the registry">Delete selected (<span id="srd-del-count">0</span>)</button>
+                class="px-3 py-1 rounded-full border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed font-bold" title="Delete selected offline spoke registrations from the registry">Delete selected (<span id="srd-del-count">0</span>)</button>
     </div>`;
     html += `<div class="overflow-x-auto"><table class="w-full text-xs">
         <thead><tr class="text-left text-slate-500 text-xs border-b border-slate-200">
@@ -2221,7 +2221,7 @@ function _spokeRegistryDiagHtml(d) {
         if (r.legacy_twin_of) badges.push('<span class="px-1.5 py-0.5 rounded bg-orange-100 text-orange-700" title="Same box, registered under the pre-2026-07-20 &quot;-spoke&quot; id. Safe to delete once the twin is connected.">twin of ' + escapeHtml(nameOf(r.legacy_twin_of)) + '</span>');
         const del = (r.connected || r.is_relayed_agent)
             ? `<span class="text-slate-500" title="${r.is_relayed_agent ? 'Relayed agent reporting through its parent spoke — not a leftover' : 'Connected — this is a live spoke, not a leftover'}">live</span>`
-            : `<button onclick="deleteSpokeRegistration('${escJsAttr(r.spoke_id)}')" class="px-2 py-0.5 rounded border border-red-300 text-red-600 hover:bg-red-50" title="Delete this spoke registration">Delete</button>`;
+            : `<button onclick="deleteSpokeRegistration('${escJsAttr(r.spoke_id)}')" class="px-2 py-0.5 rounded-full border border-red-300 text-red-600 hover:bg-red-50" title="Delete this spoke registration">Delete</button>`;
         const sel = (r.connected || r.is_relayed_agent) ? '' :
             `<input type="checkbox" class="srd-sel" data-twin="${r.legacy_twin_of ? '1' : '0'}" ` +
             `value="${escapeHtml(r.spoke_id)}" onchange="srdSyncCount()" title="Select this spoke registration for deletion">`;
@@ -2246,7 +2246,7 @@ function _spokeRegistryDiagHtml(d) {
             <div class="flex items-center justify-between mb-1">
                 <p class="text-xs text-slate-500 font-bold">Orphaned telemetry (no such spoke)</p>
                 <button type="button" id="srd-orph-btn" onclick="srdPurgeTelemetry()" disabled
-                        class="text-xs px-3 py-1 rounded border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed font-bold" title="Purge cached telemetry for selected nonexistent spoke IDs">Purge selected (<span id="srd-orph-count">0</span>)</button>
+                        class="text-xs px-3 py-1 rounded-full border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed font-bold" title="Purge cached telemetry for selected nonexistent spoke IDs">Purge selected (<span id="srd-orph-count">0</span>)</button>
             </div>
             <p class="text-xs text-slate-500 mb-2">Cached telemetry keyed to a spoke id that no longer exists — typically an id that changed under a box. It keeps claiming the Proxmox hosts it last reported, so those hosts render under a spoke that no longer runs them. Deleting a spoke cannot remove these; purge them here.</p>
             <div class="space-y-1">` + orphans.map(o =>
@@ -2646,8 +2646,8 @@ async function showMtlsDebug() {
             <td class="px-3 py-1.5 whitespace-nowrap">
                 ${c.local
                   ? `<span class="text-xs text-slate-500 italic" title="mTLS is remote-only (wss). A co-located spoke on loopback has no TLS leg to present a client cert.">loopback — mTLS N/A</span>`
-                  : `<button onclick="mtlsProvision('${esc(c.spoke_id)}')" class="text-xs bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-2 py-0.5 rounded font-bold" title="Issue/renew this spoke's Hub-Local-CA mTLS client cert now">issue</button>
-                ${c.mtls_active ? `<button onclick="mtlsRevoke('${esc(c.spoke_id)}','${esc(c.label || c.spoke_id)}')" class="text-xs bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-2 py-0.5 rounded font-bold ml-1" title="Revoke this spoke's mTLS client cert (it reconnects cert-less)">revoke</button>` : ''}`}
+                  : `<button onclick="mtlsProvision('${esc(c.spoke_id)}')" class="text-xs bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-2 py-0.5 rounded-full font-bold" title="Issue/renew this spoke's Hub-Local-CA mTLS client cert now">issue</button>
+                ${c.mtls_active ? `<button onclick="mtlsRevoke('${esc(c.spoke_id)}','${esc(c.label || c.spoke_id)}')" class="text-xs bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-2 py-0.5 rounded-full font-bold ml-1" title="Revoke this spoke's mTLS client cert (it reconnects cert-less)">revoke</button>` : ''}`}
             </td>
         </tr>`).join('') : `<tr><td colspan="6" class="px-3 py-3 text-slate-500 italic">No connected spokes.</td></tr>`;
     const lmca = (d.lm_mtls_ca_certs || []).map(c => `<div>${esc(c.subject)} <span class="text-slate-500">← ${esc(c.issuer)}</span></div>`).join('') || '<div class="text-slate-500">— none —</div>';
@@ -2666,7 +2666,7 @@ async function showMtlsDebug() {
                   <input type="checkbox" id="mtls-autoprov-chk" ${d.auto_provision ? 'checked' : ''} onchange="mtlsSetAutoProvision(this.checked)" class="w-4 h-4 rounded">
                   Auto-provision
                 </label>
-                <button onclick="mtlsProvision('')" class="text-xs bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md font-bold whitespace-nowrap" title="Issue/renew a Hub-Local-CA mTLS client cert for EVERY connected spoke now">⟳ Provision all connected</button>
+                <button onclick="mtlsProvision('')" class="text-xs bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-full font-bold whitespace-nowrap" title="Issue/renew a Hub-Local-CA mTLS client cert for EVERY connected spoke now">⟳ Provision all connected</button>
               </div>
             </div>
             <div class="text-xs text-slate-500">The hub mints each spoke's clientAuth mTLS client cert from its <b>Local CA</b> (public CAs no longer issue clientAuth) — done automatically on connect; use these buttons to (re)issue on demand.</div>
@@ -2686,7 +2686,7 @@ async function showMtlsDebug() {
                 <div><div class="font-semibold text-slate-600 mb-1">Pinned AppBuilder cert verify</div><div class="font-mono text-slate-700 space-y-0.5">${pin}</div></div>
             </div>
             <div id="mtls-acme-info" class="border-t border-slate-200 pt-3 text-xs text-slate-500">Loading certbot / ACME profile info…</div>
-            <div class="flex justify-end"><button onclick="document.getElementById('mtls-debug-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium" title="Close dialog">Close</button></div>
+            <div class="flex justify-end"><button onclick="document.getElementById('mtls-debug-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm font-medium" title="Close dialog">Close</button></div>
         </div>`, { card: 'max-w-4xl w-full max-h-[90vh] overflow-y-auto', backdropClose: true });
     // certbot / ACME profile info (le spoke) — diagnoses "requested clientAuth but
     // got serverAuth-only": needs certbot >= 4.0 for --preferred-profile, and the
@@ -2752,8 +2752,8 @@ async function showMtlsDebug() {
                         <td class="px-3 py-1.5 text-xs ${expired ? 'text-red-600 font-bold' : 'text-slate-500'}">${esc(naStr || '—')}</td>
                         <td class="px-3 py-1.5 whitespace-nowrap">${statusBadge}${expBadge}</td>
                         <td class="px-3 py-1.5 whitespace-nowrap">
-                            <button onclick="mtlsProvision('${esc(pk)}')" class="text-xs bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-2 py-0.5 rounded font-bold" title="Re-issue/renew this Hub-Local-CA mTLS client cert from its registry entry">Reissue</button>
-                            <button onclick="mtlsRemoveCert('${esc(pk)}','${esc(label)}')" class="text-xs bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-2 py-0.5 rounded font-bold ml-1" title="Remove this stored mTLS cert from the hub registry — use for a stale/orphaned entry left by a replaced or reset box">Remove</button>
+                            <button onclick="mtlsProvision('${esc(pk)}')" class="text-xs bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-2 py-0.5 rounded-full font-bold" title="Re-issue/renew this Hub-Local-CA mTLS client cert from its registry entry">Reissue</button>
+                            <button onclick="mtlsRemoveCert('${esc(pk)}','${esc(label)}')" class="text-xs bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-2 py-0.5 rounded-full font-bold ml-1" title="Remove this stored mTLS cert from the hub registry — use for a stale/orphaned entry left by a replaced or reset box">Remove</button>
                         </td>
                     </tr>`;
                 }).join('') : `<tr><td colspan="5" class="px-3 py-3 text-slate-500 italic">No provisioned mTLS certs.</td></tr>`;
@@ -2844,8 +2844,8 @@ function showDnsRecordModal(editItem) {
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">TTL</label><input id="dns-r-ttl" title="Time to Live in seconds (minimum 60s)" type="number" min="60" value="${val(editItem?.ttl) || 300}" class="${inputCls}"></div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="saveDnsRecord()" title="Save record changes" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Record'}</button>
-            <button onclick="document.getElementById('dns-record-modal').remove()" title="Cancel and close modal" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button onclick="saveDnsRecord()" title="Save record changes" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold">${editing ? 'Save Changes' : 'Add Record'}</button>
+            <button onclick="document.getElementById('dns-record-modal').remove()" title="Cancel and close modal" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     if (editing) { modal.dataset.editName = editItem.name; modal.dataset.editType = editItem.type; }
 }
@@ -2900,8 +2900,8 @@ function showDnsForwarderModal(editItem) {
             </div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="saveDnsForwarder()" title="Save forwarder configuration" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold">${isEdit ? 'Save Changes' : 'Add Forwarder'}</button>
-            <button onclick="document.getElementById('dns-forwarder-modal').remove()" title="Cancel and close modal" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button onclick="saveDnsForwarder()" title="Save forwarder configuration" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold">${isEdit ? 'Save Changes' : 'Add Forwarder'}</button>
+            <button onclick="document.getElementById('dns-forwarder-modal').remove()" title="Cancel and close modal" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     const modal = document.getElementById('dns-forwarder-modal');
     if (modal && isEdit) {
@@ -3079,7 +3079,7 @@ function _dnsOverrideLiveView(d, mins, error) {
         <select onchange="loadDnsOverrideLiveCheck(parseInt(this.value, 10))" class="ml-auto border border-slate-300 rounded-md px-2 py-1 text-xs">
             ${windows.map(([v, t]) => `<option value="${v}" ${v === mins ? 'selected' : ''}>${t}</option>`).join('')}
         </select>
-        <button onclick="loadDnsOverrideLiveCheck()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md text-xs font-bold">Re-check</button>
+        <button onclick="loadDnsOverrideLiveCheck()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-full text-xs font-bold">Re-check</button>
     </div>`;
     if (!d) return header + `<p class="text-sm text-red-600">${escapeHtml(error || 'Live check unavailable')}</p>`;
     const hits = d.hits || [];
@@ -3171,8 +3171,8 @@ function showDnsOverrideProfileModal(editItem) {
             </div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="saveDnsOverrideProfile()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold">${isEdit ? 'Save Changes' : 'Add Profile'}</button>
-            <button onclick="document.getElementById('dns-override-profile-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button onclick="saveDnsOverrideProfile()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold">${isEdit ? 'Save Changes' : 'Add Profile'}</button>
+            <button onclick="document.getElementById('dns-override-profile-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm">Cancel</button>
         </div>`, { card: 'w-full max-w-xl p-6 space-y-4 max-h-[90vh] overflow-y-auto' });
     const modal = document.getElementById('dns-override-profile-modal');
     if (modal && isEdit) modal.dataset.editName = editItem.name;
@@ -3319,8 +3319,8 @@ function showDnsOverrideAssignModal(preset) {
             </div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="saveDnsOverrideAssignment()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold">${p.edit ? 'Save Changes' : 'Apply'}</button>
-            <button onclick="document.getElementById('dns-override-assign-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button onclick="saveDnsOverrideAssignment()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold">${p.edit ? 'Save Changes' : 'Apply'}</button>
+            <button onclick="document.getElementById('dns-override-assign-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     const modal = document.getElementById('dns-override-assign-modal');
     if (modal) {

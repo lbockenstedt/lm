@@ -400,7 +400,7 @@ function showOpnsenseAddModal(subMenu) {
             <div class="p-6 space-y-4">${fwPicker}${fields}</div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="document.getElementById('opn-add-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800" title="Cancel and discard changes">Cancel</button>
-                <button onclick="${submitFn}" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm" title="Submit and save ${subMenu.replace(/s$/, '')}">Add</button>
+                <button onclick="${submitFn}" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm" title="Submit and save ${subMenu.replace(/s$/, '')}">Add</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
@@ -535,7 +535,7 @@ function showOpnsenseEditModal(fwId, subMenu, itemIdx) {
             <div class="p-6 space-y-4">${fields}</div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="document.getElementById('opn-add-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800" title="Cancel and discard changes">Cancel</button>
-                <button onclick="submitOpnsenseEdit('${fwId}','${subMenu}','${itemId.replace(/'/g,"\\'")}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm" title="Save changes to ${subMenu.replace(/s$/, '')}">Save</button>
+                <button onclick="submitOpnsenseEdit('${fwId}','${subMenu}','${itemId.replace(/'/g,"\\'")}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm" title="Save changes to ${subMenu.replace(/s$/, '')}">Save</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
@@ -773,7 +773,7 @@ function showLDAPModal(subMenu, editItem) {
             <div class="p-6 space-y-4">${fields}</div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="this.closest('.fixed').remove()" title="Cancel and close dialog" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
-                <button onclick="${subMenu === 'Groups' ? 'saveLDAPGroup()' : `saveLDAPUser(${editing ? 'true' : 'false'})`}" title="Save directory changes" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all">Save</button>
+                <button onclick="${subMenu === 'Groups' ? 'saveLDAPGroup()' : `saveLDAPUser(${editing ? 'true' : 'false'})`}" title="Save directory changes" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all">Save</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
@@ -903,7 +903,7 @@ function showLDAPPasswordModal(uid) {
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="this.closest('.fixed').remove()" title="Cancel and close dialog" class="px-4 py-2 text-sm text-slate-600">Cancel</button>
-                <button onclick="changeUserPassword('${eUid}')" title="Apply new password" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all">Set Password</button>
+                <button onclick="changeUserPassword('${eUid}')" title="Apply new password" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all">Set Password</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
@@ -945,7 +945,7 @@ async function showLDAPMembersModal(cn) {
             <div class="p-6 space-y-4">
                 <div class="flex items-center gap-2">
                     <select id="ldap-member-add" title="Select user to add to group" class="flex-1 bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading users…</option></select>
-                    <button onclick="addLDAPMember('${String(cn).replace(/'/g, "\\'")}')" title="Add selected user to group" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold">Add</button>
+                    <button onclick="addLDAPMember('${String(cn).replace(/'/g, "\\'")}')" title="Add selected user to group" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-sm font-bold">Add</button>
                 </div>
                 <div id="ldap-members-list" class="space-y-1 max-h-64 overflow-y-auto"><p class="text-xs text-slate-500 italic">Loading members…</p></div>
             </div>
@@ -1072,7 +1072,7 @@ async function showAddUserModal() {
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="closeAddUserModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
-                <button onclick="saveUser()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Create User</button>
+                <button onclick="saveUser()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm">Create User</button>
             </div>
         </div>
     `;
@@ -1255,7 +1255,7 @@ async function editUser(userId) {
                     <button onclick="promptSetPassword('${userId}')" class="text-xs text-slate-500 hover:text-blue-600 transition-colors">Set Password</button>
                     <div class="flex justify-end gap-3">
                         <button onclick="closeEditUserModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
-                        <button onclick="saveUserEdits('${userId}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save Changes</button>
+                        <button onclick="saveUserEdits('${userId}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm">Save Changes</button>
                     </div>
                 </div>
             </div>

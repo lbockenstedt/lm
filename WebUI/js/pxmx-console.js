@@ -203,20 +203,20 @@ function pxmxVmTableHtml(vms) {
             // disabled + locked. The hub enforces this too (403), so this is
             // UX, not the security boundary.
             if (spec.action === 'destroy' && vm.protected) {
-                return `<button disabled title="Protected from deletion — remove the safeguard in Setup → Hypervisors" class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-500 cursor-not-allowed">🔒 Delete</button>`;
+                return `<button disabled title="Protected from deletion — remove the safeguard in Setup → Hypervisors" class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-500 cursor-not-allowed">🔒 Delete</button>`;
             }
-            return `<button onclick="event.stopPropagation(); pxmxVmAction('${uid}','${spec.action}')" class="px-2 py-0.5 rounded text-xs font-bold ${spec.cls}" title="${spec.label} this virtual machine">${spec.label}</button>`;
+            return `<button onclick="event.stopPropagation(); pxmxVmAction('${uid}','${spec.action}')" class="px-2 py-0.5 rounded-full text-xs font-bold ${spec.cls}" title="${spec.label} this virtual machine">${spec.label}</button>`;
         };
         const consoleBtn = !canAct ? ''
             : (isLxc || tpl)
-                ? `<button disabled title="${isLxc ? 'Containers have no VNC console' : 'Templates have no console'}" class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-500 cursor-not-allowed">🖥 Console</button>`
-                : `<button onclick="event.stopPropagation(); pxmxOpenConsole('${uid}')" class="px-2 py-0.5 rounded text-xs font-bold bg-slate-800 text-slate-100 hover:bg-slate-700" title="Open a noVNC console to this VM">🖥 Console</button>`;
+                ? `<button disabled title="${isLxc ? 'Containers have no VNC console' : 'Templates have no console'}" class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-500 cursor-not-allowed">🖥 Console</button>`
+                : `<button onclick="event.stopPropagation(); pxmxOpenConsole('${uid}')" class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-800 text-slate-100 hover:bg-slate-700" title="Open a noVNC console to this VM">🖥 Console</button>`;
         // Start/Stop/Restart/Snapshot/Backup live behind one "Actions ▾" menu
         // (pxmxToggleVmActionMenu) — Delete and Console stay as standalone
         // buttons (delete-protection and console-availability need their own
         // always-visible state, not a menu item you might miss).
         const destroySpec = PXMX_VM_ACTIONS.find(s => s.action === 'destroy');
-        const menuBtn = !canAct ? '' : `<button onclick="event.stopPropagation(); pxmxToggleVmActionMenu(event, '${uid}', ${tpl})" class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-700 hover:bg-slate-200" title="Open VM actions menu">⋯ Actions ▾</button>`;
+        const menuBtn = !canAct ? '' : `<button onclick="event.stopPropagation(); pxmxToggleVmActionMenu(event, '${uid}', ${tpl})" class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-700 hover:bg-slate-200" title="Open VM actions menu">⋯ Actions ▾</button>`;
         const actions = `<div class="flex flex-wrap gap-1 justify-end">
             ${consoleBtn}
             ${menuBtn}
@@ -249,7 +249,7 @@ function pxmxVmTabsHtml() {
         { numeric: true, sensitivity: 'base' });
     const sortedNodes = nodes.slice().sort((a, b) => _cmp(a.cluster, b.cluster) || _cmp(a.node, b.node));
     const tabBtn = (key, label, count, active) =>
-        `<button onclick="pxmxSelectVmTab('${escJsAttr(key || '')}')" class="px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${active ? 'bg-brand/10 text-primary-text border border-brand' : 'text-slate-500 hover:bg-slate-100 border border-transparent'}" title="Filter virtual machines by server ${escapeHtml(label)}">${escapeHtml(label)} <span class="opacity-60">(${count})</span></button>`;
+        `<button onclick="pxmxSelectVmTab('${escJsAttr(key || '')}')" class="px-3 py-1.5 rounded-full text-xs font-bold transition-colors ${active ? 'bg-brand/10 text-primary-text border border-brand' : 'text-slate-500 hover:bg-slate-100 border border-transparent'}" title="Filter virtual machines by server ${escapeHtml(label)}">${escapeHtml(label)} <span class="opacity-60">(${count})</span></button>`;
     const countFor = key => allVms.filter(v => pxmxNodeKey(v.cluster, v.node) === key).length;
     return `<div class="flex flex-wrap gap-1.5 mb-3">
         ${tabBtn('', 'All', allVms.length, !activeKey)}
@@ -269,7 +269,7 @@ function pxmxVmSectionHtml() {
     const vms = pxmxFilteredVms();
     const countLabel = activeKey ? `${vms.length} on ${escapeHtml((activeKey.split('::')[1] || activeKey))}` : `${vms.length} total`;
     const buildBtn = nodes.length
-        ? `<button onclick="pxmxOpenCreateVm()" class="mb-3 ml-2 px-3 py-1.5 rounded-md text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-colors" title="Create a new virtual machine from an ISO installer">＋ Build VM from ISO</button>`
+        ? `<button onclick="pxmxOpenCreateVm()" class="mb-3 ml-2 px-3 py-1.5 rounded-full text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-colors" title="Create a new virtual machine from an ISO installer">＋ Build VM from ISO</button>`
         : '';
     return `<div class="flex items-center justify-between mb-1 px-1">
             <h3 class="text-base font-semibold text-navy">Virtual Machines &amp; Containers
@@ -289,7 +289,7 @@ function pxmxBulkBar() {
     // Render from the shared PXMX_VM_ACTIONS spec so the bulk buttons match the
     // inline per-row buttons exactly (icon, label, color, hover, sizing).
     const btns = PXMX_VM_ACTIONS.map(s =>
-        `<button onclick="pxmxBulkAction('${s.action}')" class="px-2 py-0.5 rounded text-xs font-bold ${s.cls}" title="Execute ${s.label} on all selected VMs">${s.label}</button>`).join('');
+        `<button onclick="pxmxBulkAction('${s.action}')" class="px-2 py-0.5 rounded-full text-xs font-bold ${s.cls}" title="Execute ${s.label} on all selected VMs">${s.label}</button>`).join('');
     return `<div class="flex flex-wrap items-center gap-2 mb-3 text-xs">
       <span class="text-slate-500 font-medium mr-1">Bulk (selected):</span>
       ${btns}
@@ -375,19 +375,19 @@ function openVmDetail(uniqueId) {
                 · Pool ${vm.pool ? escapeHtml(vm.pool) : '—'}</p>
         </div>
         <div class="flex flex-wrap items-center gap-2 mb-4"${canEdit() ? '' : ' style="display:none"'}>
-            <button onclick="pxmxVmAction('${uid}','start')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-green-600 hover:bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand transition-colors" title="Power on this virtual machine">▶ Start</button>
-            <button onclick="pxmxVmAction('${uid}','stop')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-red-600 hover:bg-red-700 text-white transition-colors" title="Gracefully shut down or force-stop this VM">■ Stop</button>
-            <button onclick="pxmxVmAction('${uid}','reboot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white transition-colors" title="Reboot this virtual machine">↺ Restart</button>
-            <button onclick="pxmxVmAction('${uid}','snapshot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-600 hover:bg-slate-700 text-white transition-colors" title="Take an instantaneous snapshot of this VM">📷 Snapshot</button>
-            ${isAdmin() ? `<button onclick="pxmxOpenVmSnapSchedule('${uid}')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 transition-colors" title="View or set how often this VM is snapshotted">🕒 Schedule…</button>` : ''}
-            <button onclick="pxmxVmAction('${uid}','backup')" title="vzdump backup to the storage configured in Setup → Hypervisors" class="px-3 py-1.5 rounded-md text-xs font-bold bg-sky-600 hover:bg-sky-700 text-white transition-colors">💾 Backup</button>
-            <button id="pxmx-backup-hub-btn" onclick="pxmxBackupToHub('${uid}')" title="vzdump this template and store a copy in the hub's Template Repo (Template Repo page). The archive is deleted from the chosen storage after streaming." class="px-3 py-1.5 rounded-md text-xs font-bold bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-300 transition-colors">⬆ Back up to Hub</button>
+            <button onclick="pxmxVmAction('${uid}','start')" class="px-3 py-1.5 rounded-full text-xs font-bold bg-green-600 hover:bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand transition-colors" title="Power on this virtual machine">▶ Start</button>
+            <button onclick="pxmxVmAction('${uid}','stop')" class="px-3 py-1.5 rounded-full text-xs font-bold bg-red-600 hover:bg-red-700 text-white transition-colors" title="Gracefully shut down or force-stop this VM">■ Stop</button>
+            <button onclick="pxmxVmAction('${uid}','reboot')" class="px-3 py-1.5 rounded-full text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white transition-colors" title="Reboot this virtual machine">↺ Restart</button>
+            <button onclick="pxmxVmAction('${uid}','snapshot')" class="px-3 py-1.5 rounded-full text-xs font-bold bg-slate-600 hover:bg-slate-700 text-white transition-colors" title="Take an instantaneous snapshot of this VM">📷 Snapshot</button>
+            ${isAdmin() ? `<button onclick="pxmxOpenVmSnapSchedule('${uid}')" class="px-3 py-1.5 rounded-full text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 transition-colors" title="View or set how often this VM is snapshotted">🕒 Schedule…</button>` : ''}
+            <button onclick="pxmxVmAction('${uid}','backup')" title="vzdump backup to the storage configured in Setup → Hypervisors" class="px-3 py-1.5 rounded-full text-xs font-bold bg-sky-600 hover:bg-sky-700 text-white transition-colors">💾 Backup</button>
+            <button id="pxmx-backup-hub-btn" onclick="pxmxBackupToHub('${uid}')" title="vzdump this template and store a copy in the hub's Template Repo (Template Repo page). The archive is deleted from the chosen storage after streaming." class="px-3 py-1.5 rounded-full text-xs font-bold bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-300 transition-colors">⬆ Back up to Hub</button>
             <select id="pxmx-backup-hub-storage" title="vzdump storage target for THIS backup (file-based only — PBS excluded; vzdump-to-PBS isn't a single streamable file). The archive is deleted from here after it streams to the hub." class="px-2 py-1.5 rounded-md text-xs border border-slate-300 bg-white max-w-[12rem]"><option value="">loading storages…</option></select>
-            <button id="pxmx-vm-console-btn" onclick="pxmxOpenConsole('${uid}')" title="Open VNC console (noVNC)" class="px-3 py-1.5 rounded-md text-xs font-bold bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand transition-colors">🖥 Console</button>
+            <button id="pxmx-vm-console-btn" onclick="pxmxOpenConsole('${uid}')" title="Open VNC console (noVNC)" class="px-3 py-1.5 rounded-full text-xs font-bold bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand transition-colors">🖥 Console</button>
             ${vm.protected
-                ? `<button disabled title="Protected from deletion — remove the safeguard in Setup → Hypervisors" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-200 text-slate-500 cursor-not-allowed">🔒 Delete</button>`
-                : `<button onclick="pxmxVmAction('${uid}','destroy')" title="Destroy this VM and its disks (--purge) — IRREVERSIBLE" class="px-3 py-1.5 rounded-md text-xs font-bold bg-red-800 hover:bg-red-900 text-white transition-colors">🗑 Delete</button>`}
-            ${(() => { const tp = (window._pxmxTemplatePools||[]); return (vm.pool && tp.includes(String(vm.pool).toLowerCase())) ? `<button onclick="pxmxCloneVm('${uid}')" title="Clone this template to a new VM" class="px-3 py-1.5 rounded-md text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-colors">⧉ Clone</button><button onclick="pxmxDeploySpoke('${uid}')" title="One-click spoke deploy: clone this golden spoke template, auto-name it CS-SVR-0N, and start it so it DHCPs and self-onboards" class="px-3 py-1.5 rounded-md text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white transition-colors">🚀 Deploy Spoke</button>` : ''; })()}
+                ? `<button disabled title="Protected from deletion — remove the safeguard in Setup → Hypervisors" class="px-3 py-1.5 rounded-full text-xs font-bold bg-slate-200 text-slate-500 cursor-not-allowed">🔒 Delete</button>`
+                : `<button onclick="pxmxVmAction('${uid}','destroy')" title="Destroy this VM and its disks (--purge) — IRREVERSIBLE" class="px-3 py-1.5 rounded-full text-xs font-bold bg-red-800 hover:bg-red-900 text-white transition-colors">🗑 Delete</button>`}
+            ${(() => { const tp = (window._pxmxTemplatePools||[]); return (vm.pool && tp.includes(String(vm.pool).toLowerCase())) ? `<button onclick="pxmxCloneVm('${uid}')" title="Clone this template to a new VM" class="px-3 py-1.5 rounded-full text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-colors">⧉ Clone</button><button onclick="pxmxDeploySpoke('${uid}')" title="One-click spoke deploy: clone this golden spoke template, auto-name it CS-SVR-0N, and start it so it DHCPs and self-onboards" class="px-3 py-1.5 rounded-full text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white transition-colors">🚀 Deploy Spoke</button>` : ''; })()}
             <span id="pxmx-vm-action-status" class="text-xs text-slate-500"></span>
         </div>
         <div id="pxmx-vm-snap-sched" class="hidden rounded-lg border border-slate-200 bg-white p-4 mb-4"></div>`;
@@ -487,7 +487,7 @@ async function renderPxmxSettings(container) {
         </div>` : ''}
         ${isAdmin() ? `<div class="hpe-card rounded-lg p-5 shadow-sm" id="pxmx-snap-schedules"></div>` : ''}
         <div class="flex justify-end items-center gap-3">
-          <button onclick="savePxmxSettings()" class="bg-primary hover:bg-[#018a6c] text-white px-5 py-2 rounded-md text-sm font-bold" title="Save hypervisor backup and console settings">Save</button>
+          <button onclick="savePxmxSettings()" class="bg-primary hover:bg-[#018a6c] text-white px-5 py-2 rounded-full text-sm font-bold" title="Save hypervisor backup and console settings">Save</button>
           <span id="pxmx-settings-status" class="text-xs text-slate-500"></span>
         </div>
       </div>`;
@@ -553,7 +553,7 @@ async function pxmxOpenVmSnapSchedule(uid) {
     ].filter(Boolean);
     const others = d.schedules.filter(s => s !== own && via(s).length);
     const inScope = d.vms.some(v => v.unique_id === uid);
-    const btn = 'text-xs font-bold border border-slate-300 rounded px-2 py-0.5 hover:bg-slate-100';
+    const btn = 'text-xs font-bold border border-slate-300 rounded-full px-2 py-0.5 hover:bg-slate-100';
     const inp = 'border border-slate-200 rounded-md px-2 py-1 text-sm w-20';
     const otherRows = others.map(s => `<li class="text-xs text-slate-600">${escapeHtml(s.name)}${s.enabled ? '' : ' (paused)'} — every ${s.every_hours}h, keep ${s.keep}, via ${escapeHtml(via(s).join(', '))} · ${_pxmxSnapLastRun(s)}</li>`).join('');
     const sid = own ? escapeHtml(JSON.stringify(own.id)) : '';
@@ -567,7 +567,7 @@ async function pxmxOpenVmSnapSchedule(uid) {
         <label class="flex items-center gap-2 text-sm text-slate-700 self-center"><input id="vm-snap-enabled" type="checkbox" class="rounded" ${!own || own.enabled ? 'checked' : ''}/> Snapshot this VM</label>
         <div><label class="block text-xs font-bold text-slate-500">Every (hours)</label><input id="vm-snap-every" type="number" min="1" max="8760" class="${inp}" value="${own ? own.every_hours : 24}"/></div>
         <div><label class="block text-xs font-bold text-slate-500">Keep last</label><input id="vm-snap-keep" type="number" min="1" max="100" class="${inp}" value="${keep}"/></div>
-        <button class="bg-primary hover:bg-[#018a6c] text-white px-3 py-1 rounded-md text-xs font-bold" onclick="pxmxSaveVmSnapSchedule(${escapeHtml(JSON.stringify(uid))})">${own ? 'Save' : 'Create schedule'}</button>
+        <button class="bg-primary hover:bg-[#018a6c] text-white px-3 py-1 rounded-full text-xs font-bold" onclick="pxmxSaveVmSnapSchedule(${escapeHtml(JSON.stringify(uid))})">${own ? 'Save' : 'Create schedule'}</button>
         ${own ? `<button class="${btn}" onclick="pxmxRunSnapSchedule(${sid})" ${own.running ? 'disabled' : ''}>Run now</button>
         <button class="${btn} text-red-700" onclick="pxmxDeleteSnapSchedule(${sid})">Delete</button>` : ''}
       </div>
@@ -599,7 +599,7 @@ async function pxmxLoadSnapSchedules(editId) {
     try { d = await apiJson(_snapUrl()); }
     catch (e) { box.innerHTML = `<p class="text-sm text-red-600">Could not load snapshot schedules: ${escapeHtml(String(e.message || e))}</p>`; return; }
     window._pxmxSnapData = d;
-    const btn = 'text-xs font-bold border border-slate-300 rounded px-2 py-0.5 hover:bg-slate-100';
+    const btn = 'text-xs font-bold border border-slate-300 rounded-full px-2 py-0.5 hover:bg-slate-100';
     const rows = d.schedules.map(s => {
         const targets = [
             s.vms.length ? `${s.vms.length} VM(s)` : '',
@@ -653,8 +653,8 @@ function _pxmxSnapForm(d, s) {
           </div>
         </div>
         <div class="flex justify-end gap-2">
-          <button class="text-sm border border-slate-300 rounded-md px-4 py-1.5" onclick="pxmxLoadSnapSchedules()">Cancel</button>
-          <button class="bg-primary hover:bg-[#018a6c] text-white px-4 py-1.5 rounded-md text-sm font-bold" onclick="pxmxSaveSnapSchedule()">Save schedule</button>
+          <button class="text-sm border border-slate-300 rounded-full px-4 py-1.5" onclick="pxmxLoadSnapSchedules()">Cancel</button>
+          <button class="bg-primary hover:bg-[#018a6c] text-white px-4 py-1.5 rounded-full text-sm font-bold" onclick="pxmxSaveSnapSchedule()">Save schedule</button>
         </div>
       </div>`;
 }
@@ -948,7 +948,7 @@ async function renderTemplateRepo() {
           <h2 class="text-lg font-bold text-navy">Template Repo</h2>
           <p class="text-sm text-slate-500">Proxmox template backups (vzdump) stored on the hub. Trigger one with “⬆ Back up to Hub” on a template VM; edit each template’s metadata here.</p>
         </div>
-        <button onclick="renderTemplateRepo()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">↻ Refresh</button>
+        <button onclick="renderTemplateRepo()" class="px-3 py-1.5 rounded-full text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">↻ Refresh</button>
       </div>
       <div class="hpe-card rounded-lg overflow-hidden">
         <div class="overflow-x-auto"><table class="w-full text-sm">
@@ -984,8 +984,8 @@ function _templateRepoRow(t) {
       <td class="px-4 py-2 text-right text-slate-600">${t.size ? _tplBytes(t.size) : '—'}</td>
       <td class="px-4 py-2">${_tplStatusBadge(t)}</td>
       <td class="px-4 py-2 text-right whitespace-nowrap">
-        <button onclick="templateRepoEdit('${id}')" class="px-2 py-1 rounded text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600">Edit</button>
-        <button onclick="templateRepoDelete('${id}')" class="px-2 py-1 rounded text-xs font-bold bg-red-100 hover:bg-red-200 text-red-700" title="Delete this template backup from the hub repository (irreversible)">Delete</button>
+        <button onclick="templateRepoEdit('${id}')" class="px-2 py-1 rounded-full text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600">Edit</button>
+        <button onclick="templateRepoDelete('${id}')" class="px-2 py-1 rounded-full text-xs font-bold bg-red-100 hover:bg-red-200 text-red-700" title="Delete this template backup from the hub repository (irreversible)">Delete</button>
       </td>
     </tr>`;
 }
@@ -1011,7 +1011,7 @@ function templateRepoEdit(id) {
           <div><label class="text-xs text-slate-500 font-bold">Purpose</label><textarea id="tpl-edit-purpose" rows="2" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm">${esc(t.purpose)}</textarea></div>
           <div class="pt-3 flex justify-end gap-3">
             <button onclick="this.closest('#template-edit-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Cancel</button>
-            <button onclick="templateRepoSaveMeta('${escJsAttr(id)}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold">Save</button>
+            <button onclick="templateRepoSaveMeta('${escJsAttr(id)}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold">Save</button>
           </div>
         </div>
       </div>`;
@@ -1078,8 +1078,8 @@ async function pxmxCloneVm(uniqueId) {
                 <select id="pxmx-clone-pool" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm" title="Select target resource pool">${poolOpts}</select>
             </label>
             <div class="flex justify-end gap-2 pt-1">
-                <button onclick="document.getElementById('pxmx-clone-modal').remove()" class="px-3 py-2 rounded-md text-sm font-medium text-slate-600 hover:bg-slate-100" title="Cancel cloning">Cancel</button>
-                <button id="pxmx-clone-go" onclick="pxmxCloneVmSubmit('${escJs(vm.unique_id)}')" class="px-4 py-2 rounded-md text-sm font-bold bg-indigo-600 hover:bg-indigo-700 text-white" title="Clone template to new VM">⧉ Clone</button>
+                <button onclick="document.getElementById('pxmx-clone-modal').remove()" class="px-3 py-2 rounded-full text-sm font-medium text-slate-600 hover:bg-slate-100" title="Cancel cloning">Cancel</button>
+                <button id="pxmx-clone-go" onclick="pxmxCloneVmSubmit('${escJs(vm.unique_id)}')" class="px-4 py-2 rounded-full text-sm font-bold bg-indigo-600 hover:bg-indigo-700 text-white" title="Clone template to new VM">⧉ Clone</button>
             </div>
             <p id="pxmx-clone-status" class="text-xs text-slate-500"></p>
         </div>
@@ -1160,8 +1160,8 @@ async function pxmxDeploySpoke(uniqueId) {
                 <input id="pxmx-deploy-start" type="checkbox" checked class="w-4 h-4 rounded" /> Start the clone after deploy (self-onboard)
             </label>
             <div class="flex justify-end gap-2 pt-1">
-                <button onclick="document.getElementById('pxmx-deploy-modal').remove()" class="px-3 py-2 rounded-md text-sm font-medium text-slate-600 hover:bg-slate-100">Cancel</button>
-                <button id="pxmx-deploy-go" onclick="pxmxDeploySpokeSubmit('${escJs(vm.unique_id)}')" class="px-4 py-2 rounded-md text-sm font-bold bg-emerald-600 hover:bg-emerald-700 text-white">🚀 Deploy</button>
+                <button onclick="document.getElementById('pxmx-deploy-modal').remove()" class="px-3 py-2 rounded-full text-sm font-medium text-slate-600 hover:bg-slate-100">Cancel</button>
+                <button id="pxmx-deploy-go" onclick="pxmxDeploySpokeSubmit('${escJs(vm.unique_id)}')" class="px-4 py-2 rounded-full text-sm font-bold bg-emerald-600 hover:bg-emerald-700 text-white">🚀 Deploy</button>
             </div>
             <p id="pxmx-deploy-status" class="text-xs text-slate-500"></p>
         </div>
@@ -1258,8 +1258,8 @@ function pxmxOpenCreateVm() {
                 </label>
             </div>
             <div class="flex justify-end gap-2 pt-1">
-                <button onclick="document.getElementById('pxmx-create-vm-modal').remove()" class="px-3 py-2 rounded-md text-sm font-medium text-slate-600 hover:bg-slate-100" title="Cancel VM creation">Cancel</button>
-                <button id="pxmx-cv-go" onclick="pxmxCreateVmSubmit()" class="px-4 py-2 rounded-md text-sm font-bold bg-indigo-600 hover:bg-indigo-700 text-white" title="Provision new virtual machine">＋ Create VM</button>
+                <button onclick="document.getElementById('pxmx-create-vm-modal').remove()" class="px-3 py-2 rounded-full text-sm font-medium text-slate-600 hover:bg-slate-100" title="Cancel VM creation">Cancel</button>
+                <button id="pxmx-cv-go" onclick="pxmxCreateVmSubmit()" class="px-4 py-2 rounded-full text-sm font-bold bg-indigo-600 hover:bg-indigo-700 text-white" title="Provision new virtual machine">＋ Create VM</button>
             </div>
             <p id="pxmx-cv-status" class="text-xs text-slate-500"></p>
         </div>
@@ -1407,7 +1407,7 @@ function _consoleDpaBadge(p) {
     const parts = [];
     if (d.ssh_port) {
         const cmd = _consoleDpaSshCmd(p);
-        parts.push(`<button type="button" onclick="_consoleCopyDpa(this)" data-cmd="${escapeHtml(cmd)}" class="font-mono px-1.5 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-200 hover:bg-sky-100" title="Direct Port Access over SSH — host ${escapeHtml(String(d.host || '?'))}, port ${escapeHtml(String(d.ssh_port))}. Click to copy.">🔐 DPA ${escapeHtml(String(d.host || '?'))}:${escapeHtml(String(d.ssh_port))}${d.ssh_override ? ' ' + pin : ''}</button>`);
+        parts.push(`<button type="button" onclick="_consoleCopyDpa(this)" data-cmd="${escapeHtml(cmd)}" class="font-mono px-1.5 py-0.5 rounded-full bg-sky-50 text-sky-700 border border-sky-200 hover:bg-sky-100" title="Direct Port Access over SSH — host ${escapeHtml(String(d.host || '?'))}, port ${escapeHtml(String(d.ssh_port))}. Click to copy.">🔐 DPA ${escapeHtml(String(d.host || '?'))}:${escapeHtml(String(d.ssh_port))}${d.ssh_override ? ' ' + pin : ''}</button>`);
     }
     if (d.telnet_port) {
         const tb = String(d.bind || '127.0.0.1');
@@ -1455,11 +1455,11 @@ function _renderConsolePorts(el, data) {
         const agentName = p.agent_name || p.spoke_id || '';
         const tenantId = p.tenant_id || 'unassigned';
         const eP = esc(p.port_id), eS = esc(p.spoke_id || ''), eT = esc(p.tenant_override || '');
-        const tenantBtn = admin ? `<button onclick="openConsolePortTenantModal('${eS}','${eP}','${eT}')" class="text-xs px-2 py-1 rounded border border-brand text-primary-text hover:bg-slate-50">Tenant</button>` : '';
-        const configBtn = hasConsoleWrite() ? `<button onclick="openConsoleConfigModal('${eS}','${eP}')" class="text-xs px-2 py-1 rounded border border-indigo-400 text-indigo-600 hover:bg-slate-50">Config</button>` : '';
-        const profileBtn = hasConsoleView() ? `<button onclick="profileDevice('${eS}','${eP}')" class="text-xs px-2 py-1 rounded border border-violet-400 text-violet-600 hover:bg-slate-50" title="Profile this device: use the known fingerprint if we have one, otherwise ask the AI to identify it from its (scrubbed) console output">🔎 Profile Device</button>` : '';
+        const tenantBtn = admin ? `<button onclick="openConsolePortTenantModal('${eS}','${eP}','${eT}')" class="text-xs px-2 py-1 rounded-full border border-brand text-primary-text hover:bg-slate-50">Tenant</button>` : '';
+        const configBtn = hasConsoleWrite() ? `<button onclick="openConsoleConfigModal('${eS}','${eP}')" class="text-xs px-2 py-1 rounded-full border border-indigo-400 text-indigo-600 hover:bg-slate-50">Config</button>` : '';
+        const profileBtn = hasConsoleView() ? `<button onclick="profileDevice('${eS}','${eP}')" class="text-xs px-2 py-1 rounded-full border border-violet-400 text-violet-600 hover:bg-slate-50" title="Profile this device: use the known fingerprint if we have one, otherwise ask the AI to identify it from its (scrubbed) console output">🔎 Profile Device</button>` : '';
         const captureBtn = (p.capture_bytes || p.monitoring || (p.probe && p.probe.banner))
-            ? `<button onclick="openConsoleCaptureModal('${eS}','${eP}')" class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50" title="View recent console output captured from this port">Capture</button>` : '';
+            ? `<button onclick="openConsoleCaptureModal('${eS}','${eP}')" class="text-xs px-2 py-1 rounded-full border border-slate-300 hover:bg-slate-50" title="View recent console output captured from this port">Capture</button>` : '';
         const dpaBadge = _consoleDpaBadge(p);
         return `<tr class="hover:bg-slate-50">
             <td class="px-4 py-3"><div class="font-semibold text-slate-700">${escapeHtml(label)}${inUse}${staleBadge}${disconnectedBadge}${monDot}${bootBadge}${stackBadge}</div>
@@ -1469,26 +1469,26 @@ function _renderConsolePorts(el, data) {
               ${_consoleIdentityBlock(p)}</td>
             <td class="px-4 py-3 text-right whitespace-nowrap space-x-1">
               ${unreachable
-                ? `<button disabled title="Device not connected — reconnect it to open a session" class="text-xs px-2 py-1 rounded bg-slate-100 text-slate-500 border border-slate-200 font-bold cursor-not-allowed">🖥 Open</button>`
-                : `<button onclick="openConsoleTerminal('${eS}','${eP}','${esc(label)}')" class="text-xs px-2 py-1 rounded bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand font-bold">🖥 Open</button>`}
+                ? `<button disabled title="Device not connected — reconnect it to open a session" class="text-xs px-2 py-1 rounded-full bg-slate-100 text-slate-500 border border-slate-200 font-bold cursor-not-allowed">🖥 Open</button>`
+                : `<button onclick="openConsoleTerminal('${eS}','${eP}','${esc(label)}')" class="text-xs px-2 py-1 rounded-full bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand font-bold">🖥 Open</button>`}
               ${profileBtn}
               ${captureBtn}
-              <button onclick="openConsoleSettingsModal('${eS}','${eP}')" class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Settings</button>
+              <button onclick="openConsoleSettingsModal('${eS}','${eP}')" class="text-xs px-2 py-1 rounded-full border border-slate-300 hover:bg-slate-50">Settings</button>
               ${configBtn}
               ${tenantBtn}
             </td></tr>`;
     }).join('');
     const profileAllBtn = hasConsoleView()
-        ? `<button onclick="profileAllDevices()" class="text-xs px-3 py-1.5 rounded border border-violet-400 text-violet-600 hover:bg-slate-50" title="Profile every listed device at once: known fingerprints are used as-is; unknown devices are sent (scrubbed) to the AI to identify. Ports open in a session are skipped.">🔎 Profile All Devices</button>`
+        ? `<button onclick="profileAllDevices()" class="text-xs px-3 py-1.5 rounded-full border border-violet-400 text-violet-600 hover:bg-slate-50" title="Profile every listed device at once: known fingerprints are used as-is; unknown devices are sent (scrubbed) to the AI to identify. Ports open in a session are skipped.">🔎 Profile All Devices</button>`
         : '';
     const diagBtn = hasConsoleView()
-        ? `<button onclick="openConsoleDiagnosticsModal()" class="text-xs px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50" title="Serial connections that keep failing or disconnecting">🩺 Diagnostics</button>`
+        ? `<button onclick="openConsoleDiagnosticsModal()" class="text-xs px-3 py-1.5 rounded-full border border-slate-300 hover:bg-slate-50" title="Serial connections that keep failing or disconnecting">🩺 Diagnostics</button>`
         : '';
     const dpaBtn = (admin || _consoleDpaSpokes.length)
-        ? `<button onclick="openConsoleDpaModal()" class="text-xs px-3 py-1.5 rounded border border-sky-400 text-sky-700 hover:bg-slate-50" title="Direct Port Access: SSH (or telnet) straight to a serial port on the console server">🔌 Direct Port Access</button>`
+        ? `<button onclick="openConsoleDpaModal()" class="text-xs px-3 py-1.5 rounded-full border border-sky-400 text-sky-700 hover:bg-slate-50" title="Direct Port Access: SSH (or telnet) straight to a serial port on the console server">🔌 Direct Port Access</button>`
         : '';
     const adminTools = diagBtn + dpaBtn + ((admin || isTenantAdmin())
-        ? `<button onclick="openConsoleCredentialsModal()" class="text-xs px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">🔑 Credentials</button>`
+        ? `<button onclick="openConsoleCredentialsModal()" class="text-xs px-3 py-1.5 rounded-full border border-slate-300 hover:bg-slate-50">🔑 Credentials</button>`
         : '');
     const tools = (profileAllBtn || adminTools)
         ? `<div class="flex justify-end gap-2 p-2 border-b border-slate-100">${profileAllBtn}${adminTools}</div>`
@@ -1692,7 +1692,7 @@ async function openConsoleCaptureModal(spokeId, portId) {
           <button onclick="document.getElementById('console-capture-modal').remove()" class="text-slate-500 hover:text-white text-2xl leading-none">&times;</button>
         </div>
         <pre class="flex-1 m-0 p-3 overflow-auto text-xs text-slate-100 font-mono whitespace-pre-wrap">${escapeHtml(text)}</pre>
-        <div class="px-4 py-2 bg-[#2d2d2d] text-right"><button class="js-capture-refresh text-xs px-3 py-1.5 rounded border border-slate-500 text-slate-200 hover:bg-slate-700">↻ Refresh</button></div>
+        <div class="px-4 py-2 bg-[#2d2d2d] text-right"><button class="js-capture-refresh text-xs px-3 py-1.5 rounded-full border border-slate-500 text-slate-200 hover:bg-slate-700">↻ Refresh</button></div>
       </div>`;
     modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
     _mountModal(modal);
@@ -1845,11 +1845,11 @@ function _consoleDiagDebugBanner(dbg) {
 // spoke) + copy/refresh (available to the whole console view tier).
 function _consoleDiagFooterBtns() {
     const purgeBtn = isAdmin()
-        ? `<button onclick="purgeConsoleDiagnostics()" class="text-xs px-3 py-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50" title="Delete all collected serial-health / identify telemetry across every console agent">🗑 Purge data</button>`
+        ? `<button onclick="purgeConsoleDiagnostics()" class="text-xs px-3 py-1.5 rounded-full border border-red-200 text-red-600 hover:bg-red-50" title="Delete all collected serial-health / identify telemetry across every console agent">🗑 Purge data</button>`
         : '';
-    return `<button onclick="copyConsoleDiagnostics(this)" class="text-xs px-3 py-1.5 rounded border border-brand text-primary-text hover:bg-brand/10 font-bold" title="Copy the full diagnostics — every port's login/identify telemetry, prompts, creds tried, skip reason and the last raw device line — as plain text to paste into a ticket or chat">⧉ Copy debug</button>`
+    return `<button onclick="copyConsoleDiagnostics(this)" class="text-xs px-3 py-1.5 rounded-full border border-brand text-primary-text hover:bg-brand/10 font-bold" title="Copy the full diagnostics — every port's login/identify telemetry, prompts, creds tried, skip reason and the last raw device line — as plain text to paste into a ticket or chat">⧉ Copy debug</button>`
          + purgeBtn
-         + `<button onclick="refreshConsoleDiagnostics()" class="text-xs px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">↻ Refresh</button>`;
+         + `<button onclick="refreshConsoleDiagnostics()" class="text-xs px-3 py-1.5 rounded-full border border-slate-300 hover:bg-slate-50">↻ Refresh</button>`;
 }
 
 // Serialize the last-fetched console diagnostics to plain text so an operator can
@@ -2145,8 +2145,8 @@ async function openConsoleCredentialsModal() {
                    ? 'Selection active — only ticked accounts are used.'
                    : 'No selection — every account is tried.'}</span>
                <span class="flex gap-2 shrink-0">
-                 <button onclick="clearConsoleCredentialSelection('${escJsAttr(tenantScope)}')" class="text-xs px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Use all</button>
-                 <button onclick="saveConsoleCredentialSelection('${escJsAttr(tenantScope)}')" class="text-xs px-3 py-1 rounded border border-brand text-primary-text hover:bg-brand/10 font-bold">Save selection</button>
+                 <button onclick="clearConsoleCredentialSelection('${escJsAttr(tenantScope)}')" class="text-xs px-2 py-1 rounded-full border border-slate-300 hover:bg-slate-50">Use all</button>
+                 <button onclick="saveConsoleCredentialSelection('${escJsAttr(tenantScope)}')" class="text-xs px-3 py-1 rounded-full border border-brand text-primary-text hover:bg-brand/10 font-bold">Save selection</button>
                </span>
              </div>
            </div>`
@@ -2175,7 +2175,7 @@ async function openConsoleCredentialsModal() {
                  <div class="space-y-1">${localCreds.map(c => `
                    <div class="flex items-center justify-between gap-2 bg-slate-50 rounded px-2 py-1">
                      <span class="font-mono text-xs text-slate-600">${escapeHtml(c.username)}${c.has_password ? '' : ' <span class="text-amber-500">(no password)</span>'}</span>
-                     <button onclick="deleteConsoleLocalCredential('${escJsAttr(c.username)}')" class="text-xs px-2 py-0.5 rounded border border-red-300 text-red-600 hover:bg-red-50" title="Delete this local credential">Delete</button>
+                     <button onclick="deleteConsoleLocalCredential('${escJsAttr(c.username)}')" class="text-xs px-2 py-0.5 rounded-full border border-red-300 text-red-600 hover:bg-red-50" title="Delete this local credential">Delete</button>
                    </div>`).join('')}</div>
                </div>`
             : '';
@@ -2219,11 +2219,11 @@ async function openConsoleCredentialsModal() {
           ${scopeNote}
           <p class="text-xs text-slate-500">Tried in order when scanning/auto-identifying serial-attached devices. Stored in the Credential Vault; passwords are never displayed back. Leave a password blank to keep the stored one. Remove all rows to clear this tenant's console logins.</p>
           <div id="console-cred-rows" class="space-y-2">${(existing.length ? existing.map(c => rowFor(c.username)).join('') : rowFor(''))}</div>
-          <button onclick="document.getElementById('console-cred-rows').insertAdjacentHTML('beforeend', _consoleCredRowHtml())" class="text-xs px-3 py-1 rounded border border-slate-300 hover:bg-slate-50">+ Add credential</button>
+          <button onclick="document.getElementById('console-cred-rows').insertAdjacentHTML('beforeend', _consoleCredRowHtml())" class="text-xs px-3 py-1 rounded-full border border-slate-300 hover:bg-slate-50">+ Add credential</button>
           ${pskRow}
           <div class="pt-3 flex justify-end gap-3">
             <button onclick="this.closest('#console-creds-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Cancel</button>
-            <button onclick="saveConsoleVaultCredentials('${escJsAttr(tenantScope)}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold">Save</button>
+            <button onclick="saveConsoleVaultCredentials('${escJsAttr(tenantScope)}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold">Save</button>
           </div>
         </div></div>`;
     _mountModal(modal);
@@ -2447,10 +2447,10 @@ function serialEnsureConsoleDock() {
         </div>
         <div class="flex-1 flex flex-col min-w-0 min-h-0">
             <div class="flex items-center gap-3 px-4 py-2 bg-[#2d2d2d] border-b border-slate-700 text-slate-200 text-sm">
-                <button id="serial-console-min" title="Minimize to the footer — keeps every session connected so you can browse the rest of the UI" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">▁ Minimize</button>
-                <button id="serial-console-fs" title="Fullscreen the active console" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Fullscreen</button>
-                <button id="serial-console-takeover" title="Take over write control from the other user" class="px-2 py-0.5 text-xs rounded border border-amber-500 text-amber-400 hover:bg-amber-900/40 hidden">Take Over</button>
-                <button id="serial-console-reconnect" title="Reconnect this console — resumes on the same terminal, keeping its scrollback" class="px-2 py-0.5 text-xs rounded border border-green-500 text-green-400 hover:bg-green-900/40 hidden">⟳ Reconnect</button>
+                <button id="serial-console-min" title="Minimize to the footer — keeps every session connected so you can browse the rest of the UI" class="px-2 py-0.5 text-xs rounded-full border border-slate-500 hover:bg-slate-700">▁ Minimize</button>
+                <button id="serial-console-fs" title="Fullscreen the active console" class="px-2 py-0.5 text-xs rounded-full border border-slate-500 hover:bg-slate-700">Fullscreen</button>
+                <button id="serial-console-takeover" title="Take over write control from the other user" class="px-2 py-0.5 text-xs rounded-full border border-amber-500 text-amber-400 hover:bg-amber-900/40 hidden">Take Over</button>
+                <button id="serial-console-reconnect" title="Reconnect this console — resumes on the same terminal, keeping its scrollback" class="px-2 py-0.5 text-xs rounded-full border border-green-500 text-green-400 hover:bg-green-900/40 hidden">⟳ Reconnect</button>
                 <span id="serial-console-status" class="ml-auto text-xs text-amber-400"></span>
                 <button id="serial-console-closeall" title="Close all open consoles" class="text-slate-500 hover:text-red-400 text-lg leading-none">&times;</button>
             </div>
@@ -3303,7 +3303,7 @@ function openConsoleSettingsModal(spokeId, portId) {
           ${dpaSection}
           <div class="pt-3 flex justify-end gap-3">
             <button onclick="this.closest('#console-settings-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Cancel</button>
-            <button onclick="saveConsoleSettings('${spokeId.replace(/'/g, "\\'")}','${portId.replace(/'/g, "\\'")}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold">Save</button>
+            <button onclick="saveConsoleSettings('${spokeId.replace(/'/g, "\\'")}','${portId.replace(/'/g, "\\'")}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold">Save</button>
           </div>
         </div></div>`;
     document.body.appendChild(modal);
@@ -3405,7 +3405,7 @@ function openConsoleDpaModal() {
         <textarea id="dpa-keys" rows="3" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm font-mono mt-1 text-xs" placeholder="authorized SSH public keys, one per line"></textarea></div>
       <div class="pt-3 flex justify-end gap-3">
         <button onclick="this.closest('#console-dpa-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Cancel</button>
-        <button onclick="saveConsoleDpa()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold">Save</button>
+        <button onclick="saveConsoleDpa()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold">Save</button>
       </div>
     </div></div>`;
   document.body.appendChild(modal);
@@ -3554,7 +3554,7 @@ async function openConsolePortTenantModal(spokeId, portId, currentTenantId) {
           </select>
           <div class="pt-3 flex justify-end gap-3">
             <button onclick="this.closest('#console-port-tenant-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Cancel</button>
-            <button onclick="saveConsolePortTenant('${spokeId.replace(/'/g, "\\'")}','${portId.replace(/'/g, "\\'")}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold">Assign</button>
+            <button onclick="saveConsolePortTenant('${spokeId.replace(/'/g, "\\'")}','${portId.replace(/'/g, "\\'")}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold">Assign</button>
           </div>
         </div></div>`;
     _mountModal(modal);
@@ -3585,7 +3585,7 @@ function openConsoleConfigModal(spokeId, portId) {
         </div>
         <div class="p-6 space-y-3 overflow-y-auto">
           <p class="text-xs text-slate-500">Requires the device to have been Identified. Push is transactional — verify before + after, save on success, roll back on failure (a failed push is never saved).</p>
-          <button onclick="consoleConfigBackup('${eS}','${eP}')" class="text-xs px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">⤓ Read / backup running-config</button>
+          <button onclick="consoleConfigBackup('${eS}','${eP}')" class="text-xs px-3 py-1.5 rounded-full border border-slate-300 hover:bg-slate-50">⤓ Read / backup running-config</button>
           <textarea id="console-config-text" rows="10" placeholder="Paste config to push (one command per line)…" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm font-mono"></textarea>
           <div class="flex items-center gap-4 text-sm flex-wrap">
             <label class="flex items-center gap-2"><input type="checkbox" id="console-config-save" checked class="rounded border-slate-300"> Save to startup on success</label>
@@ -3595,7 +3595,7 @@ function openConsoleConfigModal(spokeId, portId) {
           <pre id="console-config-output" class="text-xs bg-slate-900 text-slate-100 rounded-md p-3 overflow-auto hidden" style="max-height:240px"></pre>
           <div class="pt-2 flex justify-end gap-3">
             <button onclick="this.closest('#console-config-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Close</button>
-            <button onclick="consoleConfigPush('${eS}','${eP}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold">Push config</button>
+            <button onclick="consoleConfigPush('${eS}','${eP}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold">Push config</button>
           </div>
         </div></div>`;
     document.body.appendChild(modal);
@@ -3751,11 +3751,11 @@ function pxmxEnsureConsoleDock() {
         </div>
         <div class="flex-1 flex flex-col min-w-0">
             <div class="flex items-center gap-3 px-4 py-2 bg-[#16213e] border-b border-slate-700 text-slate-200 text-sm">
-                <button id="pxmx-vnc-min" title="Minimize to the footer — keeps every session connected so you can browse the rest of the UI" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">▁ Minimize</button>
-                <button id="pxmx-vnc-cad" title="Send Ctrl+Alt+Del to the active console" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Ctrl+Alt+Del</button>
-                <button id="pxmx-vnc-reconnect" title="Reconnect the active console — mints a fresh session and reattaches in the same tab, without disturbing the other open consoles" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">⟳ Reconnect</button>
-                <button id="pxmx-vnc-fs" title="Fullscreen the active console" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Fullscreen</button>
-                <button id="pxmx-vnc-takeover" title="Take over write control from the other user" class="px-2 py-0.5 text-xs rounded border border-amber-500 text-amber-400 hover:bg-amber-900/40 hidden">Take Over</button>
+                <button id="pxmx-vnc-min" title="Minimize to the footer — keeps every session connected so you can browse the rest of the UI" class="px-2 py-0.5 text-xs rounded-full border border-slate-500 hover:bg-slate-700">▁ Minimize</button>
+                <button id="pxmx-vnc-cad" title="Send Ctrl+Alt+Del to the active console" class="px-2 py-0.5 text-xs rounded-full border border-slate-500 hover:bg-slate-700">Ctrl+Alt+Del</button>
+                <button id="pxmx-vnc-reconnect" title="Reconnect the active console — mints a fresh session and reattaches in the same tab, without disturbing the other open consoles" class="px-2 py-0.5 text-xs rounded-full border border-slate-500 hover:bg-slate-700">⟳ Reconnect</button>
+                <button id="pxmx-vnc-fs" title="Fullscreen the active console" class="px-2 py-0.5 text-xs rounded-full border border-slate-500 hover:bg-slate-700">Fullscreen</button>
+                <button id="pxmx-vnc-takeover" title="Take over write control from the other user" class="px-2 py-0.5 text-xs rounded-full border border-amber-500 text-amber-400 hover:bg-amber-900/40 hidden">Take Over</button>
                 <span id="pxmx-vnc-status" class="ml-auto text-xs text-amber-400"></span>
             </div>
             <div id="pxmx-vnc-bodies" class="relative flex-1 bg-black overflow-hidden"></div>
@@ -4509,7 +4509,7 @@ async function renderPxmxDiagnostics(container, forceRefresh = false) {
                     <div>
                         <span class="font-bold">Failed to load Drive Diagnostics:</span> ${escapeHtml(err.message || String(err))}
                     </div>
-                    <button onclick="loadPxmxData('Diagnostics')" class="text-xs px-3 py-1.5 rounded-md bg-white border border-red-300 text-red-700 hover:bg-red-50 font-medium" title="Retry fetching drive diagnostics">↻ Retry</button>
+                    <button onclick="loadPxmxData('Diagnostics')" class="text-xs px-3 py-1.5 rounded-full bg-white border border-red-300 text-red-700 hover:bg-red-50 font-medium" title="Retry fetching drive diagnostics">↻ Retry</button>
                 </div>
             </div>`;
         return;
@@ -4527,7 +4527,7 @@ async function renderPxmxDiagnostics(container, forceRefresh = false) {
                     <div>
                         <span class="font-bold">Failed to load Drive Diagnostics:</span> ${escapeHtml(msg)}
                     </div>
-                    <button onclick="loadPxmxData('Diagnostics')" class="text-xs px-3 py-1.5 rounded-md bg-white border border-red-300 text-red-700 hover:bg-red-50 font-medium">↻ Retry</button>
+                    <button onclick="loadPxmxData('Diagnostics')" class="text-xs px-3 py-1.5 rounded-full bg-white border border-red-300 text-red-700 hover:bg-red-50 font-medium">↻ Retry</button>
                 </div>
             </div>`;
         return;
@@ -4543,7 +4543,7 @@ async function renderPxmxDiagnostics(container, forceRefresh = false) {
                     <div>
                         <span class="font-bold">Failed to parse drive diagnostics response:</span> ${escapeHtml(err.message || String(err))}
                     </div>
-                    <button onclick="loadPxmxData('Diagnostics')" class="text-xs px-3 py-1.5 rounded-md bg-white border border-red-300 text-red-700 hover:bg-red-50 font-medium">↻ Retry</button>
+                    <button onclick="loadPxmxData('Diagnostics')" class="text-xs px-3 py-1.5 rounded-full bg-white border border-red-300 text-red-700 hover:bg-red-50 font-medium">↻ Retry</button>
                 </div>
             </div>`;
         return;
@@ -4595,7 +4595,7 @@ async function renderPxmxDiagnostics(container, forceRefresh = false) {
                 <p class="text-xs text-slate-500 mt-1">Storage device telemetry and SSD wear level diagnostics across hypervisor nodes${cachedNote}</p>
             </div>
             <div>
-                <button onclick="loadPxmxData('Diagnostics')" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 text-xs font-semibold shadow-sm transition-all" title="Reload SMART telemetry and SSD wear diagnostics from the hub cache (polled every 6 hours)">
+                <button onclick="loadPxmxData('Diagnostics')" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 text-xs font-semibold shadow-sm transition-all" title="Reload SMART telemetry and SSD wear diagnostics from the hub cache (polled every 6 hours)">
                     ↻ Run Diagnostics / Refresh
                 </button>
             </div>
@@ -4629,7 +4629,7 @@ async function renderPxmxDiagnostics(container, forceRefresh = false) {
                 <div class="bg-amber-50 border border-amber-200 rounded-lg p-6 text-center">
                     <div class="text-amber-800 font-semibold mb-1">No Hypervisor Spoke Connected</div>
                     <p class="text-xs text-amber-700 mb-4">No connected hypervisor spoke was found for the current tenant. Connect a Proxmox spoke to view drive diagnostics.</p>
-                    <button onclick="loadPxmxData('Diagnostics')" class="text-xs px-3 py-1.5 rounded-md bg-white border border-amber-300 text-amber-800 hover:bg-amber-50 font-medium" title="Retry connecting to hypervisor spoke">↻ Retry Connection</button>
+                    <button onclick="loadPxmxData('Diagnostics')" class="text-xs px-3 py-1.5 rounded-full bg-white border border-amber-300 text-amber-800 hover:bg-amber-50 font-medium" title="Retry connecting to hypervisor spoke">↻ Retry Connection</button>
                 </div>
             </div>`;
         return;
@@ -4857,7 +4857,7 @@ async function loadPxmxData(subMenu, forceRefresh = false) {    const container 
                 if (nodes.length === 0 && vms.length === 0) {
                     container.innerHTML = `<div class="py-10 text-center space-y-3">
                         <p class="text-slate-500 italic text-sm">No Proxmox agents connected.</p>
-                        ${isAdmin() ? `<button onclick="showPxmxInstallModal()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold transition-all shadow-sm" title="Show bash installation command for Proxmox host agent">Show Install Command</button>` : ''}
+                        ${isAdmin() ? `<button onclick="showPxmxInstallModal()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-sm font-bold transition-all shadow-sm" title="Show bash installation command for Proxmox host agent">Show Install Command</button>` : ''}
                     </div>`;
                     return;
                 }
@@ -4879,7 +4879,7 @@ async function loadPxmxData(subMenu, forceRefresh = false) {    const container 
             if (vms.length === 0 && nodes.length === 0) {
                 container.innerHTML = `<div class="py-10 text-center space-y-3">
                     <p class="text-slate-500 italic text-sm">No Proxmox agents connected.</p>
-                    ${isAdmin() ? `<button onclick="showPxmxInstallModal()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Show Install Command</button>` : ''}
+                    ${isAdmin() ? `<button onclick="showPxmxInstallModal()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-sm font-bold transition-all shadow-sm">Show Install Command</button>` : ''}
                 </div>`;
                 return;
             }
@@ -4942,8 +4942,8 @@ async function showPxmxInstallModal() {
                 <p class="text-xs text-slate-500">The <code>--id</code> flag uses <code>$(hostname)</code> — replace it with a unique name if running on multiple nodes.</p>
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
-                <button onclick="navigator.clipboard.writeText(document.getElementById('pxmx-install-cmd').innerText)" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 border border-slate-300 rounded-md" title="Copy agent install script command to clipboard">Copy</button>
-                <button onclick="document.getElementById('pxmx-install-modal').remove()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm" title="Dismiss install dialog">Done</button>
+                <button onclick="navigator.clipboard.writeText(document.getElementById('pxmx-install-cmd').innerText)" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 border border-slate-300 rounded-full" title="Copy agent install script command to clipboard">Copy</button>
+                <button onclick="document.getElementById('pxmx-install-modal').remove()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm" title="Dismiss install dialog">Done</button>
             </div>
         </div>`;
     _mountModal(modal);

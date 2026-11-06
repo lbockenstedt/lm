@@ -270,8 +270,8 @@ function osuFixAccess(key) {
       <input id="osu-fix-user" type="text" value="root" autocomplete="off" placeholder="username" class="${inp}">
       <input id="osu-fix-pw" type="password" autocomplete="off" placeholder="password" class="${inp}">
       <div class="flex justify-end gap-2 pt-2">
-        <button data-action="close" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
-        <button id="osu-fix-go" data-action="fix" class="px-4 py-1.5 text-sm rounded-md bg-primary text-white font-bold hover:bg-primary-hover">Fix access</button>
+        <button data-action="close" class="px-4 py-1.5 text-sm rounded-full border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
+        <button id="osu-fix-go" data-action="fix" class="px-4 py-1.5 text-sm rounded-full bg-primary text-white font-bold hover:bg-primary-hover">Fix access</button>
       </div>`, { backdropClose: true });
     delegate(modal, { close: () => modal.remove(), fix: () => osuDoFixAccess(key) });
     document.getElementById('osu-fix-pw')?.focus();
@@ -651,7 +651,7 @@ function _osuBodyHtml({ data: d }) {
         const reboot = scheduled ? _osuBadge('reboot scheduled', 'blue')
             : (n.reboot_required ? _osuBadge('reboot required', 'amber', 'A kernel/PVE update needs a reboot. Nothing reboots automatically — do it deliberately.') : '');
         const canReboot = n.eligible && n.reboot_required && !scheduled && feats.includes('reboot') && !busy;
-        const rebootBtn = canReboot ? safeHtml`<button data-action="reboot" data-node="${key}" class="text-xs font-bold text-amber-800 border border-amber-300 rounded px-2 py-0.5 hover:bg-amber-100">Reboot…</button>` : '';
+        const rebootBtn = canReboot ? safeHtml`<button data-action="reboot" data-node="${key}" class="text-xs font-bold text-amber-800 border border-amber-300 rounded-full px-2 py-0.5 hover:bg-amber-100">Reboot…</button>` : '';
         const selectable = n.eligible && n.count && !n.apply_blocker && !busy;
         const nodeBox = selectable
             ? safeHtml`<input type="checkbox" class="w-4 h-4 rounded" ${_osuSel.nodes.has(key) ? 'checked' : ''} data-action="toggleNode" data-node="${key}" title="Upgrade everything pending on this node">`
@@ -671,7 +671,7 @@ function _osuBodyHtml({ data: d }) {
             ? safeHtml`<div class="text-xs text-slate-500 mt-1">${n.reason}</div>`
             : (n.count ? safeHtml`<details class="mt-1"><summary class="cursor-pointer text-xs text-slate-500">${n.count} package(s)${n.security_count ? ` · ${n.security_count} security` : ''}</summary><div class="text-xs mt-1 leading-relaxed">${pickHint}${pkgs}</div></details>${pickNote}` : '');
         const fixBtn = n.apply_blocker && feats.includes('fix_access') && !busy
-            ? safeHtml` <button data-action="fixAccess" data-node="${key}" class="ml-1 text-xs font-bold text-amber-800 border border-amber-300 rounded px-2 py-0.5 hover:bg-amber-100">Fix access…</button>` : '';
+            ? safeHtml` <button data-action="fixAccess" data-node="${key}" class="ml-1 text-xs font-bold text-amber-800 border border-amber-300 rounded-full px-2 py-0.5 hover:bg-amber-100">Fix access…</button>` : '';
         const autoBox = n.eligible
             ? safeHtml`<label class="flex items-center gap-1 text-xs font-bold ${n.auto_patch ? 'text-emerald-700' : 'text-slate-500'} cursor-pointer" title="Install this node's updates automatically in the maintenance window"><input type="checkbox" class="w-3 h-3" ${n.auto_patch ? 'checked' : ''} data-action="toggleAutoPatch" data-node="${key}">Auto-patch</label>` : '';
         const rebootBox = n.eligible && n.auto_patch

@@ -488,12 +488,12 @@ function updateContextActions() {
     const fa = document.getElementById('footer-actions');
     if (!fa) return;
     const parts = [];
-    parts.push(`<button onclick="refreshCurrentView()" title="Refresh this view" class="text-xs opacity-80 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded transition-all">↻ Refresh</button>`);
+    parts.push(`<button onclick="refreshCurrentView()" title="Refresh this view" class="text-xs opacity-80 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded-full transition-all">↻ Refresh</button>`);
     if (currentView === 'opnsense') {
-        parts.push(`<button onclick="refreshOpnsenseCache()" class="text-xs opacity-80 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded transition-all">↻ Refresh Cache</button>`);
+        parts.push(`<button onclick="refreshOpnsenseCache()" class="text-xs opacity-80 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded-full transition-all">↻ Refresh Cache</button>`);
     }
     if (isAdmin()) {
-        parts.push(`<button onclick="triggerUpdate(event)" id="update-btn" class="text-xs opacity-80 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded transition-all">↻ Update</button>`);
+        parts.push(`<button onclick="triggerUpdate(event)" id="update-btn" class="text-xs opacity-80 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded-full transition-all">↻ Update</button>`);
     }
     fa.innerHTML = parts.join('');
 }
@@ -1484,8 +1484,8 @@ async function fileBug(prefill = '') {
                 <div id="req-asst-checklist" class="text-xs leading-relaxed"></div>
                 <div class="flex gap-2 items-end">
                     <textarea id="req-asst-input" rows="2" placeholder="Describe what went wrong, or what you'd like added…" class="flex-1 bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></textarea>
-                    <button id="req-asst-send" onclick="reqAsstSend()" class="bg-primary hover:bg-primary-hover text-white px-4 py-2 rounded-md text-sm font-bold">Send</button>
-                    <button id="req-asst-stop" onclick="reqAsstStop()" class="hidden bg-slate-200 hover:bg-slate-300 text-slate-700 px-4 py-2 rounded-md text-sm font-bold">Stop</button>
+                    <button id="req-asst-send" onclick="reqAsstSend()" class="bg-primary hover:bg-primary-hover text-white px-4 py-2 rounded-full text-sm font-bold">Send</button>
+                    <button id="req-asst-stop" onclick="reqAsstStop()" class="hidden bg-slate-200 hover:bg-slate-300 text-slate-700 px-4 py-2 rounded-full text-sm font-bold">Stop</button>
                 </div>
                 <p class="text-xs text-slate-500 leading-relaxed">
                     The assistant asks one question at a time and reads the code read-only to point at the likely area — it never changes anything.
@@ -1495,7 +1495,7 @@ async function fileBug(prefill = '') {
                 <div id="req-asst-status" class="text-xs text-slate-500 hidden"></div>
                 <div class="flex justify-end gap-3">
                     <button onclick="this.closest('#file-bug-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Close</button>
-                    <button id="req-asst-file" onclick="reqAsstFile()" disabled class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm disabled:opacity-40 disabled:cursor-not-allowed">File report</button>
+                    <button id="req-asst-file" onclick="reqAsstFile()" disabled class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm disabled:opacity-40 disabled:cursor-not-allowed">File report</button>
                 </div>
             </div>
             <div id="bug-quick" class="p-6 space-y-4 overflow-y-auto">
@@ -1527,7 +1527,7 @@ async function fileBug(prefill = '') {
                 <div id="bug-submit-status" class="text-xs text-slate-500 hidden"></div>
                 <div class="pt-2 flex justify-end gap-3">
                     <button onclick="this.closest('#file-bug-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
-                    <button id="bug-submit-btn" onclick="submitBugReport()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Submit</button>
+                    <button id="bug-submit-btn" onclick="submitBugReport()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm">Submit</button>
                 </div>
             </div>
         </div>`;
@@ -2737,7 +2737,7 @@ async function loadTenantConfig() {
                 </div>
                 <div class="flex items-center gap-2">
                     <span class="text-xs font-mono text-slate-500">${t.slug || t.id}</span>
-                    <button ${btnAction} title="${btnLabel}" class="text-xs px-2 py-0.5 rounded ${btnCls} transition-colors">
+                    <button ${btnAction} title="${btnLabel}" class="text-xs px-2 py-0.5 rounded-full ${btnCls} transition-colors">
                         ${btnLabel}
                     </button>
                     ${canDelete ? `<button onclick="deleteTenant('${t.id}','${nameArg}')" title="Delete tenant" class="p-1 rounded text-slate-500 hover:text-red-500 hover:bg-red-50 transition-colors"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>` : ''}
@@ -4651,7 +4651,7 @@ function renderView(viewId) {
 function _viewTemplate(viewId) {
     const card = 'hpe-card rounded-lg p-5 shadow-sm';
     const input = 'w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500 text-slate-800';
-    const btn = 'bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm';
+    const btn = 'bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm';
 
     switch (viewId) {
         case 'dashboard':
@@ -4906,11 +4906,11 @@ function _viewTemplate(viewId) {
   <div id="le-status-bar" class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500"></div>
   <div class="space-y-2">
     <div class="flex items-center gap-2 flex-nowrap">
-      <button onclick="showLeIssueModal()" title="Issue a new Let's Encrypt / ACME TLS certificate for a domain" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">＋ Issue certificate</button>
-      ${isAdmin() ? `<button onclick="leRenewAll()" title="Renew all eligible managed certificates nearing expiry" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">↻ Renew all</button>
-      <button onclick="leDistributeNow()" title="Immediately push all managed certificates to their configured distribution targets" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">⚡ Distribute now</button>` : ''}
-      <button onclick="showMtlsDebug()" class="bg-slate-600/10 hover:bg-slate-600/20 text-slate-700 border border-slate-400 px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap" title="Debug: which connected spokes/agents are ACTUALLY presenting a verified mTLS client cert vs. connected cert-less, plus the hub's trust bundle + pinned AppBuilder cert check">🔒 mTLS status</button>
-      <button onclick="showDnsCredentialsModal()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200 whitespace-nowrap" title="Manage this tenant's DNS credentials (Hurricane Electric, Cloudflare, rfc2136, Route53), used for DNS-based certificate issuance">🔑 DNS Credentials</button>
+      <button onclick="showLeIssueModal()" title="Issue a new Let's Encrypt / ACME TLS certificate for a domain" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-full text-xs font-medium transition-all whitespace-nowrap">＋ Issue certificate</button>
+      ${isAdmin() ? `<button onclick="leRenewAll()" title="Renew all eligible managed certificates nearing expiry" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-full text-xs font-medium transition-all whitespace-nowrap">↻ Renew all</button>
+      <button onclick="leDistributeNow()" title="Immediately push all managed certificates to their configured distribution targets" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-full text-xs font-medium transition-all whitespace-nowrap">⚡ Distribute now</button>` : ''}
+      <button onclick="showMtlsDebug()" class="bg-slate-600/10 hover:bg-slate-600/20 text-slate-700 border border-slate-400 px-3 py-1 rounded-full text-xs font-medium transition-all whitespace-nowrap" title="Debug: which connected spokes/agents are ACTUALLY presenting a verified mTLS client cert vs. connected cert-less, plus the hub's trust bundle + pinned AppBuilder cert check">🔒 mTLS status</button>
+      <button onclick="showDnsCredentialsModal()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-full text-xs font-medium transition-all border border-slate-200 whitespace-nowrap" title="Manage this tenant's DNS credentials (Hurricane Electric, Cloudflare, rfc2136, Route53), used for DNS-based certificate issuance">🔑 DNS Credentials</button>
     </div>
     <div class="flex items-center gap-4 flex-wrap">
       <label class="flex items-center gap-1 text-xs text-amber-700 cursor-pointer select-none" title="When ON, a wildcard cert (*.domain) is pushed to EVERY connected cert-capable spoke + the hub on each distribution, not just its explicit targets. OFF by default while cert distribution is being tested — flip on once explicit-target distribution is confirmed working.">

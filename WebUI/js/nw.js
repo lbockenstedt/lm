@@ -122,7 +122,7 @@ function _nwDetailHtml() {
             : '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-700" title="Reachability unknown — the Network Devices spoke is offline, so up/down can\'t be probed">unknown</span>';
     const cat = (window._nwView && window._nwView.category) || 'Devices';
     const tabs = _NW_DETAIL_TABS.map(t =>
-        `<button onclick="nwSelectDetailTab('${escJsAttr(t)}')" class="px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${t === st.activeTab ? 'bg-brand/10 text-primary-text border border-brand' : 'text-slate-500 hover:bg-slate-100 border border-transparent'}">${escapeHtml(t)}</button>`
+        `<button onclick="nwSelectDetailTab('${escJsAttr(t)}')" class="px-3 py-1.5 rounded-full text-xs font-bold transition-colors ${t === st.activeTab ? 'bg-brand/10 text-primary-text border border-brand' : 'text-slate-500 hover:bg-slate-100 border border-transparent'}">${escapeHtml(t)}</button>`
     ).join('');
 
     let body;
@@ -879,9 +879,9 @@ async function _renderNwTopologyTab(opts) {
       <label class="flex items-center gap-1.5 text-xs text-slate-500" title="Include devices known only by a MAC address (hosts, VMs, phones). Off by default: the map shows infrastructure only.">
         <input type="checkbox" id="nw-topo-endpoints"> Show endpoints
       </label>
-      <button id="nw-topo-expand" class="px-2 py-1.5 text-xs font-semibold rounded border border-slate-300 text-slate-600 hover:bg-slate-50">Expand all</button>
-      <button id="nw-topo-collapse" class="px-2 py-1.5 text-xs font-semibold rounded border border-slate-300 text-slate-600 hover:bg-slate-50">Collapse all</button>
-      <button id="nw-topo-refresh" class="px-3 py-1.5 text-xs font-semibold rounded bg-primary text-white hover:bg-[#018f6f]">Refresh from devices</button>
+      <button id="nw-topo-expand" class="px-2 py-1.5 text-xs font-semibold rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50">Expand all</button>
+      <button id="nw-topo-collapse" class="px-2 py-1.5 text-xs font-semibold rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50">Collapse all</button>
+      <button id="nw-topo-refresh" class="px-3 py-1.5 text-xs font-semibold rounded-full bg-primary text-white hover:bg-[#018f6f]">Refresh from devices</button>
     </div>
   </div>
   <div class="flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-500">
@@ -953,7 +953,7 @@ async function _renderNwTopologyManual() {
       <input id="nw-topo-dev-mac" class="${inp}" placeholder="MAC (optional)">
       <input id="nw-topo-dev-ip" class="${inp}" placeholder="IP (optional)">
       <input id="nw-topo-dev-note" class="${inp}" placeholder="Note">
-      <button id="nw-topo-dev-add" class="px-3 py-1 text-xs font-semibold rounded bg-slate-700 text-white">Add device</button>
+      <button id="nw-topo-dev-add" class="px-3 py-1 text-xs font-semibold rounded-full bg-slate-700 text-white">Add device</button>
     </div>
   </div>
   <div>
@@ -966,7 +966,7 @@ async function _renderNwTopologyManual() {
       <input id="nw-topo-link-b" list="nw-topo-names" class="${inp}" placeholder="Device B">
       <input id="nw-topo-link-bp" class="${inp} w-20" placeholder="Port">
       <input id="nw-topo-link-note" class="${inp}" placeholder="Note">
-      <button id="nw-topo-link-add" class="px-3 py-1 text-xs font-semibold rounded bg-slate-700 text-white">Add link</button>
+      <button id="nw-topo-link-add" class="px-3 py-1 text-xs font-semibold rounded-full bg-slate-700 text-white">Add link</button>
     </div>
   </div>
 </div>`;
@@ -1117,9 +1117,9 @@ async function _renderNwScanTab() {
           <div><label class="${lblCls}">Concurrency</label><input type="number" id="nwt-concurrency" min="1" max="128" value="${escapeHtml(String(scan.concurrency || 32))}" class="${inCls}"></div>
         </div>
         <div class="flex flex-wrap gap-2 pt-2 border-t border-slate-100">
-          <button onclick="saveNwTenantScanConfig(this)" class="px-4 py-2 rounded-md bg-primary text-white text-sm font-bold hover:bg-[#018f6f]" title="Save tenant network scan configuration">Save config</button>
-          <button onclick="runNwTenantScan(this, true)" class="px-4 py-2 rounded-md bg-slate-100 text-slate-700 text-sm font-bold hover:bg-slate-200" title="Run discovery scan in preview mode without adding devices to inventory">Preview scan</button>
-          <button onclick="runNwTenantScan(this, false)" class="px-4 py-2 rounded-md bg-blue-600 text-white text-sm font-bold hover:bg-blue-700" title="Execute discovery scan and automatically enroll discovered devices">Scan &amp; add</button>
+          <button onclick="saveNwTenantScanConfig(this)" class="px-4 py-2 rounded-full bg-primary text-white text-sm font-bold hover:bg-[#018f6f]" title="Save tenant network scan configuration">Save config</button>
+          <button onclick="runNwTenantScan(this, true)" class="px-4 py-2 rounded-full bg-slate-100 text-slate-700 text-sm font-bold hover:bg-slate-200" title="Run discovery scan in preview mode without adding devices to inventory">Preview scan</button>
+          <button onclick="runNwTenantScan(this, false)" class="px-4 py-2 rounded-full bg-blue-600 text-white text-sm font-bold hover:bg-blue-700" title="Execute discovery scan and automatically enroll discovered devices">Scan &amp; add</button>
         </div>
         <div id="nwt-results" class="text-xs mt-3"></div>
       </div>
@@ -1151,7 +1151,7 @@ async function _renderNwScanTab() {
           <div><label class="${lblCls}">Max Concurrent Polls</label><select id="nwt-poll-maxconc" class="${selCls}">${opt([['', 'Inherit global'], ['2', '2'], ['5', '5'], ['10', '10'], ['20', '20'], ['50', '50']], pollVal('max_concurrency'))}</select></div>
         </div>
         <div class="pt-3 mt-3 border-t border-slate-100">
-          <button onclick="saveNwTenantPollSchedule(this)" class="px-4 py-2 rounded-md bg-primary text-white text-sm font-bold hover:bg-[#018f6f]" title="Save recurring scan schedule and polling cadence">Save schedule &amp; cadence</button>
+          <button onclick="saveNwTenantPollSchedule(this)" class="px-4 py-2 rounded-full bg-primary text-white text-sm font-bold hover:bg-[#018f6f]" title="Save recurring scan schedule and polling cadence">Save schedule &amp; cadence</button>
         </div>
       </div>
 
@@ -1329,8 +1329,8 @@ async function _nwtLoadSweep() {
         box.className = 'text-xs text-slate-600';
         box.innerHTML = `<div class="flex flex-wrap items-center gap-3 mb-2">
             <label class="flex items-center gap-2"><input type="checkbox" ${d.enabled ? 'checked' : ''} onchange="nwtSweepAction({enabled: this.checked})"> Enable sweep</label>
-            <button onclick="nwtSweepAction({run: true})" class="px-3 py-1 rounded bg-slate-100 text-slate-700 font-bold hover:bg-slate-200">Probe next batch now</button>
-            <button onclick="nwtSweepAction({reset: true})" class="px-3 py-1 rounded bg-slate-100 text-slate-700 font-bold hover:bg-slate-200">Restart cycle</button>
+            <button onclick="nwtSweepAction({run: true})" class="px-3 py-1 rounded-full bg-slate-100 text-slate-700 font-bold hover:bg-slate-200">Probe next batch now</button>
+            <button onclick="nwtSweepAction({reset: true})" class="px-3 py-1 rounded-full bg-slate-100 text-slate-700 font-bold hover:bg-slate-200">Restart cycle</button>
             <span>${state} · ${Number(d.found || 0)} host(s) found · ${d.total ? `Progress ${pct}% of ${d.total} addresses · cycles ${d.cycles || 0}` : 'No supernet space to sweep yet'}${d.last_status ? ` · last: ${escapeHtml(d.last_status)}` : ''}${d.last_error ? ` (${escapeHtml(d.last_error)})` : ''}</span></div>
             <div id="nwt-gw" class="mb-3 p-2 rounded bg-slate-50"></div>`;
         _nwtRenderGateway(document.getElementById('nwt-gw'), d.gateway || {});
@@ -1722,7 +1722,7 @@ function showNwConfigModal(deviceId, deviceName) {
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="closeNwConfigModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
-                <button onclick="submitNwConfig('${escapeHtml(deviceId)}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Apply</button>
+                <button onclick="submitNwConfig('${escapeHtml(deviceId)}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm">Apply</button>
             </div>
         </div>`;
     document.body.appendChild(modal);

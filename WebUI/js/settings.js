@@ -114,8 +114,8 @@ function _renderSettingsSection(subMenu) {
                         <p class="text-xs text-slate-500">Every producer behind the footer MODULE STATUS dot, with the evidence for each alert.</p>
                     </div>
                     <div class="ml-auto flex items-center gap-2">
-                        <button onclick="copyModuleDiagnostics(this)" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-xs font-bold" title="Copy every alert + finding as plain text for a ticket or chat">⧉ Copy all</button>
-                        <button onclick="loadModuleDiagnostics()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">↻ Refresh</button>
+                        <button onclick="copyModuleDiagnostics(this)" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-xs font-bold" title="Copy every alert + finding as plain text for a ticket or chat">⧉ Copy all</button>
+                        <button onclick="loadModuleDiagnostics()" class="text-xs px-3 py-1 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50">↻ Refresh</button>
                     </div>
                 </div>
                 <div id="service-cluster-summary"></div>
@@ -147,20 +147,20 @@ function _renderSettingsSection(subMenu) {
                             <h3 class="text-sm font-bold text-slate-500">Hub Service ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                             <p class="text-xs text-slate-500 mt-1">Restart <code>lm.service</code> to load freshly-pulled code. Use after an update when a new endpoint returns <b>405 Method Not Allowed</b> — the running process is still the old code until it cycles. Spokes reconnect automatically; this page reloads in a few seconds.</p>
                         </div>
-                        <button onclick="restartHubService()" id="restart-hub-btn" class="text-xs px-3 py-1 rounded-md border border-amber-300 text-amber-700 hover:bg-amber-50 transition-all whitespace-nowrap" title="Restart the hub service (lm.service) now">♻️ Restart hub service</button>
+                        <button onclick="restartHubService()" id="restart-hub-btn" class="text-xs px-3 py-1 rounded-full border border-amber-300 text-amber-700 hover:bg-amber-50 transition-all whitespace-nowrap" title="Restart the hub service (lm.service) now">♻️ Restart hub service</button>
                     </div>
                 </div>
                 <div class="${card} p-6">
                     <div class="flex justify-between items-center mb-3">
                         <h3 class="text-sm font-bold text-slate-500">Hub Health &amp; Connectivity ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                        <button onclick="loadHubHealthCard()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Event-loop lag + per-spoke transport (RTT / write-buffer) — diagnoses fleet-wide WS backpressure (1011 drops): saturated hub loop vs network path (hub is in Azure)">↻ Refresh</button>
+                        <button onclick="loadHubHealthCard()" class="text-xs px-3 py-1 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Event-loop lag + per-spoke transport (RTT / write-buffer) — diagnoses fleet-wide WS backpressure (1011 drops): saturated hub loop vs network path (hub is in Azure)">↻ Refresh</button>
                     </div>
                     <div id="hub-health-body"><p class="text-slate-500 italic text-xs">Loading…</p></div>
                 </div>
                 <div class="${card} p-6">
                     <div class="flex justify-between items-center mb-1">
                         <h3 class="text-sm font-bold text-slate-500">Alert Diagnostics ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                        <button onclick="loadAlertDiagnostics()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Why the footer MODULE STATUS dot is red — which producer raised each alert, and whether any are false positives">↻ Refresh</button>
+                        <button onclick="loadAlertDiagnostics()" class="text-xs px-3 py-1 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Why the footer MODULE STATUS dot is red — which producer raised each alert, and whether any are false positives">↻ Refresh</button>
                     </div>
                     <p class="text-xs text-slate-500 mb-3">The footer <b>MODULE STATUS</b> dot turns red on <b>any</b> active error-tier alert, and that badge merges multiple producers — spoke out-of-contact, agent out-of-contact, and fleet availability. Every spoke green while the dot is red is therefore not a contradiction. This card names the producer behind each alert and flags the ones that are stale or false.</p>
                     <div id="alert-diag-body"><p class="text-slate-500 italic text-xs">Loading…</p></div>
@@ -168,7 +168,7 @@ function _renderSettingsSection(subMenu) {
                 <div class="${card} p-6">
                     <div class="flex justify-between items-center mb-1">
                         <h3 class="text-sm font-bold text-slate-500">Spoke Registry Diagnostics ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                        <button onclick="loadSpokeRegistryDiag()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Every spoke registration the hub holds — including ones a tenant view hides — plus which one is elected as each tenant's Client-Sim broker">↻ Refresh</button>
+                        <button onclick="loadSpokeRegistryDiag()" class="text-xs px-3 py-1 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Every spoke registration the hub holds — including ones a tenant view hides — plus which one is elected as each tenant's Client-Sim broker">↻ Refresh</button>
                     </div>
                     <p class="text-xs text-slate-500 mb-3">A rebuilt spoke that was never deregistered leaves its <b>old id</b> behind, still tenant-bound and still electable. The Client-Sim broker is now <b>sticky</b>: it holds until the elected spoke stops being connected/approved/bound, so a spoke that reconnects no longer reassigns it. Before that, election was <code>bound[0]</code> over the connected set, and one flapping spoke moved the broker fleet-wide — the same host logging a different <code>cs_spoke</code>, quota re-pushes never converging. Registrations with <b>no tenant</b> are hidden from a non-admin Spokes list yet can still be claimed as a tenant's broker, which is why deleting everything visible does not always fix it.</p>
                     <div id="spoke-registry-diag-body"><p class="text-slate-500 italic text-xs">Loading…</p></div>
@@ -177,8 +177,8 @@ function _renderSettingsSection(subMenu) {
                     <div class="flex justify-between items-center mb-3">
                         <h3 class="text-sm font-bold text-slate-500">Message Backlog &amp; Rate Limiting ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                         <div class="flex items-center gap-2">
-                            <button onclick="resetRateLimitDrops()" id="reset-drops-btn" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Zero the rate-limit drop counters">Reset Drops</button>
-                            <button onclick="dropHubBacklog()" id="drop-backlog-btn" class="text-xs px-3 py-1 rounded-md border border-red-300 text-red-600 hover:bg-red-50 transition-all">Drop Backlog</button>
+                            <button onclick="resetRateLimitDrops()" id="reset-drops-btn" class="text-xs px-3 py-1 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Zero the rate-limit drop counters">Reset Drops</button>
+                            <button onclick="dropHubBacklog()" id="drop-backlog-btn" class="text-xs px-3 py-1 rounded-full border border-red-300 text-red-600 hover:bg-red-50 transition-all">Drop Backlog</button>
                         </div>
                     </div>
                     <div id="sys-backlog-detail" class="text-xs text-slate-500 space-y-2"><p class="text-slate-500 italic">Loading…</p></div>
@@ -197,7 +197,7 @@ function _renderSettingsSection(subMenu) {
                     <div class="flex justify-between items-center mb-1">
                         <h3 class="text-sm font-bold text-slate-500">Backpressure Tuning ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                         <div class="flex justify-end items-center gap-2">
-                            <button onclick="resetBackpressureConfig()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Restore recommended defaults (not yet saved)">Reset Defaults</button>
+                            <button onclick="resetBackpressureConfig()" class="text-xs px-3 py-1 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Restore recommended defaults (not yet saved)">Reset Defaults</button>
                         </div>
                     </div>
                     <p class="text-xs text-slate-500 mb-3">How hard the hub throttles spokes as it heats up. Applies LIVE (each 1s tick). Lower CPU marks + higher max slow-down = more aggressive (keeps CPU out of protect, telemetry gets staler while throttled).</p>
@@ -220,7 +220,7 @@ function _renderSettingsSection(subMenu) {
                     <div class="flex justify-between items-center mb-1">
                         <h3 class="text-sm font-bold text-slate-500 flex items-center gap-2">Update / Maintenance Window ${helpIcon('lm-hub', null, 'Hub help')}<span id="ug-watchdog-pill" class="text-xs px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500 normal-case">watchdog …</span></h3>
                         <div class="flex justify-end items-center gap-2">
-                            <button onclick="resetUpdateGateConfig()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Restore defaults (02:00 window)">Reset Defaults</button>
+                            <button onclick="resetUpdateGateConfig()" class="text-xs px-3 py-1 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Restore defaults (02:00 window)">Reset Defaults</button>
                         </div>
                     </div>
                     <p class="text-xs text-slate-500 mb-3">When AUTO-updates <b>apply</b>. The hub pulls new code anytime; the restart into it is held for this window so it never interrupts logged-in users. The footer <b>Update</b> button bypasses this and restarts immediately. <span id="ug-watchdog-status" class="font-mono ml-1"></span></p>
@@ -236,7 +236,7 @@ function _renderSettingsSection(subMenu) {
                         <label>Window length (hours)<br><input type="number" id="ug-window-duration" min="1" max="24" step="1" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
                         <label title="IANA zone the window hour is in (e.g. America/Chicago). Blank = the hub's system clock, which is usually UTC.">Window timezone<br><input type="text" id="ug-timezone" placeholder="hub clock (UTC)" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
                     </div>
-                    <div class="flex justify-end mt-3"><button id="ug-save-btn" onclick="saveUpdateGateConfig()" class="text-xs px-3 py-1 rounded-md bg-green-600 text-white hover:bg-green-700 transition-all">Save</button></div>
+                    <div class="flex justify-end mt-3"><button id="ug-save-btn" onclick="saveUpdateGateConfig()" class="text-xs px-3 py-1 rounded-full bg-green-600 text-white hover:bg-green-700 transition-all">Save</button></div>
                 </div>
                 <div class="grid grid-cols-2 gap-4">
                     <div class="${card} p-6">
@@ -260,7 +260,7 @@ function _renderSettingsSection(subMenu) {
                             <input type="checkbox" id="mtls-auto-provision" class="rounded border-slate-300 text-primary-text focus:ring-green-500">
                             Auto-provision mTLS
                         </label>
-                        <button onclick="saveMtlsAutoProvision(this)" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm ml-auto">Save</button>
+                        <button onclick="saveMtlsAutoProvision(this)" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-full text-xs font-bold transition-all shadow-sm ml-auto">Save</button>
                         <span id="mtls-auto-provision-hint" class="text-xs text-slate-500"></span>
                     </div>
                     <p class="text-xs text-slate-500 mb-3"><b>Auto-provision</b> = the hub distributes the LE wildcard + CA bundle to the hub and every spoke, then enables mTLS once the whole fleet is ready. No manual file copying.</p>
@@ -269,7 +269,7 @@ function _renderSettingsSection(subMenu) {
                             <input type="checkbox" id="mtls-enabled" class="rounded border-slate-300 text-primary-text focus:ring-green-500">
                             Enable mutual TLS
                         </label>
-                        <button onclick="saveMtlsEnable(this)" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm ml-auto">Save</button>
+                        <button onclick="saveMtlsEnable(this)" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm ml-auto">Save</button>
                     </div>
                 </div>
                 <div class="${card} p-6">
@@ -285,7 +285,7 @@ function _renderSettingsSection(subMenu) {
                             <option value="240">4 hours</option>
                             <option value="480">8 hours</option>
                         </select>
-                        <button onclick="saveSessionTimeout(this)" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm ml-auto">Save</button>
+                        <button onclick="saveSessionTimeout(this)" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm ml-auto">Save</button>
                     </div>
                 </div>
                 <div class="${card} p-6">
@@ -334,7 +334,7 @@ function _renderSettingsSection(subMenu) {
                 <div class="flex items-end gap-2">
                     <label class="text-xs text-slate-500 flex-1">Token name<br>
                         <input type="text" id="apitok-name" placeholder="e.g. ci-pipeline" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
-                    <button onclick="createApiToken()" id="apitok-create-btn" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold">Create token</button>
+                    <button onclick="createApiToken()" id="apitok-create-btn" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-sm font-bold">Create token</button>
                 </div>
                 <div id="apitok-new" class="hidden"></div>
                 <div class="overflow-hidden rounded-md border border-slate-200">
@@ -671,7 +671,7 @@ function _renderSetupRemoteConsoleTile(content) {
                 </div>
                 <div id="rc-output-wrap" class="hidden">
                     <div class="flex justify-end mb-1">
-                        <button onclick="copyRcOutput()" id="rc-copy" class="text-xs bg-slate-200 hover:bg-slate-300 text-slate-700 px-2 py-1 rounded-md font-semibold">📋 Copy</button>
+                        <button onclick="copyRcOutput()" id="rc-copy" class="text-xs bg-slate-200 hover:bg-slate-300 text-slate-700 px-2 py-1 rounded-full font-semibold">📋 Copy</button>
                     </div>
                     <pre id="rc-output" class="bg-slate-900 text-slate-100 text-xs font-mono rounded-md p-3 overflow-x-auto whitespace-pre-wrap max-h-96 overflow-y-auto"></pre>
                 </div>
@@ -981,7 +981,7 @@ function _renderSetupSelfBackupTile(content) {
                         <div class="text-xs font-bold text-slate-500">Local archives</div>
                         <div class="flex items-center gap-2">
                             <input type="file" id="sb-upload-file" accept=".tar.gz,.tgz.enc,application/gzip,application/octet-stream" class="hidden" onchange="uploadSelfBackup(this)">
-                            <button type="button" onclick="document.getElementById('sb-upload-file').click()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1 rounded-md text-xs font-bold">Upload archive…</button>
+                            <button type="button" onclick="document.getElementById('sb-upload-file').click()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1 rounded-full text-xs font-bold">Upload archive…</button>
                         </div>
                     </div>
                     <p class="text-xs text-slate-500 mb-2">Download an archive to keep off-box, or upload one back onto this hub for a system-recovery restore.</p>
@@ -2168,7 +2168,7 @@ async function showRackImportModal() {
         <div class="space-y-3">
             <div class="flex items-center gap-3">
                 <input id="nb-rack-file" type="file" accept=".xlsx" class="hidden" onchange="uploadRackImportXlsx(this)">
-                <button onclick="document.getElementById('nb-rack-file').click()" class="bg-indigo-50 hover:bg-indigo-100 text-indigo-600 border border-indigo-300 px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm">Choose .xlsx…</button>
+                <button onclick="document.getElementById('nb-rack-file').click()" class="bg-indigo-50 hover:bg-indigo-100 text-indigo-600 border border-indigo-300 px-3 py-1.5 rounded-full text-xs font-bold transition-all shadow-sm">Choose .xlsx…</button>
                 <span id="nb-rack-file-name" class="text-xs text-slate-500"></span>
             </div>
             <div id="nb-rack-import-status" class="text-xs text-slate-500"></div>
@@ -2283,7 +2283,7 @@ async function showRackElevationModal(rackId) {
             <span><span class="text-slate-500">Site:</span> ${escapeHtml(r.site || '—')}</span>
             <span><span class="text-slate-500">Tenant:</span> ${escapeHtml(r.tenant || '—')}</span>
             <span><span class="text-slate-500">Height:</span> ${r.u_height || 0}U</span>
-            <button onclick="_addDeviceFromElev(${rackId})" class="ml-auto bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md text-xs font-bold transition-all">+ Add device</button>
+            <button onclick="_addDeviceFromElev(${rackId})" class="ml-auto bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-full text-xs font-bold transition-all">+ Add device</button>
         </div>`;
         const front = (d.faces && d.faces.front) || [];
         const rear  = (d.faces && d.faces.rear)  || [];
@@ -2403,8 +2403,8 @@ function renderRackImportResults() {
     html += `<div class="flex items-center justify-between pt-3 border-t">
         <label class="text-xs flex items-center gap-1"><input id="nb-ri-dryrun" type="checkbox"> Dry run (validate only, write nothing)</label>
         <div class="flex gap-2">
-            <button onclick="document.getElementById('nb-rack-import-modal').remove()" class="px-3 py-1.5 text-xs border border-slate-300 rounded hover:bg-slate-50">Cancel</button>
-            <button onclick="commitRackImport(this)" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-1.5 rounded text-xs font-bold transition-all shadow-sm">Import</button>
+            <button onclick="document.getElementById('nb-rack-import-modal').remove()" class="px-3 py-1.5 text-xs border border-slate-300 rounded-full hover:bg-slate-50">Cancel</button>
+            <button onclick="commitRackImport(this)" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-1.5 rounded-full text-xs font-bold transition-all shadow-sm">Import</button>
         </div>
     </div>`;
     document.getElementById('nb-rack-import-results').innerHTML = html;
@@ -3724,7 +3724,7 @@ function _renderSettingsCloudNacTile(content) {
                 <div class="flex gap-2">
                     <input id="cn-group-id" type="text" placeholder="group object ID" class="${inputCls} font-mono text-xs flex-1">
                     <input id="cn-group-name" type="text" placeholder="(name)" readonly class="${inputCls} text-xs flex-1 bg-slate-50">
-                    <button type="button" onclick="loadCloudNacGroupPicker()" id="cn-group-btn" class="whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold">Pick from Entra</button>
+                    <button type="button" onclick="loadCloudNacGroupPicker()" id="cn-group-btn" class="whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-full text-xs font-bold">Pick from Entra</button>
                 </div>
                 <select id="cn-group-select" onchange="onCloudNacGroupPick(this)" class="hidden w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></select>
                 <p id="cn-group-msg" class="text-xs text-amber-600 hidden"></p>
@@ -3733,7 +3733,7 @@ function _renderSettingsCloudNacTile(content) {
                 <div class="text-xs font-bold text-slate-500 mb-1">Test provision</div>
                 <div class="flex gap-2">
                     <input id="cn-test-user" type="text" placeholder="username (e.g. cschmidt)" class="${inputCls} font-mono text-xs flex-1">
-                    <button type="button" onclick="provisionCloudNac()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold whitespace-nowrap">Provision</button>
+                    <button type="button" onclick="provisionCloudNac()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-full text-xs font-bold whitespace-nowrap">Provision</button>
                 </div>
                 <p id="cn-test-out" class="text-xs font-mono text-slate-600 mt-1 break-all"></p>
             </div>
@@ -4215,23 +4215,23 @@ function _renderSettingsKeyVaultTile(content) {
                 <div class="space-y-1 md:col-span-2"><label class="${labelCls}">Backup secret prefix <span class="text-slate-500 normal-case font-normal">(daily: prefix + YYYYMMDD)</span></label><input id="kv-prefix" type="text" placeholder="lm-min-backup-" class="${inputCls} font-mono text-xs"></div>
             </div>
             <div class="mt-3 flex flex-wrap items-center gap-2">
-                <button type="button" onclick="testKeyVault()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Test connection</button>
-                <button type="button" onclick="testFernetTier1()" title="Tests the DIFFERENT auth path the hub actually uses at boot to source the Fernet key from Key Vault (managed identity via LM_KEYVAULT_URL/LM_FERNET_KEY_KV_SECRET) — separate from 'Test connection' above, which only checks the SSO app-cert path used by the buttons below." class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Test Fernet boot path (Tier 1)</button>
-                <button type="button" onclick="saveFernetTier1Config()" title="Writes LM_FERNET_KEY_KV_SECRET and LM_KEYVAULT_URL — using the Vault URL / Fernet-key secret name fields above — into this hub's .env, then restarts the hub to apply them. LM_FERNET_KEY stays in place as a fallback; nothing else in .env is touched." class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Save &amp; restart for Tier 1</button>
-                <button type="button" onclick="rotateKeyVaultAdmin()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Rotate admin now</button>
-                <button type="button" onclick="pushKeyVaultFernet()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Push Fernet key</button>
-                <button type="button" onclick="backupKeyVaultNow()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Backup now</button>
+                <button type="button" onclick="testKeyVault()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-full text-xs font-bold">Test connection</button>
+                <button type="button" onclick="testFernetTier1()" title="Tests the DIFFERENT auth path the hub actually uses at boot to source the Fernet key from Key Vault (managed identity via LM_KEYVAULT_URL/LM_FERNET_KEY_KV_SECRET) — separate from 'Test connection' above, which only checks the SSO app-cert path used by the buttons below." class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-full text-xs font-bold">Test Fernet boot path (Tier 1)</button>
+                <button type="button" onclick="saveFernetTier1Config()" title="Writes LM_FERNET_KEY_KV_SECRET and LM_KEYVAULT_URL — using the Vault URL / Fernet-key secret name fields above — into this hub's .env, then restarts the hub to apply them. LM_FERNET_KEY stays in place as a fallback; nothing else in .env is touched." class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-full text-xs font-bold">Save &amp; restart for Tier 1</button>
+                <button type="button" onclick="rotateKeyVaultAdmin()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-full text-xs font-bold">Rotate admin now</button>
+                <button type="button" onclick="pushKeyVaultFernet()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-full text-xs font-bold">Push Fernet key</button>
+                <button type="button" onclick="backupKeyVaultNow()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-full text-xs font-bold">Backup now</button>
                 <span id="kv-action-out" class="text-xs font-mono text-slate-600 break-all"></span>
             </div>
             <div class="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3">
                 <div class="text-xs font-bold text-slate-500 mb-1">Disaster recovery</div>
                 <p class="text-xs text-slate-500 mb-2">Download the min bootstrap bundle to keep off-box, or restore one onto this hub (from an uploaded file or a vault secret) to bring logins + Azure back, then pull the full backup from source.</p>
                 <div class="flex flex-wrap items-center gap-2">
-                    <button type="button" onclick="downloadKeyVaultMin()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Download min backup</button>
+                    <button type="button" onclick="downloadKeyVaultMin()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-full text-xs font-bold">Download min backup</button>
                     <input type="file" id="kv-restore-file" accept="application/json,.json" class="hidden" onchange="restoreKeyVaultFromFile(this)">
-                    <button type="button" onclick="document.getElementById('kv-restore-file').click()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Restore from file…</button>
+                    <button type="button" onclick="document.getElementById('kv-restore-file').click()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-full text-xs font-bold">Restore from file…</button>
                     <input id="kv-restore-secret" type="text" placeholder="or vault secret name" class="${inputCls} font-mono text-xs flex-1 min-w-[10rem]">
-                    <button type="button" onclick="restoreKeyVaultFromVault()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Restore from vault</button>
+                    <button type="button" onclick="restoreKeyVaultFromVault()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-full text-xs font-bold">Restore from vault</button>
                 </div>
                 <p id="kv-restore-out" class="text-xs font-mono text-slate-600 mt-1 break-all"></p>
             </div>
@@ -4424,15 +4424,15 @@ function _renderSettingsNotificationsTile(content) {
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-2">
                         <div class="flex gap-1">
                             <select id="notif-acs-sub" class="${inputCls} font-mono text-xs flex-1" onchange="onAcsSubChanged()"><option value="">Subscription ID…</option></select>
-                            <button type="button" onclick="pullAzureSubs()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-2 py-1 rounded-md text-xs font-bold whitespace-nowrap">Pull</button>
+                            <button type="button" onclick="pullAzureSubs()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-2 py-1 rounded-full text-xs font-bold whitespace-nowrap">Pull</button>
                         </div>
                         <div class="flex gap-1">
                             <select id="notif-acs-rg" class="${inputCls} font-mono text-xs flex-1" onchange="onAcsRgChanged()"><option value="">Resource group…</option></select>
-                            <button type="button" onclick="pullAzureRgs()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-2 py-1 rounded-md text-xs font-bold whitespace-nowrap">Pull</button>
+                            <button type="button" onclick="pullAzureRgs()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-2 py-1 rounded-full text-xs font-bold whitespace-nowrap">Pull</button>
                         </div>
                         <div class="flex gap-1">
                             <select id="notif-acs-name" class="${inputCls} font-mono text-xs flex-1" onchange="onAcsResourceChanged()"><option value="">Resource name…</option></select>
-                            <button type="button" onclick="pullAcsResources()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-2 py-1 rounded-md text-xs font-bold whitespace-nowrap">Pull</button>
+                            <button type="button" onclick="pullAcsResources()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-2 py-1 rounded-full text-xs font-bold whitespace-nowrap">Pull</button>
                         </div>
                     </div>
                     <p class="text-xs text-slate-500 mt-1">The SSO app calls <span class="font-mono">communicationServices/listKeys</span> via ARM (needs <b>Contributor</b> on the ACS resource/RG). The connection string is cached ~10 min and never touches the vault. <b>Pull</b> lists the subscriptions, resource groups, and ACS resources the app can see — choose top-down.</p></div>
@@ -4448,11 +4448,11 @@ function _renderSettingsNotificationsTile(content) {
             </div>
             <p id="notif-acs-note" class="text-xs text-slate-500 mt-2 hidden">ACS API transport signs each request with the access key (HMAC-SHA256) — no Entra app permission needed. The access key is pulled from ARM (listKeys) or read from the Key Vault secret, depending on the credential source above.</p>
             <div class="mt-3 flex flex-wrap items-center gap-2">
-                <button type="button" id="notif-push-btn" onclick="pushAcsSecret()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Push ACS connection string to Key Vault</button>
+                <button type="button" id="notif-push-btn" onclick="pushAcsSecret()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-full text-xs font-bold">Push ACS connection string to Key Vault</button>
                 <span id="notif-action-out" class="text-xs font-mono text-slate-600 break-all"></span>
                 <div class="ml-auto flex items-center gap-2">
-                    <button type="button" onclick="testNotifications()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Send test email</button>
-                    <button type="button" onclick="saveNotifications()" class="bg-primary hover:bg-brand/90 text-white px-3 py-1.5 rounded-md text-xs font-bold">Save</button>
+                    <button type="button" onclick="testNotifications()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-full text-xs font-bold">Send test email</button>
+                    <button type="button" onclick="saveNotifications()" class="bg-primary hover:bg-brand/90 text-white px-3 py-1.5 rounded-full text-xs font-bold">Save</button>
                 </div>
             </div>
         </div>`;
@@ -4933,7 +4933,7 @@ function _renderSettingsNetboxSsoTile(content) {
             <div class="mt-4 flex items-center justify-between gap-3">
                 <span id="nbsso-msg" class="text-xs text-slate-500"></span>
                 <div class="flex items-center gap-2">
-                    <button type="button" onclick="testNetboxSso()" id="nbsso-test-btn" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Test login</button>
+                    <button type="button" onclick="testNetboxSso()" id="nbsso-test-btn" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-full text-xs font-bold">Test login</button>
                     <button onclick="saveNetboxSso()" id="nbsso-save-btn" class="${btnCls}">Save &amp; Apply</button>
                 </div>
             </div>
@@ -5103,14 +5103,14 @@ function _renderSettingsAzureNsgTile(content) {
                 <div class="flex gap-2 mb-2">
                     <input id="nsg-add-ip" type="text" placeholder="1.2.3.4 or 10.0.0.0/24" class="${inputCls} font-mono text-xs flex-1">
                     <input id="nsg-add-desc" type="text" placeholder="description (optional)" class="${inputCls} text-xs flex-1">
-                    <button type="button" onclick="addNsgEntry()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold whitespace-nowrap">+ Add</button>
+                    <button type="button" onclick="addNsgEntry()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-full text-xs font-bold whitespace-nowrap">+ Add</button>
                 </div>
                 <div id="nsg-entries" class="border border-slate-200 rounded-md divide-y divide-slate-100 max-h-72 overflow-y-auto"></div>
             </div>
             <div class="mt-4 flex items-center justify-between gap-3">
                 <span id="nsg-msg" class="text-xs text-slate-500"></span>
                 <div class="flex items-center gap-3">
-                    <button onclick="testAzureNsg()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-md text-sm font-bold">Test connection</button>
+                    <button onclick="testAzureNsg()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-full text-sm font-bold">Test connection</button>
                     <button onclick="saveAzureNsg()" id="nsg-save-btn" class="${btnCls}">Save &amp; Apply</button>
                 </div>
             </div>
@@ -5270,7 +5270,7 @@ function _renderSettingsOciNsgTile(content) {
                 <div class="space-y-1"><label class="${labelCls}">Private key path <span class="text-slate-500 normal-case font-normal">(or kv:&lt;name&gt;)</span></label>
                     <div class="flex gap-2">
                         <input id="oci-nsg-key" type="text" placeholder="/etc/lm/oci/api-key.pem or kv:oci-api-key" class="${inputCls} font-mono text-xs flex-1">
-                        <button type="button" onclick="document.getElementById('oci-nsg-key-file').click()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold whitespace-nowrap">Upload…</button>
+                        <button type="button" onclick="document.getElementById('oci-nsg-key-file').click()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-full text-xs font-bold whitespace-nowrap">Upload…</button>
                         <input type="file" id="oci-nsg-key-file" accept=".pem,.key,text/plain,application/x-pem-file" class="hidden" onchange="uploadOciNsgKey(this)">
                     </div>
                     <p class="text-xs text-slate-500">Upload the unencrypted PEM private key generated for this OCI API user (Profile → API Keys → Add API Key). It's written to a 0600 file on this hub and the path above is filled in automatically — the key content itself is never shown or sent back to the browser.</p>
@@ -5287,14 +5287,14 @@ function _renderSettingsOciNsgTile(content) {
                 <div class="flex gap-2 mb-2">
                     <input id="oci-nsg-add-ip" type="text" placeholder="1.2.3.4 or 10.0.0.0/24" class="${inputCls} font-mono text-xs flex-1">
                     <input id="oci-nsg-add-desc" type="text" placeholder="description (optional)" class="${inputCls} text-xs flex-1">
-                    <button type="button" onclick="addOciNsgEntry()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold whitespace-nowrap">+ Add</button>
+                    <button type="button" onclick="addOciNsgEntry()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-full text-xs font-bold whitespace-nowrap">+ Add</button>
                 </div>
                 <div id="oci-nsg-entries" class="border border-slate-200 rounded-md divide-y divide-slate-100 max-h-72 overflow-y-auto"></div>
             </div>
             <div class="mt-4 flex items-center justify-between gap-3">
                 <span id="oci-nsg-msg" class="text-xs text-slate-500"></span>
                 <div class="flex items-center gap-3">
-                    <button onclick="testOciNsg()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-md text-sm font-bold">Test connection</button>
+                    <button onclick="testOciNsg()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-full text-sm font-bold">Test connection</button>
                     <button onclick="saveOciNsg()" id="oci-nsg-save-btn" class="${btnCls}">Save &amp; Apply</button>
                 </div>
             </div>
@@ -5486,7 +5486,7 @@ function _renderSettingsOciVaultTile(content) {
                 <div class="space-y-1"><label class="${labelCls}">Private key path <span class="text-slate-500 normal-case font-normal">(or kv:&lt;name&gt;)</span></label>
                     <div class="flex gap-2">
                         <input id="oci-vault-key" type="text" placeholder="/etc/lm/oci/api-key.pem or kv:oci-vault-key" class="${inputCls} font-mono text-xs flex-1">
-                        <button type="button" onclick="document.getElementById('oci-vault-key-file').click()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold whitespace-nowrap">Upload…</button>
+                        <button type="button" onclick="document.getElementById('oci-vault-key-file').click()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-full text-xs font-bold whitespace-nowrap">Upload…</button>
                         <input type="file" id="oci-vault-key-file" accept=".pem,.key,text/plain,application/x-pem-file" class="hidden" onchange="uploadOciVaultKey(this)">
                     </div>
                     <p class="text-xs text-slate-500">Upload the unencrypted PEM private key generated for this OCI API user (Profile → API Keys → Add API Key). It's written to a 0600 file on this hub and the path above is filled in automatically — the key content itself is never shown or sent back to the browser.</p>
@@ -5499,7 +5499,7 @@ function _renderSettingsOciVaultTile(content) {
             <div class="mt-4 flex items-center justify-between gap-3">
                 <span id="oci-vault-msg" class="text-xs text-slate-500"></span>
                 <div class="flex items-center gap-3">
-                    <button onclick="testOciVault()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-md text-sm font-bold">Test connection</button>
+                    <button onclick="testOciVault()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-full text-sm font-bold">Test connection</button>
                     <button onclick="saveOciVault()" id="oci-vault-save-btn" class="${btnCls}">Save</button>
                 </div>
             </div>
@@ -5603,7 +5603,7 @@ function _renderSettingsSsoTile(content) {
                     <label class="${labelCls}">Allowed groups <span class="text-slate-500 normal-case font-normal">(object IDs, optional — comma/space separated; membership in ANY grants login)</span></label>
                     <div class="flex gap-2">
                         <input id="oidc-group" type="text" placeholder="Entra group object IDs — blank = any user in the tenant" class="${inputCls} font-mono text-xs flex-1">
-                        <button type="button" onclick="loadOidcGroupPicker()" id="oidc-group-btn" class="whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold">＋ Pick from Entra</button>
+                        <button type="button" onclick="loadOidcGroupPicker()" id="oidc-group-btn" class="whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-full text-xs font-bold">＋ Pick from Entra</button>
                     </div>
                     <select id="oidc-group-select" onchange="onOidcGroupPick(this)" class="hidden w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></select>
                     <p id="oidc-group-msg" class="text-xs text-amber-600 hidden"></p>
@@ -5612,13 +5612,13 @@ function _renderSettingsSsoTile(content) {
             <div class="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3">
                 <div class="flex items-center justify-between gap-2 flex-wrap">
                     <div class="text-xs text-slate-600"><span class="font-bold">Client certificate</span> <span id="oidc-cert-status" class="text-slate-500">checking…</span></div>
-                    <button onclick="generateOidcCert()" id="oidc-gen-btn" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-md text-xs font-bold">Generate certificate</button>
+                    <button onclick="generateOidcCert()" id="oidc-gen-btn" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-full text-xs font-bold">Generate certificate</button>
                 </div>
                 <p class="text-xs text-slate-500 mt-1">Auto-creates a self-signed keypair on the hub (in the hub's writable state directory by default — no root/<code>/etc</code> access needed). This is a client credential Entra matches by thumbprint — it is <em>not</em> a TLS/LE cert. Upload the generated certificate below to the Entra app registration → Certificates &amp; secrets → Certificates.</p>
                 <div id="oidc-cert-output" class="hidden mt-2">
                     <div class="flex items-center justify-between gap-2 mb-1">
                         <div class="text-xs text-slate-500">Thumbprint (x5t): <code id="oidc-cert-thumb" class="text-slate-700"></code></div>
-                        <button type="button" onclick="downloadOidcCert()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md text-xs font-bold">Download .cer</button>
+                        <button type="button" onclick="downloadOidcCert()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-full text-xs font-bold">Download .cer</button>
                     </div>
                     <label class="text-xs text-slate-500"><span class="font-semibold">Download</span> the certificate above and upload the <em>file</em> to Entra → App registration → Certificates &amp; secrets → Certificates (Entra takes a file, not pasted text). This is the <em>public</em> cert — never upload the private key.</label>
                     <textarea id="oidc-cert-pem" readonly rows="6" class="w-full mt-1 bg-white border border-slate-300 rounded-md px-2 py-1 text-xs font-mono"></textarea>
@@ -5846,7 +5846,7 @@ function _renderSetupTestFeedTile(content) {
                 <div class="flex flex-wrap items-center gap-2 pt-1">
                     <button onclick="tfTestSource()" class="${btnSecCls} text-xs" title="Fetch one snapshot from the source and show what it would replay, without starting the feed or connecting any synthetic spoke">Test source</button>
                     <button onclick="tfStart()" id="tf-start" class="${btnCls}" title="Start pulling from the source and replaying it into this hub as synthetic spokes">Start feed</button>
-                    <button onclick="tfStop()" id="tf-stop" class="bg-red-100 hover:bg-red-200 text-red-700 px-4 py-2 rounded-md text-sm font-bold border border-red-200" title="Stop the feeder; the synthetic spokes go offline but stay registered until you delete them">Stop feed</button>
+                    <button onclick="tfStop()" id="tf-stop" class="bg-red-100 hover:bg-red-200 text-red-700 px-4 py-2 rounded-full text-sm font-bold border border-red-200" title="Stop the feeder; the synthetic spokes go offline but stay registered until you delete them">Stop feed</button>
                     <button onclick="tfSaveReceiver()" class="${btnSecCls} ml-auto" title="Save the source URL, credentials and polling settings without starting the feed">Save</button>
                 </div>
                 <div id="tf-output" class="hidden">

@@ -962,7 +962,7 @@ async function openAgentConfigModal(agentId, currentLabel) {
                 </div>
                 <div class="pt-4 flex justify-end gap-3">
                     <button onclick="this.closest('#agent-config-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
-                    <button onclick="saveAgentConfig('${agentId.replace(/'/g, "\\'")}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save Changes</button>
+                    <button onclick="saveAgentConfig('${agentId.replace(/'/g, "\\'")}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm">Save Changes</button>
                 </div>
             </div>
         </div>
@@ -1064,7 +1064,7 @@ async function openAgentAssignModal(agentId, currentTenantId) {
                 </div>
                 <div class="pt-4 flex justify-end gap-3">
                     <button onclick="this.closest('#agent-assign-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
-                    <button onclick="saveAgentTenant('${agentId.replace(/'/g, "\\'")}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Assign</button>
+                    <button onclick="saveAgentTenant('${agentId.replace(/'/g, "\\'")}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm">Assign</button>
                 </div>
             </div>
         </div>
@@ -1141,7 +1141,7 @@ async function openSpokeAssignModal(spokeId, currentTenantId, noun = 'Spoke') {
                 </div>
                 <div class="pt-4 flex justify-end gap-3">
                     <button onclick="this.closest('#spoke-assign-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
-                    <button onclick="saveSpokeAssign('${spokeId.replace(/'/g, "\\'")}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Assign</button>
+                    <button onclick="saveSpokeAssign('${spokeId.replace(/'/g, "\\'")}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm">Assign</button>
                 </div>
             </div>
         </div>
@@ -1298,14 +1298,14 @@ async function openSpokeMetadataModal(spokeId, currentName, approved) {
                 <div class="pt-4 border-t border-slate-200 space-y-2">
                     <label class="text-xs text-slate-500 font-bold">Spoke Actions</label>
                     <div class="flex flex-wrap gap-2">
-                        <button onclick="resetSpokeSecret('${eId}'); this.closest('#spoke-metadata-modal').remove()" class="px-3 py-1.5 text-xs font-medium rounded-md bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 transition-colors" title="Regenerate this spoke's shared secret — the spoke must be reconfigured with the new value">Reset Secret</button>
-                        ${approved ? `<button onclick="unapproveSpoke('${eId}'); this.closest('#spoke-metadata-modal').remove()" class="px-3 py-1.5 text-xs font-medium rounded-md bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 transition-colors">Un-approve</button>` : ''}
+                        <button onclick="resetSpokeSecret('${eId}'); this.closest('#spoke-metadata-modal').remove()" class="px-3 py-1.5 text-xs font-medium rounded-full bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 transition-colors" title="Regenerate this spoke's shared secret — the spoke must be reconfigured with the new value">Reset Secret</button>
+                        ${approved ? `<button onclick="unapproveSpoke('${eId}'); this.closest('#spoke-metadata-modal').remove()" class="px-3 py-1.5 text-xs font-medium rounded-full bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 transition-colors">Un-approve</button>` : ''}
                     </div>
                     <p class="text-xs text-slate-500">Reset Secret wipes stored keys and forces re-onboarding. Un-approve revokes access until re-approved.</p>
                 </div>
                 <div class="pt-4 flex justify-end gap-3">
                     <button onclick="this.closest('#spoke-metadata-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
-                    <button onclick="saveSpokeMetadata('${spokeId.replace(/'/g, "\\'")}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save Changes</button>
+                    <button onclick="saveSpokeMetadata('${spokeId.replace(/'/g, "\\'")}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm">Save Changes</button>
                 </div>
             </div>
         </div>
@@ -1687,7 +1687,7 @@ async function showGroupModal(groupId) {
                 <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Directory Group <span class="text-slate-500 normal-case font-normal">(optional — Entra group object ID or LDAP DN; maps a directory group to this bundle + its tenant scope)</span></label>
                     <div class="flex gap-2">
                         <input type="text" id="grp-ldap" value="${g.ldap_group || ''}" placeholder="Entra object ID or cn=noc,ou=groups,dc=example,dc=com" class="flex-1 bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500 font-mono">
-                        <button type="button" onclick="loadEntraGroupPicker()" id="grp-entra-btn" class="whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold">Pick from Entra</button>
+                        <button type="button" onclick="loadEntraGroupPicker()" id="grp-entra-btn" class="whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-full text-xs font-bold">Pick from Entra</button>
                     </div>
                     <select id="grp-entra-select" onchange="onEntraGroupPick(this)" class="hidden w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></select>
                     <p id="grp-entra-msg" class="text-xs text-amber-600 hidden"></p>
@@ -1699,7 +1699,7 @@ async function showGroupModal(groupId) {
             </div>
             <div class="shrink-0 px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="closeGroupModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
-                <button onclick="saveGroup()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">${groupId ? 'Save' : 'Create'} Group</button>
+                <button onclick="saveGroup()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm">${groupId ? 'Save' : 'Create'} Group</button>
             </div>
         </div>`;
     _mountModal(modal);
@@ -2377,7 +2377,7 @@ function _singleFlight(fn) {
 function addServerButtonHtml(role, label) {
     if (!isTenantAdmin() && !isAdmin()) return '';
     return `<button onclick="openAddServerModal('${escapeHtml(role)}', '${escapeHtml(label)}')"
-        class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-md text-xs font-bold shadow-sm"
+        class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-full text-xs font-bold shadow-sm"
         title="Self-service: onboard a new ${escapeHtml(label)} server for your tenant">+ Add Server</button>`;
 }
 
@@ -2392,8 +2392,8 @@ function openAddServerModal(role, label) {
         <p class="text-sm text-slate-500">Generate a one-time onboarding key, then run the install command below on the new server. It registers and binds to <b>${escapeHtml(tenant)}</b> automatically — no admin approval needed.</p>
         <div id="add-server-psk-area" class="text-xs text-slate-500 italic">No key generated yet.</div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="document.getElementById('add-server-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Close</button>
-            <button onclick="_addServerGenPsk('${escapeHtml(role)}', '${escapeHtml(tenant)}')" class="px-4 py-1.5 text-sm rounded-md bg-primary text-white font-bold hover:bg-primary-hover">Generate Key</button>
+            <button onclick="document.getElementById('add-server-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-full border border-slate-200 text-slate-600 hover:bg-slate-50">Close</button>
+            <button onclick="_addServerGenPsk('${escapeHtml(role)}', '${escapeHtml(tenant)}')" class="px-4 py-1.5 text-sm rounded-full bg-primary text-white font-bold hover:bg-primary-hover">Generate Key</button>
         </div>`;
     openModal('add-server-modal', body, { backdropClose: true });
 }
@@ -2471,14 +2471,14 @@ async function loadMyDeviceSpokes() {
             const canRoles = s.connected && s.approved && (s.module_type === 'agent');
             const eSid = String(s.spoke_id).replace(/'/g, "\\'");
             const rolesBtn = canRoles
-                ? `<button onclick="showLoadRoleModal('${eSid}')" class="px-2.5 py-1 rounded-md text-xs font-bold bg-white hover:bg-slate-50 text-primary-text border border-brand transition-colors" title="Load or unload roles (DNS, DHCP, Edge Proxy, …) on this agent">Roles</button>`
+                ? `<button onclick="showLoadRoleModal('${eSid}')" class="px-2.5 py-1 rounded-full text-xs font-bold bg-white hover:bg-slate-50 text-primary-text border border-brand transition-colors" title="Load or unload roles (DNS, DHCP, Edge Proxy, …) on this agent">Roles</button>`
                 : '';
             // Delete permanently removes the registration + crypto material; the
             // spoke must fully re-onboard (a fresh key) to return. Tenant-scoped
             // server-side (/tenant/{tenant}/spokes/{id}) — a tenant-admin can
             // only delete a spoke bound to their own tenant.
             const eName = String(_spokeName(s)).replace(/'/g, "\\'");
-            const delBtn = `<button onclick="_myDevDeleteSpoke('${eSid}', '${eName}')" class="px-2.5 py-1 rounded-md text-xs font-bold bg-white hover:bg-red-50 text-red-600 border border-red-300 transition-colors" title="Permanently remove this spoke/agent — it must re-onboard to return">Delete</button>`;
+            const delBtn = `<button onclick="_myDevDeleteSpoke('${eSid}', '${eName}')" class="px-2.5 py-1 rounded-full text-xs font-bold bg-white hover:bg-red-50 text-red-600 border border-red-300 transition-colors" title="Permanently remove this spoke/agent — it must re-onboard to return">Delete</button>`;
             return `<div class="flex items-center justify-between border border-slate-100 rounded-md px-3 py-2">
                 <div><span class="text-sm font-medium text-slate-700">${escapeHtml(_nodeLabel(_spokeName(s), s.tenant_id || tenant))}</span>
                 <span class="ml-2 text-xs text-slate-500 font-mono">${escapeHtml(s.module_type || '—')}</span></div>
@@ -2520,7 +2520,7 @@ async function loadMyDeviceAgents() {
             const eAid = String(a.agent_id).replace(/'/g, "\\'");
             const eSpk = String(a.spoke_id || '').replace(/'/g, "\\'");
             const approveBtn = a._status === 'pending'
-                ? `<button onclick="_myDevApproveAgent('${eSpk}', '${eAid}')" class="px-2.5 py-1 rounded-md text-xs font-bold bg-white hover:bg-green-50 text-green-700 border border-green-300 transition-colors">Approve</button>`
+                ? `<button onclick="_myDevApproveAgent('${eSpk}', '${eAid}')" class="px-2.5 py-1 rounded-full text-xs font-bold bg-white hover:bg-green-50 text-green-700 border border-green-300 transition-colors">Approve</button>`
                 : '';
             // Client-Simulation toggle: only meaningful once approved (a
             // pending agent has no tenant pin yet, and the tenant-scoped
@@ -2531,7 +2531,7 @@ async function loadMyDeviceAgents() {
             // turned on) without an admin.
             const csEnabled = !!(a.client_simulation && a.client_simulation.enabled);
             const csToggle = a._status !== 'pending'
-                ? `<button onclick="_myDevToggleAgentCs('${eAid}', ${!csEnabled})" class="px-2.5 py-1 rounded-md text-xs font-bold border transition-colors ${csEnabled ? 'bg-white hover:bg-red-50 text-red-600 border-red-300' : 'bg-white hover:bg-green-50 text-green-700 border-green-300'}" title="Client-Simulation mode">${csEnabled ? 'Disable CS' : 'Enable CS'}</button>`
+                ? `<button onclick="_myDevToggleAgentCs('${eAid}', ${!csEnabled})" class="px-2.5 py-1 rounded-full text-xs font-bold border transition-colors ${csEnabled ? 'bg-white hover:bg-red-50 text-red-600 border-red-300' : 'bg-white hover:bg-green-50 text-green-700 border-green-300'}" title="Client-Simulation mode">${csEnabled ? 'Disable CS' : 'Enable CS'}</button>`
                 : '';
             return `<div class="flex items-center justify-between border border-slate-100 rounded-md px-3 py-2">
                 <div><span class="text-sm font-medium text-slate-700">${escapeHtml(String(a.hostname || a.agent_id || '').toUpperCase())}</span>
@@ -3449,7 +3449,7 @@ async function showLoadRoleModal(spokeId) {
                 <button onclick="document.getElementById('load-role-modal').remove()"
                     class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
                 <button onclick="loadRole('${spokeId}')"
-                    class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Activate Selected</button>
+                    class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm">Activate Selected</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
@@ -3834,7 +3834,7 @@ async function loadOpnsenseManagement() {
     const actions = document.getElementById('top-nav-actions');
     if (actions) {
         if (writable.includes(subMenu) && canEdit()) {
-            actions.innerHTML = `<button onclick="showOpnsenseAddModal('${subMenu}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm" title="Create a new ${subMenu.replace(/s$/, '')} on the firewall">+ Add ${subMenu.replace(/s$/, '')}</button>`;
+            actions.innerHTML = `<button onclick="showOpnsenseAddModal('${subMenu}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-full text-xs font-bold transition-all shadow-sm" title="Create a new ${subMenu.replace(/s$/, '')} on the firewall">+ Add ${subMenu.replace(/s$/, '')}</button>`;
         } else {
             actions.innerHTML = '';
         }

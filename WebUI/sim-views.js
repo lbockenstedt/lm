@@ -893,9 +893,9 @@ window.csKillSwitchMountChip = async function (elId) {
     }
     const ksBtn = ks
         ? `<button onclick="csToggleKillSwitch(false)" title="Simulations halted — click to resume"
-             class="normal-case tracking-normal bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded-md text-xs font-bold">▶ Resume Sims</button>`
+             class="normal-case tracking-normal bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded-full text-xs font-bold">▶ Resume Sims</button>`
         : `<button onclick="csToggleKillSwitch(true)" title="Emergency stop all simulations on this tenant"
-             class="normal-case tracking-normal bg-white hover:bg-red-50 text-red-600 border border-red-300 px-3 py-1 rounded-md text-xs font-bold">⛔ Emergency Stop</button>`;
+             class="normal-case tracking-normal bg-white hover:bg-red-50 text-red-600 border border-red-300 px-3 py-1 rounded-full text-xs font-bold">⛔ Emergency Stop</button>`;
     // Purge Clients lives next to the Emergency Stop chip in this same strip,
     // sized identically to it (px-3 py-1 rounded-md text-xs font-bold, outline
     // red). Shown only on the Clients child strip — purge is client-specific.
@@ -903,7 +903,7 @@ window.csKillSwitchMountChip = async function (elId) {
     // with the other emergency control at the top of the view.
     const purgeBtn = (typeof currentSubView !== 'undefined' && currentSubView === 'Clients')
         ? `<button id="cs-purge-clients-btn" onclick="csPurgeClients(this)" title="Remove all client records from memory and disk"
-             class="normal-case tracking-normal bg-white hover:bg-red-50 text-red-600 border border-red-300 px-3 py-1 rounded-md text-xs font-bold">🗑 Purge Clients</button>`
+             class="normal-case tracking-normal bg-white hover:bg-red-50 text-red-600 border border-red-300 px-3 py-1 rounded-full text-xs font-bold">🗑 Purge Clients</button>`
         : '';
     el.innerHTML = ksBtn + purgeBtn;
 };
@@ -1766,7 +1766,7 @@ function csRenderClientsFaceted() {
     const sizeOpts = CS_CLIENT_PAGE_SIZES.map(n =>
         `<option value="${n}"${n === pageSize ? ' selected' : ''}>${n}</option>`).join('');
     const btn = (label, delta, disabled) =>
-        `<button onclick="csClientGoPage(${delta})" ${disabled ? 'disabled' : ''} class="px-2 py-0.5 rounded border ${disabled ? 'border-slate-100 text-slate-500 cursor-not-allowed' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}">${label}</button>`;
+        `<button onclick="csClientGoPage(${delta})" ${disabled ? 'disabled' : ''} class="px-2 py-0.5 rounded-full border ${disabled ? 'border-slate-100 text-slate-500 cursor-not-allowed' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}">${label}</button>`;
     // Pager sits at the BOTTOM of the table.
     const pager = `<div class="flex flex-wrap items-center justify-between gap-2 mt-3 text-xs text-slate-500">
         <span>Showing ${first.toLocaleString()}–${last.toLocaleString()} of ${matches.length.toLocaleString()}</span>
@@ -1818,7 +1818,7 @@ async function csRenderClients(tier) {
       <select id="cs-client-status" onchange="csClientResetPage()" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500">
         <option value="">All</option><option value="online">Online</option><option value="offline">Offline</option>
       </select>
-      <button id="cs-clear-all-overrides-btn" onclick="csClearAllOverrides(this)" title="Clear EVERY override layer /api/config bakes into [username] — the per-client registry overrides AND any active demo scenarios (the failure-flag source that survives a registry-only clear) — for every client, then re-fetch each client's local simulation.conf" class="ml-auto bg-white border border-amber-300 text-amber-700 hover:bg-amber-50 rounded-md px-3 py-1.5 text-sm font-semibold">✕ Clear All Overrides</button>`);
+      <button id="cs-clear-all-overrides-btn" onclick="csClearAllOverrides(this)" title="Clear EVERY override layer /api/config bakes into [username] — the per-client registry overrides AND any active demo scenarios (the failure-flag source that survives a registry-only clear) — for every client, then re-fetch each client's local simulation.conf" class="ml-auto bg-white border border-amber-300 text-amber-700 hover:bg-amber-50 rounded-full px-3 py-1.5 text-sm font-semibold">✕ Clear All Overrides</button>`);
     // Initial load: fan out the clients fetch and the demo card together.
     // /aggregate/clients is a fast hub cache read, but csDemoCard() does two
     // relay round-trips to the spoke (/demo/active + /demo/scenarios) — running
@@ -2100,7 +2100,7 @@ function csRenderClientRows(rows, targetId) {
           <td colspan="${CS_CLIENT_COLS}" class="px-4 pb-3 pt-0">
             <div class="flex flex-wrap items-center justify-between gap-2">
               ${csClientSimBar(c, host)}
-              <button onclick="csRemoveClient('${csEscape(host)}', this)" class="text-xs px-2 py-0.5 rounded font-bold whitespace-nowrap bg-white hover:bg-red-50 text-red-500 border border-red-200 flex-shrink-0" title="Remove this client's registry record — for a stale/unrecognized entry (a renamed VM's old hostname, a one-off test client). Does NOT affect any actual VM; a client that's still alive just re-registers on its next check-in.">🗑 Remove</button>
+              <button onclick="csRemoveClient('${csEscape(host)}', this)" class="text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap bg-white hover:bg-red-50 text-red-500 border border-red-200 flex-shrink-0" title="Remove this client's registry record — for a stale/unrecognized entry (a renamed VM's old hostname, a one-off test client). Does NOT affect any actual VM; a client that's still alive just re-registers on its next check-in.">🗑 Remove</button>
             </div>
           </td>
         </tr>` : '';
@@ -2194,10 +2194,10 @@ function csClientSimBar(c, host) {
         </select>
         <button data-cs-debug-host="${csEscape(host)}" data-cs-debug-on="0" onclick="csDebugToggle(this)"
           title="Stream this client's logs up to the hub for remote troubleshooting (30-min auto-off)"
-          class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-2 py-0.5 rounded text-xs font-bold">Enable Debug</button>
+          class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-2 py-0.5 rounded-full text-xs font-bold">Enable Debug</button>
         <button data-cs-debug-host="${csEscape(host)}" onclick="csDebugLogs(this)"
           title="Open the Client Debug log panel for this host"
-          class="bg-indigo-100 hover:bg-indigo-200 text-indigo-700 px-2 py-0.5 rounded text-xs font-bold">View Logs</button>
+          class="bg-indigo-100 hover:bg-indigo-200 text-indigo-700 px-2 py-0.5 rounded-full text-xs font-bold">View Logs</button>
       </div>
     </div>`;
 }
@@ -2351,9 +2351,9 @@ function csDemoCell(hostname) {
         ${csDemoOptions(a ? a.scenario : 'normal')}
       </select>
       <button data-cs-demo-host="${csEscape(hostname)}" onclick="csDemoTrigger(this)"
-        class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-1.5 py-0.5 rounded-md text-xs font-bold">Go</button>
+        class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-1.5 py-0.5 rounded-full text-xs font-bold">Go</button>
       <button data-cs-ctl-host="${csEscape(hostname)}" onclick="csCtlClear(this)"
-        class="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 px-1.5 py-0.5 rounded-md text-xs font-bold" title="Clear this client's sim overrides">Clear</button>
+        class="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 px-1.5 py-0.5 rounded-full text-xs font-bold" title="Clear this client's sim overrides">Clear</button>
     </td>`;
 }
 
@@ -2366,7 +2366,7 @@ async function csDemoCard() {
         <span class="ml-2 inline-block bg-amber-100 text-amber-700 rounded px-1.5 py-0.5 text-xs font-bold">${csEscape(a.scenario)}</span>
         <span class="ml-2 text-xs text-slate-500">${csEscape(a.minutes_remaining)}m remaining</span></span>
       <button data-cs-demo-host="${csEscape(a.hostname)}" onclick="csDemoClear(this)"
-        class="bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded-md text-xs font-bold">Clear</button>
+        class="bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded-full text-xs font-bold">Clear</button>
     </div>`).join('');
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <p class="text-xs font-bold text-slate-500 mb-2">Active Demo Scenarios (${active.length})</p>
@@ -2631,7 +2631,7 @@ function _csCentralTableBuild(id) {
     let bar = '';
     if (monOf) {
         const nMon = rows.filter(r => monOf(r)).length;
-        const mk = (val, label) => `<button onclick="csCentralFilter('${csEscape(id)}','${val}')" class="px-2.5 py-1 rounded-md text-xs font-bold border ${filter === val ? 'bg-navy/10 text-navy border-navy' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${label}</button>`;
+        const mk = (val, label) => `<button onclick="csCentralFilter('${csEscape(id)}','${val}')" class="px-2.5 py-1 rounded-full text-xs font-bold border ${filter === val ? 'bg-navy/10 text-navy border-navy' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${label}</button>`;
         bar = `<div class="flex items-center gap-2 mb-3">
             <span class="text-xs text-slate-500 font-semibold">Monitored:</span>
             ${mk('all', `All (${rows.length})`)}${mk('mon', `On (${nMon})`)}${mk('unmon', `Off (${rows.length - nMon})`)}
@@ -2682,8 +2682,8 @@ async function csRenderCentral() {
         const nInsights = (insightsBySite[name] || 0) + globalInsights;
         const _minLbl = minBySite[name] ? ` · min ${csEscape(String(minBySite[name]))}` : '';
         const btn = isMon
-            ? `<button onclick="csMonitorSiteModal(${csEscape(JSON.stringify(name))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Edit monitoring / min-client threshold">✓ Monitored${_minLbl}</button>`
-            : `<button onclick="csMonitorSiteModal(${csEscape(JSON.stringify(name))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this site's client count (set a min-client floor)">Monitor</button>`;
+            ? `<button onclick="csMonitorSiteModal(${csEscape(JSON.stringify(name))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-emerald-100" title="Edit monitoring / min-client threshold">✓ Monitored${_minLbl}</button>`
+            : `<button onclick="csMonitorSiteModal(${csEscape(JSON.stringify(name))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-slate-200" title="Monitor this site's client count (set a min-client floor)">Monitor</button>`;
         return { name, health: st.health_score, clients: st.wireless_clients != null ? st.wireless_clients : 0,
                  alerts: nAlerts, insights: nInsights, monitored: isMon, btn: name ? btn : '' };
     });
@@ -2736,10 +2736,10 @@ window.csMonitorSiteModal = async function (siteName, rerender) {
                 </div>
                 <div id="cs-monitor-status" class="text-xs text-slate-500 hidden"></div>
                 <div class="pt-2 flex justify-between gap-3">
-                    ${isMon ? `<button onclick="csSaveMonitorSite(${csEscape(JSON.stringify(siteName))}, false, null)" class="px-4 py-2 text-sm font-medium text-rose-600 hover:text-rose-800 border border-rose-200 rounded-md">Stop monitoring</button>` : `<span></span>`}
+                    ${isMon ? `<button onclick="csSaveMonitorSite(${csEscape(JSON.stringify(siteName))}, false, null)" class="px-4 py-2 text-sm font-medium text-rose-600 hover:text-rose-800 border border-rose-200 rounded-full">Stop monitoring</button>` : `<span></span>`}
                     <div class="flex gap-3">
                         <button onclick="this.closest('#cs-monitor-site-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
-                        <button id="cs-monitor-save" class="bg-emerald-100 hover:bg-emerald-200 text-emerald-800 border border-emerald-300 px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">${isMon ? 'Save' : 'Start monitoring'}</button>
+                        <button id="cs-monitor-save" class="bg-emerald-100 hover:bg-emerald-200 text-emerald-800 border border-emerald-300 px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm">${isMon ? 'Save' : 'Start monitoring'}</button>
                     </div>
                 </div>
             </div>
@@ -2827,8 +2827,8 @@ async function csRenderCentralAlerts() {
         const isMon = id && monSet.has(`${id}::${site}`);
         if (id) seen.add(`${id}::${site}`);
         const btn = !id ? '—' : (isMon
-            ? `<button onclick="csToggleMonitorCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this alert at ${csEscape(site || 'all sites')}">✓ Monitored</button>`
-            : `<button onclick="csToggleMonitorCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true, ${csEscape(JSON.stringify(site))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this alert at ${csEscape(site || 'all sites')}">Monitor</button>`);
+            ? `<button onclick="csToggleMonitorCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this alert at ${csEscape(site || 'all sites')}">✓ Monitored</button>`
+            : `<button onclick="csToggleMonitorCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true, ${csEscape(JSON.stringify(site))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-slate-200" title="Monitor this alert at ${csEscape(site || 'all sites')}">Monitor</button>`);
         return { name: a.name || '—', site: a.site || '—', severity: a.severity || 'warning',
                  category: a.category || '—', status: a.status || 'active', monitored: !!isMon, btn };
     });
@@ -2846,7 +2846,7 @@ async function csRenderCentralAlerts() {
         rows.push({
             name: c.name || id, site: site || '—', severity: 'unknown', category: '—',
             status: 'not_firing', monitored: true,
-            btn: `<button onclick="csToggleMonitorCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(c.name || id))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this alert at ${csEscape(site || 'all sites')}">✓ Monitored</button>`,
+            btn: `<button onclick="csToggleMonitorCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(c.name || id))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this alert at ${csEscape(site || 'all sites')}">✓ Monitored</button>`,
         });
     });
     if (!rows.length) { csSet(`${csCentralFreshnessBadge(data)}${warn}${csEmpty('No Central alerts.', 'Alerts come from Central /network-notifications/v1/alerts (active + recently closed).')}`); return; }
@@ -2895,8 +2895,8 @@ async function csRenderCentralInsights() {
         const isMon = id && monSet.has(`${id}::${site}`);
         if (id) seen.add(`${id}::${site}`);
         const btn = !id ? '—' : (isMon
-            ? `<button onclick="csToggleMonitorCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this insight at ${csEscape(site || 'all sites')}">✓ Monitored</button>`
-            : `<button onclick="csToggleMonitorCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true, ${csEscape(JSON.stringify(site))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this insight at ${csEscape(site || 'all sites')}">Monitor</button>`);
+            ? `<button onclick="csToggleMonitorCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this insight at ${csEscape(site || 'all sites')}">✓ Monitored</button>`
+            : `<button onclick="csToggleMonitorCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true, ${csEscape(JSON.stringify(site))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-slate-200" title="Monitor this insight at ${csEscape(site || 'all sites')}">Monitor</button>`);
         return { name: i.name || '—', category: i.category || '—', site: i.site || '—',
                  firing: true, monitored: !!isMon, btn };
     });
@@ -2911,7 +2911,7 @@ async function csRenderCentralInsights() {
         seen.add(key);
         rows.push({
             name: c.name || id, category: '—', site: site || '—', firing: false, monitored: true,
-            btn: `<button onclick="csToggleMonitorCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(c.name || id))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this insight at ${csEscape(site || 'all sites')}">✓ Monitored</button>`,
+            btn: `<button onclick="csToggleMonitorCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(c.name || id))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this insight at ${csEscape(site || 'all sites')}">✓ Monitored</button>`,
         });
     });
     if (!rows.length) { csSet(`${csCentralFreshnessBadge(data)}${warn}${csEmpty('No Central insights.', 'AI insights come from Central /network-notifications/v1/insights.')}`); return; }
@@ -2972,8 +2972,8 @@ async function csRenderCentralClients() {
         const isMon = site && monitored.has(String(site));
         const _minLbl = site && minBySite[site] ? ` · min ${csEscape(String(minBySite[site]))}` : '';
         const btn = !site ? '—' : (isMon
-            ? `<button onclick="csMonitorSiteModal(${csEscape(JSON.stringify(site))}, 'clients')" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Edit monitoring / min-client threshold">✓ Site monitored${_minLbl}</button>`
-            : `<button onclick="csMonitorSiteModal(${csEscape(JSON.stringify(site))}, 'clients')" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this client's site (set a min-client floor)">Monitor</button>`);
+            ? `<button onclick="csMonitorSiteModal(${csEscape(JSON.stringify(site))}, 'clients')" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-emerald-100" title="Edit monitoring / min-client threshold">✓ Site monitored${_minLbl}</button>`
+            : `<button onclick="csMonitorSiteModal(${csEscape(JSON.stringify(site))}, 'clients')" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-slate-200" title="Monitor this client's site (set a min-client floor)">Monitor</button>`);
         return { host: cl.hostname || cl.mac || '—', ip: cl.ip || '—', mac: cl.mac || '—',
                  site: cl.site || '—', os: cl.os || '—', status: cl.status || 'unknown',
                  monitored: !!isMon, btn };
@@ -3021,8 +3021,8 @@ async function csRenderCentralHardware() {
         const site = d.site || '';
         const isMon = id && monSet.has(`${id}::${site}`);
         const btn = !id ? '—' : (isMon
-            ? `<button onclick="csToggleMonitorHardware(${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, ${csEscape(JSON.stringify(dt))}, ${csEscape(JSON.stringify(site))}, false)" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this device">✓ Monitored</button>`
-            : `<button onclick="csToggleMonitorHardware(${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, ${csEscape(JSON.stringify(dt))}, ${csEscape(JSON.stringify(site))}, true)" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this device (alerts on the dashboard when it goes down)">Monitor</button>`);
+            ? `<button onclick="csToggleMonitorHardware(${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, ${csEscape(JSON.stringify(dt))}, ${csEscape(JSON.stringify(site))}, false)" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this device">✓ Monitored</button>`
+            : `<button onclick="csToggleMonitorHardware(${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, ${csEscape(JSON.stringify(dt))}, ${csEscape(JSON.stringify(site))}, true)" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-slate-200" title="Monitor this device (alerts on the dashboard when it goes down)">Monitor</button>`);
         return { name, type: dt || '—', model: d.model || '—', site: site || '—',
                  status: d.status || 'unknown', monitored: !!isMon, btn };
     });
@@ -3151,7 +3151,7 @@ function _csCentralOnPremTableBuild(id) {
     let bar = '';
     if (monOf) {
         const nMon = rows.filter(r => monOf(r)).length;
-        const mk = (val, label) => `<button onclick="csCentralOnPremFilter('${csEscape(id)}','${val}')" class="px-2.5 py-1 rounded-md text-xs font-bold border ${filter === val ? 'bg-navy/10 text-navy border-navy' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${label}</button>`;
+        const mk = (val, label) => `<button onclick="csCentralOnPremFilter('${csEscape(id)}','${val}')" class="px-2.5 py-1 rounded-full text-xs font-bold border ${filter === val ? 'bg-navy/10 text-navy border-navy' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${label}</button>`;
         bar = `<div class="flex items-center gap-2 mb-3">
             <span class="text-xs text-slate-500 font-semibold">Monitored:</span>
             ${mk('all', `All (${rows.length})`)}${mk('mon', `On (${nMon})`)}${mk('unmon', `Off (${rows.length - nMon})`)}
@@ -3202,8 +3202,8 @@ async function csRenderCentralOnPrem() {
         const nInsights = (insightsBySite[name] || 0) + globalInsights;
         const _minLbl = minBySite[name] ? ` · min ${csEscape(String(minBySite[name]))}` : '';
         const btn = isMon
-            ? `<button onclick="csMonitorCentralOnPremSiteModal(${csEscape(JSON.stringify(name))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Edit monitoring / min-client threshold">✓ Monitored${_minLbl}</button>`
-            : `<button onclick="csMonitorCentralOnPremSiteModal(${csEscape(JSON.stringify(name))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this site's client count (set a min-client floor)">Monitor</button>`;
+            ? `<button onclick="csMonitorCentralOnPremSiteModal(${csEscape(JSON.stringify(name))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-emerald-100" title="Edit monitoring / min-client threshold">✓ Monitored${_minLbl}</button>`
+            : `<button onclick="csMonitorCentralOnPremSiteModal(${csEscape(JSON.stringify(name))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-slate-200" title="Monitor this site's client count (set a min-client floor)">Monitor</button>`;
         return { name, health: st.health_score, clients: st.wireless_clients != null ? st.wireless_clients : 0,
                  alerts: nAlerts, insights: nInsights, monitored: isMon, btn: name ? btn : '' };
     });
@@ -3256,10 +3256,10 @@ window.csMonitorCentralOnPremSiteModal = async function (siteName, rerender) {
                 </div>
                 <div id="cs-monitor-status" class="text-xs text-slate-500 hidden"></div>
                 <div class="pt-2 flex justify-between gap-3">
-                    ${isMon ? `<button onclick="csSaveMonitorCentralOnPremSite(${csEscape(JSON.stringify(siteName))}, false, null)" class="px-4 py-2 text-sm font-medium text-rose-600 hover:text-rose-800 border border-rose-200 rounded-md">Stop monitoring</button>` : `<span></span>`}
+                    ${isMon ? `<button onclick="csSaveMonitorCentralOnPremSite(${csEscape(JSON.stringify(siteName))}, false, null)" class="px-4 py-2 text-sm font-medium text-rose-600 hover:text-rose-800 border border-rose-200 rounded-full">Stop monitoring</button>` : `<span></span>`}
                     <div class="flex gap-3">
                         <button onclick="this.closest('#cs-monitor-central-on-prem-site-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
-                        <button id="cs-monitor-save" class="bg-emerald-100 hover:bg-emerald-200 text-emerald-800 border border-emerald-300 px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">${isMon ? 'Save' : 'Start monitoring'}</button>
+                        <button id="cs-monitor-save" class="bg-emerald-100 hover:bg-emerald-200 text-emerald-800 border border-emerald-300 px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm">${isMon ? 'Save' : 'Start monitoring'}</button>
                     </div>
                 </div>
             </div>
@@ -3345,8 +3345,8 @@ async function csRenderCentralOnPremAlerts() {
         const site = (a.site && a.site !== '—') ? a.site : '';
         const isMon = id && monSet.has(`${id}::${site}`);
         const btn = !id ? '—' : (isMon
-            ? `<button onclick="csToggleMonitorCentralOnPremCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this alert at ${csEscape(site || 'all sites')}">✓ Monitored</button>`
-            : `<button onclick="csToggleMonitorCentralOnPremCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true, ${csEscape(JSON.stringify(site))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this alert at ${csEscape(site || 'all sites')}">Monitor</button>`);
+            ? `<button onclick="csToggleMonitorCentralOnPremCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this alert at ${csEscape(site || 'all sites')}">✓ Monitored</button>`
+            : `<button onclick="csToggleMonitorCentralOnPremCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true, ${csEscape(JSON.stringify(site))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-slate-200" title="Monitor this alert at ${csEscape(site || 'all sites')}">Monitor</button>`);
         return { name: a.name || '—', site: a.site || '—', severity: a.severity || 'warning',
                  category: a.category || '—', status: a.status || 'active', monitored: !!isMon, btn };
     });
@@ -3388,8 +3388,8 @@ async function csRenderCentralOnPremInsights() {
         const site = i.site || '';
         const isMon = id && monSet.has(`${id}::${site}`);
         const btn = !id ? '—' : (isMon
-            ? `<button onclick="csToggleMonitorCentralOnPremCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this insight at ${csEscape(site || 'all sites')}">✓ Monitored</button>`
-            : `<button onclick="csToggleMonitorCentralOnPremCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true, ${csEscape(JSON.stringify(site))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this insight at ${csEscape(site || 'all sites')}">Monitor</button>`);
+            ? `<button onclick="csToggleMonitorCentralOnPremCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this insight at ${csEscape(site || 'all sites')}">✓ Monitored</button>`
+            : `<button onclick="csToggleMonitorCentralOnPremCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true, ${csEscape(JSON.stringify(site))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-slate-200" title="Monitor this insight at ${csEscape(site || 'all sites')}">Monitor</button>`);
         return { name: i.name || '—', category: i.category || '—', site: i.site || '—',
                  monitored: !!isMon, btn };
     });
@@ -3444,8 +3444,8 @@ async function csRenderCentralOnPremClients() {
         const isMon = site && monitored.has(String(site));
         const _minLbl = site && minBySite[site] ? ` · min ${csEscape(String(minBySite[site]))}` : '';
         const btn = !site ? '—' : (isMon
-            ? `<button onclick="csMonitorCentralOnPremSiteModal(${csEscape(JSON.stringify(site))}, 'clients')" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Edit monitoring / min-client threshold">✓ Site monitored${_minLbl}</button>`
-            : `<button onclick="csMonitorCentralOnPremSiteModal(${csEscape(JSON.stringify(site))}, 'clients')" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this client's site (set a min-client floor)">Monitor</button>`);
+            ? `<button onclick="csMonitorCentralOnPremSiteModal(${csEscape(JSON.stringify(site))}, 'clients')" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-emerald-100" title="Edit monitoring / min-client threshold">✓ Site monitored${_minLbl}</button>`
+            : `<button onclick="csMonitorCentralOnPremSiteModal(${csEscape(JSON.stringify(site))}, 'clients')" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-slate-200" title="Monitor this client's site (set a min-client floor)">Monitor</button>`);
         return { host: cl.hostname || cl.mac || '—', ip: cl.ip || '—', mac: cl.mac || '—',
                  site: cl.site || '—', os: cl.os || '—', status: cl.status || 'unknown',
                  monitored: !!isMon, btn };
@@ -3501,8 +3501,8 @@ async function csRenderCentralOnPremHardware() {
         const site = d.site || '';
         const isMon = id && monSet.has(`${id}::${site}`);
         const btn = !id ? '—' : (isMon
-            ? `<button onclick="csToggleMonitorOnPremHardware(${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, ${csEscape(JSON.stringify(dt))}, ${csEscape(JSON.stringify(site))}, false)" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this device">✓ Monitored</button>`
-            : `<button onclick="csToggleMonitorOnPremHardware(${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, ${csEscape(JSON.stringify(dt))}, ${csEscape(JSON.stringify(site))}, true)" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this device (alerts on the dashboard when it goes down)">Monitor</button>`);
+            ? `<button onclick="csToggleMonitorOnPremHardware(${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, ${csEscape(JSON.stringify(dt))}, ${csEscape(JSON.stringify(site))}, false)" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this device">✓ Monitored</button>`
+            : `<button onclick="csToggleMonitorOnPremHardware(${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, ${csEscape(JSON.stringify(dt))}, ${csEscape(JSON.stringify(site))}, true)" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-slate-200" title="Monitor this device (alerts on the dashboard when it goes down)">Monitor</button>`);
         return { name, type: dt || '—', model: d.model || '—', site: site || '—',
                  status: d.status || 'unknown', monitored: !!isMon, btn };
     });
@@ -3718,7 +3718,7 @@ async function _csRenderDiag(source) {
         r.rawN > 0 ? `${r.rawN} present${r.rawSev ? ' · ' + r.rawSev : ''}` : 'none',
         r.derived != null ? r.derived : '—', r.firing, r.diag].join('\t')));
     window._csDiagCopyText = _cp.join('\n');
-    const copyBtn = `<button onclick="csCopyText(window._csDiagCopyText, this)" class="text-xs font-semibold px-3 py-1.5 rounded-md border border-slate-300 bg-white hover:bg-slate-50 text-slate-700">📋 Copy raw data</button>`;
+    const copyBtn = `<button onclick="csCopyText(window._csDiagCopyText, this)" class="text-xs font-semibold px-3 py-1.5 rounded-full border border-slate-300 bg-white hover:bg-slate-50 text-slate-700">📋 Copy raw data</button>`;
     if (!rows.length) { csSet(`${warn}${legend}${csEmpty(`No monitored checks / ${prod} data to compare.`, `Monitor an alert or insight (${prod} → Alerts / Insights) and let the poller run, then compare here.`)}`); return; }
     csSet(`<div class="space-y-4">${warn}${legend}<div class="hpe-card rounded-lg p-5 shadow-sm"><div class="flex justify-end mb-2">${copyBtn}</div>${csCentralTable('central-diag', cols, rows, { caption: `${rows.length} check × site row(s) — raw ${prod} vs derived dashboard status` })}</div></div>`);
 }
@@ -3804,7 +3804,7 @@ function _csMistTableBuild(id) {
     let bar = '';
     if (monOf) {
         const nMon = rows.filter(r => monOf(r)).length;
-        const mk = (val, label) => `<button onclick="csMistFilter('${csEscape(id)}','${val}')" class="px-2.5 py-1 rounded-md text-xs font-bold border ${filter === val ? 'bg-navy/10 text-navy border-navy' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${label}</button>`;
+        const mk = (val, label) => `<button onclick="csMistFilter('${csEscape(id)}','${val}')" class="px-2.5 py-1 rounded-full text-xs font-bold border ${filter === val ? 'bg-navy/10 text-navy border-navy' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${label}</button>`;
         bar = `<div class="flex items-center gap-2 mb-3">
             <span class="text-xs text-slate-500 font-semibold">Monitored:</span>
             ${mk('all', `All (${rows.length})`)}${mk('mon', `On (${nMon})`)}${mk('unmon', `Off (${rows.length - nMon})`)}
@@ -3850,8 +3850,8 @@ async function csRenderMist() {
         const nInsights = (insightsBySite[name] || 0) + globalInsights;
         const _minLbl = minBySite[name] ? ` · min ${csEscape(String(minBySite[name]))}` : '';
         const btn = isMon
-            ? `<button onclick="csMonitorMistSiteModal(${csEscape(JSON.stringify(name))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Edit monitoring / min-client threshold">✓ Monitored${_minLbl}</button>`
-            : `<button onclick="csMonitorMistSiteModal(${csEscape(JSON.stringify(name))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this site's client count (set a min-client floor)">Monitor</button>`;
+            ? `<button onclick="csMonitorMistSiteModal(${csEscape(JSON.stringify(name))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-emerald-100" title="Edit monitoring / min-client threshold">✓ Monitored${_minLbl}</button>`
+            : `<button onclick="csMonitorMistSiteModal(${csEscape(JSON.stringify(name))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-slate-200" title="Monitor this site's client count (set a min-client floor)">Monitor</button>`;
         return { name, health: st.health_score, clients: st.wireless_clients != null ? st.wireless_clients : 0,
                  alerts: nAlerts, insights: nInsights, monitored: isMon, btn: name ? btn : '' };
     });
@@ -3899,10 +3899,10 @@ window.csMonitorMistSiteModal = async function (siteName, rerender) {
                 </div>
                 <div id="cs-monitor-mist-status" class="text-xs text-slate-500 hidden"></div>
                 <div class="pt-2 flex justify-between gap-3">
-                    ${isMon ? `<button onclick="csSaveMistMonitorSite(${csEscape(JSON.stringify(siteName))}, false, null)" class="px-4 py-2 text-sm font-medium text-rose-600 hover:text-rose-800 border border-rose-200 rounded-md">Stop monitoring</button>` : `<span></span>`}
+                    ${isMon ? `<button onclick="csSaveMistMonitorSite(${csEscape(JSON.stringify(siteName))}, false, null)" class="px-4 py-2 text-sm font-medium text-rose-600 hover:text-rose-800 border border-rose-200 rounded-full">Stop monitoring</button>` : `<span></span>`}
                     <div class="flex gap-3">
                         <button onclick="this.closest('#cs-monitor-mist-site-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
-                        <button id="cs-monitor-mist-save" class="bg-emerald-100 hover:bg-emerald-200 text-emerald-800 border border-emerald-300 px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">${isMon ? 'Save' : 'Start monitoring'}</button>
+                        <button id="cs-monitor-mist-save" class="bg-emerald-100 hover:bg-emerald-200 text-emerald-800 border border-emerald-300 px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm">${isMon ? 'Save' : 'Start monitoring'}</button>
                     </div>
                 </div>
             </div>
@@ -3981,8 +3981,8 @@ async function csRenderMistAlerts() {
         const site = (a.site && a.site !== '—') ? a.site : '';
         const isMon = id && monSet.has(`${id}::${site}`);
         const btn = !id ? '—' : (isMon
-            ? `<button onclick="csToggleMistMonitorCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this alert at ${csEscape(site || 'all sites')}">✓ Monitored</button>`
-            : `<button onclick="csToggleMistMonitorCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true, ${csEscape(JSON.stringify(site))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this alert at ${csEscape(site || 'all sites')}">Monitor</button>`);
+            ? `<button onclick="csToggleMistMonitorCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this alert at ${csEscape(site || 'all sites')}">✓ Monitored</button>`
+            : `<button onclick="csToggleMistMonitorCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true, ${csEscape(JSON.stringify(site))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-slate-200" title="Monitor this alert at ${csEscape(site || 'all sites')}">Monitor</button>`);
         return { name: a.name || '—', site: a.site || '—', severity: a.severity || 'warning',
                  category: a.category || '—', status: a.status || 'active', monitored: !!isMon, btn };
     });
@@ -4019,8 +4019,8 @@ async function csRenderMistInsights() {
         const site = i.site || '';
         const isMon = id && monSet.has(`${id}::${site}`);
         const btn = !id ? '—' : (isMon
-            ? `<button onclick="csToggleMistMonitorCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this insight at ${csEscape(site || 'all sites')}">✓ Monitored</button>`
-            : `<button onclick="csToggleMistMonitorCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true, ${csEscape(JSON.stringify(site))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this insight at ${csEscape(site || 'all sites')}">Monitor</button>`);
+            ? `<button onclick="csToggleMistMonitorCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this insight at ${csEscape(site || 'all sites')}">✓ Monitored</button>`
+            : `<button onclick="csToggleMistMonitorCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true, ${csEscape(JSON.stringify(site))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-slate-200" title="Monitor this insight at ${csEscape(site || 'all sites')}">Monitor</button>`);
         return { name: i.name || '—', category: i.category || '—', site: i.site || '—',
                  monitored: !!isMon, btn };
     });
@@ -4075,8 +4075,8 @@ async function csRenderMistClients() {
         const isMon = site && monitored.has(String(site));
         const _minLbl = site && minBySite[site] ? ` · min ${csEscape(String(minBySite[site]))}` : '';
         const btn = !site ? '—' : (isMon
-            ? `<button onclick="csMonitorMistSiteModal(${csEscape(JSON.stringify(site))}, 'clients')" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Edit monitoring / min-client threshold">✓ Site monitored${_minLbl}</button>`
-            : `<button onclick="csMonitorMistSiteModal(${csEscape(JSON.stringify(site))}, 'clients')" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this client's site (set a min-client floor)">Monitor</button>`);
+            ? `<button onclick="csMonitorMistSiteModal(${csEscape(JSON.stringify(site))}, 'clients')" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-emerald-100" title="Edit monitoring / min-client threshold">✓ Site monitored${_minLbl}</button>`
+            : `<button onclick="csMonitorMistSiteModal(${csEscape(JSON.stringify(site))}, 'clients')" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-slate-200" title="Monitor this client's site (set a min-client floor)">Monitor</button>`);
         return { host: cl.hostname || cl.mac || '—', ip: cl.ip || '—', mac: cl.mac || '—',
                  site: cl.site || '—', os: cl.os || '—', status: cl.status || 'unknown',
                  monitored: !!isMon, btn };
@@ -4116,8 +4116,8 @@ async function csRenderMistHardware() {
         const site = d.site || '';
         const isMon = id && monSet.has(`${id}::${site}`);
         const btn = !id ? '—' : (isMon
-            ? `<button onclick="csToggleMistMonitorHardware(${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, ${csEscape(JSON.stringify(dt))}, ${csEscape(JSON.stringify(site))}, false)" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this device">✓ Monitored</button>`
-            : `<button onclick="csToggleMistMonitorHardware(${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, ${csEscape(JSON.stringify(dt))}, ${csEscape(JSON.stringify(site))}, true)" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this device (alerts on the dashboard when it goes down)">Monitor</button>`);
+            ? `<button onclick="csToggleMistMonitorHardware(${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, ${csEscape(JSON.stringify(dt))}, ${csEscape(JSON.stringify(site))}, false)" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this device">✓ Monitored</button>`
+            : `<button onclick="csToggleMistMonitorHardware(${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, ${csEscape(JSON.stringify(dt))}, ${csEscape(JSON.stringify(site))}, true)" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-slate-200" title="Monitor this device (alerts on the dashboard when it goes down)">Monitor</button>`);
         return { name, type: dt || '—', model: d.model || '—', site: site || '—',
                  status: d.status || 'unknown', monitored: !!isMon, btn };
     });
@@ -4174,7 +4174,7 @@ async function csRenderConfig() {
       <h3 class="text-sm font-bold text-slate-500 mb-2">API Config Push ${helpIcon('cs', null, 'Simulations help')}</h3>
       <p class="text-xs text-slate-500 mb-2">Paste a JSON config object to push to all spokes (unwrapped at the spoke's <code>_apply_hub_config</code>).</p>
       <textarea id="cs-configpush" rows="10" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-xs font-mono outline-none focus:ring-2 focus:ring-green-500" placeholder='{ "key": "value" }'></textarea>
-      <div class="mt-3 flex justify-end"><button onclick="csSaveConfigPush()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-5 py-2 rounded-md text-sm font-bold shadow-sm">Push Config</button></div>
+      <div class="mt-3 flex justify-end"><button onclick="csSaveConfigPush()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-5 py-2 rounded-full text-sm font-bold shadow-sm">Push Config</button></div>
     </div>`;
 
     // per-spoke config state (desired vs applied) — best-effort read from cache.
@@ -4488,8 +4488,8 @@ async function csRenderConfigSimulation() {
       <p class="text-xs text-slate-500 mb-3">Edit the labeled fields. Saved as the hub-managed <code>sim_conf_override</code> INI and pushed to the spoke (merged on top of the repo's simulation.conf). Clearing a field reverts it to the repo default.</p>
       <div id="cs-ini-sections">${simBody}</div>
       <div class="flex justify-end items-center gap-3 mt-4">
-        <button onclick="csSaveSimConfStructured()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save</button>
-        <button onclick="csRenderConfigSimulation()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-md text-sm font-bold">Refresh</button>
+        <button onclick="csSaveSimConfStructured()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-5 py-2 rounded-full text-sm font-bold shadow-sm">Save</button>
+        <button onclick="csRenderConfigSimulation()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-full text-sm font-bold">Refresh</button>
       </div>
     </div>`;
 
@@ -5018,10 +5018,10 @@ function csRenderSimQuotaEditor() {
           <h3 class="text-sm font-bold text-slate-500">Engine Config ${helpIcon('cs', null, 'Simulations help')}${helpIcon('alert-generation', null, 'How to generate each alert (negative sims): config + quota settings')}</h3>
           <div class="flex justify-end gap-2">
             ${window._csIgnoreGlobalQuotas
-              ? `<button onclick="csToggleIgnoreGlobalQuotas()" title="This tenant ignores the platform-wide Sim Quota defaults — only its own rows apply. Click to use global defaults again." class="bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-300 px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Global Defaults: Ignored</button>`
-              : `<button onclick="csToggleIgnoreGlobalQuotas()" title="This tenant inherits the platform-wide Sim Quota defaults, merged with its own rows. Click to ignore them." class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Global Defaults: On</button>`}
-            <button onclick="csSimQuotaAdd()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">+ Add Quota</button>
-            <button onclick="csSimQuotaSave()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Quotas</button>
+              ? `<button onclick="csToggleIgnoreGlobalQuotas()" title="This tenant ignores the platform-wide Sim Quota defaults — only its own rows apply. Click to use global defaults again." class="bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-300 px-4 py-1.5 rounded-full text-sm font-bold shadow-sm">Global Defaults: Ignored</button>`
+              : `<button onclick="csToggleIgnoreGlobalQuotas()" title="This tenant inherits the platform-wide Sim Quota defaults, merged with its own rows. Click to ignore them." class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-full text-sm font-bold shadow-sm">Global Defaults: On</button>`}
+            <button onclick="csSimQuotaAdd()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-full text-sm font-bold shadow-sm">+ Add Quota</button>
+            <button onclick="csSimQuotaSave()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-full text-sm font-bold shadow-sm">Save Quotas</button>
           </div>
         </div>
         <p class="text-xs text-slate-500 mb-2">Link a monitored alert or insight (Central → Alerts/Insights → Monitor) to the simulation that produces it, then set how many online clients the engine keeps running that sim in the chosen site. The engine auto-selects from the online pool and self-heals when a runner dies. <span class="font-semibold">Re-home</span> lets it borrow runners from other sites (re-homing their <span class="font-mono">wsite</span>) when this site's pool can't fill the count. Sims + sites come from this tenant's <span class="font-semibold">Config Editor</span> (simulation.conf) and Central site mappings.</p>
@@ -5201,8 +5201,8 @@ function csPoolConfigCardHtml() {
         <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
           <h3 class="text-sm font-bold text-slate-500">Pool &amp; SSID</h3>
           <div class="flex justify-end gap-2">
-            <button onclick="csPoolCellAdd()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">+ Add SSID</button>
-            <button onclick="csSavePoolConfig()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Pool</button>
+            <button onclick="csPoolCellAdd()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-full text-sm font-bold shadow-sm">+ Add SSID</button>
+            <button onclick="csSavePoolConfig()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-full text-sm font-bold shadow-sm">Save Pool</button>
           </div>
         </div>
         <p class="text-xs text-slate-500 mb-2"><code>1X</code> auth uses <code>dot1x_eap</code> and <code>dot1x_password</code> from the Simulation config; PEAP falls back to the SSID Ssidpw when the Dot1x Password is empty. Set a 1X cell's <span class="font-semibold">Account location</span> to have the engine create each assigned client's account in Entra ID, the tenant LDAP OU or ClearPass with a random vaulted password (see NAC → My Users).</p>
@@ -5870,7 +5870,7 @@ async function csRenderSimQuotaState() {
             return `<div class="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-emerald-700"${at ? ` title="Achieved ${csEscape(at)}"` : ''}>
                 <span class="font-semibold">✅ known-good:</span>
                 <span>${csEscape(String(n))} clients · stable in ${csEscape(stable)} · knobs: ${knobStr}</span>
-                <button onclick="csResetToKnownGood(${csEscape(JSON.stringify(ak))})" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-2 py-0.5 rounded text-xs font-bold">Reset to known-good</button>
+                <button onclick="csResetToKnownGood(${csEscape(JSON.stringify(ak))})" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-2 py-0.5 rounded-full text-xs font-bold">Reset to known-good</button>
             </div>`;
         };
         const rows = eff.map(q => {
@@ -6055,9 +6055,9 @@ async function csRenderSimQuotaState() {
             <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
               <h3 class="text-sm font-bold text-slate-500">Engine State ${helpIcon('cs', null, 'Simulations help')}</h3>
               <div class="flex gap-2">
-                ${kgCount ? `<button onclick="csResetToKnownGood('')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-md text-sm font-bold shadow-sm" title="Restore every alert with a recorded known-good operating point, then hold ~1h before resuming learning">✅ Reset ALL to known-good</button>` : ''}
-                <button onclick="csResetSimQuota()" class="bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 px-3 py-1.5 rounded-md text-sm font-bold shadow-sm" title="Clear ALL engine assignments and re-shuffle every client from scratch">↻ Reset &amp; Reshuffle</button>
-                <button onclick="csRenderSimQuotaState()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-md text-sm font-bold shadow-sm">↻ Refresh</button>
+                ${kgCount ? `<button onclick="csResetToKnownGood('')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-full text-sm font-bold shadow-sm" title="Restore every alert with a recorded known-good operating point, then hold ~1h before resuming learning">✅ Reset ALL to known-good</button>` : ''}
+                <button onclick="csResetSimQuota()" class="bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 px-3 py-1.5 rounded-full text-sm font-bold shadow-sm" title="Clear ALL engine assignments and re-shuffle every client from scratch">↻ Reset &amp; Reshuffle</button>
+                <button onclick="csRenderSimQuotaState()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-full text-sm font-bold shadow-sm">↻ Refresh</button>
               </div>
             </div>
             <p class="text-xs text-slate-500 mb-3">Live SimQuotaEngine ledger — which clients are currently assigned to each effective quota. The engine tops up to the target count from the online pool each 60s sweep; amber = under-filled.</p>
@@ -6141,7 +6141,7 @@ async function csRenderEngineDiag() {
           <div class="hpe-card rounded-lg p-5 shadow-sm">
             <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
               <h3 class="text-sm font-bold text-slate-500">Engine Diagnostic ${helpIcon('cs', null, 'Simulations help')}</h3>
-              <button onclick="csRenderEngineDiag()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-md text-sm font-bold shadow-sm">↻ Refresh</button>
+              <button onclick="csRenderEngineDiag()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-full text-sm font-bold shadow-sm">↻ Refresh</button>
             </div>
             <p class="text-xs text-slate-500 mb-3">Why each quota fills or under-fills, from the engine's LAST 60s sweep. <b>Free-eligible</b> = pool clients this quota could still take (non-zero on an underfilled quota = a real placement bug, flagged red); <b>Blocked</b> = clients excluded this quota, by reason. Refresh after a sweep.</p>
             <div class="mb-4 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
@@ -6592,7 +6592,7 @@ function csRenderPxmxSiteMapEditor() {
       <div class="hpe-card rounded-lg p-5 shadow-sm">
         <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
           <h3 class="text-sm font-bold text-slate-500">Server to Site Assignments ${helpIcon('cs', null, 'Simulations help')}</h3>
-          <button onclick="csPxmxSiteSave()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Assignments</button>
+          <button onclick="csPxmxSiteSave()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-full text-sm font-bold shadow-sm">Save Assignments</button>
         </div>
         <p class="text-xs text-slate-500 mb-2">Assign <span class="font-semibold">every</span> pxmx server to a pool: a <span class="font-semibold">Site Pool</span> (RF chamber — its clients are physically at that site and only run that site's SSID) or the <span class="font-semibold">Tenant-Wide Pool</span> (site-based SSID — its clients are assignable to any site/SSID by the Pool &amp; SSID placement). A deployment can mix both. Pools are always per-tenant. A client's own wsite override still wins; the bucket-default wsite is the fallback.</p>
         <div class="space-y-2 mt-2" id="cs-px-rows">${rowHtml || '<div class="text-xs text-slate-500 italic">No pxmx servers connected and no assignments saved. A server appears here once its agent connects to this spoke.</div>'}</div>
@@ -6628,8 +6628,8 @@ function csSiteLinksCardHtml() {
         <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
           <h3 class="text-sm font-bold text-slate-500">Site Links (wsite ↔ Central)</h3>
           <div class="flex justify-end gap-2">
-            <button onclick="csSiteLinkAdd()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">+ Add Link</button>
-            <button onclick="csSiteLinkSave()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Links</button>
+            <button onclick="csSiteLinkAdd()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-full text-sm font-bold shadow-sm">+ Add Link</button>
+            <button onclick="csSiteLinkSave()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-full text-sm font-bold shadow-sm">Save Links</button>
           </div>
         </div>
         <p class="text-xs text-slate-500 mb-3">Tie a simulation <b>wsite</b> (the SSID prefix, e.g. <span class="font-mono">MIA</span>) to its <b>Central site</b> (e.g. <span class="font-mono">Miami</span>). The link <b>Name</b> is what shows in the assignment dropdown below, and it lets an alert-driven quota at that site match where the alert fires in Central.</p>
@@ -6732,7 +6732,7 @@ function csConfigSourceCard(source, cfg) {
     const repo = cfg.repo_url || '';
     const branch = cfg.repo_branch || 'main';
     const btn = (val, label, active) =>
-        `<button onclick="csSetConfigSource('${val}')" class="px-3 py-1.5 rounded-md text-sm font-bold border transition-colors ${active ? 'bg-brand/10 text-primary-text border-brand' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'}">${label}</button>`;
+        `<button onclick="csSetConfigSource('${val}')" class="px-3 py-1.5 rounded-full text-sm font-bold border transition-colors ${active ? 'bg-brand/10 text-primary-text border-brand' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'}">${label}</button>`;
     let status;
     if (isHub) {
         status = '<span class="text-emerald-700">Hub-owned — the GitHub sync is ignored; your edits are authoritative and are never reverted by a repo pull.</span>';
@@ -6881,9 +6881,9 @@ function csUORenderCards() {
             </span>
             <div class="flex gap-2" onclick="event.stopPropagation()">
               <button data-uo-user="${csEscape(u)}" onclick="csUODownload(this)"
-                      class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-2 py-1 rounded-md text-xs font-bold">Download</button>
+                      class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-2 py-1 rounded-full text-xs font-bold">Download</button>
               <button data-uo-user="${csEscape(u)}" onclick="csUORemove(this)"
-                      class="bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded-md text-xs font-bold">✕ Remove</button>
+                      class="bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded-full text-xs font-bold">✕ Remove</button>
             </div>
           </div>
           <div class="cs-uo-body hidden px-3 pb-3">
@@ -6916,12 +6916,12 @@ function csRenderUserOverridesCard(uo, uoErr) {
       </div>
       <p class="text-xs text-slate-500 mb-3">Per-user simulation overrides — pin a hostname to specific sim settings (a <code>[username]</code> section overrides the simulation profile for that user).</p>
       <div class="flex justify-end items-center gap-3 mb-3">
-        <button onclick="csUOAdd()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold">＋ Add User</button>
-        <button onclick="csUOSave()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-sm font-bold">Save</button>
+        <button onclick="csUOAdd()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-full text-sm font-bold">＋ Add User</button>
+        <button onclick="csUOSave()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-full text-sm font-bold">Save</button>
       </div>
       <div id="cs-uo-cards">${csUORenderCards()}</div>
       <div class="flex justify-end mt-3">
-        <button onclick="csRenderConfigSimulation()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-3 py-1.5 rounded-md text-sm font-bold">Refresh</button>
+        <button onclick="csRenderConfigSimulation()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-3 py-1.5 rounded-full text-sm font-bold">Refresh</button>
       </div>
     </div>`;
 }
@@ -7415,7 +7415,7 @@ function csPoolSelectHtml(selected) {
         </select>
         <span id="cs-ap-pool-note" class="text-xs text-slate-500">loading pools…</span>
         <button onclick="csPoolAddExisting()" title="Add sim VMs that were provisioned BEFORE a pool was set. New clones join automatically."
-                class="bg-white hover:bg-slate-50 text-slate-600 border border-slate-300 px-2.5 py-1 rounded-md text-xs font-bold">Add existing VMs</button>
+                class="bg-white hover:bg-slate-50 text-slate-600 border border-slate-300 px-2.5 py-1 rounded-full text-xs font-bold">Add existing VMs</button>
       </div>`;
 }
 
@@ -7550,7 +7550,7 @@ async function csProcessingModesCard() {
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <h3 class="text-sm font-bold text-slate-500 mb-2">Processing Modes ${helpIcon('cs', null, 'Simulations help')}</h3>
       <div class="grid grid-cols-1 md:grid-cols-3 gap-3">${fields}</div>
-      <div class="flex justify-end mt-4"><button onclick="csSaveProcessingModes()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save Modes</button></div>
+      <div class="flex justify-end mt-4"><button onclick="csSaveProcessingModes()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-5 py-2 rounded-full text-sm font-bold shadow-sm">Save Modes</button></div>
     </div>`;
 }
 
@@ -7577,7 +7577,7 @@ async function csNotificationsCard() {
       <div class="grid grid-cols-1 gap-3">
         ${f('cs-notif-emails', 'To Emails (comma-separated)', Array.isArray(n.to_emails) ? n.to_emails.join(', ') : (n.to_emails || ''))}
       </div>
-      <div class="mt-4 flex justify-end"><button onclick="csSaveNotifications()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save Notifications</button></div>
+      <div class="mt-4 flex justify-end"><button onclick="csSaveNotifications()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-5 py-2 rounded-full text-sm font-bold shadow-sm">Save Notifications</button></div>
     </div>`;
 }
 
@@ -7721,8 +7721,8 @@ async function csRenderSetupCentralApi() {
         </label>
       </div>
       <div class="flex justify-end gap-2 mt-4">
-        <button onclick="csSaveCentralConn()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold">Save Connection</button>
-        <button onclick="csTestCentral()" class="bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-bold">Test Central</button>
+        <button onclick="csSaveCentralConn()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-sm font-bold">Save Connection</button>
+        <button onclick="csTestCentral()" class="bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm font-bold">Test Central</button>
       </div>
       <div id="cs-csc-test" class="mt-3 text-xs text-slate-500"></div>
     </div>`;
@@ -7737,7 +7737,7 @@ async function csRenderSetupCentralApi() {
       <p class="text-xs text-slate-500 mb-3">Hub-owned site mappings + Aruba Central sim/hardware monitors. Pushed to the spoke as <code>central_sites_config</code> and applied to the spoke's runtime monitoring when hub-managed.</p>
 
       <div class="flex items-center gap-2 mb-2">
-        <button onclick="csLoadCentralAvailable()" class="bg-slate-200 text-slate-700 px-3 py-1.5 rounded-md text-xs font-bold">Load available checks</button>
+        <button onclick="csLoadCentralAvailable()" class="bg-slate-200 text-slate-700 px-3 py-1.5 rounded-full text-xs font-bold">Load available checks</button>
         <span id="cs-csc-catalog-msg" class="text-xs text-slate-500"></span>
       </div>
 
@@ -7754,7 +7754,7 @@ async function csRenderSetupCentralApi() {
       <button onclick="csCscAddHw()" class="mt-2 text-xs text-primary-text font-bold hover:underline">+ Add hardware check</button>
 
       <div class="flex justify-end gap-2 mt-4">
-        <button onclick="csSaveCentralSites()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold">Save Sites &amp; Checks</button>
+        <button onclick="csSaveCentralSites()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-sm font-bold">Save Sites &amp; Checks</button>
       </div>
     </div>`;
 
@@ -8036,8 +8036,8 @@ async function csRenderSetupCentralOnPremApi() {
         </label>
       </div>
       <div class="flex justify-end gap-2 mt-4">
-        <button onclick="csSaveCentralOnPremConn()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold">Save Connection</button>
-        <button onclick="csTestCentralOnPrem()" class="bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-bold">Test Central On-Prem</button>
+        <button onclick="csSaveCentralOnPremConn()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-sm font-bold">Save Connection</button>
+        <button onclick="csTestCentralOnPrem()" class="bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm font-bold">Test Central On-Prem</button>
       </div>
       <div id="cs-cop-csc-test" class="mt-3 text-xs text-slate-500"></div>
     </div>`;
@@ -8052,7 +8052,7 @@ async function csRenderSetupCentralOnPremApi() {
       <p class="text-xs text-slate-500 mb-3">Hub-owned site mappings + Aruba Central sim/hardware monitors. Pushed to the spoke as <code>central_on_prem_sites_config</code> and applied to the spoke's runtime monitoring when hub-managed.</p>
 
       <div class="flex items-center gap-2 mb-2">
-        <button onclick="csLoadCentralOnPremAvailable()" class="bg-slate-200 text-slate-700 px-3 py-1.5 rounded-md text-xs font-bold">Load available checks</button>
+        <button onclick="csLoadCentralOnPremAvailable()" class="bg-slate-200 text-slate-700 px-3 py-1.5 rounded-full text-xs font-bold">Load available checks</button>
         <span id="cs-cop-csc-catalog-msg" class="text-xs text-slate-500"></span>
       </div>
 
@@ -8069,7 +8069,7 @@ async function csRenderSetupCentralOnPremApi() {
       <button onclick="csCopCscAddHw()" class="mt-2 text-xs text-primary-text font-bold hover:underline">+ Add hardware check</button>
 
       <div class="flex justify-end gap-2 mt-4">
-        <button onclick="csSaveCentralOnPremSites()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold">Save Sites &amp; Checks</button>
+        <button onclick="csSaveCentralOnPremSites()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-sm font-bold">Save Sites &amp; Checks</button>
       </div>
     </div>`;
 
@@ -8325,8 +8325,8 @@ async function csRenderSetupMistApi() {
         </label>
       </div>
       <div class="flex justify-end gap-2 mt-4">
-        <button onclick="csSaveMistConn()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold">Save Connection</button>
-        <button onclick="csTestMist()" class="bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-bold">Test Mist</button>
+        <button onclick="csSaveMistConn()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-sm font-bold">Save Connection</button>
+        <button onclick="csTestMist()" class="bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm font-bold">Test Mist</button>
       </div>
       <div id="cs-msc-test" class="mt-3 text-xs text-slate-500"></div>
     </div>`;
@@ -8341,7 +8341,7 @@ async function csRenderSetupMistApi() {
       <p class="text-xs text-slate-500 mb-3">Hub-owned site mappings + Mist sim/hardware monitors. Pushed to the spoke as <code>mist_sites_config</code> and applied to the spoke's runtime monitoring when hub-managed.</p>
 
       <div class="flex items-center gap-2 mb-2">
-        <button onclick="csLoadMistAvailable()" class="bg-slate-200 text-slate-700 px-3 py-1.5 rounded-md text-xs font-bold">Load available checks</button>
+        <button onclick="csLoadMistAvailable()" class="bg-slate-200 text-slate-700 px-3 py-1.5 rounded-full text-xs font-bold">Load available checks</button>
         <span id="cs-msc-catalog-msg" class="text-xs text-slate-500"></span>
       </div>
 
@@ -8358,7 +8358,7 @@ async function csRenderSetupMistApi() {
       <button onclick="csMscAddHw()" class="mt-2 text-xs text-primary-text font-bold hover:underline">+ Add hardware check</button>
 
       <div class="flex justify-end gap-2 mt-4">
-        <button onclick="csSaveMistSites()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold">Save Sites &amp; Checks</button>
+        <button onclick="csSaveMistSites()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-sm font-bold">Save Sites &amp; Checks</button>
       </div>
     </div>`;
 
@@ -8528,7 +8528,7 @@ async function csRenderSetupProxmox() {
         const card = await csHubConfigCard('/tenant/' + csTenant() + '/hub-config');
         const resetBar = `<div class="hpe-card rounded-lg p-5 shadow-sm flex items-center justify-between gap-3">
           <p class="text-xs text-slate-500">Reset every knob on this page to factory defaults. Certified/ignored USB devices + ignored hostnames are preserved (manage those on the USB page).</p>
-          <button onclick="csResetHubConfig()" class="shrink-0 bg-red-100 hover:bg-red-200 text-red-700 px-4 py-2 rounded-md text-sm font-bold">Reset to Default</button>
+          <button onclick="csResetHubConfig()" class="shrink-0 bg-red-100 hover:bg-red-200 text-red-700 px-4 py-2 rounded-full text-sm font-bold">Reset to Default</button>
         </div>`;
         csSet(`<div class="space-y-4">${autoProv}<div class="hpe-card rounded-lg p-5 shadow-sm">
           <h3 class="text-sm font-bold text-slate-500 mb-2">Hub Config ${helpIcon('cs', null, 'Simulations help')}</h3>
@@ -8574,8 +8574,8 @@ async function csRenderSetupGithub() {
           ${f('cs-gh-token', 'GitHub Token ' + (cfg.has_token ? '(set — leave blank to keep)' : '(new)'), '', 'password')}
         </div>
         <div class="flex justify-end gap-2 mt-4">
-          <button onclick="csSaveGithub()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold">Save</button>
-          <button onclick="csClearGithub()" class="bg-red-100 text-red-700 px-4 py-2 rounded-md text-sm font-bold">Clear</button>
+          <button onclick="csSaveGithub()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-sm font-bold">Save</button>
+          <button onclick="csClearGithub()" class="bg-red-100 text-red-700 px-4 py-2 rounded-full text-sm font-bold">Clear</button>
         </div>
       </div></div>`);
 }
@@ -8617,7 +8617,7 @@ async function csRenderSetupSecurity() {
           ${f('cs-sec-timeout', 'Session Timeout (minutes)', cfg.session_timeout_minutes)}
           ${f('cs-sec-provider', 'Auth Provider', cfg.auth_provider)}
         </div>
-        <div class="mt-4 flex justify-end"><button onclick="csSaveSecurity()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold">Save</button></div>
+        <div class="mt-4 flex justify-end"><button onclick="csSaveSecurity()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-sm font-bold">Save</button></div>
       </div></div>`);
 }
 
@@ -8808,7 +8808,7 @@ function csVmHostBanner(opts) {
     return `<div class="mb-4 relative" style="max-width:28rem">
       <div class="flex items-center gap-2">
         <span class="text-xs font-bold text-slate-500">Host</span>
-        <button onclick="csVmHostPanelToggle()" class="flex-1 text-left px-3 py-1.5 rounded-md border border-slate-200 bg-white text-xs font-semibold text-slate-700 hover:bg-slate-50 flex items-center justify-between">
+        <button onclick="csVmHostPanelToggle()" class="flex-1 text-left px-3 py-1.5 rounded-full border border-slate-200 bg-white text-xs font-semibold text-slate-700 hover:bg-slate-50 flex items-center justify-between">
           <span>${csEscape(summary)}</span><span class="text-slate-500">▾</span></button>
         ${(!single && nSel) ? `<button onclick="csVmHostAll()" class="text-xs text-slate-500 hover:text-slate-600 underline">clear</button>` : ''}
       </div>
@@ -8974,16 +8974,16 @@ async function csRenderVmServer() {
       <div class="hpe-card rounded-lg p-5 shadow-sm">
         <p class="text-xs font-bold text-slate-500 mb-2">Fleet Reclone</p>
         <div class="flex items-center gap-2">
-          <button onclick="csFleetReclone()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-md text-xs font-bold" title="Destroy and re-clone every VM in the fleet from its template — all in-VM state is lost">Reclone All</button>
-          <button id="cs-fleet-reclone-stop" onclick="csFleetRecloneStop()" class="hidden bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 px-3 py-1.5 rounded-md text-xs font-bold" title="Stop the running fleet reclone — VMs already in progress finish, the rest are skipped">Stop</button>
-          <button id="cs-fleet-reclone-clear" onclick="csFleetRecloneClear()" class="hidden bg-white hover:bg-slate-50 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold" title="Clear the finished reclone's errors and per-VM log. Refused while a batch is running — stop it first.">Clear errors</button>
+          <button onclick="csFleetReclone()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-full text-xs font-bold" title="Destroy and re-clone every VM in the fleet from its template — all in-VM state is lost">Reclone All</button>
+          <button id="cs-fleet-reclone-stop" onclick="csFleetRecloneStop()" class="hidden bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 px-3 py-1.5 rounded-full text-xs font-bold" title="Stop the running fleet reclone — VMs already in progress finish, the rest are skipped">Stop</button>
+          <button id="cs-fleet-reclone-clear" onclick="csFleetRecloneClear()" class="hidden bg-white hover:bg-slate-50 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-full text-xs font-bold" title="Clear the finished reclone's errors and per-VM log. Refused while a batch is running — stop it first.">Clear errors</button>
         </div>
         <div id="cs-fleet-reclone-progress" class="mt-2 text-xs text-slate-500 space-y-1">No reclone in progress.</div>
       </div>
       <div class="hpe-card rounded-lg p-5 shadow-sm flex flex-col">
         <div class="flex items-center justify-between mb-2">
           <p class="text-xs font-bold text-slate-500">Auto-Provisioning</p>
-          <button id="cs-autoprov-enable-btn" onclick="csToggleAutoProvision()" class="px-3 py-1 rounded-md text-xs font-bold border">Enable</button>
+          <button id="cs-autoprov-enable-btn" onclick="csToggleAutoProvision()" class="px-3 py-1 rounded-full text-xs font-bold border">Enable</button>
         </div>
         <div class="text-xs font-bold text-slate-500 mb-1">Provisioning now</div>
         <div id="cs-autoprov-live" class="text-xs text-slate-500 grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 content-start flex-1 min-h-0 overflow-y-auto">loading…</div>
@@ -9048,8 +9048,8 @@ async function csRenderVmServer() {
         || (typeof isTenantAdmin === 'function' && isTenantAdmin());
     const bulkBar = _canRefresh
         ? `<div class="flex items-center gap-2 flex-wrap">
-             <button onclick="csFleetRefreshTemplates()" class="bg-amber-100 hover:bg-amber-200 text-amber-800 border border-amber-300 px-3 py-1.5 rounded-md text-xs font-bold" title="Distribute a seed template backup from the hub onto the selected host(s): pause auto-provisioning, delete each host's sim VMs + template, qmrestore the seed backup, then resume auto-provisioning.">↻ Refresh Template(s)</button>
-             <button onclick="csUploadTemplate()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200 px-3 py-1.5 rounded-md text-xs font-bold" title="Upload a vzdump template archive (.vma.zst) from your browser straight into the hub Template Repo — for when the source Proxmox host is offline or you only have the archive as a file. Stamped to the current tenant.">⬆ Upload template</button>
+             <button onclick="csFleetRefreshTemplates()" class="bg-amber-100 hover:bg-amber-200 text-amber-800 border border-amber-300 px-3 py-1.5 rounded-full text-xs font-bold" title="Distribute a seed template backup from the hub onto the selected host(s): pause auto-provisioning, delete each host's sim VMs + template, qmrestore the seed backup, then resume auto-provisioning.">↻ Refresh Template(s)</button>
+             <button onclick="csUploadTemplate()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200 px-3 py-1.5 rounded-full text-xs font-bold" title="Upload a vzdump template archive (.vma.zst) from your browser straight into the hub Template Repo — for when the source Proxmox host is offline or you only have the archive as a file. Stamped to the current tenant.">⬆ Upload template</button>
              <span class="text-xs text-slate-500">Select target host(s), then push a seed template backup from the hub onto them. This wipes each target's sim VMs.</span>
              <span id="cs-refresh-status-chip" class="hidden text-xs font-bold px-2 py-1 rounded-full border"></span>
            </div>`
@@ -9307,7 +9307,7 @@ window.csFleetRefreshTemplates = async function () {
                 <div id="cs-refresh-status" class="text-xs text-slate-500 hidden"></div>
                 <div class="pt-2 flex justify-end gap-3">
                     <button onclick="this.closest('#cs-refresh-tpl-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
-                    <button id="cs-refresh-go" class="bg-amber-100 hover:bg-amber-200 text-amber-800 border border-amber-300 px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm ${none ? 'opacity-50 cursor-not-allowed' : ''}" ${none ? 'disabled' : ''}>Refresh</button>
+                    <button id="cs-refresh-go" class="bg-amber-100 hover:bg-amber-200 text-amber-800 border border-amber-300 px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm ${none ? 'opacity-50 cursor-not-allowed' : ''}" ${none ? 'disabled' : ''}>Refresh</button>
                 </div>
             </div>
         </div>`;
@@ -9453,7 +9453,7 @@ window.csUploadTemplate = async function () {
                 <div id="cs-up-status" class="text-xs text-slate-500 font-mono hidden"></div>
                 <div class="pt-2 flex justify-end gap-3">
                     <button onclick="this.closest('#cs-upload-tpl-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
-                    <button id="cs-up-go" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Upload</button>
+                    <button id="cs-up-go" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm">Upload</button>
                 </div>
             </div>
         </div>`;
@@ -9598,7 +9598,7 @@ async function csRenderMyTemplates() {
       <div class="hpe-card rounded-lg overflow-hidden border border-slate-200">
         <div class="flex items-center justify-between px-4 py-2 bg-slate-50 border-b border-slate-200">
           <h3 class="text-sm font-bold text-navy">My Templates <span class="text-slate-500 font-normal">(${templates.length})</span></h3>
-          <button onclick="window.csRenderMyTemplates ? window.csRenderMyTemplates() : csRenderMyTemplates()" class="px-2 py-1 rounded text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200" title="Reload the list of templates backed up to the hub for your tenant.">↻ Refresh</button>
+          <button onclick="window.csRenderMyTemplates ? window.csRenderMyTemplates() : csRenderMyTemplates()" class="px-2 py-1 rounded-full text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200" title="Reload the list of templates backed up to the hub for your tenant.">↻ Refresh</button>
         </div>
         <div class="overflow-x-auto"><table class="w-full text-sm">
           <thead class="bg-white text-xs text-slate-500"><tr>
@@ -9659,7 +9659,7 @@ window.csBackupTemplateToHub = async function (key) {
                 <div id="cs-backup-status" class="text-xs text-slate-500 hidden"></div>
                 <div class="pt-2 flex justify-end gap-3">
                     <button onclick="this.closest('#cs-backup-tpl-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
-                    <button id="cs-backup-go" class="bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-300 px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Back up</button>
+                    <button id="cs-backup-go" class="bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-300 px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm">Back up</button>
                 </div>
             </div>
         </div>`;
@@ -10003,7 +10003,7 @@ async function csRenderVmServerVms() {
     const cats = ['Simulation Clients', 'Other', 'Containers', 'Templates'];
     const grouped = {};
     cats.forEach(c => grouped[c] = vms.filter(v => csVmCategory(v) === c));
-    const tabs = cats.map((c, i) => `<button onclick="csVmVmsTab('${c}')" id="cs-vmtab-${csEscape(c)}" class="px-3 py-1.5 rounded-md text-xs font-bold ${i === 0 ? 'bg-brand/10 text-primary-text border border-brand' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'}">${csEscape(c)} <span class="opacity-60">(${grouped[c].length})</span></button>`).join('');
+    const tabs = cats.map((c, i) => `<button onclick="csVmVmsTab('${c}')" id="cs-vmtab-${csEscape(c)}" class="px-3 py-1.5 rounded-full text-xs font-bold ${i === 0 ? 'bg-brand/10 text-primary-text border border-brand' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'}">${csEscape(c)} <span class="opacity-60">(${grouped[c].length})</span></button>`).join('');
     csVmPage = 1;
     const _initList = grouped['Simulation Clients'] || [];
     const rows = csVmRenderRows(_initList);
@@ -10011,11 +10011,11 @@ async function csRenderVmServerVms() {
     const apPanel = single ? csAutoProvPanel(single) : '';
     csSet(`<div>${csVmHostBanner()}${apPanel}${tabs}
       <div class="flex items-center gap-2 my-3 text-xs text-slate-500">
-        <button onclick="csVmBulk('start_vm')" class="bg-green-100 text-green-700 px-2 py-1 rounded font-bold">Start</button>
-        <button onclick="csVmBulk('stop_vm')" class="bg-amber-100 text-amber-700 px-2 py-1 rounded font-bold">Stop</button>
-        <button onclick="csVmBulk('reboot_vm')" class="bg-slate-200 text-slate-700 px-2 py-1 rounded font-bold">Reboot</button>
-        <button onclick="csVmBulk('reclone_vm')" class="bg-blue-100 text-blue-700 px-2 py-1 rounded font-bold" title="Wipe and re-clone the selected VMs from template (discards current disk state)">Reclone</button>
-        <button onclick="csVmBulk('delete_vm')" class="bg-red-100 text-red-700 px-2 py-1 rounded font-bold" title="Permanently delete the selected VMs from Proxmox">Delete</button>
+        <button onclick="csVmBulk('start_vm')" class="bg-green-100 text-green-700 px-2 py-1 rounded-full font-bold">Start</button>
+        <button onclick="csVmBulk('stop_vm')" class="bg-amber-100 text-amber-700 px-2 py-1 rounded-full font-bold">Stop</button>
+        <button onclick="csVmBulk('reboot_vm')" class="bg-slate-200 text-slate-700 px-2 py-1 rounded-full font-bold">Reboot</button>
+        <button onclick="csVmBulk('reclone_vm')" class="bg-blue-100 text-blue-700 px-2 py-1 rounded-full font-bold" title="Wipe and re-clone the selected VMs from template (discards current disk state)">Reclone</button>
+        <button onclick="csVmBulk('delete_vm')" class="bg-red-100 text-red-700 px-2 py-1 rounded-full font-bold" title="Permanently delete the selected VMs from Proxmox">Delete</button>
         ${moreQueued > 0 ? `<span class="text-slate-500" title="Auto-provisioning has more VMs queued than are shown yet">· ${moreQueued} more queued</span>` : ''}
       </div>
       <div id="cs-vm-list">${csVmTable(rows)}${csVmPager(_initList.length)}</div>
@@ -10479,24 +10479,24 @@ function csVmRow(v) {
     const busy = isPlaceholder || String(v.prov_status || '').toLowerCase() === 'tearing_down';
     // Route by composite key (spoke|host|vmid) — VMIDs can collide across hosts.
     const act = (label, action, cls) => busy
-        ? `<button disabled title="VM is being deleted" class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-500 cursor-not-allowed">${label}</button>`
-        : `<button onclick="csVmAction('${key}','${action}')" class="px-2 py-0.5 rounded text-xs font-bold ${cls}">${label}</button>`;
+        ? `<button disabled title="VM is being deleted" class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-500 cursor-not-allowed">${label}</button>`
+        : `<button onclick="csVmAction('${key}','${action}')" class="px-2 py-0.5 rounded-full text-xs font-bold ${cls}">${label}</button>`;
     // VNC console (mirrors the pxmx VM table's 🖥 Console button). qemu VMs
     // only — lxc containers have no VNC display, and templates aren't runnable.
     // Disabled while tearing_down. The opener resolves the VM's owning cs
     // spoke + host from the row so VNC_START routes to the right agent.
     const isLxc = String(v.type || '').toLowerCase() === 'lxc';
     const consoleBtn = (busy || isLxc || v.is_template)
-        ? `<button disabled title="${isLxc ? 'Containers have no VNC console' : (v.is_template ? 'Templates have no console' : 'VM is being deleted')}" class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-500 cursor-not-allowed">🖥 Console</button>`
-        : `<button onclick="csOpenVmConsole('${key}')" class="px-2 py-0.5 rounded text-xs font-bold bg-slate-800 text-slate-100" title="Open a noVNC console to this VM">🖥 Console</button>`;
+        ? `<button disabled title="${isLxc ? 'Containers have no VNC console' : (v.is_template ? 'Templates have no console' : 'VM is being deleted')}" class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-500 cursor-not-allowed">🖥 Console</button>`
+        : `<button onclick="csOpenVmConsole('${key}')" class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-800 text-slate-100" title="Open a noVNC console to this VM">🖥 Console</button>`;
     const menuBtn = busy
-        ? `<button disabled class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-500 cursor-not-allowed">⋯ Actions ▾</button>`
-        : `<button onclick="event.stopPropagation(); csToggleVmActionMenu(event, '${key}')" class="px-2 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-700 hover:bg-slate-200">⋯ Actions ▾</button>`;
+        ? `<button disabled class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-500 cursor-not-allowed">⋯ Actions ▾</button>`
+        : `<button onclick="event.stopPropagation(); csToggleVmActionMenu(event, '${key}')" class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-700 hover:bg-slate-200">⋯ Actions ▾</button>`;
     // Tenant-admin/admin: back a TEMPLATE VM up to the hub Template Repo. This is
     // the in-module equivalent of the Global-Admin "⬆ Back up to Hub" — the only
     // path a tenant admin (no Setup/Hypervisors nav) has to seed a template.
     const backupBtn = (!busy && v.is_template && csCanManageTemplates())
-        ? `<button onclick="csBackupTemplateToHub('${key}')" title="vzdump this template and store a copy in the hub Template Repo (My Templates). The archive is deleted from the chosen storage after streaming." class="px-2 py-0.5 rounded text-xs font-bold bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-300">⬆ Back up to Hub</button>`
+        ? `<button onclick="csBackupTemplateToHub('${key}')" title="vzdump this template and store a copy in the hub Template Repo (My Templates). The archive is deleted from the chosen storage after streaming." class="px-2 py-0.5 rounded-full text-xs font-bold bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-300">⬆ Back up to Hub</button>`
         : '';
     const selCell = isPlaceholder
         ? `<span class="inline-block w-3.5"></span> ${vid}`
@@ -10550,7 +10550,7 @@ function csVmPager(total) {
     const opts = CS_VM_PAGE_SIZES.map(n =>
         `<option value="${n}"${String(n) === String(csVmPageSize) ? ' selected' : ''}>${n}</option>`).join('');
     const btn = (label, delta, disabled) =>
-        `<button onclick="csVmGoPage(${delta})" ${disabled ? 'disabled' : ''} class="px-2 py-0.5 rounded border ${disabled ? 'border-slate-100 text-slate-500 cursor-not-allowed' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}">${label}</button>`;
+        `<button onclick="csVmGoPage(${delta})" ${disabled ? 'disabled' : ''} class="px-2 py-0.5 rounded-full border ${disabled ? 'border-slate-100 text-slate-500 cursor-not-allowed' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}">${label}</button>`;
     return `<div class="flex flex-wrap items-center justify-between gap-2 mt-3 text-xs text-slate-500">
         <span>Showing ${first.toLocaleString()}–${last.toLocaleString()} of ${total.toLocaleString()}</span>
         <div class="flex items-center gap-2">
@@ -10761,7 +10761,7 @@ async function csRenderVmServerTerminal() {
       <div class="hpe-card rounded-lg overflow-hidden shadow-sm" style="background:#1e1e1e">
         <div class="px-4 py-2 flex justify-between items-center bg-[#2d2d2d] text-slate-200">
           <div class="text-sm font-mono">⌨️ ${csEscape(hostLabel)} — root shell ${helpIcon('cs', null, 'Simulations help')}</div>
-          <button onclick="csVmShellReconnect()" class="text-xs px-2 py-1 rounded bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand font-bold">↻ Reconnect</button>
+          <button onclick="csVmShellReconnect()" class="text-xs px-2 py-1 rounded-full bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand font-bold">↻ Reconnect</button>
         </div>
         <div id="cs-vm-term-body" style="height:60vh" class="p-1"></div>
         <div id="cs-vm-term-status" class="px-4 py-1 text-xs text-slate-400 bg-[#2d2d2d] font-mono">Connecting…</div>
@@ -11008,8 +11008,8 @@ async function csRenderVmServerUsb() {
       <td class="px-3 py-2 text-center text-sm font-bold text-slate-700">${g.items.length}</td>
       <td class="px-3 py-2"><div class="flex gap-1 items-center">
         <select class="cs-usb-row-type text-xs border border-slate-200 rounded px-1 py-0.5 bg-white"><option value="">—</option><option value="wireless">wireless</option><option value="wired">wired</option></select>
-        <button onclick="csUsbCertifyRow(this, '${csEscape(g.vid)}','${csEscape(g.pid)}')" class="bg-green-100 text-green-700 px-2 py-0.5 rounded text-xs font-bold">Certify</button>
-        <button onclick="csUsbVidpid('${csEscape(g.vid)}','${csEscape(g.pid)}','ignore')" class="bg-slate-200 text-slate-600 px-2 py-0.5 rounded text-xs font-bold">Ignore</button>
+        <button onclick="csUsbCertifyRow(this, '${csEscape(g.vid)}','${csEscape(g.pid)}')" class="bg-green-100 text-green-700 px-2 py-0.5 rounded-full text-xs font-bold">Certify</button>
+        <button onclick="csUsbVidpid('${csEscape(g.vid)}','${csEscape(g.pid)}','ignore')" class="bg-slate-200 text-slate-600 px-2 py-0.5 rounded-full text-xs font-bold">Ignore</button>
       </div></td>
     </tr>`; }).join('');
     // Ignored (this tenant) — un-ignore restores the adapter to service. Uses the
@@ -11022,7 +11022,7 @@ async function csRenderVmServerUsb() {
         return `<tr>
       <td class="px-3 py-2 text-sm">${csEscape(nm || '—')}</td>
       <td class="px-3 py-2 font-mono text-xs">${csEscape(vid)}:${csEscape(pid)}</td>
-      <td class="px-3 py-2"><button onclick="csUsbVidpid('${csEscape(vid)}','${csEscape(pid)}','remove')" class="bg-slate-200 text-slate-600 hover:bg-green-100 hover:text-green-700 px-2 py-0.5 rounded text-xs font-bold">Un-ignore</button></td>
+      <td class="px-3 py-2"><button onclick="csUsbVidpid('${csEscape(vid)}','${csEscape(pid)}','remove')" class="bg-slate-200 text-slate-600 hover:bg-green-100 hover:text-green-700 px-2 py-0.5 rounded-full text-xs font-bold">Un-ignore</button></td>
     </tr>`;
     }).join('');
     // Diagnostic: when no dongles are present, show where the cs spoke put
@@ -11043,7 +11043,7 @@ async function csRenderVmServerUsb() {
     // differ only in which state store they clear, so the operator can keep one.
     const _usbSid = csEscape(String((h && h.spoke_id) || ''));
     const _usbHost = csEscape(String((h && (h.hostname || h.spoke_hostname || h.spoke_id)) || ''));
-    const _btnCls = 'text-xs font-bold px-3 py-1.5 rounded-md border border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100 whitespace-nowrap';
+    const _btnCls = 'text-xs font-bold px-3 py-1.5 rounded-full border border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100 whitespace-nowrap';
     const _clearQtBtn = `<button onclick="csClearUsbQuarantine('${_usbSid}','${_usbHost}')" title="Clear the dmesg quarantine list (incl. the 5-strike permanent flag) + force-release driver-bound dongles on this host. Leaves the exclusion list intact." class="${_btnCls}">Clear Quarantine</button>`;
     const _clearExclBtn = `<button onclick="csClearUsbExclusions('${_usbSid}','${_usbHost}')" title="Clear the destroy-fail bus exclusions (repeated spin-up/down trips these) + force-release driver-bound dongles on this host. Leaves the quarantine list intact." class="${_btnCls}">Clear Exclusion List</button>`;
     csSet(`<div>${csVmHostBanner({ single: true })}
@@ -11208,7 +11208,7 @@ async function csRenderVmServerQueue(live) {
       <td class="px-3 py-2 text-slate-500 text-xs">${csEscape(c.age_secs != null ? c.age_secs + 's' : '—')}</td>
       <td class="px-3 py-2 text-slate-500 text-xs">${csEscape(c.message || '—')}</td>
       <td class="px-3 py-2"><button data-cs-cmd-id="${csEscape(c.id || '')}" onclick="csCmdDelete(this)"
-        class="bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded-md text-xs font-bold">Delete</button></td>
+        class="bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded-full text-xs font-bold">Delete</button></td>
     </tr><tr class="bg-slate-50/60">
       <td colspan="7" class="px-3 pb-2 pt-0 font-mono text-xs text-slate-500 break-all">${csEscape(_cmdStr || '—')}</td>
     </tr>`;
@@ -11224,8 +11224,8 @@ async function csRenderVmServerQueue(live) {
           <input id="cs-cmd-target" value="${csVmSelectedHostIds.length === 1 ? csEscape([..._scopeHosts][0] || '') : ''}" class="border border-slate-200 rounded-md px-2 py-1 w-40" placeholder="proxmox"/></div>
         <div><label class="text-xs text-slate-500">Args JSON</label>
           <input id="cs-cmd-args" class="border border-slate-200 rounded-md px-2 py-1 w-56" placeholder='{"vmid":90050}'/></div>
-        <button onclick="csSendCommand()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-md text-xs font-bold">Send</button>
-        <button onclick="csClearCommands()" class="bg-red-100 text-red-700 px-3 py-1.5 rounded-md text-xs font-bold">Clear Queue</button>
+        <button onclick="csSendCommand()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1.5 rounded-full text-xs font-bold">Send</button>
+        <button onclick="csClearCommands()" class="bg-red-100 text-red-700 px-3 py-1.5 rounded-full text-xs font-bold">Clear Queue</button>
       </div></div>`;
     csSet(`<div>${csVmHostBanner()}${sendForm}
       <p class="text-xs font-bold text-slate-500 mb-2">Queue (${shown.length}${csVmSelectedHostIds.length ? ' of ' + cmds.length : ''})</p>
@@ -11831,7 +11831,7 @@ function csFmtKnownObj(k, v) {
               <div class="text-xs text-slate-500">${back} · ${flags}</div>
               <div class="text-xs text-slate-500">since ${since}</div>
               ${o.bus_path ? `<button onclick="csReplaceDongle('${esc(o.bus_path)}')"
-                class="mt-1 px-2 py-0.5 rounded border border-slate-300 bg-white hover:bg-slate-50 text-xs font-bold text-slate-600"
+                class="mt-1 px-2 py-0.5 rounded-full border border-slate-300 bg-white hover:bg-slate-50 text-xs font-bold text-slate-600"
                 title="Watch this port live while you pull the dongle — confirms you removed the RIGHT one without touching the CLI.">⟳ Replace Dongle</button>` : ''}
             </div>`;
         }).join('');
@@ -12180,12 +12180,12 @@ async function csRenderVmServerDetails() {
     csSet(`<div>${csVmHostBanner({ single: true })}
       <div class="flex justify-end gap-2 mb-3">
         <button onclick="csShowTech(this)"
-          class="bg-slate-700 hover:bg-slate-800 text-white px-3 py-1.5 rounded-md text-xs font-bold"
+          class="bg-slate-700 hover:bg-slate-800 text-white px-3 py-1.5 rounded-full text-xs font-bold"
           title="Download EVERYTHING the hub holds for this host as JSON — the complete raw telemetry record, including USB dongle state, PCI slots/ports, VM list and agent internals that are deliberately NOT rendered on screen. Built from the source record, so anything removed from this page is still in the download.">
           ⤓ Show Tech
         </button>
         <button onclick="csDeleteHost('${csEscape(String(_delId).replace(/'/g, "\\'"))}')"
-          class="bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded-md text-xs font-bold"
+          class="bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded-full text-xs font-bold"
           title="Remove this host from the VM Server view and clear its cached/stored data. Use for a host that has been intentionally shut down. If the host comes back online it will re-appear.">
           Delete host + clear cache
         </button>
@@ -12595,7 +12595,7 @@ async function csRenderSetupDiagnostics() {
     const _disabledLine = _disabled.length
       ? `<p class="text-xs text-amber-600 mb-2">${csEscape(String(_disabled.length))} agent(s) hidden (CS disabled) — enable in Agent Config to manage their VMs.</p>`
       : '';
-    const _btn = 'text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50';
+    const _btn = 'text-xs px-3 py-1 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50';
     const _act = (label, fn, title) =>
         `<button type="button" onclick="csDiagStop(event); ${fn}" class="${_btn}" title="${csEscape(title || '')}">${label}</button>`;
 
@@ -12606,7 +12606,7 @@ async function csRenderSetupDiagnostics() {
           <p class="text-xs text-slate-500">Captured ${csEscape(window._csDiagData.fetched_at)} — sections with a problem open automatically.</p>
         </div>
         <div class="ml-auto flex items-center gap-2">
-          <button type="button" onclick="csCopyAllDiagnostics(this)" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-xs font-bold" title="Copy EVERY section below as plain text — repo status, CS bridge, missing dongles, sim tags and sim DHCP. Paste straight into a ticket or chat.">⧉ Copy all diagnostics</button>
+          <button type="button" onclick="csCopyAllDiagnostics(this)" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-xs font-bold" title="Copy EVERY section below as plain text — repo status, CS bridge, missing dongles, sim tags and sim DHCP. Paste straight into a ticket or chat.">⧉ Copy all diagnostics</button>
           <button type="button" onclick="csRenderSetupDiagnostics()" class="${_btn}">↻ Refresh all</button>
         </div>
       </div>
@@ -13263,7 +13263,7 @@ async function csRenderSpokeManagement() {
       <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
         <input id="cs-claim-id" placeholder="spoke-id" class="bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono">
         <input id="cs-claim-psk" placeholder="onboarding PSK" class="bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono">
-        <button onclick="csClaimSpoke()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-md text-sm font-bold shadow-sm">Claim</button>
+        <button onclick="csClaimSpoke()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-2 rounded-full text-sm font-bold shadow-sm">Claim</button>
       </div>
     </div>`;
 
@@ -13364,7 +13364,7 @@ async function csSpokeMgmtPskCard() {
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <div class="flex justify-between items-center mb-3">
         <h3 class="text-sm font-bold text-slate-500">Onboarding PSK <span class="text-slate-500 normal-case font-normal">· tenant ${csEscape(tenant)}</span> ${helpIcon('cs', null, 'Simulations help')}</h3>
-        <button onclick="csSpokeMgmtGenPsk()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-md text-xs font-bold shadow-sm">+ Generate</button>
+        <button onclick="csSpokeMgmtGenPsk()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-full text-xs font-bold shadow-sm">+ Generate</button>
       </div>
       ${psks.length ? csTable(['PSK', ''], rows) : '<p class="text-xs text-slate-500 italic py-4 text-center">No PSKs issued.</p>'}
       ${deploy}
@@ -13905,9 +13905,9 @@ async function _csRenderAssistantSessions(caps) {
                 </div>
                 <div class="flex gap-2">
                     <button onclick="csAssistantNewSession()"
-                        class="text-xs px-3 py-1.5 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">New conversation</button>
+                        class="text-xs px-3 py-1.5 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50">New conversation</button>
                     <button id="cs-assistant-submit" onclick="csAssistantSubmitSession()" disabled
-                        class="text-xs px-3 py-1.5 rounded-md bg-primary text-white font-semibold hover:bg-primary-hover opacity-50">Submit to AppBuilder</button>
+                        class="text-xs px-3 py-1.5 rounded-full bg-primary text-white font-semibold hover:bg-primary-hover opacity-50">Submit to AppBuilder</button>
                 </div>
             </div>
             <div class="flex-1 flex gap-3 min-h-0">
@@ -13917,9 +13917,9 @@ async function _csRenderAssistantSessions(caps) {
                         <textarea id="cs-assistant-input" rows="2" onkeydown="_csAsstInputKey(event)"
                             class="flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm outline-none focus:border-brand resize-y"></textarea>
                         <button id="cs-assistant-stop" type="button" onclick="csAssistantStop()"
-                            class="hidden border border-slate-300 text-slate-600 rounded-lg px-3 py-2 text-sm hover:bg-slate-50">Stop</button>
+                            class="hidden border border-slate-300 text-slate-600 rounded-full px-3 py-2 text-sm hover:bg-slate-50">Stop</button>
                         <button id="cs-assistant-send" type="submit"
-                            class="bg-primary text-white rounded-lg px-4 py-2 text-sm font-semibold hover:bg-primary-hover">Send</button>
+                            class="bg-primary text-white rounded-full px-4 py-2 text-sm font-semibold hover:bg-primary-hover">Send</button>
                     </form>
                 </div>
                 <div id="cs-assistant-spec" class="w-72 shrink-0 overflow-y-auto rounded-lg border border-slate-200 bg-white p-4"></div>
@@ -13972,11 +13972,11 @@ async function csRenderAssistant() {
                 </div>
                 <div class="flex gap-2">
                     <button onclick="csAssistantNewConversation()"
-                        class="text-xs px-3 py-1.5 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">
+                        class="text-xs px-3 py-1.5 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50">
                         New conversation
                     </button>
                     <button onclick="csAssistantSubmitFeatureRequest()"
-                        class="text-xs px-3 py-1.5 rounded-md bg-primary text-white font-semibold hover:bg-primary-hover">
+                        class="text-xs px-3 py-1.5 rounded-full bg-primary text-white font-semibold hover:bg-primary-hover">
                         File as Feature Request
                     </button>
                 </div>
@@ -13986,7 +13986,7 @@ async function csRenderAssistant() {
                 <input id="cs-assistant-input" type="text" placeholder="e.g. I want a simulation that runs this script… or: copy dns_fail for the LRB deployment"
                     class="flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm outline-none focus:border-brand">
                 <button id="cs-assistant-send" type="submit"
-                    class="bg-primary text-white rounded-lg px-4 py-2 text-sm font-semibold hover:bg-primary-hover">
+                    class="bg-primary text-white rounded-full px-4 py-2 text-sm font-semibold hover:bg-primary-hover">
                     Send
                 </button>
             </form>

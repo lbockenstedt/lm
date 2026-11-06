@@ -458,7 +458,7 @@ async function showDeviceDashboard(item) {
                     type: v.type || 'qemu', agent_id: v.agent_id || '', name: v.name || ''
                 }).replace(/"/g, '&quot;');
                 const btn = canVnc
-                    ? `<button onclick="ddOpenVnc(${vmArg})" class="text-xs px-2 py-1 rounded bg-orange-100 hover:bg-orange-200 text-orange-700 border border-orange-300 font-bold shrink-0">🖥 VNC Console</button>`
+                    ? `<button onclick="ddOpenVnc(${vmArg})" class="text-xs px-2 py-1 rounded-full bg-orange-100 hover:bg-orange-200 text-orange-700 border border-orange-300 font-bold shrink-0">🖥 VNC Console</button>`
                     : '';
                 return `<div class="flex items-center justify-between gap-2 py-1 border-b border-slate-50 last:border-0">
                     <div class="min-w-0">
@@ -510,7 +510,7 @@ async function showDeviceDashboard(item) {
                 const busy = c.in_use ? `<span class="ml-2 px-1.5 py-0.5 rounded text-xs bg-amber-100 text-amber-700 font-bold">IN USE</span>` : '';
                 const canConnect = c.spoke_id && c.port_id;
                 const btn = canConnect
-                    ? `<button onclick="openConsoleTerminal('${escJsAttr(c.spoke_id)}','${escJsAttr(c.port_id)}','${escJsAttr(c.name || '')}')" class="text-xs px-2 py-1 rounded bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand font-bold shrink-0">🖥 Connect</button>`
+                    ? `<button onclick="openConsoleTerminal('${escJsAttr(c.spoke_id)}','${escJsAttr(c.port_id)}','${escJsAttr(c.name || '')}')" class="text-xs px-2 py-1 rounded-full bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand font-bold shrink-0">🖥 Connect</button>`
                     : '';
                 return `<div class="flex items-center justify-between gap-2 py-1.5 border-b border-slate-50 last:border-0">
                     <div class="min-w-0">

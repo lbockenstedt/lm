@@ -22,16 +22,16 @@ async function loadNetboxData(subMenu) {
             // already has (RFC1918 free-space scan) and assigns the pick. The
             // manual "+ Add" (carve-from-parent) flow stays alongside it.
             const findBtn = subMenu === 'Prefixes'
-                ? `<button onclick="showFindSubnetModal()" class="bg-white border border-brand text-primary-text hover:bg-primary hover:text-white px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm mr-2" title="Scan for and allocate the next available contiguous subnet">Add Prefix</button>`
+                ? `<button onclick="showFindSubnetModal()" class="bg-white border border-brand text-primary-text hover:bg-primary hover:text-white px-3 py-1 rounded-full text-xs font-bold transition-all shadow-sm mr-2" title="Scan for and allocate the next available contiguous subnet">Add Prefix</button>`
                 : '';
             // Admin-only Excel rack-layout importer (Setup → Module Management
             // gating is mirrored here: only admins see the button; the hub
             // routes are admin-gated too — defense in depth).
             const importBtn = (subMenu === 'Racks' && isAdmin())
-                ? `<button onclick="showRackImportModal()" class="bg-white border border-indigo-500 text-indigo-600 hover:bg-indigo-500 hover:text-white px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm mr-2" title="Import rack elevation layout from an Excel spreadsheet">Import .xlsx</button>`
+                ? `<button onclick="showRackImportModal()" class="bg-white border border-indigo-500 text-indigo-600 hover:bg-indigo-500 hover:text-white px-3 py-1 rounded-full text-xs font-bold transition-all shadow-sm mr-2" title="Import rack elevation layout from an Excel spreadsheet">Import .xlsx</button>`
                 : '';
             actions.innerHTML = canEdit()
-                ? `${importBtn}${findBtn}<button onclick="showNetboxAddModal()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm" title="Add a new item to NetBox">+ Add</button>`
+                ? `${importBtn}${findBtn}<button onclick="showNetboxAddModal()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-full text-xs font-bold transition-all shadow-sm" title="Add a new item to NetBox">+ Add</button>`
                 : importBtn;
         } else {
             actions.innerHTML = '';
@@ -303,7 +303,7 @@ async function showCPPMDeviceDetail(mac) {
             </div>
             ${isUntagged ? `<div class="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between">
                 <p class="text-xs text-slate-500">Not assigned to any tenant - claim this device to your tenant.</p>
-                <button onclick="showClaimDeviceModal('${encodeURIComponent(mac)}')" title="Claim this unassigned device into NetBox IPAM" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-5 py-2 rounded-md text-sm font-bold shrink-0">Claim Device</button>
+                <button onclick="showClaimDeviceModal('${encodeURIComponent(mac)}')" title="Claim this unassigned device into NetBox IPAM" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-5 py-2 rounded-full text-sm font-bold shrink-0">Claim Device</button>
             </div>` : ''}`;
     } catch (e) {
         body.innerHTML = `<p class="text-xs text-red-400 italic">Error: ${e.message}</p>`;
@@ -350,8 +350,8 @@ async function showClaimDeviceModal(mac) {
             <div class="col-span-2 space-y-1"><label class="text-xs text-slate-500 font-bold">Description</label><input id="cl-desc" class="${inputCls}" placeholder="optional" title="Optional description or notes"></div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button id="cl-submit" onclick="submitClaimDevice('${encodeURIComponent(mac)}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold" title="Provision device into NetBox and tag endpoint">Claim Device</button>
-            <button onclick="document.getElementById('nb-claim-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Cancel device claim">Cancel</button>
+            <button id="cl-submit" onclick="submitClaimDevice('${encodeURIComponent(mac)}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold" title="Provision device into NetBox and tag endpoint">Claim Device</button>
+            <button onclick="document.getElementById('nb-claim-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm" title="Cancel device claim">Cancel</button>
         </div>`, { backdropClose: true });
 }
 
@@ -421,8 +421,8 @@ function showNetboxAddDeviceModal(editItem, prefill) {
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Status</label><select id="nb-d-status" class="${inputCls}"><option value="active">active</option><option value="planned">planned</option><option value="offline">offline</option><option value="failed">failed</option><option value="inventory">inventory</option></select></div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="submitNetboxAddDevice()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold" title="${editing ? 'Save changes to device' : 'Register new device in NetBox'}">${editing ? 'Save Changes' : 'Add Device'}</button>
-            <button onclick="document.getElementById('nb-device-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Close dialog without saving">Cancel</button>
+            <button onclick="submitNetboxAddDevice()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold" title="${editing ? 'Save changes to device' : 'Register new device in NetBox'}">${editing ? 'Save Changes' : 'Add Device'}</button>
+            <button onclick="document.getElementById('nb-device-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm" title="Close dialog without saving">Cancel</button>
         </div>`, { card: 'w-full max-w-lg p-6 space-y-4' });
     if (editing) modal.dataset.deviceId = editItem.id;
     if (editing && editItem.status) {
@@ -544,8 +544,8 @@ async function showNetboxRackModal(editItem) {
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Facility ID (optional)</label><input id="nb-r-facility" value="${val(editItem?.facility_id)}" class="${inputCls}" placeholder="A1"></div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="submitNetboxRack()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold" title="${editing ? 'Save changes to rack' : 'Add new rack to NetBox'}">${editing ? 'Save Changes' : 'Add Rack'}</button>
-            <button onclick="document.getElementById('nb-rack-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Close dialog without saving">Cancel</button>
+            <button onclick="submitNetboxRack()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold" title="${editing ? 'Save changes to rack' : 'Add new rack to NetBox'}">${editing ? 'Save Changes' : 'Add Rack'}</button>
+            <button onclick="document.getElementById('nb-rack-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm" title="Close dialog without saving">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     if (editing) modal.dataset.rackId = editItem.id;
 }
@@ -668,8 +668,8 @@ async function showNetboxAllocatePrefixModal(editItem) {
             </div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="submitNetboxAllocatePrefix()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold" title="${editing ? 'Save changes to prefix' : 'Allocate subnet prefix in NetBox'}">${editing ? 'Save Changes' : 'Allocate'}</button>
-            <button onclick="document.getElementById('nb-prefix-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Close dialog without saving">Cancel</button>
+            <button onclick="submitNetboxAllocatePrefix()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold" title="${editing ? 'Save changes to prefix' : 'Allocate subnet prefix in NetBox'}">${editing ? 'Save Changes' : 'Allocate'}</button>
+            <button onclick="document.getElementById('nb-prefix-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm" title="Close dialog without saving">Cancel</button>
         </div>`, { card: 'w-full max-w-4xl p-6 space-y-4 max-h-[90vh] overflow-y-auto' });
     if (editing) modal.dataset.prefixId = editItem.id;
     loadNetboxPrefixSiteOptions(editItem?.site_slug || '');
@@ -870,8 +870,8 @@ async function showFindSubnetModal() {
             </div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button id="nb-f-assign-btn" onclick="submitFindSubnetAssign()" disabled class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold disabled:opacity-40 disabled:cursor-not-allowed">Assign</button>
-            <button onclick="document.getElementById('nb-find-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button id="nb-f-assign-btn" onclick="submitFindSubnetAssign()" disabled class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold disabled:opacity-40 disabled:cursor-not-allowed">Assign</button>
+            <button onclick="document.getElementById('nb-find-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm">Cancel</button>
         </div>`, { card: 'w-full max-w-4xl p-6 space-y-4 max-h-[90vh] overflow-y-auto', backdropClose: true });
     window._nbFindAvail = [];
     window._nbFindSelected = null;
@@ -1055,12 +1055,12 @@ function showNetboxAllocateIPModal(prefixHint, editItem) {
             ${editing ? `<div class="space-y-1 col-span-1 md:col-span-2"><label class="text-xs text-slate-500 font-bold">Status</label><select id="nb-ip-status" class="${inputCls}">${statusOpts}</select></div>` : ''}
             ${editing ? `<div class="space-y-1 col-span-1 md:col-span-2"><label class="text-xs text-slate-500 font-bold">NAC Role Override</label>
                 <div class="flex gap-2"><select id="nb-ip-nac-role" class="${inputCls}"><option value="">Loading…</option></select>
-                <button type="button" id="nb-ip-nac-refresh" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 rounded-md text-sm" title="Re-read the role list from ClearPass">Refresh</button></div>
+                <button type="button" id="nb-ip-nac-refresh" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 rounded-full text-sm" title="Re-read the role list from ClearPass">Refresh</button></div>
                 <p id="nb-ip-nac-role-note" class="text-xs text-slate-500">ClearPass role for this device (needs the IP's MAC address). Changing it disconnects the device so it re-authenticates.</p></div>` : ''}
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="submitNetboxAllocateIP()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-md text-sm font-bold" title="${editing ? 'Save changes to IP address' : 'Allocate next available IP address in subnet'}">${editing ? 'Save Changes' : 'Allocate'}</button>
-            <button onclick="document.getElementById('nb-ip-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Close dialog without saving">Cancel</button>
+            <button onclick="submitNetboxAllocateIP()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold" title="${editing ? 'Save changes to IP address' : 'Allocate next available IP address in subnet'}">${editing ? 'Save Changes' : 'Allocate'}</button>
+            <button onclick="document.getElementById('nb-ip-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm" title="Close dialog without saving">Cancel</button>
         </div>`, { card: 'w-full max-w-2xl p-6 space-y-4 max-h-[90vh] overflow-y-auto' });
     if (editing) {
         modal.dataset.ipId = editItem.id;
