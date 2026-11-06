@@ -267,7 +267,7 @@ class EndpointSyncMixin:
                 await self.simulations_store.set_endpoint_sync_status(tenant_id, status)
                 return status
             # Build the authoritative (replace=True) batch for the CPPM spoke.
-            payload = {"tenant_id": tenant_id, "tenant_slug": scope,
+            payload = {"tenant_id": tenant_id,
                        "tenant_name": tenant_name, "source": se.get("label", "IPAM"),
                        "replace": True, "endpoints": endpoints}
             # Only the operator one-off may allow removing more than half the tenant's endpoints.

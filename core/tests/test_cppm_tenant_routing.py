@@ -454,3 +454,25 @@ def test_role_overrides_lists_prefixed_roles_from_global_spoke():
 def test_role_overrides_503_without_nac_spoke():
     c = _build(_admin(), FakeHub(set()))
     assert c.get("/api/cppm/role-overrides").status_code == 503
+
+
+def test_tenant_devices_filtered_by_netbox_tenant_id(monkeypatch):
+    # Ownership is the NetBox_Tenant_ID attribute; slug attributes are ignored.
+    import routes.cppm as cppm_routes
+    monkeypatch.setattr(cppm_routes, "get_tenant_scoping",
+                        lambda hub, tid: {"netbox_tenant_slug": "a-slug"})
+    devices = [
+        {"mac": "aa:aa:aa:aa:aa:aa", "attributes": {"NetBox_Tenant_ID": "tenantA"}},
+        {"mac": "bb:bb:bb:bb:bb:bb", "attributes": {"NetBox_Tenant_ID": "tenantB"}},
+        {"mac": "cc:cc:cc:cc:cc:cc", "attributes": {"NetBox_Tenant_Slug": "tenantA"}},
+    ]
+    hub = FakeHub({"cppm-a"},
+                  replies={"cppm-a": {"LIST_ENDPOINTS": {"status": "SUCCESS", "devices": devices}}},
+                  module_metadata={"cppm-a": {"tenant_id": "tenantA"}})
+    c = _build(_tenant_user("tenantA"), hub)
+    r = c.get("/api/cppm/devices")
+    assert r.status_code == 200
+    assert [d["mac"] for d in r.json()["devices"]] == ["aa:aa:aa:aa:aa:aa"]
+
+    r = c.get("/api/cppm/unknown-devices")
+    assert [d["mac"] for d in r.json()["devices"]] == ["cc:cc:cc:cc:cc:cc"]

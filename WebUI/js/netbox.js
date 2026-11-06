@@ -252,10 +252,10 @@ async function showCPPMDeviceDetail(mac) {
         // Full endpoint attribute dump (the summary grid above shows the common
         // fields; this section lists EVERY attribute on the endpoint record so a
         // click on a My Devices / Unknown Devices row surfaces the whole set,
-        // including Tenant / Tenant_Slug / NetBox_Tenant_* and profiler attrs).
+        // including Tenant / NetBox_Tenant_* and profiler attrs).
         const allAttrs = ep.attributes || {};
         // Untagged = assigned to no tenant → eligible to Claim into NetBox.
-        const isUntagged = !(allAttrs["NetBox_Tenant_Slug"] || allAttrs["Tenant_Slug"]);
+        const isUntagged = !allAttrs["NetBox_Tenant_ID"];
         const attrEntries = Object.entries(allAttrs).filter(([, v]) => v != null && v !== '');
         const attrSection = attrEntries.length
             ? `<div class="mt-3">

@@ -359,16 +359,15 @@ def register(app, hub, ctx):
             logger.error(f"API: Error fetching CPPM health: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
-    def _device_tenant_slug(d: dict) -> str:
-        """A device's tenant = its NetBox_Tenant_Slug (or Tenant_Slug) endpoint
-        attribute — the value the endpoint sync writes. Empty when untagged."""
-        # Read the tenant slug from the device's endpoint attributes.
+    def _device_tenant(d: dict) -> str:
+        """A device's tenant = its NetBox_Tenant_ID endpoint attribute (the LM
+        tenant id the endpoint sync writes). Empty when untagged."""
         attrs = (d.get("attributes") if isinstance(d, dict) else None) or {}
-        return attrs.get("NetBox_Tenant_Slug") or attrs.get("Tenant_Slug") or ""
+        return attrs.get("NetBox_Tenant_ID") or ""
 
     def _filter_devices_by_tenant(data, scope: str):
         """Tag-based tenant filter for the Device Database list. Keeps only
-        devices tagged with this IPAM scope (the logged-in user's tenant).
+        devices tagged with this tenant id (the logged-in user's tenant).
         More authoritative than the subnet filter — a device tagged for tenant
         X belongs to X regardless of its IP — so a non-admin sees only their own
         tenant's devices. No scope (admin, or tenant not bound to NetBox) →
@@ -382,7 +381,7 @@ def register(app, hub, ctx):
         if not isinstance(devices, list):
             return data
         # Keep the scope's devices and fix up the total.
-        kept = [d for d in devices if isinstance(d, dict) and _device_tenant_slug(d) == scope]
+        kept = [d for d in devices if isinstance(d, dict) and _device_tenant(d) == scope]
         out = dict(data)
         out["devices"] = kept
         out["total"] = len(kept)
@@ -407,18 +406,15 @@ def register(app, hub, ctx):
         logger.debug("relay %s %s tenant=%s", request.method, request.url.path, tenant)
         sess = _session_user(request)
         # Tag-based tenant filter: keep only devices tagged with the effective
-        # tenant's IPAM scope (NetBox_Tenant_Slug / Tenant_Slug). The effective
-        # tenant is the selected one (?tenant=) for admins / multi-tenant
-        # switches — clamped for non-admins — falling back to the session tenant
-        # when nothing is selected. scope=None (admin, no selection, or tenant
-        # not bound to NetBox) → no-op; the subnet filter is the backstop.
-        if tenant and _effective_tenant(request, tenant):
-            scope = _effective_tenant_slug(request, tenant)
-        elif sess and not _is_admin(sess):
-            tid = sess.get("user", {}).get("tenant_id")
-            scope = (get_tenant_scoping(hub, tid) or {}).get("netbox_tenant_slug") or None if tid else None
-        else:
-            scope = None
+        # tenant's id (NetBox_Tenant_ID). The effective tenant is the selected
+        # one (?tenant=) for admins / multi-tenant switches — clamped for
+        # non-admins — falling back to the session tenant when nothing is
+        # selected. scope=None (admin, no selection, or tenant not bound to
+        # NetBox so its endpoints are never tagged) → no-op; the subnet filter
+        # is the backstop.
+        tid = _effective_tenant(request, tenant) if tenant or (sess and not _is_admin(sess)) else None
+        bound = tid and (get_tenant_scoping(hub, tid) or {}).get("netbox_tenant_slug")
+        scope = tid if bound else None
         # Filter function that applies that scope.
         tf = lambda d: _filter_devices_by_tenant(d, scope)
 
@@ -436,8 +432,8 @@ def register(app, hub, ctx):
     # List endpoints that aren't tagged to any tenant.
     @app.get("/api/cppm/unknown-devices")
     async def get_cppm_unknown_devices(request: Request, tenant: str = None):
-        """Endpoints not assigned to any tenant (no NetBox_Tenant_Slug /
-        Tenant_Slug attribute) — the 'Unknown Devices' tab. Subnet-scoped by the
+        """Endpoints not assigned to any tenant (no NetBox_Tenant_ID
+        attribute) — the 'Unknown Devices' tab. Subnet-scoped by the
         selected tenant so a tenant sees untagged devices on their own network;
         an admin with no tenant selected sees every untagged endpoint."""
         hub = app.state.hub
@@ -448,10 +444,10 @@ def register(app, hub, ctx):
         data = await _nac_read(job)
         # Keep only untagged endpoints (assigned to no tenant).
         if isinstance(data, dict) and isinstance(data.get("devices"), list):
-            untagged = [d for d in data["devices"] if isinstance(d, dict) and not _device_tenant_slug(d)]
+            untagged = [d for d in data["devices"] if isinstance(d, dict) and not _device_tenant(d)]
             data = {**data, "devices": untagged, "total": len(untagged)}
         elif isinstance(data, list):
-            data = [d for d in data if isinstance(d, dict) and not _device_tenant_slug(d)]
+            data = [d for d in data if isinstance(d, dict) and not _device_tenant(d)]
         # Apply the tenant subnet filter and add the cache info.
         return hub.cache_annotate(await _filter_tenant(request, data, "nac", ["ip"], tenant),
                                   job.ns, job.key)
