@@ -570,6 +570,19 @@ def test_handle_command_ha_dns_hook_status_returns_per_member_not_merged():
     assert res["members"]["node-b"]["settings"]["enabled"] is False
 
 
+def test_handle_command_ha_dns_hook_status_has_top_level_settings_for_the_toggle():
+    import asyncio
+    reply = {"results": {
+        "node-a": {"status": "SUCCESS", "settings": {"enabled": False},
+                   "loaded_in_running_config": True, "log_tail": ["x"]},
+        "node-b": {"status": "SUCCESS", "settings": {"enabled": False},
+                   "loaded_in_running_config": False}}}
+    res = asyncio.run(_ha_spoke(reply).handle_command("DHCP_DNS_HOOK_STATUS", {}))
+    assert res["settings"] == {"enabled": False}
+    assert res["loaded_in_running_config"] is False
+    assert res["log_tail"] == ["x"]
+
+
 def test_handle_command_ha_dns_hook_config_missing_member_is_not_success():
     # node-b never answers at all (e.g. disconnected) — dropped entirely
     # from `results`, not present with an explicit error. Without comparing

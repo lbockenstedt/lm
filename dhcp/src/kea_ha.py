@@ -52,6 +52,7 @@ DHCP_WORKER_OPS = (
     "KEAW_LIST_LEASES",    # lease4-get-all
     "KEAW_LIST_RES",       # static reservations across subnets
     "KEAW_DEL_LEASE",      # delete active lease by IP
+    "KEAW_RELEASE_DECLINES",  # free declines held past the current probation
     # ── DHCPv6 (dual-stack) mirrors of the ops above, against the separate
     # kea-dhcp6 daemon. Required here: this tuple is the coordinator→worker
     # op allowlist handed to ClusterCoordinator, so an op missing from it can

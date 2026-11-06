@@ -182,6 +182,7 @@ class DHCPSpoke(BaseSpoke):
       DHCP_HA_STATUS     — HA member state, lease sync, drift, recommendations
       DHCP_HA_CONFIG     — set the HA member pair + mode (+ worker secret)
       DHCP_HA_APPLY      — re-apply the current desired config to both nodes
+      DHCP_RELEASE_DECLINES — free every declined address so the pool can reuse it
       DHCP_DNS_HOOK_CONFIG — enable/update/disable the real-time Kea -> Unbound hook
       DHCP_DNS_HOOK_STATUS — real-time DNS hook settings + log tail
 
@@ -759,6 +760,26 @@ class DHCPSpoke(BaseSpoke):
         status = "ERROR" if errors else "SUCCESS"
         return {"status": status, "results": results, "member_errors": errors}
 
+    async def _ha_release_declines(self, release_all: bool) -> Dict[str, Any]:
+        """Free declined addresses on every node (see
+        ``KeaManager.release_held_declines``). Each node holds its own copy of
+        the lease, so the release runs on both."""
+        fan = await self.cluster.transport.fanout(
+            "KEAW_RELEASE_DECLINES", {"all": release_all}, timeout=60.0)
+        results = fan.get("results") or {}
+        released = set()
+        errors = {}
+        for member_id, reply in results.items():
+            if isinstance(reply, dict) and reply.get("status") == "SUCCESS":
+                released.update(reply.get("released") or [])
+            else:
+                errors[member_id] = (reply or {}).get("message") or "no response"
+        if errors and len(errors) == len(results):
+            status = "ERROR"
+        else:
+            status = "PARTIAL" if errors else "SUCCESS"
+        return {"status": status, "released": sorted(released), "member_errors": errors}
+
     async def _ha_dns_hook_status(self) -> Dict[str, Any]:
         """Per-node hook settings/log tail — NOT merged (unlike ``_ha_list``),
         because drift between nodes (one enabled, one not) is exactly what an
@@ -783,8 +804,17 @@ class DHCPSpoke(BaseSpoke):
             reply = results.get(member_id) or {}
             errors[member_id] = reply.get("message") or reply.get("status") or "no response"
         status = "ERROR" if errors else "SUCCESS"
+        # Top-level fields in the single-node shape so the WebUI panel and its
+        # Enable/Disable toggle work the same on a pair. "Loaded" is only
+        # true when every answering node loads the hook.
+        first = results[sorted(ok_ids)[0]] if ok_ids else {}
+        loaded = [results[m].get("loaded_in_running_config") for m in ok_ids]
         return {"status": status, "members": results,
-                "member_errors": errors}
+                "member_errors": errors,
+                "settings": first.get("settings"),
+                "log_tail": first.get("log_tail", []),
+                "loaded_in_running_config": (None if not loaded or None in loaded
+                                             else all(loaded))}
 
     async def _ha_diagnostics(self) -> Dict[str, Any]:
         """Per-node diagnostics + the HA view.
@@ -1215,8 +1245,12 @@ class DHCPSpoke(BaseSpoke):
         if self.cluster.enabled:
             # Push the v4 config to both nodes.
             if cmd == "DHCP_SYNC":
-                return await self.cluster.apply(data.get("subnets", []),
-                                                data.get("reservations", []))
+                result = await self.cluster.apply(data.get("subnets", []),
+                                                  data.get("reservations", []))
+                await self._ha_release_declines(release_all=False)
+                return result
+            if cmd == "DHCP_RELEASE_DECLINES":
+                return await self._ha_release_declines(release_all=True)
             # v4 reservation changes.
             if cmd in ("DHCP_ADD_RES", "DHCP_UPDATE_RES", "DHCP_DEL_RES"):
                 return await self._ha_reservation(cmd, data)
@@ -1279,6 +1313,9 @@ class DHCPSpoke(BaseSpoke):
             subnets      = data.get("subnets", [])
             reservations = data.get("reservations", [])
             return await asyncio.to_thread(self.mgr.sync, subnets, reservations)
+
+        if cmd == "DHCP_RELEASE_DECLINES":
+            return await asyncio.to_thread(self.mgr.release_held_declines, True)
 
         # Single-node v4 list queries.
         if cmd == "DHCP_LIST_SUBNETS":
