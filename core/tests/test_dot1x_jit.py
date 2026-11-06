@@ -151,7 +151,7 @@ def test_clearpass_local_user(hub):
     run(dj.provision(hub, "t1", "cs1", "amy-3", "amy", "clearpass"))
     sid, cmd, p = hub.cmds("CPPM_CREATE_LOCAL_USER")[0]
     assert sid == "nac1" and p["user_id"] == "amy" and p["role_name"] == "[Guest]"
-    assert p["tenant_slug"] == "slug-t1"
+    assert "tenant_slug" not in p
     run(dj.release(hub, "t1", "amy-3", "amy", "clearpass"))
     assert hub.cmds("CPPM_DELETE_LOCAL_USER")[0][2] == {"user_id": "amy"}
 

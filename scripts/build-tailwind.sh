@@ -27,7 +27,25 @@ echo "Installing tailwindcss (scratch dir: ${WORK_DIR})..."
 cat > "${WORK_DIR}/tailwind.config.js" <<CONFIG
 module.exports = {
   content: ["${WEBUI_DIR}/*.html", "${WEBUI_DIR}/*.js", "${WEBUI_DIR}/js/**/*.js"],
-  theme: { extend: {} },
+  // HPE Design System tokens (design-system.hpe.design, hpe-design-tokens).
+  // See docs/webui-style.md. brand = decorative only (accents, borders, tints);
+  // anything behind or as text uses primary / primary.text for AA contrast.
+  theme: { extend: {
+    fontFamily: { sans: ['"HPE Graphik"', 'Arial', 'sans-serif'] },
+    colors: {
+      brand: '#01A982',                                                // decorative.brand
+      primary: { DEFAULT: '#068667', hover: '#006750', text: '#006750' }, // background.primary.strong / text.primary
+      navy: '#263040',
+      focus: '#292D3A',                                                // focus
+      // HPE status colors on the Tailwind palette (icon.* / background.*).
+      red:     { 50: '#FFECEC', 500: '#CC1F1A', 600: '#CC1F1A' },      // critical
+      amber:   { 50: '#FFF3DD', 500: '#D36D00' },                      // warning
+      green:   { 50: '#E3FDF4', 500: '#009A71' },                      // ok
+      emerald: { 50: '#E3FDF4', 500: '#009A71' },                      // ok
+      blue:    { 50: '#E0F8FF', 500: '#0055DA' },                      // info
+      sky:     { 50: '#E0F8FF', 500: '#0055DA' },                      // info
+    },
+  } },
   plugins: [],
 };
 CONFIG
