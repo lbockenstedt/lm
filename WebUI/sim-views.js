@@ -12973,8 +12973,16 @@ async function csRenderCompliance() {
     const quarters = data.quarters.map(q => `<div class="bg-white border border-slate-200 rounded-lg p-3 text-center">
         <div class="text-xs text-slate-500 font-semibold">${csEscape(q.q)}</div>
         <div class="mt-1">${csCompPct(q.pct, 'text-xl font-bold')}</div></div>`).join('');
-    const worst = data.checks.filter(c => c.d30 !== null && c.d30 < 99).slice(0, 5)
-        .map(c => `<li class="flex justify-between py-1 border-b border-slate-100"><span class="font-mono text-xs">${csCompProductTag(c)}${csEscape(c.check)}</span>${csCompPct(c.d30)}</li>`).join('');
+    // Every check with its % for each period (worst month first).
+    const keys = CS_COMPLIANCE_WINDOWS.map(w => w[0]);
+    const pctCells = vals => vals.map(v => `<td class="px-3 py-2 text-right">${csCompPct(v)}</td>`).join('');
+    const overallRow = `<tr class="bg-slate-50 font-semibold"><td class="px-3 py-2 text-sm">Overall</td><td></td>
+      ${pctCells(keys.map(k => (data.overall[k] || {}).pct))}</tr>`;
+    const checkRows = data.checks.map(c => `<tr class="border-t border-slate-100">
+      <td class="px-3 py-2 font-mono text-xs">${csCompProductTag(c)}${csEscape(c.check)}</td>
+      <td class="px-3 py-2 text-right text-xs text-slate-500">${c.sites}</td>
+      ${pctCells(keys.map(k => c[k]))}</tr>`).join('');
+    const headCells = CS_COMPLIANCE_WINDOWS.map(([, label]) => `<th class="px-3 py-2 text-right font-semibold">${label}</th>`).join('');
     csSet(`<div class="space-y-5">
       <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">${cards}</div>
       <div class="bg-white border border-slate-200 rounded-lg p-4">
@@ -12982,9 +12990,14 @@ async function csRenderCompliance() {
         <div class="flex gap-2 items-end">${bars}</div>
       </div>
       <div><div class="text-sm font-semibold text-slate-700 mb-2">Quarters</div><div class="grid grid-cols-4 gap-3">${quarters}</div></div>
-      <div class="bg-white border border-slate-200 rounded-lg p-4">
-        <div class="text-sm font-semibold text-slate-700 mb-1">Below 99% this month</div>
-        ${worst ? `<ul>${worst}</ul>` : '<div class="text-xs text-slate-400">Every check is at or above 99% over the last 30 days.</div>'}
+      <div class="bg-white border border-slate-200 rounded-lg overflow-x-auto">
+        <div class="text-sm font-semibold text-slate-700 px-4 pt-4 pb-2">All checks <span class="text-xs font-normal text-slate-400">· worst month first</span></div>
+        <table class="w-full text-sm">
+          <thead class="text-xs uppercase tracking-wider text-slate-500 bg-slate-50">
+            <tr><th class="px-3 py-2 text-left font-semibold">Check</th><th class="px-3 py-2 text-right font-semibold">Sites</th>${headCells}</tr>
+          </thead>
+          <tbody>${overallRow}${checkRows}</tbody>
+        </table>
       </div>
       ${csCompSinceNote(data)}
     </div>`);
