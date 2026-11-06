@@ -160,6 +160,78 @@ def build_dns_records(ips_data: Dict[str, Any],
     return records
 
 
+def _lease_networks(pfx_data: Dict[str, Any]) -> List[Any]:
+    """Every non-container NetBox prefix in this scope's data."""
+    nets = []
+    for p in (pfx_data or {}).get("prefixes") or []:
+        if not isinstance(p, dict):
+            continue
+        st = p.get("status")
+        if isinstance(st, dict):
+            st = st.get("value") or ""
+        if str(st).lower() == "container":
+            continue
+        try:
+            nets.append(ipaddress.ip_network(str(p.get("prefix") or ""), strict=False))
+        except ValueError:
+            continue
+    return nets
+
+
+def apply_kea_leases(records: List[Dict[str, Any]], leases: List[Dict[str, Any]],
+                     pfx_data: Dict[str, Any] = None,
+                     now: float = None) -> List[Dict[str, Any]]:
+    """Point a NetBox host name at the address Kea actually leased it.
+
+    NetBox does not follow a DHCP client that moves to a new address, so DNS
+    kept the old one (and two hosts could swap). For each active Kea lease
+    whose host name already has an A record, that record's address becomes
+    the lease address. Names with no NetBox record are left to the real-time
+    hook. Only leases inside this scope's NetBox prefixes count, so one
+    tenant's leases never touch another tenant's records.
+    """
+    if not leases:
+        return records
+    now = time.time() if now is None else now
+    scopes = _scope_domains(pfx_data) if pfx_data else []
+    nets = _lease_networks(pfx_data)
+    # Lower-case qualified name -> (cltt, address), newest lease wins.
+    leased: Dict[str, Tuple[int, str]] = {}
+    for lease in leases:
+        if not isinstance(lease, dict) or int(lease.get("state") or 0) != 0:
+            continue
+        address = str(lease.get("ip-address") or lease.get("ip") or "").strip()
+        name = str(lease.get("hostname") or "").strip().rstrip(".").lower()
+        try:
+            ip = ipaddress.ip_address(address)
+            cltt = int(lease.get("cltt") or 0)
+            expires = cltt + int(lease.get("valid-lft") or 0)
+        except (ValueError, TypeError):
+            continue
+        if ip.version != 4 or not name or (cltt and expires < now):
+            continue
+        if not all(_LABEL_RE.match(l) for l in name.split(".")):
+            continue
+        if not any(ip in net for net in nets if net.version == 4):
+            continue
+        fqdn = qualify_dns_name(name, address, scopes).lower()
+        if fqdn not in leased or cltt >= leased[fqdn][0]:
+            leased[fqdn] = (cltt, address)
+
+    out: List[Dict[str, Any]] = []
+    done = set()
+    for rec in records:
+        key = str(rec.get("name") or "").rstrip(".").lower()
+        if rec.get("type") != "A" or key not in leased:
+            out.append(rec)
+            continue
+        # Collapse every A record for a leased name into one at the lease address.
+        if key not in done:
+            done.add(key)
+            out.append(dict(rec, value=leased[key][1]))
+    return out
+
+
 def build_dhcp_payload(pfx_data: Dict[str, Any],
                        ips_data: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """NetBox prefixes + IPs → (subnets, reservations) Kea sync payload.
@@ -575,7 +647,9 @@ class DnsDhcpSyncMixin:
             pfx_data, ips_data = await self._netbox_prefixes_and_ips(filters)
             # Build the DNS or DHCP payload and count it.
             if side == "dns":
-                records = build_dns_records(ips_data, pfx_data)
+                records = apply_kea_leases(build_dns_records(ips_data, pfx_data),
+                                           await self._kea_leases(self._get_dhcp_spokes()),
+                                           pfx_data)
                 payload, cmd = {"records": records}, "DNS_SYNC"
                 counts["records_synced"] += len(records)
             else:
@@ -595,6 +669,26 @@ class DnsDhcpSyncMixin:
             # Collect the unwrapped spoke results.
             spoke_results.extend(unwrap_spoke(r) for r in results)
         return counts, spoke_results, skipped
+
+    async def _kea_leases(self, dhcp_spokes: List[str]) -> List[Dict[str, Any]]:
+        """Active v4 leases from every DHCP spoke. On any failure the last
+        good list is reused, so a missed read never flips DNS back to stale
+        NetBox addresses for one cycle."""
+        if not dhcp_spokes:
+            return []
+        replies = await asyncio.gather(*[
+            self.request_response(sid, "DHCP_LIST_LEASES", {}, timeout=30.0)
+            for sid in dhcp_spokes], return_exceptions=True)
+        leases: List[Dict[str, Any]] = []
+        for sid, raw in zip(dhcp_spokes, replies):
+            reply = None if isinstance(raw, BaseException) else unwrap_spoke(raw)
+            if not isinstance(reply, dict) or str(reply.get("status", "")).upper() == "ERROR" \
+                    or not isinstance(reply.get("leases"), list):
+                logger.warning("DNS sync: could not read Kea leases from %s; using last list", sid)
+                return getattr(self, "_last_kea_leases", [])
+            leases.extend(reply["leases"])
+        self._last_kea_leases = leases
+        return leases
 
     def _get_dhcp_spokes(self) -> List[str]:
         """All connected, approved DHCP spokes to sync to."""
@@ -709,6 +803,9 @@ class DnsDhcpSyncMixin:
                 fetch_errors[key] = str(e)
                 logger.warning("DNS/DHCP sync: NetBox fetch failed (%s): %s", key or "all", e)
 
+        # Kea's live leases correct NetBox addresses for DHCP hosts.
+        leases = await self._kea_leases(dhcp_spokes) if dns_groups else []
+
         # Hashes from last tick; new ones start as a copy.
         last = getattr(self, "_last_sync_hashes", None) or {}
         new_hashes = dict(last)
@@ -731,7 +828,7 @@ class DnsDhcpSyncMixin:
                 pfx, ips = fetched[key]
                 # Build the payload, hash it and count it.
                 if side == "dns":
-                    records = build_dns_records(ips, pfx)
+                    records = apply_kea_leases(build_dns_records(ips, pfx), leases, pfx)
                     payload = {"records": records}
                     h = hashlib.sha256(json.dumps(records, sort_keys=True,
                                                   default=str).encode()).hexdigest()
