@@ -125,9 +125,14 @@ async def _nw_bg_refresh_fleet(hub) -> None:
     # Merged device rows, ids already seen, and how many spokes answered.
     merged, seen, answered = [], set(), 0
     # Ask each spoke for its device list and merge the rows, de-duplicated by id.
-    for sid in spokes:
+    # All spokes at once; merged in spoke order, so duplicates resolve as before.
+    results = await asyncio.gather(
+        *(hub.request_response(sid, "NW_LIST_DEVICES", {}, timeout=20.0) for sid in spokes),
+        return_exceptions=True)
+    for sid, result in zip(spokes, results):
         try:
-            result = await hub.request_response(sid, "NW_LIST_DEVICES", {}, timeout=20.0)
+            if isinstance(result, BaseException):
+                raise result
             env = access.unwrap_spoke(result)
             rows = env.get("data") if isinstance(env, dict) else None
             if isinstance(rows, list):
@@ -1069,12 +1074,18 @@ def register(app, hub, ctx):
         # {"tenant": tid} = own+shared from that spoke) + merge rows by id.
         merged, seen, answered = [], set(), 0
         # Ask each spoke for its devices (filtered to the reader's tenant) and merge them by id.
-        for sid in spokes:
+        # All spokes at once; merged in spoke order, so duplicates resolve as before.
+        def _payload(sid):
             tid = spoke_to_tid.get(sid, "")
-            payload = {"tenant": tid} if tid else {}
+            return {"tenant": tid} if tid else {}
+        results = await asyncio.gather(
+            *(hub.request_response(sid, "NW_LIST_DEVICES", _payload(sid), timeout=20.0)
+              for sid in spokes),
+            return_exceptions=True)
+        for sid, result in zip(spokes, results):
             try:
-                result = await hub.request_response(sid, "NW_LIST_DEVICES", payload,
-                                                    timeout=20.0)
+                if isinstance(result, BaseException):
+                    raise result
                 env = access.unwrap_spoke(result)
                 rows = env.get("data") if isinstance(env, dict) else None
                 if isinstance(rows, list):
