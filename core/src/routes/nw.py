@@ -2668,7 +2668,7 @@ def register(app, hub, ctx):
                     tenant_id, scan["scanned"], len(identified), len(reachable), dry_run)
         # Log each reachable host that could not be identified.
         for dev in reachable:
-            logger.info("nw scan tenant=%s UNIDENTIFIED %s ports=%s detail=%s", tenant_id,
+            logger.debug("nw scan tenant=%s UNIDENTIFIED %s ports=%s detail=%s", tenant_id,
                         dev.get("address"), dev.get("open_ports") or dev.get("ports"),
                         {k: dev.get(k) for k in ("reason", "error", "banner", "ssh_error") if dev.get(k)})
         # Decide what to do with each identified device.
