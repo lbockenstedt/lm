@@ -200,7 +200,8 @@ def _question(model: str, vendor: str, interface_names: Iterable[str]) -> str:
     names = sorted({str(n) for n in interface_names or [] if n})[:_MAX_INTERFACE_NAMES]
     # Three lines: model, vendor hint, interface names.
     return (f"Reported model: {model}\nVendor hint: {vendor or 'unknown'}\n"
-            f"Interface names: {', '.join(names) or '(none)'}")
+            f"Interface names: {', '.join(names) or '(none)'}\n"
+            "Answer with the JSON object only: no prose, no markdown.")
 
 
 async def get_spec(hub, model: str, vendor: str = "",
@@ -247,17 +248,21 @@ async def get_spec(hub, model: str, vendor: str = "",
         agent = find_ab(hub)
         if not agent:
             return None
-        # Ask the LLM; any failure is logged and treated as "unknown for now".
+        # Ask the LLM (a second time if it answered in prose instead of JSON); any
+        # failure is logged and treated as "unknown for now".
         try:
-            # A catalog answer is recorded for good, so use the most capable model.
-            reply = await _ask_llm(hub, agent, _SYS_SPEC,
-                                   _question(model, vendor, interface_names),
-                                   timeout=120.0, role="final")
+            for _ in range(2):
+                # A catalog answer is recorded for good, so use the most capable model.
+                reply = await _ask_llm(hub, agent, _SYS_SPEC,
+                                       _question(model, vendor, interface_names),
+                                       timeout=120.0, role="final")
+                answer = _extract_json(reply)
+                if answer is not None:
+                    break
         except Exception as e:  # noqa: BLE001
             logger.warning("device spec: LLM ask for %r failed: %s", model, e)
             return None
-        # Parse and validate the reply.
-        answer = _extract_json(reply)
+        # Validate the reply.
         spec = clean_spec(answer)
         # The reply was neither a usable spec nor an explicit "unknown".
         if not spec and not (isinstance(answer, dict) and answer.get("identified") is False):
