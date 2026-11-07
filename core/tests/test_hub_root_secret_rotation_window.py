@@ -308,6 +308,10 @@ class _ReprovisionHub:
         self.events.append((spoke_id, event_type, detail))
 
     send_to_spoke = main.LabManagerHub.send_to_spoke
+    send_setup_to_spoke = main.LabManagerHub.send_setup_to_spoke
+    _register_broadcast_ack = main.LabManagerHub._register_broadcast_ack
+    _BROADCAST_ACK_TTL = 60
+    _pending_broadcast_ids = {}
 
 
 def _reprovision(hub, spoke_id):
