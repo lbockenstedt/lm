@@ -5348,10 +5348,13 @@ def register(app, hub, ctx):
         """Real-time Kea -> Unbound DNS registration hook ("Option 1"):
         on-disk settings, whether it's loaded in Kea's running config, and a
         tail of its own event log. Mirrors ``/api/dhcp/ha``'s GET shape —
-        this is a status read, open to any authenticated session."""
+        this is a status read, open to any authenticated session.
+
+        Always read live (not from the warm cache): the Enable/Disable toggle
+        posts back these settings, so a stale or failed cached entry would
+        block the toggle or overwrite newer settings."""
         logger.debug("relay GET /api/dhcp/dns-hook")
-        # Fetch the hook status (cached).
-        return await _cached_relay(_spoke_ref("dhcp", request, tenant),
+        return await _relay_spoke(_dhcp_spoke_for_request(request, tenant),
                                   "DHCP_DNS_HOOK_STATUS", log_name="dhcp_dns_hook_status",
                                   timeout=30)
 
