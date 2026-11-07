@@ -32,8 +32,14 @@ def test_prune_and_monitor_window():
     assert rows == []
     reg["10.0.0.3"].update(snmp_ok=True, snmp_credential_id="snmp:t:S")
     rows = seen.monitor_rows({"t": reg}, 38 * day, skip_addresses=set(), skip_names={"sw1"})
-    # .3 clashes with a monitored name so it uses its IP.
-    assert rows == [{"tenant_id": "t", "name": "10.0.0.3", "address": "10.0.0.3",
+    # .3 is sw1 at another address: the same box, so it is not added again.
+    assert rows == []
+    reg["10.0.0.4"] = {"address": "10.0.0.4", "last_seen": 38 * day, "snmp_ok": True,
+                       "snmp_credential_id": "snmp:t:S"}
+    reg["10.0.0.5"] = {**reg["10.0.0.4"], "address": "10.0.0.5", "hostname": "pdu-a"}
+    rows = seen.monitor_rows({"t": reg}, 38 * day, skip_addresses=set(), skip_names={"sw1"})
+    # .4 has no sysName and is not monitored; .5 is named by its sysName.
+    assert rows == [{"tenant_id": "t", "name": "pdu-a", "address": "10.0.0.5",
                      "type": "host", "snmp_ok": True, "snmp_secret": "snmp:t:S"}]
 
 
