@@ -1867,6 +1867,33 @@ def register(app, hub, ctx):
         # Return NetBox's result.
         return {"result": rd or {}}
 
+    @app.post("/setup/netbox-autorack/run")
+    async def run_netbox_autorack(request: Request):
+        """Place/re-rack NetBox devices from their names (MIPBE-SSPLM-N31-R45-VPNC1
+        -> rack N31, RU 45). POST ``{apply: bool, tenant_slug?: str, report?: bool}``;
+        a dry run unless ``apply``. ``report`` returns the last sweep's conflicts
+        and cannot-auto-rack list without running one."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        ipam = hub.get_spoke_by_type("ipam")
+        if not ipam:
+            return {"result": {"status": "error", "message": "NetBox spoke not connected"}}
+        payload = {"dry_run": not bool(body.get("apply", False)),
+                   "tenant": str(body.get("tenant_slug") or "").strip(),
+                   "report": bool(body.get("report", False))}
+        try:
+            rr = await hub.request_response(ipam, "NETBOX_AUTORACK_SWEEP", payload, timeout=180.0)
+            return {"result": (_unwrap_spoke(rr) if isinstance(rr, dict) else {}) or {}}
+        except Exception as e:
+            logger.warning("[sync-error] netbox-autorack failed: %s", e)
+            return {"result": {"status": "error", "message": str(e)}}
+
     # ── GitHub repo sync (Setup → Sync, replaces the old autoupdate loop) ───
     # global_config["repo_sync"] is saved via the generic POST /setup/config
     # shallow-merge — no dedicated config route needed. The background loop
