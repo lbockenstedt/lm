@@ -934,7 +934,12 @@ function _dhcpDnsHookPanel(dnsHook) {
 // domain, ttl, register_ptr) — a toggle must never silently reset an
 // operator's existing hook configuration.
 async function toggleDhcpDnsHook(enable) {
-    const st = window._dhcpDnsHookStatus;
+    // Re-read live status so the toggle never acts on a stale page load.
+    let st = window._dhcpDnsHookStatus;
+    try {
+        const r = await fetch('/api/dhcp/dns-hook' + _tenantQS());
+        if (r.ok) st = await r.json();
+    } catch (e) { /* keep the page-load status */ }
     if (!st || !st.settings || st.status === 'ERROR') {
         showToast('DNS hook status unavailable — refresh before toggling so existing settings are preserved', 'error');
         return;

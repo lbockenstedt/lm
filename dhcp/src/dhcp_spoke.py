@@ -786,10 +786,11 @@ class DHCPSpoke(BaseSpoke):
         operator needs to see here.
 
         Unlike a plain read, ``status`` here is NOT unconditionally SUCCESS:
-        a member that never answers is surfaced in ``member_errors`` and
-        drags the overall status to ERROR, the same convention as
-        ``_ha_dns_hook_config``, so a caller can't mistake "half the pair
-        didn't respond" for a clean status read.
+        a member that doesn't answer SUCCESS is surfaced in ``member_errors``
+        and the overall status becomes PARTIAL, so a caller can't mistake
+        "half the pair didn't respond" for a clean status read. It is only
+        ERROR when no member returned settings at all — one healthy node is
+        enough for the Enable/Disable toggle to preserve the settings.
         """
         fan = await self.cluster.transport.fanout("KEAW_DNS_HOOK_STATUS", {}, timeout=15.0)
         results = fan.get("results") or {}
@@ -803,11 +804,19 @@ class DHCPSpoke(BaseSpoke):
         for member_id in sorted(expected - ok_ids):
             reply = results.get(member_id) or {}
             errors[member_id] = reply.get("message") or reply.get("status") or "no response"
-        status = "ERROR" if errors else "SUCCESS"
         # Top-level fields in the single-node shape so the WebUI panel and its
-        # Enable/Disable toggle work the same on a pair. "Loaded" is only
+        # Enable/Disable toggle work the same on a pair. Settings come from a
+        # SUCCESS node first, else any node that still read them (a PARTIAL
+        # node only failed to read Kea's running config). "Loaded" is only
         # true when every answering node loads the hook.
-        first = results[sorted(ok_ids)[0]] if ok_ids else {}
+        with_settings = sorted(ok_ids) + sorted(
+            m for m, r in results.items()
+            if m not in ok_ids and isinstance(r, dict) and isinstance(r.get("settings"), dict))
+        first = results[with_settings[0]] if with_settings else {}
+        if not with_settings:
+            status = "ERROR"
+        else:
+            status = "PARTIAL" if errors else "SUCCESS"
         loaded = [results[m].get("loaded_in_running_config") for m in ok_ids]
         return {"status": status, "members": results,
                 "member_errors": errors,
