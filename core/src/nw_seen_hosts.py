@@ -158,10 +158,12 @@ def monitor_rows(by_tenant: Dict[str, Dict[str, Dict[str, Any]]], now: float,
             # Skip hosts that never answered SNMP with a known credential.
             if not (e.get("snmp_ok") and e.get("snmp_credential_id")):
                 continue
-            # Use the hostname as name unless it clashes with a monitored name; then use the IP.
-            name = str(e.get("hostname") or ip)
-            if name.casefold() in skip_names:
-                name = ip
+            # Only hosts named by sysName: a name already monitored is the same box
+            # at another address (e.g. a switch SVI), and no name means SNMP identity
+            # was incomplete; neither becomes a host of its own.
+            name = str(e.get("hostname") or "").strip()
+            if not name or name.casefold() in skip_names:
+                continue
             out.append({"tenant_id": tid, "name": name, "address": ip,
                         "type": str(e.get("object_type") or "host"),
                         "snmp_ok": True, "snmp_secret": e["snmp_credential_id"]})
