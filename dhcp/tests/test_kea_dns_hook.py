@@ -621,8 +621,32 @@ def test_handle_command_ha_dns_hook_status_missing_member_is_not_success():
     reply = {"results": {"node-a": {"status": "SUCCESS", "settings": {"enabled": True}}}}
     obj = _ha_spoke(reply, member_ids=["node-a", "node-b"])
     res = asyncio.run(obj.handle_command("DHCP_DNS_HOOK_STATUS", {}))
-    assert res["status"] == "ERROR"
+    assert res["status"] == "PARTIAL"
+    assert res["settings"] == {"enabled": True}
     assert res["member_errors"]["node-b"] == "no response"
+
+
+def test_handle_command_ha_dns_hook_status_uses_partial_node_settings():
+    # Both nodes failed only the running-config read: settings are still
+    # known, so the toggle must not be blocked.
+    import asyncio
+    reply = {"results": {
+        "node-a": {"status": "PARTIAL", "message": "cannot read running config",
+                   "settings": {"enabled": False}},
+        "node-b": {"status": "PARTIAL", "message": "cannot read running config",
+                   "settings": {"enabled": False}}}}
+    res = asyncio.run(_ha_spoke(reply).handle_command("DHCP_DNS_HOOK_STATUS", {}))
+    assert res["status"] == "PARTIAL"
+    assert res["settings"] == {"enabled": False}
+
+
+def test_handle_command_ha_dns_hook_status_without_any_settings_is_error():
+    import asyncio
+    reply = {"results": {"node-a": {"status": "ERROR", "message": "hook files missing"}}}
+    obj = _ha_spoke(reply, member_ids=["node-a", "node-b"])
+    res = asyncio.run(obj.handle_command("DHCP_DNS_HOOK_STATUS", {}))
+    assert res["status"] == "ERROR"
+    assert res["settings"] is None
 
 
 def test_handle_command_ha_dns_hook_status_preserves_member_error_messages():
@@ -637,7 +661,7 @@ def test_handle_command_ha_dns_hook_status_preserves_member_error_messages():
     }}
     obj = _ha_spoke(reply, member_ids=["node-a", "node-b", "node-c", "node-d"])
     res = asyncio.run(obj.handle_command("DHCP_DNS_HOOK_STATUS", {}))
-    assert res["status"] == "ERROR"
+    assert res["status"] == "PARTIAL"
     assert res["member_errors"]["node-b"] == "cannot read running config"
     assert res["member_errors"]["node-c"] == "hook files missing"
     assert res["member_errors"]["node-d"] == "no response"
