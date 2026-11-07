@@ -41,21 +41,15 @@ def test_kea_control_agent_stays_loopback_only():
     assert "0.0.0.0" not in ca_block
 
 
-def test_ha_peer_traffic_uses_a_separate_https_agent():
+def test_ha_peer_traffic_uses_kea_dhcp4_listener_with_mutual_tls():
     """REGRESSION (round 2, #5): HTTPS with mutual certificate verification.
-    Basic-auth credentials ride inside that session; there is no plaintext
-    HTTP fallback for peer traffic."""
+    Peer traffic goes to kea-dhcp4's own HA listener; the old separate
+    kea-ha-agent (blocked by AppArmor, crash-looped) is retired."""
     src = _read(DHCP_SH)
-    assert 'HA_AGENT_CONF="/etc/kea/kea-ha-agent.conf"' in src
     assert 'HA_PORT="8002"' in src
-    assert '"trust-anchor": "${HA_CA}"' in src
-    assert '"cert-file": "${HA_CERT}"' in src
-    assert '"key-file": "${HA_KEY}"' in src
-    assert '"cert-required": true' in src
-    assert '"type": "basic"' in src
-    assert '"user": "${HA_USER}", "password": "${HA_PASSWORD}"' in src
-    # A dedicated unit serves it, so the loopback agent is untouched.
-    assert "kea-ctrl-agent -c ${HA_AGENT_CONF}" in src
+    assert "--ha-ca, --ha-cert and --ha-key are required" in src
+    assert "kea-ctrl-agent -c ${HA_AGENT_CONF}" not in src
+    assert 'systemctl disable --now "$HA_AGENT_SERVICE"' in src
     assert 'HA_AGENT_SERVICE="kea-ha-agent"' in src
 
 
