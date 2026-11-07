@@ -118,6 +118,9 @@ class HubVncConsoleMixin:
     # route then serves it marked ``stale``. ~4× the interval to avoid flagging a
     # spoke that merely missed one sweep.
     CONSOLE_PORTS_STALE_AFTER = 120.0
+    # A connected spoke that keeps timing out (websocket up, command loop wedged)
+    # is re-polled on an exponential backoff instead of every sweep, capped here.
+    CONSOLE_PORTS_MAX_BACKOFF = 600.0
 
     @staticmethod
     def _console_unwrap_ports(result: Any) -> list:
@@ -144,8 +147,15 @@ class HubVncConsoleMixin:
         # Default to the class timeout and to every connected console spoke.
         if timeout is None:
             timeout = self.CONSOLE_PORTS_REFRESH_TIMEOUT
+        # The background sweep (no explicit sids) skips spokes still in backoff;
+        # an explicit refresh (route / on demand) always polls.
+        backoff = getattr(self, "_console_ports_backoff", None)
+        if backoff is None:
+            backoff = self._console_ports_backoff = {}
         if sids is None:
-            sids = self.get_all_spokes_by_type("console") or []
+            now = time.monotonic()
+            sids = [s for s in (self.get_all_spokes_by_type("console") or [])
+                    if backoff.get(s, (0, 0.0))[1] <= now]
         # Sids that were refreshed successfully this sweep.
         refreshed: set = set()
 
@@ -156,8 +166,17 @@ class HubVncConsoleMixin:
                 r = await self.request_response(sid, "CONSOLE_LIST_PORTS", {}, timeout=timeout)
                 await self.warm_set("console_ports", sid, self._console_unwrap_ports(r))
                 refreshed.add(sid)
+                backoff.pop(sid, None)
             except Exception as exc:  # noqa: BLE001 - one dead console mustn't stall the sweep
-                # An unreachable spoke is skipped so it cannot stall the sweep.
+                # An unreachable spoke is skipped so it cannot stall the sweep,
+                # and polled less often the longer it keeps failing.
+                fails = backoff.get(sid, (0, 0.0))[0] + 1
+                delay = min(self.CONSOLE_PORTS_REFRESH_INTERVAL * 2 ** fails,
+                            self.CONSOLE_PORTS_MAX_BACKOFF)
+                backoff[sid] = (fails, time.monotonic() + delay)
+                if fails == 1:
+                    logger.warning("console ports refresh: %s not answering (%s); backing off",
+                                   sid, exc)
                 logger.debug("console ports refresh: %s unreachable (%s)", sid, exc)
 
         # Poll every spoke concurrently.
