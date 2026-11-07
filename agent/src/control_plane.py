@@ -309,6 +309,8 @@ class RoleConnection(AgentHostingControlPlane):
         self._disk_cache_path = str(
             Path(__file__).resolve().parent.parent / "pxmx_agent_cache.json")
         self.disk_cache: dict = {}
+        self._disk_cache_dirty = False
+        self._disk_cache_task = None
         self._load_disk_cache()
         # The proxmox role authenticates inbound node-agents with an agent_secret
         # (the spoke-side PSK; approve_pending_agent provisions it to the agent on
@@ -578,29 +580,50 @@ class RoleConnection(AgentHostingControlPlane):
             logger.warning(f"Could not load agent disk cache: {e}")
 
     def _save_disk_cache(self):
-        """Persist connected agent telemetry to disk (atomic write)."""
-        # Snapshot the fields we cache for each connected agent.
+        """Persist connected agent telemetry to disk without blocking the loop.
+
+        Called from the event loop on every telemetry frame. The file write runs
+        in a worker thread: os.replace waits on the filesystem journal, and a
+        slow disk flush there froze the shared loop (every co-hosted spoke) for
+        ~70s. One write runs at a time; frames arriving mid-write mark the cache
+        dirty so the writer saves the latest snapshot once more."""
+        self._disk_cache_dirty = True
+        if self._disk_cache_task is None or self._disk_cache_task.done():
+            self._disk_cache_task = asyncio.get_running_loop().create_task(
+                self._disk_cache_writer())
+
+    async def _disk_cache_writer(self):
+        """Write snapshots until no newer telemetry is waiting."""
+        while self._disk_cache_dirty:
+            self._disk_cache_dirty = False
+            payload = self._disk_cache_payload()
+            self.disk_cache = payload["agents"]
+            await asyncio.to_thread(self._write_disk_cache, payload)
+
+    def _disk_cache_payload(self) -> dict:
+        """Snapshot the fields we cache for each connected agent."""
+        return {
+            "saved_at": time.time(),
+            "agents": {
+                aid: {
+                    "hostname":      info.get("hostname", aid),
+                    "cluster_name":  info.get("cluster_name", aid),
+                    "last_seen":     info.get("last_seen", 0),
+                    "nodes":         info.get("nodes", []),
+                    "vms":           info.get("vms", []),
+                    "agent_metrics": info.get("agent_metrics", {}),
+                }
+                for aid, info in self.connected_agents.items()
+            },
+        }
+
+    def _write_disk_cache(self, payload: dict) -> None:
+        """Write the cache atomically (temp file, then rename). Runs in a thread."""
         try:
-            payload = {
-                "saved_at": time.time(),
-                "agents": {
-                    aid: {
-                        "hostname":      info.get("hostname", aid),
-                        "cluster_name":  info.get("cluster_name", aid),
-                        "last_seen":     info.get("last_seen", 0),
-                        "nodes":         info.get("nodes", []),
-                        "vms":           info.get("vms", []),
-                        "agent_metrics": info.get("agent_metrics", {}),
-                    }
-                    for aid, info in self.connected_agents.items()
-                },
-            }
-            # Write it atomically (temp file, then rename) and keep it in memory.
             tmp = self._disk_cache_path + ".tmp"
             with open(tmp, "w") as f:
                 json.dump(payload, f)
             os.replace(tmp, self._disk_cache_path)
-            self.disk_cache = payload["agents"]
         # A failed write is only a warning.
         except Exception as e:
             logger.warning(f"Could not write agent disk cache: {e}")
