@@ -383,7 +383,7 @@ def test_resolve_ambiguous_ip_sends_real_candidates_and_picks_one():
     (sid, cmd, payload), = hub.sent
     assert (sid, cmd) == ("ab", "HELP_ASK")
     assert payload["system"] == llm._SYS_PICK_IP
-    user = payload["messages"][0]["content"]
+    user = payload["messages"][-1]["content"]
     # Candidate values go out unredacted (the narrow exemption) …
     assert "- 10.1.1.20" in user and "- 172.16.50.20" in user
     # … but the source lines are still scrubbed (their IPs/masks → [IP]).
@@ -408,5 +408,5 @@ def test_general_llm_path_still_redacts_ips():
     # The exemption must not leak: _ask_llm (used by orchestrate) still scrubs.
     hub = _RelayHub("{}")
     _run(llm._ask_llm(hub, "ab", "sys", "Vlan10 172.16.50.20 up"))
-    content = hub.sent[0][2]["messages"][0]["content"]
+    content = hub.sent[0][2]["messages"][-1]["content"]
     assert "172.16.50.20" not in content and "[IP]" in content
