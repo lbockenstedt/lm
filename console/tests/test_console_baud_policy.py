@@ -214,3 +214,20 @@ def test_pinned_port_is_never_re_swept_on_a_garbled_line(spoke):
     kwargs, boot = _boot_relock_args(spoke, score=0.1)
     spoke._boot_maybe_relock(**kwargs)
     assert boot["relocked"] is False
+
+
+def test_identify_locks_the_rate_when_its_extra_enters_draw_a_prompt(spoke, monkeypatch):
+    """The sweep missed the device, but identify's own Enters drew a clean
+    login prompt at 9600: that proves the rate, so it is locked."""
+    monkeypatch.setattr(spoke, "_resolve_baud", lambda pid, dev: (9600, None))
+    monkeypatch.setattr(cs, "open_raw", lambda *a, **kw: types.SimpleNamespace(
+        read=lambda n: b"", write=lambda b: None, close=lambda: None))
+    monkeypatch.setattr(cs, "run_identify", lambda *a, **kw: {
+        "banner": "\r\nUser Access Verification\r\nUsername: ", "logged_in": False,
+        "diag": {}})
+    res = spoke._identify_blocking("good", "/dev/ttyUSB0")
+    assert res["detected_baud"] == 9600 and res["baud_confident"] is True
+
+    monkeypatch.setattr(cs, "run_identify", lambda *a, **kw: {
+        "banner": "\xff\x80#", "logged_in": False, "diag": {"garbled": True}})
+    assert "detected_baud" not in spoke._identify_blocking("good", "/dev/ttyUSB0")

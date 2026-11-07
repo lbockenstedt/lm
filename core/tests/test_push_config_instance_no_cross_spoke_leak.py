@@ -53,6 +53,9 @@ class _FakeHub:
     async def send_to_spoke(self, msg):
         self.sent.append(msg)
 
+    async def send_setup_to_spoke(self, msg):
+        self.sent.append(msg)
+
 
 def _make_hub(nac_instances, spoke_id, module_type="nac", alias=None):
     hub = _FakeHub({"nac_instances": nac_instances}, module_type, alias=alias)

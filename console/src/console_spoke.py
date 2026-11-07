@@ -875,6 +875,14 @@ class ConsoleSpoke(BaseSpoke):
                 ser.close()
             except Exception:  # noqa: BLE001
                 pass
+        # The sweep may miss a device that only answers after identify's
+        # extra Enters; a clean prompt at this rate proves it, so lock it too.
+        banner = res.get("banner") or ""
+        known = (self.store.get(port_id).get("probe") or {}).get("baud_confident")
+        if (not locked and not known and baud and not (res.get("diag") or {}).get("garbled")
+                and (res.get("logged_in") or looks_like_prompt(banner))
+                and score_sample(banner.encode("utf-8", "replace")) >= 0.8):
+            locked = baud
         # Mark a newly confirmed baud on the result.
         if locked:
             res["detected_baud"] = locked

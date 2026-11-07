@@ -86,6 +86,15 @@ _BAUD_CONFIDENT_SCORE = 0.8
 # what makes 115200 and 9600 reliably answer on that gear.
 _BAUD_NUDGE_ATTEMPTS = 3
 
+# 115200 and 9600 cover nearly all console gear, so they get a patient probe:
+# more Enters with about a second between them. Some devices only negotiate
+# their rate after several carriage returns spaced out like a person pressing
+# Enter; three Enters in 1.5s read those lines as dead. Other rates keep the
+# quick probe so a fully silent port still sweeps in about 20s.
+_PRIORITY_NUDGE_ATTEMPTS = 6
+_PRIORITY_READ_SECS = 6.0
+_OTHER_READ_SECS = 1.5
+
 # Default line settings for a port with nothing saved: 115200 8N1, no flow control.
 _DEFAULT_SETTINGS = {"baud": DEFAULT_BAUD, "bytesize": 8, "parity": "N", "stopbits": 1, "flow": "none"}
 
@@ -242,17 +251,16 @@ def open_raw(dev: str, baud: int = DEFAULT_BAUD, timeout: float = 0.3):
 
 
 def detect_baud(dev: str, candidates: Optional[List[int]] = None,
-                read_secs: float = 1.5,
-                nudges: int = _BAUD_NUDGE_ATTEMPTS) -> Dict[str, Any]:
+                read_secs: float = _PRIORITY_READ_SECS,
+                nudges: int = _PRIORITY_NUDGE_ATTEMPTS) -> Dict[str, Any]:
     """Sweep candidate baud rates (8N1), press Enter a few times, score the reply;
     return the best. Blocking — callers run it via ``asyncio.to_thread``.
 
-    Enter is pressed up to *nudges* times per rate because a lot of console gear
-    answers only after several carriage returns (see _BAUD_NUDGE_ATTEMPTS). The
-    per-rate time budget is still ``read_secs`` in total — it is SPLIT across the
-    nudges rather than multiplied by them — so a full sweep takes no longer than
-    it did with a single Enter, and the reply is accumulated across nudges so a
-    device that answers slowly is not missed either."""
+    At 115200 and 9600 Enter is pressed up to *nudges* times spread over
+    ``read_secs``; other rates get at most ``_BAUD_NUDGE_ATTEMPTS`` Enters over
+    at most ``_OTHER_READ_SECS``. Each rate's budget is SPLIT across its Enters,
+    not multiplied by them, and the reply is accumulated across Enters so a
+    device that answers slowly is not missed."""
     # Needs pyserial.
     if serial is None:
         raise RuntimeError("pyserial not installed")
@@ -262,18 +270,22 @@ def detect_baud(dev: str, candidates: Optional[List[int]] = None,
     # Try each rate.
     for baud in candidates:
         try:
-            # Number of Enter presses at this rate.
+            # Patient probe at the common rates, quick probe at the others.
             tries = max(1, int(nudges or 1))
-            # Split, don't multiply: the whole point is more Enters, not a
-            # proportionally longer sweep across eight candidate rates.
-            per_try = max(0.25, float(read_secs) / tries)
+            budget = float(read_secs)
+            if baud not in PRIORITY_BAUDS:
+                tries = min(tries, _BAUD_NUDGE_ATTEMPTS)
+                budget = min(budget, _OTHER_READ_SECS)
+            # Split, don't multiply, the budget across the Enters.
+            per_try = max(0.1, budget / tries)
             # Open the port and clear old input.
             with serial.Serial(dev, baud, timeout=0.3) as ser:
                 ser.reset_input_buffer()
                 buf = b""
                 # Press Enter and read for this try's share of the time (up to 4 KiB).
-                for _ in range(tries):
-                    ser.write(b"\r\n")
+                for attempt in range(tries):
+                    # CRLF first, then bare CRs like an operator pressing Enter.
+                    ser.write(b"\r\n" if attempt == 0 else b"\r")
                     try:
                         ser.flush()  # push the CR out before we wait on a reply
                     except Exception:  # noqa: BLE001 - not every backend has it
