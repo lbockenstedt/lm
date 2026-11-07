@@ -18,6 +18,7 @@ from __future__ import annotations
 
 # logging for diagnostics; os for cache file paths; re validates CVE ids.
 import logging
+from functools import lru_cache
 import os
 import re
 # time stamps feed freshness; urllib downloads feeds; zlib decompresses them.
@@ -116,6 +117,9 @@ def _split_version(v: str) -> Tuple[int, str, str]:
     return epoch, upstream, revision
 
 
+# Cached: a fleet of similar nodes compares the same (installed, fixed) pairs over and
+# over, and the uncached pure-Python compare pegged the hub's one CPU after every restart.
+@lru_cache(maxsize=200_000)
 def version_compare(a: str, b: str) -> int:
     """<0, 0 or >0 as Debian version ``a`` sorts before, equal to or after ``b``."""
     # Epoch decides first, then upstream, then revision.
