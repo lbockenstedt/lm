@@ -216,6 +216,9 @@ class _FakeHub:
     async def send_to_spoke(self, msg):
         self.sent.append(msg)
 
+    async def send_setup_to_spoke(self, msg):
+        self.sent.append(msg)
+
 
 def _make_fake_hub(gc):
     return _FakeHub(gc)

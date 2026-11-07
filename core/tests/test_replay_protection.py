@@ -13,12 +13,12 @@ import uuid
 import main  # noqa: E402  (core/src on sys.path via conftest)
 
 
-def _fake_hub(window=120.0, skew=15.0, warn_interval=10.0):
+def _fake_hub(window=120.0, skew=120.0, warn_interval=10.0):
     """A LabManagerHub subclass that skips the heavy real __init__ and sets only
     the replay attrs. Subclassing (not a bare object) so ``self._replay_warn``
     / ``_prune_seen_message_ids`` resolve through the MRO to the real methods.
 
-    ``skew`` defaults to 15.0 to MIRROR the production default
+    ``skew`` defaults to 120.0 to MIRROR the production default
     (``LM_REPLAY_FUTURE_SKEW_S``, main.py) so these tests track real behavior."""
     class _FakeHub(main.LabManagerHub):
         def __init__(self):
@@ -88,8 +88,8 @@ def test_realistic_console_host_skew_accepted_at_default():
     reply from a ~5s-fast host, surfacing as 'agent connected but no ports'. The
     default now allows real-world drift; keep it comfortably above 5s."""
     hub = _fake_hub()  # default skew mirrors production (LM_REPLAY_FUTURE_SKEW_S)
-    assert hub._REPLAY_FUTURE_SKEW_S >= 15.0
-    fut = time.time() + 6  # a host ~6s fast — the failing real-world case
+    assert hub._REPLAY_FUTURE_SKEW_S >= 120.0
+    fut = time.time() + 18  # an ~18s-fast console host — the latest real-world case
     assert _check(hub, _frame(ts=fut, msg_id="ra-con")) is True
 
 

@@ -729,6 +729,19 @@ def test_detect_baud_sweep_budget_is_split_not_multiplied(monkeypatch):
     assert elapsed < 2.4, "per-rate budget was multiplied by the nudge count"
 
 
+def test_detect_baud_presses_enter_six_times_at_9600_and_three_elsewhere(monkeypatch):
+    """Field report: some gear only negotiates its rate after several spaced
+    Enters. 115200/9600 get 6, exotic rates keep the quick 3."""
+    _reset_nudge_fake(good_baud=9600, needed=5)
+    monkeypatch.setattr(m, "serial", _NudgeFakeSerial)
+    res = m.detect_baud("/dev/ttyUSB0", [115200, 9600], read_secs=0.6)
+    assert res["baud"] == 9600 and res["confident"] is True
+    _reset_nudge_fake(good_baud=38400, needed=5)
+    res = m.detect_baud("/dev/ttyUSB0", [38400], read_secs=0.6)
+    assert res["confident"] is False
+    assert _NudgeFakeSerial.writes_at_good == 3
+
+
 def test_default_candidates_try_115200_then_9600_first():
     """The two rates that cover almost all console gear must lead the sweep, in
     that order, so detection reaches them before any exotic rate."""
