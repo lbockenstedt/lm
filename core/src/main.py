@@ -2246,6 +2246,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         self._pending_broadcast_ids = {k: v for k, v in self._pending_broadcast_ids.items()
                                        if v > now}
 
+    async def send_setup_to_spoke(self, message: Message) -> None:
+        """Send a connect-time setup push (hub secret, URL, watchdog, ...) whose
+        COMMAND_RESULT ack nobody awaits; registering the id keeps that ack at
+        DEBUG instead of the "unknown message ID" WARNING."""
+        self._register_broadcast_ack(message.header.message_id)
+        await self.send_to_spoke(message)
+
     # ── spoke drain state (mid self-update) ─────────────────────────────────
     def mark_draining(self, spoke_id: str, window: float = None) -> None:
         """Mark a spoke as DRAINING (mid self-update) for ``window`` seconds
@@ -3072,7 +3079,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 ),
                 payload=MessagePayload(type="SPOKE_SET_HUB_SECRET", data={"hub_secret": hub_secret})
             )
-            await self.send_to_spoke(secret_msg)
+            await self.send_setup_to_spoke(secret_msg)
             logger.info(f"Pushed hub secret to {spoke_id}")
 
             # Durable recovery PSK, re-pushed on EVERY approved connect so a
@@ -3085,7 +3092,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # or the config push below.
             # Push the recovery PSK; failures are only logged.
             try:
-                await self.send_to_spoke(Message(
+                await self.send_setup_to_spoke(Message(
                     header=MessageHeader(
                         message_id=str(uuid.uuid4()),
                         timestamp=time.time(),
@@ -3123,7 +3130,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         payload=MessagePayload(
                             type="SPOKE_SET_HUB_URL", data={"hub_url": hub_url}),
                     )
-                    await self.send_to_spoke(url_msg)
+                    await self.send_setup_to_spoke(url_msg)
                     logger.debug(f"Re-pushed hub URL to {spoke_id}")
             except Exception as e:
                 logger.warning(f"Failed to re-push hub URL to {spoke_id}: {e}")
@@ -3145,7 +3152,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         ),
                         payload=MessagePayload(type="SPOKE_SET_WATCHDOG", data=wd),
                     )
-                    await self.send_to_spoke(wd_msg)
+                    await self.send_setup_to_spoke(wd_msg)
                     logger.debug(f"Pushed hub-contact watchdog config to {spoke_id}")
             except Exception as e:
                 logger.warning(f"Failed to push watchdog config to {spoke_id}: {e}")
@@ -3158,7 +3165,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # Push the TLS-verify policy to non-role spokes when set.
                 tv = self.state.get_global_config().get("hub_tls_verify")
                 if tv and not self._is_role_subspoke(spoke_id):
-                    await self.send_to_spoke(Message(
+                    await self.send_setup_to_spoke(Message(
                         header=MessageHeader(
                             message_id=str(uuid.uuid4()),
                             timestamp=time.time(),
@@ -3195,7 +3202,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                             payload=MessagePayload(
                                 type="NODE_CANARY_SET", data={"entries": entries}),
                         )
-                        await self.send_to_spoke(canary_msg)
+                        await self.send_setup_to_spoke(canary_msg)
                         logger.debug("Pushed %d canary endpoint(s) to %s",
                                      len(entries), spoke_id)
             except Exception as e:
@@ -3249,7 +3256,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                             "tenant_shared": bool(ptenant) and _access.tenant_is_shared(ptenant),
                         }),
                     )
-                    await self.send_to_spoke(cfg_msg)
+                    await self.send_setup_to_spoke(cfg_msg)
                     logger.debug(f"Pushed tenant ({ptenant or 'unassigned'}) to proxy {spoke_id}")
                 except Exception as e:
                     logger.warning(f"Failed to push tenant to proxy {spoke_id}: {e}")
@@ -4355,7 +4362,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 type="SPOKE_SET_HUB_SECRET", data={"hub_secret": current_root_secret}))
         # Send it.
         try:
-            await self.send_to_spoke(msg)
+            await self.send_setup_to_spoke(msg)
             logger.info(f"Re-provisioned current hub root secret to {spoke_id} "
                         f"(verified via an older rotation-window entry).")
             self.record_spoke_event(spoke_id, "hub_secret_reprovisioned",
