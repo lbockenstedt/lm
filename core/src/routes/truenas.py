@@ -50,7 +50,9 @@ def register(app, hub, ctx):
         appliances = (hub.state.system_state.get("global_config", {})
                       .get("truenas_appliances", []) or [])
         # Appliances explicitly bound to this spoke.
-        mine = [a for a in appliances if isinstance(a, dict) and a.get("spoke_id") == spoke_id]
+        pk = hub._primary_key(spoke_id)
+        mine = [a for a in appliances if isinstance(a, dict)
+                and hub._primary_key(a.get("spoke_id") or "") == pk]
         # If none are bound to it, this spoke manages the unbound appliances instead.
         if not mine:
             mine = [a for a in appliances if isinstance(a, dict) and not a.get("spoke_id")]
