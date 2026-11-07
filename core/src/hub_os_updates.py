@@ -1208,6 +1208,9 @@ class HubOsUpdatesMixin:
         found: Dict[str, Dict[str, Any]] = {}
         # Each Debian node with a feed.
         for key, inv in inventory.items():
+            # Pause between nodes so this background work leaves CPU for the hub
+            # (a full pass otherwise pegs the single core and trips protect mode).
+            time.sleep(0.05)
             os_info = inv.get("os") or {}
             feed = feeds.get(os_info.get("codename") or "")
             if feed is None or os_info.get("id") != "debian":
