@@ -148,6 +148,7 @@ function _nwDetailHtml() {
             ${idRow('Hostname', dev.hostname)}
             ${idRow('Model', dev.model)}
             ${idRow('Serial (SN)', dev.serial)}
+            ${idRow('Host (same serial)', dev.linked_host?.name ? `${dev.linked_host.name}${dev.linked_host.kind ? ' (' + dev.linked_host.kind + ')' : ''}` : '')}
             ${idRow('Base MAC', dev.mac)}
             ${idRow('Firmware', dev.firmware)}
             ${metaRow('Reachable', rcell)}
@@ -221,7 +222,7 @@ function _nwCollapse(items) {
     const byKey = new Map();
     const keyOf = (it, kind) => {
         const t = norm(it.tenant_id);
-        if (kind === 'serial') return norm(it.serial) && `${t}|s|${norm(it.serial)}`;
+        if (kind === 'serial') return norm(it.serial) && `${t}|s|${norm(it.object_type)}|${norm(it.serial)}`;
         const n = norm(it.name || it.hostname);
         const short = /^\d{1,3}(\.\d{1,3}){3}$/.test(n) ? n : n.split('.')[0];
         return short && `${t}|n|${norm(it.object_type)}|${short}`;
