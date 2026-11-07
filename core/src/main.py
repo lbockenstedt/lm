@@ -3392,7 +3392,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 import access as _access
                 import copy as _copy
                 appliances = self.state.get_global_config().get("truenas_appliances", []) or []
-                mine = [a for a in appliances if isinstance(a, dict) and a.get("spoke_id") == spoke_id]
+                mine = [a for a in appliances if isinstance(a, dict)
+                        and self._primary_key(a.get("spoke_id") or "") == pk]
                 if not mine:
                     mine = [a for a in appliances if isinstance(a, dict) and not a.get("spoke_id")]
                 # Build the payload with deep copies, the shared tenant and default poll interval.
