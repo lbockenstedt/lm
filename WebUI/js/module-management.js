@@ -21,7 +21,7 @@ function showAddNwDeviceModal(prefillDevice) {
             <div class="p-6 space-y-4">
                 <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Device Name</label><input type="text" id="nw-name" placeholder="e.g. Core Switch" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
                 <div class="grid grid-cols-2 gap-4">
-                    <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Object Type</label><select id="nw-object-type" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="aos_switch">AOS Switch</option><option value="cx_switch">CX Switch</option><option value="ex_switch">EX Switch</option><option value="gateway">Gateway</option></select></div>
+                    <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Object Type</label><select id="nw-object-type" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="aos_switch">AOS Switch</option><option value="cx_switch">CX Switch</option><option value="ex_switch">EX Switch</option><option value="gateway">Gateway</option><option value="ipmi">IPMI / BMC</option></select></div>
                     <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Transport</label><select id="nw-transport" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="auto">Auto</option><option value="ssh">SSH/CLI</option><option value="rest">REST API</option><option value="snmp">SNMP</option></select></div>
                 </div>
                 <div class="grid grid-cols-2 gap-4">
@@ -367,7 +367,7 @@ const DEVICE_TYPES = {
         rowSummary: d => `${d.address || '—'}${d.port ? ':' + d.port : ''}`
             + ((d.alt_addresses || []).length ? ` (+${d.alt_addresses.length} more: ${d.alt_addresses.join(', ')})` : ''),
         fields: [
-            { id: 'object_type', label: 'Object Type', type: 'select', options: [['aos_switch','AOS Switch'],['cx_switch','CX Switch'],['ex_switch','EX Switch'],['gateway','Gateway']] },
+            { id: 'object_type', label: 'Object Type', type: 'select', options: [['aos_switch','AOS Switch'],['cx_switch','CX Switch'],['ex_switch','EX Switch'],['gateway','Gateway'],['ipmi','IPMI / BMC']] },
             { id: 'transport', label: 'Transport', type: 'select', options: [['auto','Auto'],['ssh','SSH/CLI'],['rest','REST API'],['snmp','SNMP']] },
             { id: 'address', label: 'Address / Host IP', placeholder: '10.0.0.1' },
             { id: 'port', label: 'Port', placeholder: '22 / 443', coerce: 'int' },

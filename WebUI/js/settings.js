@@ -1960,7 +1960,7 @@ function _renderSetupModuleMgmtTile(content) {
                         <div class="space-y-1">
                             <label class="text-xs text-slate-500 font-bold">Default object type</label>
                             <select id="nw-import-default-ot" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
-                                <option value="gateway">Gateway</option>
+                                <option value="gateway">Gateway</option><option value="ipmi">IPMI / BMC</option>
                                 <option value="aos_switch">AOS Switch</option>
                                 <option value="cx_switch">CX Switch</option>
                                 <option value="ex_switch">EX Switch</option>

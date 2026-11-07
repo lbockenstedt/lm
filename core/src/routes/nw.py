@@ -1803,7 +1803,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=500, detail=str(e))
 
     # ── Network scan (fingerprint discovery) ────────────────────────────────
-    _SCAN_OBJECT_TYPES = ("aos_switch", "cx_switch", "ex_switch", "gateway")
+    _SCAN_OBJECT_TYPES = ("aos_switch", "cx_switch", "ex_switch", "gateway", "ipmi")
 
     async def _nw_netbox_prefix_split(hub, tenant_id):
         """The tenant's NetBox IPv4 prefixes split into ``(leaf, supernets)``.
@@ -3286,7 +3286,7 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=400, detail="Missing device name or object_type")
             _validate_nw_address(new_dev.get("address"))
             if new_dev.get("object_type") not in ("aos_switch", "cx_switch",
-                                                   "ex_switch", "gateway"):
+                                                   "ex_switch", "gateway", "ipmi"):
                 raise HTTPException(status_code=400, detail="Invalid object_type")
             # Bind it to the caller's tenant and check its vault reference.
             _enforce_tenant_bind(request, new_dev, "network device")
