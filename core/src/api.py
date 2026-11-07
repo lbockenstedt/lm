@@ -1856,8 +1856,9 @@ def create_app(hub):
     # /status is deliberately NOT shed — it must stay readable in protect mode so
     # the operator + WebUI can SEE the state (it returns a lightweight body while
     # protecting; see get_system_metrics). Only the heavy fleet-shaping views shed.
+    # "/sim/" (trailing slash) so the /sim-views.js asset is never shed.
     _SHED_PREFIXES = ("/setup/pending_spokes", "/setup/diagnostics",
-                      "/sim", "/aggregate")
+                      "/sim/", "/aggregate")
 
     @app.middleware("http")
     async def overload_admission_middleware(request, call_next):
