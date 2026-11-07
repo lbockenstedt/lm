@@ -361,6 +361,29 @@
 </head>
 <body class="flex flex-col h-screen w-screen overflow-hidden">
 
+    <!-- The login overlay is visible immediately, but its handlers (doLogin /
+         doSetup / doOidcLogin) live in js/module-management.js, which is one of
+         ~15 classic scripts loaded at the end of <body>. Clicking Sign In or
+         pressing Enter before that script has executed threw
+         "ReferenceError: doLogin is not defined". lmLoginCall() is defined
+         inline here (so it always exists) and, if the handler isn't global yet,
+         waits for it (polling, bounded) instead of throwing — the user's click
+         is honored as soon as the app scripts finish loading. -->
+    <script>
+    function lmLoginCall(name) {
+        var tries = 0;
+        (function attempt() {
+            var fn = window[name];
+            if (typeof fn === 'function') { fn(); return; }
+            if (++tries > 200) {   // ~10s: scripts never loaded — surface it
+                var err = document.getElementById(name === 'doSetup' ? 'setup-error' : 'login-error');
+                if (err) { err.textContent = 'The interface is still loading — please reload the page.'; err.classList.remove('hidden'); }
+                return;
+            }
+            setTimeout(attempt, 50);
+        })();
+    }
+    </script>
     <!-- LOGIN / FIRST-RUN OVERLAY — shown before auth, hidden after -->
     <div id="login-overlay" class="fixed inset-0 z-[9999] flex items-center justify-center bg-[#1F2531]" style="background-color:#1F2531;">
 
@@ -384,10 +407,10 @@
                     <input id="login-password" type="password" autocomplete="current-password"
                         class="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:ring-2 focus:ring-brand focus:border-transparent"
                         placeholder="••••••••"
-                        onkeydown="if(event.key==='Enter')doLogin()">
+                        onkeydown="if(event.key==='Enter')lmLoginCall('doLogin')">
                 </div>
                 <p id="login-error" class="hidden text-xs text-red-400 font-medium"></p>
-                <button onclick="doLogin()"
+                <button onclick="lmLoginCall('doLogin')"
                     class="w-full bg-primary hover:bg-primary-hover text-white font-bold py-2.5 px-4 rounded-lg text-sm transition-colors">
                     Sign In
                 </button>
@@ -401,7 +424,7 @@
                         <span class="text-xs text-slate-500 font-bold">or</span>
                         <div class="flex-1 h-px bg-slate-600"></div>
                     </div>
-                    <button onclick="doOidcLogin()"
+                    <button onclick="lmLoginCall('doOidcLogin')"
                         class="w-full bg-slate-700 hover:bg-slate-600 text-white font-bold py-2.5 px-4 rounded-lg text-sm transition-colors flex items-center justify-center gap-2">
                         <svg width="16" height="16" viewBox="0 0 23 23" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill="#f25022" d="M0 0h11v11H0z"/><path fill="#7fba00" d="M12 0h11v11H12z"/><path fill="#00a4ef" d="M0 12h11v11H0z"/><path fill="#ffb900" d="M12 12h11v11H12z"/></svg>
                         Sign in with Microsoft
@@ -451,10 +474,10 @@
                     <input id="setup-password2" type="password" autocomplete="new-password"
                         class="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:ring-2 focus:ring-brand focus:border-transparent"
                         placeholder="••••••••"
-                        onkeydown="if(event.key==='Enter')doSetup()">
+                        onkeydown="if(event.key==='Enter')lmLoginCall('doSetup')">
                 </div>
                 <p id="setup-error" class="hidden text-xs text-red-400 font-medium"></p>
-                <button onclick="doSetup()"
+                <button onclick="lmLoginCall('doSetup')"
                     class="w-full bg-primary hover:bg-primary-hover text-white font-bold py-2.5 px-4 rounded-lg text-sm transition-colors">
                     Create Account &amp; Sign In
                 </button>

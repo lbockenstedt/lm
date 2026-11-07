@@ -826,6 +826,9 @@ class ConsoleSpoke(BaseSpoke):
             groups.append(FACTORY_DEFAULT_CREDENTIALS)
         return merge_credentials(*groups)
 
+    #: How often an automatically locked rate below 115200 is re-tried at 115200.
+    _BAUD_UPGRADE_SECS = 6 * 3600
+
     def _resolve_baud(self, port_id: str, dev: str):
         """Auto-resolve the baud rate for an identify attempt, sweeping until the
         line yields actual readable text. Returns ``(baud_to_use, locked_baud)``
@@ -840,9 +843,25 @@ class ConsoleSpoke(BaseSpoke):
         # Saved probe data and line settings.
         probe = self.store.get(port_id).get("probe") or {}
         settings = self.store.settings(port_id)
-        # A confirmed baud is used as-is.
+        # A confirmed baud is used as-is, except that an automatic lock below
+        # 115200 is re-checked at 115200 now and then: autobaud gear locks onto
+        # whichever rate first drew enough Enters, which used to be 9600.
         if probe.get("baud_confident") and settings.get("baud"):
-            return settings.get("baud"), None
+            saved = int(settings["baud"])
+            if (saved < DEFAULT_BAUD and not probe.get("baud_pinned")
+                    and time.time() - float(probe.get("baud_upgrade_checked_at") or 0)
+                    >= self._BAUD_UPGRADE_SECS):
+                self.store.update(port_id, probe={"baud_upgrade_checked_at": time.time()})
+                try:
+                    up = detect_baud(dev, [DEFAULT_BAUD])
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("baud upgrade check failed on %s: %s", dev, e)
+                    up = {}
+                if up.get("confident") and up.get("baud") == DEFAULT_BAUD:
+                    logger.info("console: %s answers at %d, moving up from %d",
+                                port_id, DEFAULT_BAUD, saved)
+                    return DEFAULT_BAUD, DEFAULT_BAUD
+            return saved, None
         # Otherwise sweep the candidate rates.
         try:
             d = detect_baud(dev, DEFAULT_BAUD_CANDIDATES)
@@ -875,6 +894,14 @@ class ConsoleSpoke(BaseSpoke):
                 ser.close()
             except Exception:  # noqa: BLE001
                 pass
+        # The sweep may miss a device that only answers after identify's
+        # extra Enters; a clean prompt at this rate proves it, so lock it too.
+        banner = res.get("banner") or ""
+        known = (self.store.get(port_id).get("probe") or {}).get("baud_confident")
+        if (not locked and not known and baud and not (res.get("diag") or {}).get("garbled")
+                and (res.get("logged_in") or looks_like_prompt(banner))
+                and score_sample(banner.encode("utf-8", "replace")) >= 0.8):
+            locked = baud
         # Mark a newly confirmed baud on the result.
         if locked:
             res["detected_baud"] = locked

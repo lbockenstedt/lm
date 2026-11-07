@@ -214,3 +214,49 @@ def test_pinned_port_is_never_re_swept_on_a_garbled_line(spoke):
     kwargs, boot = _boot_relock_args(spoke, score=0.1)
     spoke._boot_maybe_relock(**kwargs)
     assert boot["relocked"] is False
+
+
+def test_identify_locks_the_rate_when_its_extra_enters_draw_a_prompt(spoke, monkeypatch):
+    """The sweep missed the device, but identify's own Enters drew a clean
+    login prompt at 9600: that proves the rate, so it is locked."""
+    monkeypatch.setattr(spoke, "_resolve_baud", lambda pid, dev: (9600, None))
+    monkeypatch.setattr(cs, "open_raw", lambda *a, **kw: types.SimpleNamespace(
+        read=lambda n: b"", write=lambda b: None, close=lambda: None))
+    monkeypatch.setattr(cs, "run_identify", lambda *a, **kw: {
+        "banner": "\r\nUser Access Verification\r\nUsername: ", "logged_in": False,
+        "diag": {}})
+    res = spoke._identify_blocking("good", "/dev/ttyUSB0")
+    assert res["detected_baud"] == 9600 and res["baud_confident"] is True
+
+    monkeypatch.setattr(cs, "run_identify", lambda *a, **kw: {
+        "banner": "\xff\x80#", "logged_in": False, "diag": {"garbled": True}})
+    assert "detected_baud" not in spoke._identify_blocking("good", "/dev/ttyUSB0")
+
+
+def test_auto_lock_at_9600_moves_up_when_the_device_answers_at_115200(spoke, monkeypatch):
+    spoke.store.update("good", settings={"baud": 9600},
+                       probe={"baud_confident": True, "detected_baud": 9600})
+    tried = []
+
+    def _detect(dev, cands, *a, **kw):
+        tried.append(list(cands))
+        return {"baud": 115200, "confident": True}
+
+    monkeypatch.setattr(cs, "detect_baud", _detect)
+    assert spoke._resolve_baud("good", "/dev/ttyUSB0") == (115200, 115200)
+    assert tried == [[115200]]
+    # Checked once; the next identify within the window reuses the saved rate.
+    spoke.store.update("good", settings={"baud": 9600})
+    assert spoke._resolve_baud("good", "/dev/ttyUSB0") == (9600, None)
+    assert len(tried) == 1
+
+
+def test_baud_upgrade_check_keeps_9600_when_115200_is_silent_or_pinned(spoke, monkeypatch):
+    spoke.store.update("good", settings={"baud": 9600},
+                       probe={"baud_confident": True, "detected_baud": 9600})
+    monkeypatch.setattr(cs, "detect_baud", lambda *a, **kw: {"baud": 115200, "confident": False})
+    assert spoke._resolve_baud("good", "/dev/ttyUSB0") == (9600, None)
+
+    spoke.store.update("good", probe={"baud_pinned": True, "baud_upgrade_checked_at": 0})
+    monkeypatch.setattr(cs, "detect_baud", lambda *a, **kw: pytest.fail("pinned rate re-probed"))
+    assert spoke._resolve_baud("good", "/dev/ttyUSB0") == (9600, None)
