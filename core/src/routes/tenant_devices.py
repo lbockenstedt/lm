@@ -93,7 +93,7 @@ _PRODUCTS = {
 }
 
 # Allowed network-device object types; anything else is rejected on add.
-_NW_OBJECT_TYPES = ("aos_switch", "cx_switch", "ex_switch", "gateway")
+_NW_OBJECT_TYPES = ("aos_switch", "cx_switch", "ex_switch", "gateway", "ipmi")
 
 
 def register(app, hub, ctx):
