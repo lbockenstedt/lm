@@ -98,8 +98,11 @@ with "Unknown command" until redeployed). The spoke command (`DHCP_DNS_HOOK_CONF
 control** — nothing ever sent it, so the hook stayed permanently disabled
 (`enabled` defaults to `false`) no matter how it was documented. `GET`/`POST
 /api/dhcp/dns-hook` (`core/src/routes/net_services.py`) close that gap:
-`GET` relays `DHCP_DNS_HOOK_STATUS` (on-disk settings + whether it's loaded in
-Kea's running config + a log tail); `POST` (Global-Admin only, same
+`GET` relays `DHCP_DNS_HOOK_STATUS` live, bypassing the warm cache, because the
+toggle posts these settings back (on-disk settings + whether it's loaded in
+Kea's running config + a log tail). On an HA pair the status is `PARTIAL` when
+a node didn't answer cleanly but another still reported settings; it is
+`ERROR` only when no node did. `POST` (Global-Admin only, same
 `_ADMIN_INFRA_WRITE_PREFIXES` gate as the rest of `/api/dhcp/`) relays
 `DHCP_DNS_HOOK_CONFIG` with `{"enabled", "targets", "domain", "ttl",
 "register_ptr"}` plus an optional `hook_dir`.
