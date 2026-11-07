@@ -13,7 +13,10 @@ from api import HTTPException, Request, logger
 
 async def inventory_devices(hub):
     """LM inventory as monitoring devices, with each SNMP community resolved
-    from the credential vault (the credential the network scan found to work)."""
+    from the credential vault (the credential the network scan found to work).
+    Only devices verified to answer SNMP are returned, plus IPs a user pinned
+    from IPAM (``monitoring_watch``), which fall back to ping without SNMP.
+    The scanner never adds ping-only hosts (the Zabbix spoke purges those)."""
     # Per-device credential overlay: fills vault-held secrets (e.g. SNMP community) into inventory
     # rows.
     import instance_vault
@@ -63,8 +66,7 @@ async def inventory_devices(hub):
     extra = [n for n in (gc.get("nw_monitor_neighbors", []) or [])
              if isinstance(n, dict) and n.get("name") and n.get("address")
              and str(n["name"]).casefold() not in names]
-    # Hosts the nw scan/sweep saw answering within the last day (ping-only
-    # ones get the ICMP template); they age out of Zabbix once they stop.
+    # Hosts the nw scan/sweep saw answering SNMP within the last day.
     import time
     import nw_seen_hosts
     # Every address already covered (primary and alternates), so seen hosts do not duplicate them.
@@ -74,12 +76,48 @@ async def inventory_devices(hub):
     extra += nw_seen_hosts.monitor_rows(
         gc.get("nw_seen_hosts") or {}, time.time(), addrs,
         names | {str(n["name"]).casefold() for n in extra})
+    # Addresses a scan reached over SNMP, with the vault credential that worked.
+    snmp_seen = {ip: e["snmp_credential_id"]
+                 for reg in (gc.get("nw_seen_hosts") or {}).values() if isinstance(reg, dict)
+                 for ip, e in reg.items()
+                 if isinstance(e, dict) and e.get("snmp_ok") and e.get("snmp_credential_id")}
+    # IPs a user chose to monitor from IPAM (Monitor button): always monitored,
+    # over SNMP when verified, otherwise by ping. New ones become extra hosts.
+    def ips_of(d):
+        return [str(a or "").split("/")[0].strip()
+                for a in [d.get("address")] + list(d.get("alt_addresses") or [])]
+    watch = gc.get("monitoring_watch") or {}
+    watched = {(str(t).casefold(), ip) for t, ips in watch.items() if isinstance(ips, dict)
+               for ip in ips}
+    covered = {ip for d in list(inv) + extra for ip in ips_of(d)}
+    taken = names | {str(n["name"]).casefold() for n in extra}
+    for t, ips in sorted(watch.items()):
+        for ip, info in sorted((ips or {}).items()):
+            if ip in covered:
+                continue
+            name = str((info or {}).get("name") or "").strip() or ip
+            name = ip if name.casefold() in taken else name
+            taken.add(name.casefold())
+            extra.append({"tenant_id": t, "name": name, "address": ip, "type": "host"})
     # Tenant-group membership tables, used to share SNMP buckets/proxies within a group.
     import access
     # Build one monitoring row per device (inventory plus extras).
+    skipped = 0
     for d in list(inv) + extra:
-        # The device's tenant, and the tenant it was moved from (if any).
+        # The device's tenant, and whether a user pinned one of its IPs in IPAM.
         tenant = d.get("tenant") or d.get("tenant_id") or "default"
+        pinned = any((str(tenant).casefold(), ip) in watched for ip in ips_of(d))
+        # Scanned devices are monitored only when proven to answer SNMP: verified
+        # on the device itself, or by a scan that reached one of its addresses.
+        ref = d.get("snmp_secret") or ""
+        verified = d.get("snmp_ok") is True
+        if not verified:
+            cred = next((snmp_seen[ip] for ip in ips_of(d) if snmp_seen.get(ip)), "")
+            verified, ref = bool(cred), ref or cred
+        if not verified and not pinned:
+            skipped += 1
+            continue
+        # The tenant the device was moved from (if any).
         moved = d.get("moved_from") if isinstance(d.get("moved_from"), dict) else {}
         former = str(moved.get("tenant_id") or "")
         # A tenant group has no SNMP bucket or proxy of its own: its member
@@ -91,7 +129,6 @@ async def inventory_devices(hub):
         # Credentials never cross tenants: the verified credential and the
         # tenant bucket only count when they belong to this device's tenant.
         # Only the Admin/Default tenant may use the Global Admin slot.
-        ref = d.get("snmp_secret") or ""
         ref_bucket = ref.split(":")[1] if ref.startswith("snmp:") and ref.count(":") >= 2 else None
         # Buckets this device may draw from: its tenant and its group members (plus the admin slot
         # for default).
@@ -100,19 +137,21 @@ async def inventory_devices(hub):
             own.add(cred_vault.ADMIN_BUCKET)
         # Pick a community in priority order: set on the device, its verified vault secret, its
         # tenant's, a member tenant's, then the Global Admin slot.
-        community = (d.get("snmp_community")
-                     or (by_ref.get(ref, "") if ref_bucket in own else "")
-                     or tenant_snmp.get(tenant)
-                     or next((tenant_snmp[m] for m in members if tenant_snmp.get(m)), "")
-                     or (tenant_snmp.get(cred_vault.ADMIN_BUCKET, "") if "default" in own else ""))
+        community = verified and (
+            d.get("snmp_community")
+            or (by_ref.get(ref, "") if ref_bucket in own else "")
+            or tenant_snmp.get(tenant)
+            or next((tenant_snmp[m] for m in members if tenant_snmp.get(m)), "")
+            or (tenant_snmp.get(cred_vault.ADMIN_BUCKET, "") if "default" in own else "")) or ""
+        # No community this tenant may use: cannot be polled (pinned IPs fall back to ping).
+        if not community and not pinned:
+            skipped += 1
+            continue
         # The row the monitoring spoke syncs into Zabbix (IP without any /prefix).
         row = {"tenant": tenant, "name": d.get("name"),
                "type": d.get("type") or d.get("object_type") or d.get("model") or "",
                "ip": str(d.get("address") or "").split("/")[0],
-               # Only a device that failed an SNMP probe is held back.
-               "snmp": (bool(community) or d.get("transport") == "snmp")
-               and d.get("snmp_ok") is not False,
-               "snmp_community": community, "_ok": d.get("snmp_ok")}
+               "snmp": bool(community), "snmp_community": community}
         if members:
             # Proxies to try after the group's own: its member tenants'.
             row["proxy_tenants"] = members
@@ -122,11 +161,8 @@ async def inventory_devices(hub):
             row["moved_from"] = former
         # Collect the finished row.
         out.append(row)
-    # The sync keeps the first address per device name: prefer one that answered SNMP.
-    out.sort(key=lambda x: 0 if x["_ok"] is True else (2 if x["_ok"] is False else 1))
-    # Drop the internal sort key before returning.
-    for x in out:
-        x.pop("_ok")
+    logger.info("monitoring: %d devices (%d pinned from IPAM), %d skipped (no verified SNMP)",
+                len(out), len(watched), skipped)
     return out
 
 
@@ -544,6 +580,65 @@ def register(app, hub, ctx):
         hub.state._mark_dirty()
         # Return the effective settings.
         return monitoring_sync_config(hub)
+
+    def _watch_tenant(request, requested, write=False):
+        """Resolve the tenant for an IPAM Monitor call and enforce access."""
+        import access
+        sess = _session_user(request)
+        if not sess:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        if not (_is_admin(sess) or access.has_ipam_access(sess)):
+            raise HTTPException(status_code=403, detail="IPAM access required")
+        tenant, code, detail = access.resolve_module_tenant(
+            _is_admin(sess), (sess.get("user") or {}).get("tenants") or [], requested, "monitoring")
+        if not tenant:
+            raise HTTPException(status_code=code, detail=detail)
+        if write and access.write_scope(sess, tenant) == "deny":
+            raise HTTPException(status_code=403, detail="Write access required")
+        return tenant, sess
+
+    @app.get("/api/monitoring/watch")
+    async def monitoring_watch_list(request: Request, tenant: str = None):
+        """IPs the tenant pinned for monitoring from IPAM."""
+        tenant, _ = _watch_tenant(request, tenant)
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        return {"tenant": tenant, "ips": (gc.get("monitoring_watch") or {}).get(tenant) or {}}
+
+    @app.put("/api/monitoring/watch")
+    async def monitoring_watch_set(request: Request):
+        """Turn monitoring of one IPAM address on or off. Body:
+        ``{tenant, ip, name?, monitor: bool}``. The next sync adds or removes
+        the Zabbix host (SNMP when verified, otherwise ping)."""
+        import ipaddress
+        import time
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        body = body if isinstance(body, dict) else {}
+        tenant, sess = _watch_tenant(request, body.get("tenant"), write=True)
+        try:
+            ip = str(ipaddress.ip_address(str(body.get("ip") or "").split("/")[0].strip()))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="ip must be an IP address")
+        name = str(body.get("name") or "").strip()[:64]
+        # The name becomes the Zabbix visible name: keep it to plain host-name characters.
+        if name and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._\- ]*", name):
+            raise HTTPException(status_code=400, detail="invalid name")
+        gc = hub.state.system_state.setdefault("global_config", {})
+        watch = gc.setdefault("monitoring_watch", {})
+        ips = watch.setdefault(tenant, {})
+        if body.get("monitor"):
+            ips[ip] = {"name": name, "by": (sess.get("user") or {}).get("username") or "",
+                       "at": int(time.time())}
+        else:
+            ips.pop(ip, None)
+            if not ips:
+                watch.pop(tenant, None)
+        hub.state._mark_dirty()
+        logger.info("monitoring: IPAM %s %s for tenant %s",
+                    "monitor" if body.get("monitor") else "unmonitor", ip, tenant)
+        return {"tenant": tenant, "ip": ip, "monitored": bool(body.get("monitor"))}
 
     @app.post("/api/monitoring/rebuild")
     async def monitoring_rebuild(request: Request):

@@ -146,7 +146,8 @@ def monitor_rows(by_tenant: Dict[str, Dict[str, Dict[str, Any]]], now: float,
                  window: float = MONITOR_WINDOW) -> List[Dict[str, Any]]:
     """Monitoring inventory rows (``nw_monitor_neighbors`` shape) for hosts
     seen within ``window`` that aren't already monitored (by address or name).
-    Hosts without a working SNMP community get the ping template."""
+    Only hosts that answered SNMP with a vault credential are returned; a
+    ping-only host is never monitored."""
     # One row per recently seen, not yet monitored host across all tenants.
     out = []
     for tid, reg in (by_tenant or {}).items():
@@ -154,13 +155,14 @@ def monitor_rows(by_tenant: Dict[str, Dict[str, Dict[str, Any]]], now: float,
             # Skip hosts outside the window or already monitored by address.
             if now - float(e.get("last_seen") or 0) > window or ip in skip_addresses:
                 continue
+            # Skip hosts that never answered SNMP with a known credential.
+            if not (e.get("snmp_ok") and e.get("snmp_credential_id")):
+                continue
             # Use the hostname as name unless it clashes with a monitored name; then use the IP.
             name = str(e.get("hostname") or ip)
             if name.casefold() in skip_names:
                 name = ip
-            # SNMP template only when SNMP worked and a credential is known; else ping.
             out.append({"tenant_id": tid, "name": name, "address": ip,
                         "type": str(e.get("object_type") or "host"),
-                        "snmp_ok": bool(e.get("snmp_ok") and e.get("snmp_credential_id")),
-                        "snmp_secret": e.get("snmp_credential_id") or ""})
+                        "snmp_ok": True, "snmp_secret": e["snmp_credential_id"]})
     return out
