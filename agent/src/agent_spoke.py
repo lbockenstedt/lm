@@ -509,6 +509,11 @@ _DEPLOY_ROLE_EXTRA_UNITS = {
     "dns-server": ("lm-dns-worker",),
     "dhcp-server": ("lm-dhcp-worker", "kea-ha-agent"),
 }
+# Sidecars that are no longer used. The self-heal turns these OFF instead of on.
+# kea-ha-agent: Kea 2.4+ serves HA peer traffic from kea-dhcp4's own listener
+# on the same port, and the agent (kea-ctrl-agent as root) is blocked by
+# AppArmor, so re-enabling it only crash-looped.
+_RETIRED_SIDECARS = ("kea-ha-agent",)
 
 # UNINSTALL_ROLE recipes — the true inverse of a deploy role's install.
 #
@@ -625,6 +630,27 @@ def _local_service_addresses() -> list:
     return addresses
 
 
+def _retire_sidecar(unit: str) -> list:
+    """Stop and disable a retired sidecar that is still enabled, active or
+    failed. Returns the action taken (empty when it is already off)."""
+    try:
+        state = subprocess.run(
+            ["systemctl", "show", "-p", "UnitFileState,ActiveState", "--value", unit],
+            capture_output=True, text=True, check=False, timeout=10,
+        ).stdout.split()
+        if "enabled" not in state and "active" not in state and "failed" not in state:
+            return []
+        subprocess.run(["systemctl", "disable", "--now", unit],
+                       capture_output=True, text=True, check=False, timeout=30)
+        subprocess.run(["systemctl", "reset-failed", unit],
+                       capture_output=True, text=True, check=False, timeout=10)
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.warning("self-heal: could not retire %s: %s", unit, e)
+        return []
+    logger.info("self-heal: disabled retired %s", unit)
+    return [f"disabled retired {unit}"]
+
+
 def _heal_deploy_role_sidecars(installed_roles: list) -> list:
     """Best-effort, fixed-argv repair for a role's cluster sidecar
     (``lm-dhcp-worker``/``lm-dns-worker``/``kea-ha-agent``) being disabled or
@@ -689,6 +715,9 @@ def _heal_deploy_role_sidecars(installed_roles: list) -> list:
                 loaded = False
             if not loaded:
                 continue  # not installed on this host — nothing to heal
+            if unit in _RETIRED_SIDECARS:
+                actions.extend(_retire_sidecar(unit))
+                continue
             # Skip unknown state and healthy units.
             healthy = _unit_healthy(unit)
             if healthy is None:

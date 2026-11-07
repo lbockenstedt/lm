@@ -56,8 +56,8 @@ while [[ "$#" -gt 0 ]]; do
         --member-id)     MEMBER_ID="$2";     INFRA_ONLY=true; shift ;;
         --coordinator)   COORDINATOR="$2";   INFRA_ONLY=true; shift ;;
         --worker-secret) WORKER_SECRET="$2"; INFRA_ONLY=true; shift ;;
-        # HA peer channel: a SECOND control agent, basic-auth protected and
-        # firewalled to the partner. Never the loopback-only 8001 agent.
+        # HA peer channel: kea-dhcp4's HA listener, mutual TLS, firewalled to
+        # the partner. Never the loopback-only 8001 agent.
         --ha-port)       HA_PORT="$2";       shift ;;
         --ha-user)       HA_USER="$2";       shift ;;
         --ha-password)   HA_PASSWORD="$2";   shift ;;
@@ -343,9 +343,9 @@ if [[ -n "$MEMBER_ID" || -n "$COORDINATOR" || -n "$WORKER_SECRET" ]]; then
     fi
 
     # The node-local control agent (8001, written above) stays LOOPBACK-ONLY and
-    # is left untouched. HA peer traffic gets a DEDICATED agent on $HA_PORT with
-    # HTTP basic auth, so the partner can run ha-heartbeat + lease sync without
-    # exposing unauthenticated config-set to the network.
+    # is left untouched. HA peer traffic goes to kea-dhcp4's own HA listener on
+    # $HA_PORT (Kea 2.4+ multi-threaded HA, "http-dedicated-listener"), which
+    # requires a client certificate signed by the HA CA.
     install -d -m 0755 /etc/kea
     install -d -m 0750 "$HA_TLS_DIR"
 
@@ -368,52 +368,11 @@ if [[ -n "$MEMBER_ID" || -n "$COORDINATOR" || -n "$WORKER_SECRET" ]]; then
     fi
     chgrp _kea "$HA_KEY" 2>/dev/null || true
 
-    cat > "$HA_AGENT_CONF" <<EOF
-{
-    "Control-agent": {
-        "http-host": "0.0.0.0",
-        "http-port": ${HA_PORT},
-        "trust-anchor": "${HA_CA}",
-        "cert-file": "${HA_CERT}",
-        "key-file": "${HA_KEY}",
-        "cert-required": true,
-        "authentication": {
-            "type": "basic",
-            "realm": "kea-ha",
-            "clients": [ { "user": "${HA_USER}", "password": "${HA_PASSWORD}" } ]
-        },
-        "control-sockets": {
-            "dhcp4": {
-                "socket-type": "unix",
-                "socket-name": "/run/kea/kea4-ctrl-socket"
-            }
-        },
-        "loggers": [{
-            "name": "kea-ctrl-agent",
-            "output_options": [{"output": "syslog"}],
-            "severity": "WARN"
-        }]
-    }
-}
-EOF
-    chmod 640 "$HA_AGENT_CONF"
-    chgrp _kea "$HA_AGENT_CONF" 2>/dev/null || true
-
-    cat > /etc/systemd/system/${HA_AGENT_SERVICE}.service <<EOF
-[Unit]
-Description=Kea Control Agent (authenticated HA peer channel)
-After=network-online.target kea-dhcp4-server.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/sbin/kea-ctrl-agent -c ${HA_AGENT_CONF}
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
+    # Retire the old separate HA control agent. kea-dhcp4 binds $HA_PORT itself,
+    # and the agent (kea-ctrl-agent run as root) was blocked by AppArmor anyway,
+    # so it only crash-looped.
+    systemctl disable --now "$HA_AGENT_SERVICE" 2>/dev/null || true
+    rm -f "/etc/systemd/system/${HA_AGENT_SERVICE}.service" "$HA_AGENT_CONF"
 
     # Firewall scope, PERSISTENT: only the declared partner address(es) may reach
     # the HA port. Runtime-only rules were lost on the first reboot, which is
@@ -486,8 +445,6 @@ EOF
     fi
 
     systemctl daemon-reload
-    systemctl enable --now "$HA_AGENT_SERVICE" \
-        || echo "⚠️  ${HA_AGENT_SERVICE} failed to start — the pair cannot heartbeat until it does"
 
     # Accept a bare coordinator host (`--coordinator 10.0.1.9`); 8770 is the
     # DHCP module's cluster listener port (dns uses 8769). Default to wss:// —
