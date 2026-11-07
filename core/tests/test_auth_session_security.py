@@ -1300,3 +1300,11 @@ def test_read_only_flag_survives_login(tmp_path):
     c, hub = _build(users={"probe": user}, tmp_path=tmp_path)
     r = c.post("/auth/login", json={"username": "probe", "password": "probe-pw-1234"})
     assert r.status_code == 200 and r.json()["permissions"]["read_only"] is True
+
+
+def test_protect_mode_sheds_sim_api_but_not_sim_static_assets():
+    client, hub = _build()
+    client.app.state.hub = hub
+    hub._protect_mode = True
+    assert client.get("/sim/api/aggregate/clients").status_code == 503
+    assert client.get("/sim-views.js").status_code != 503
