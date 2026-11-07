@@ -2235,7 +2235,7 @@ const VIEW_SUBMENUS = {
     netbox: ['Overview', 'Devices', 'Racks', 'Prefixes', 'IP Addresses'],
     dns: ['Overview', 'Records', 'Forwarders', 'Overrides', 'External DNS', 'Diagnostics'],
     dhcp: ['Overview', 'Subnets', 'Leases', 'Reservations', 'Diagnostics'],
-    nw: ['Overview', 'Gateways', 'Switches', 'Firewalls', 'Other', 'Topology', 'Scan'],
+    nw: ['Overview', 'Gateways', 'Switches', 'Firewalls', 'IPMI', 'Other', 'Topology', 'Scan'],
     truenas: ['Appliances', 'Pools', 'Datasets', 'Shares', 'Disks', 'Alerts', 'Capacity'],
     zabbix: ['Overview'],
 };

@@ -62,6 +62,8 @@ function _nwCategoryOf(objectType) {
             return 'Switches';
         case 'firewall': case 'opnsense':
             return 'Firewalls';
+        case 'ipmi':
+            return 'IPMI';
         default:
             return 'Other';
     }
@@ -278,7 +280,7 @@ async function loadNwData(category) {
     // Map any stale/legacy submenu value (a cached currentSubView from the old
     // data-type tabs, or a deep link) onto a real category so the page never
     // blanks. 'Overview' is the tenant-wide summary landing tab.
-    const CATEGORIES = ['Gateways', 'Switches', 'Firewalls', 'Other'];
+    const CATEGORIES = ['Gateways', 'Switches', 'Firewalls', 'IPMI', 'Other'];
     if (category === 'Topology') {
         window._nwView = null;
         window._nwDetail = null;
@@ -340,7 +342,7 @@ async function loadNwData(category) {
     // Per-category counts across the WHOLE fleet so the list view can show where
     // every device lives — otherwise, landing on an empty/small category (e.g.
     // Gateways) makes devices under another category look "missing".
-    const counts = { Gateways: 0, Switches: 0, Firewalls: 0, Other: 0 };
+    const counts = { Gateways: 0, Switches: 0, Firewalls: 0, IPMI: 0, Other: 0 };
     items.forEach(it => { counts[_nwCategoryOf(it.object_type)]++; });
     if (category === 'Overview') {
         // Tenant-wide summary landing (mirrors the Hypervisor Overview): keep the
@@ -361,7 +363,7 @@ async function loadNwData(category) {
 function _renderNwOverview(devices, counts) {
     const container = document.getElementById('nw-table-container');
     if (!container) return;
-    counts = counts || { Gateways: 0, Switches: 0, Firewalls: 0, Other: 0 };
+    counts = counts || { Gateways: 0, Switches: 0, Firewalls: 0, IPMI: 0, Other: 0 };
     const isUp   = it => it.reachable === true  || it.reachable === 'up';
     const isDown = it => it.reachable === false || it.reachable === 'down';
     const total = devices.length;
@@ -388,7 +390,7 @@ function _renderNwOverview(devices, counts) {
     </div>`;
 
     // Per-category cards → click navigates to that category tab.
-    const CATEGORIES = ['Gateways', 'Switches', 'Firewalls', 'Other'];
+    const CATEGORIES = ['Gateways', 'Switches', 'Firewalls', 'IPMI', 'Other'];
     const catCard = c => `
         <div onclick="setSubView('${c}')" class="cursor-pointer bg-white rounded-xl border border-slate-200 p-5 hover:border-brand hover:shadow-md transition-all" title="Filter network devices by ${c}">
             <p class="text-xs font-bold text-slate-500 mb-2">${c}</p>
@@ -1444,7 +1446,7 @@ function _renderNwDeviceList(category, devices, counts) {
     const container = document.getElementById('nw-table-container');
     if (!container) return;
     counts = counts || (window._nwView && window._nwView.counts) || {};
-    const CATEGORIES = ['Gateways', 'Switches', 'Firewalls', 'Other'];
+    const CATEGORIES = ['Gateways', 'Switches', 'Firewalls', 'IPMI', 'Other'];
     const addServerRow = `<div class="flex justify-end mb-2">${addServerButtonHtml('nw', 'Network Devices')}</div>`;
     if (!devices.length) {
         // Point the user at where devices actually are instead of a dead end.
