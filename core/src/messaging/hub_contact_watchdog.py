@@ -173,7 +173,9 @@ class HubContactWatchdogMixin:
             # counting; a genuine fresh boot after real contact just uses now.
             self._last_hub_contact = min(self._last_hub_contact, float(st["last_contact_at"]))
         logger.info("hub-contact watchdog running (enabled=%s).", self._hcw_config()["enabled"])
-        # Check every 30 seconds; errors never stop the loop.
+        # Check every 30 seconds; errors never stop the loop. State writes run in
+        # a thread: os.replace waits on the filesystem journal, and a slow disk
+        # flush there froze the shared event loop (every co-hosted spoke) for ~70s.
         while True:
             try:
                 await asyncio.sleep(30)
@@ -181,7 +183,7 @@ class HubContactWatchdogMixin:
                 cfg = self._hcw_config()
                 if not cfg["enabled"]:
                     if self._hcw_load():  # was armed, now disabled → wipe ladder
-                        self._hcw_clear()
+                        await asyncio.to_thread(self._hcw_clear)
                     continue
                 # Escalation timings and the current outage state.
                 T1, T2 = cfg["service_s"], cfg["reboot_s"]
@@ -205,9 +207,9 @@ class HubContactWatchdogMixin:
                     if (st.get("run_start_at") or st.get("stage")
                             or st.get("run") or st.get("gave_up")):
                         logger.info("hub-contact watchdog: hub reachable again — clearing escalation state.")
-                        self._hcw_clear()
+                        await asyncio.to_thread(self._hcw_clear)
                     # Persist a periodic contact heartbeat so a later boot inherits it.
-                    self._hcw_save({"last_contact_at": self._last_hub_contact})
+                    await asyncio.to_thread(self._hcw_save, {"last_contact_at": self._last_hub_contact})
                     continue
 
                 # Already gave up, or sleeping between runs: wait.
@@ -222,14 +224,14 @@ class HubContactWatchdogMixin:
                                  "giving up; leaving this node offline.", run,
                                  (T2 + SLEEP) * MAX_RUNS / 3600.0)
                     st["gave_up"] = True
-                    self._hcw_save(st)
+                    await asyncio.to_thread(self._hcw_save, st)
                     continue
 
                 # Start a run if none in progress. run_start_at anchors T1/T2.
                 if not st.get("run_start_at"):
                     st.update({"run_start_at": now, "stage": "started",
                                "last_contact_at": self._last_hub_contact})
-                    self._hcw_save(st)
+                    await asyncio.to_thread(self._hcw_save, st)
                 # How long this run has lasted, and its current stage.
                 run_outage = now - float(st["run_start_at"])
                 stage = st.get("stage", "started")
@@ -240,7 +242,7 @@ class HubContactWatchdogMixin:
                                  "restarting the service.", run_outage, run + 1)
                     st["stage"] = "service_restarted"
                     st["last_contact_at"] = self._last_hub_contact
-                    self._hcw_save(st)
+                    await asyncio.to_thread(self._hcw_save, st)
                     try:
                         await self._flush_log_relay_async()
                     except Exception:  # noqa: BLE001
@@ -252,7 +254,7 @@ class HubContactWatchdogMixin:
                                  "rebooting the server.", run_outage, run + 1)
                     st["stage"] = "rebooted"
                     st["last_contact_at"] = self._last_hub_contact
-                    self._hcw_save(st)
+                    await asyncio.to_thread(self._hcw_save, st)
                     await self._hcw_reboot()
                 # Stage 3: the run failed; sleep before the next one.
                 elif stage == "rebooted" and run_outage >= (T2 + GRACE):
@@ -262,7 +264,7 @@ class HubContactWatchdogMixin:
                     st.update({"run": run + 1, "sleep_until": now + SLEEP,
                                "run_start_at": 0, "stage": "started",
                                "last_contact_at": self._last_hub_contact})
-                    self._hcw_save(st)
+                    await asyncio.to_thread(self._hcw_save, st)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 — never fatal

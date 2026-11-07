@@ -307,3 +307,22 @@ def test_disabled_clears_and_noops(monkeypatch, tmp_path):
     exits, reboots = _drive(c, [(1, False), (1, False)], monkeypatch)
     assert exits == [] and reboots == []
     assert not c._hcw_load().get("stage")       # armed ladder was wiped
+
+def test_state_writes_run_off_the_event_loop(monkeypatch, tmp_path):
+    """State saves run in a worker thread: os.replace can wait ~70s on a slow
+    disk flush, which used to freeze every spoke sharing the event loop."""
+    import threading
+    c = _Spoke(str(tmp_path))
+    _enable(c, service_s=10, reboot_s=20)
+    loop_thread = threading.get_ident()
+    save_threads = []
+    real_save = c._hcw_save
+
+    def _save(st):
+        save_threads.append(threading.get_ident())
+        real_save(st)
+
+    monkeypatch.setattr(c, "_hcw_save", _save)
+    _drive(c, [(1, True)], monkeypatch)
+    assert save_threads and loop_thread not in save_threads
+    assert c._hcw_load().get("last_contact_at")
