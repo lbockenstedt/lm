@@ -26,7 +26,7 @@ class _Hub:
 
     async def request_response(self, target, cmd, payload, timeout=None):
         assert cmd == "HELP_ASK"
-        self.asks.append(payload["messages"][0]["content"])
+        self.asks.append(payload["messages"][-1]["content"])
         self.roles = getattr(self, "roles", []) + [payload.get("role")]
         return {"payload": {"data": {"status": "SUCCESS",
                                      "assistant": {"content": self.replies.pop(0)}}}}

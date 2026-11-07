@@ -269,7 +269,10 @@ async def _ask_llm(hub, agent, system: str, user: str, timeout: float = 90.0,
     ``role="final"`` asks AppBuilder for its most capable model (older agents
     ignore it)."""
     # Build the request with the scrubbed user text (and the model role, if asked).
-    req = {"messages": [{"role": "user", "content": scrub_for_llm(user)}],
+    # AppBuilder drops "system" whenever messages are given, so the instructions
+    # also ride in the messages as a system turn.
+    req = {"messages": [{"role": "system", "content": system},
+                        {"role": "user", "content": scrub_for_llm(user)}],
            "tools": None, "system": system}
     if role:
         req["role"] = role

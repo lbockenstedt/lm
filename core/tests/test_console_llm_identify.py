@@ -213,7 +213,7 @@ def test_ask_llm_scrubs_before_sending(monkeypatch):
 
         async def request_response(self, target, cmd, payload, timeout=None):
             if cmd == "HELP_ASK":
-                self.sent_user = payload["messages"][0]["content"]
+                self.sent_user = payload["messages"][-1]["content"]
                 return {"payload": {"data": {"status": "SUCCESS", "assistant": {"content": "{}"}}}}
             return await super().request_response(target, cmd, payload, timeout)
 
