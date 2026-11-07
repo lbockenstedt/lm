@@ -22,7 +22,8 @@ def test_inventory_devices_resolves_vault_and_shapes_devices(monkeypatch):
     monkeypatch.setattr(cred_vault, "automation_list_by_type", no_snmp)
     monkeypatch.setattr(instance_vault, "overlay_many", fake_overlay_many)
     hub = SimpleNamespace(state=SimpleNamespace(system_state={"global_config": {"nw_devices": [
-        {"name": "sw1", "address": "10.0.0.1/24", "tenant": "t1", "type": "switch"},
+        {"name": "sw1", "address": "10.0.0.1/24", "tenant": "t1", "type": "switch", "snmp_ok": True},
+        {"name": "unverified", "address": "10.0.0.2", "tenant": "t1"},
         {"name": "no-address"},
     ]}}))
     devices = asyncio.run(monitoring.inventory_devices(hub))
@@ -41,35 +42,38 @@ def test_scanned_device_inherits_tenant_scan_snmp_community(monkeypatch):
     monkeypatch.setattr(instance_vault, "overlay_many", fake_overlay_many)
     hub = SimpleNamespace(state=SimpleNamespace(system_state={"global_config": {
         "nw_devices": [{"name": "sw1", "address": "10.0.0.1", "tenant_id": "t1",
-                        "object_type": "cx_switch", "transport": "ssh"}],
+                        "object_type": "cx_switch", "transport": "ssh", "snmp_ok": True}],
         "nw_scan_credentials": [{"tenant_id": "t1", "snmp_community": "pub"}]}}))
     (d,) = asyncio.run(monitoring.inventory_devices(hub))
     assert d["type"] == "cx_switch" and d["snmp"] and d["snmp_community"] == "pub"
 
 
-def test_recently_seen_hosts_are_monitored_until_they_stop_answering(monkeypatch):
+def test_only_snmp_verified_devices_and_seen_hosts_are_monitored(monkeypatch):
     import time
 
     async def fake_overlay_many(hub, records, storage_key):
         return records
 
-    async def no_snmp(hub, sec_type, buckets=None):
-        return []
+    async def snmp_secrets(hub, sec_type, buckets=None):
+        return [{"bucket": "t1", "name": "SNMP", "value": {"snmp_community": "v"}}]
 
-    monkeypatch.setattr(cred_vault, "automation_list_by_type", no_snmp)
+    monkeypatch.setattr(cred_vault, "automation_list_by_type", snmp_secrets)
     monkeypatch.setattr(instance_vault, "overlay_many", fake_overlay_many)
     now = time.time()
+    ok = {"snmp_ok": True, "snmp_credential_id": "snmp:t1:SNMP", "last_seen": now}
     hub = SimpleNamespace(state=SimpleNamespace(system_state={"global_config": {
-        "nw_devices": [{"name": "sw1", "address": "10.0.0.1", "tenant_id": "t1"}],
+        "nw_devices": [{"name": "sw1", "address": "10.0.0.1", "tenant_id": "t1"},
+                       {"name": "sw2", "address": "10.0.0.2", "tenant_id": "t1"}],
         "nw_seen_hosts": {"t1": {
-            "10.0.0.1": {"address": "10.0.0.1", "last_seen": now},             # fleet
+            "10.0.0.1": {"address": "10.0.0.1", **ok},                          # fleet, SNMP ok
+            "10.0.0.2": {"address": "10.0.0.2", "last_seen": now},              # fleet, ping only
             "10.0.0.7": {"address": "10.0.0.7", "hostname": "pdu-a", "last_seen": now},
-            "10.0.0.8": {"address": "10.0.0.8", "last_seen": now - 3 * 86400},  # gone
+            "10.0.0.9": {"address": "10.0.0.9", "hostname": "tor1", **ok},
+            "10.0.0.8": {"address": "10.0.0.8", **ok, "last_seen": now - 3 * 86400},  # gone
         }}}}))
-    (sw, pdu) = asyncio.run(monitoring.inventory_devices(hub))
-    assert sw["name"] == "sw1"
-    assert pdu == {"tenant": "t1", "name": "pdu-a", "type": "host", "ip": "10.0.0.7",
-                   "snmp": False, "snmp_community": ""}
+    rows = asyncio.run(monitoring.inventory_devices(hub))
+    assert [(r["name"], r["ip"], r["snmp"], r["snmp_community"]) for r in rows] == [
+        ("sw1", "10.0.0.1", True, "v"), ("tor1", "10.0.0.9", True, "v")]
 
 
 def test_vault_snmp_secret_applies_to_tenant_devices(monkeypatch):
@@ -83,11 +87,10 @@ def test_vault_snmp_secret_applies_to_tenant_devices(monkeypatch):
     monkeypatch.setattr(cred_vault, "automation_list_by_type", snmp_secrets)
     monkeypatch.setattr(instance_vault, "overlay_many", fake_overlay_many)
     hub = SimpleNamespace(state=SimpleNamespace(system_state={"global_config": {
-        "nw_devices": [{"name": "a", "address": "10.0.0.1", "tenant_id": "t1"},
-                       {"name": "b", "address": "10.0.0.2", "tenant_id": "t2"}]}}))
-    a, b = asyncio.run(monitoring.inventory_devices(hub))
-    assert a["snmp_community"] == "vaulted" and a["snmp"]
-    assert not b["snmp"]
+        "nw_devices": [{"name": "a", "address": "10.0.0.1", "tenant_id": "t1", "snmp_ok": True},
+                       {"name": "b", "address": "10.0.0.2", "tenant_id": "t2", "snmp_ok": True}]}}))
+    (a,) = asyncio.run(monitoring.inventory_devices(hub))
+    assert a["name"] == "a" and a["snmp_community"] == "vaulted" and a["snmp"]
 
 
 def test_admin_slot_snmp_secret_is_only_the_default_tenants(monkeypatch):
@@ -100,11 +103,10 @@ def test_admin_slot_snmp_secret_is_only_the_default_tenants(monkeypatch):
     monkeypatch.setattr(cred_vault, "automation_list_by_type", snmp_secrets)
     monkeypatch.setattr(instance_vault, "overlay_many", fake_overlay_many)
     hub = SimpleNamespace(state=SimpleNamespace(system_state={"global_config": {
-        "nw_devices": [{"name": "a", "address": "10.0.0.1", "tenant_id": "other"},
-                       {"name": "b", "address": "10.0.0.2", "tenant_id": "default"}]}}))
-    a, b = asyncio.run(monitoring.inventory_devices(hub))
-    assert a["snmp_community"] == "" and not a["snmp"]
-    assert b["snmp_community"] == "adm" and b["snmp"]
+        "nw_devices": [{"name": "a", "address": "10.0.0.1", "tenant_id": "other", "snmp_ok": True},
+                       {"name": "b", "address": "10.0.0.2", "tenant_id": "default", "snmp_ok": True}]}}))
+    (b,) = asyncio.run(monitoring.inventory_devices(hub))
+    assert b["name"] == "b" and b["snmp_community"] == "adm" and b["snmp"]
 
 
 def test_verify_credentials_reports_ssh_and_snmp_and_gates_failed_snmp(monkeypatch):
@@ -208,7 +210,30 @@ def test_device_moved_into_tenant_group_uses_member_snmp_and_proxies(monkeypatch
     monkeypatch.setattr(access, "_GROUP_MEMBERS", {"group:ssplm": {"shared", "default"}})
     hub = SimpleNamespace(state=SimpleNamespace(system_state={"global_config": {"nw_devices": [
         {"name": "sw1", "address": "10.0.0.1", "tenant_id": "group:ssplm", "transport": "ssh",
-         "moved_from": {"tenant_id": "default", "spoke_id": "s1"}}]}}))
+         "snmp_ok": True, "moved_from": {"tenant_id": "default", "spoke_id": "s1"}}]}}))
     (d,) = asyncio.run(monitoring.inventory_devices(hub))
     assert d["snmp_community"] == "mbr" and d["snmp"]
     assert d["proxy_tenants"] == ["default", "shared"] and d["moved_from"] == "default"
+
+
+def test_ipam_pinned_ips_are_monitored_by_snmp_or_ping(monkeypatch):
+    async def fake_overlay_many(hub, records, storage_key):
+        return records
+
+    async def snmp_secrets(hub, sec_type, buckets=None):
+        return [{"bucket": "t1", "name": "SNMP", "value": {"snmp_community": "v"}}]
+
+    monkeypatch.setattr(cred_vault, "automation_list_by_type", snmp_secrets)
+    monkeypatch.setattr(instance_vault, "overlay_many", fake_overlay_many)
+    hub = SimpleNamespace(state=SimpleNamespace(system_state={"global_config": {
+        "nw_devices": [{"name": "sw1", "address": "10.0.0.1", "tenant_id": "t1"},
+                       {"name": "sw2", "address": "10.0.0.2", "tenant_id": "t1", "snmp_ok": True}],
+        "monitoring_watch": {"t1": {"10.0.0.1": {"name": ""},             # unverified device
+                                    "10.0.0.2": {"name": "x"},            # verified device
+                                    "10.0.0.5": {"name": "pdu-a"},        # new, ping only
+                                    "10.0.0.6": {"name": "sw1"}}},        # name clash -> IP
+    }}))
+    rows = asyncio.run(monitoring.inventory_devices(hub))
+    assert sorted((r["name"], r["ip"], r["snmp"]) for r in rows) == [
+        ("10.0.0.6", "10.0.0.6", False), ("pdu-a", "10.0.0.5", False),
+        ("sw1", "10.0.0.1", False), ("sw2", "10.0.0.2", True)]

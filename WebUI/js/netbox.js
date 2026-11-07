@@ -177,6 +177,9 @@ async function loadNetboxData(subMenu) {
             if (!r.ok || d.status === 'ERROR') { container.innerHTML = `<p class="p-4 text-amber-600 text-sm font-medium">Error: ${d.message || d.detail || 'NetBox spoke not connected'}</p>`; return; }
             const ips = d.ip_addresses || [];
             window._nbIPs = ips;
+            // IPs pinned for Zabbix monitoring (best effort: the list still shows without it).
+            const watched = await apiJson(`/api/monitoring/watch?tenant=${encodeURIComponent(currentTenant)}`)
+                .then(w => w.ips || {}).catch(() => ({}));
             const cols = ['Address', 'Status', 'MAC', 'DNS Name', 'Description', 'Assigned To', 'Device', ''];
             const rows = ips.map(ip => {
                 const statusCls = ip.status === 'active' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500';
@@ -189,6 +192,10 @@ async function loadNetboxData(subMenu) {
                 const reserveBtn = nbMac
                     ? `<button onclick="reserveNetboxIP(${ip.id})" title="Create a DHCP reservation pinning this address to ${escapeHtml(nbMac)}" class="p-1 text-slate-500 hover:text-primary-text transition-colors text-xs font-medium">Reserve</button>`
                     : `<span title="No MAC on this NetBox IP record yet — a DHCP reservation needs one to match the client. Discovery fills it in once the device is seen." class="p-1 text-slate-200 text-xs cursor-not-allowed">Reserve</span>`;
+                const bare = String(ip.address || '').split('/')[0];
+                const monitorBtn = watched[bare]
+                    ? `<button onclick="toggleNetboxMonitor(${ip.id}, false)" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-emerald-100" title="Stop monitoring ${escapeHtml(bare)} in Zabbix">✓ Monitored</button>`
+                    : `<button onclick="toggleNetboxMonitor(${ip.id}, true)" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-full text-xs font-bold hover:bg-slate-200" title="Monitor ${escapeHtml(bare)} in Zabbix (SNMP when it answers, otherwise ping)">Monitor</button>`;
                 return `<tr class="border-b border-slate-100 hover:bg-slate-50">
                     <td class="px-4 py-2 font-mono font-medium">${escapeHtml(ip.address)}</td>
                     <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${statusCls}">${escapeHtml(ip.status)}</span></td>
@@ -198,6 +205,7 @@ async function loadNetboxData(subMenu) {
                     <td class="px-4 py-2 text-xs">${ip.assigned_to || '—'}</td>
                     <td class="px-4 py-2 text-xs">${ip.device || '—'}</td>
                     <td class="px-4 py-2 whitespace-nowrap">
+                        ${monitorBtn}
                         ${reserveBtn}
                         <button onclick="editNetboxIP(${ip.id})" title="Edit" class="p-1 text-slate-500 hover:text-blue-600 transition-colors">${editIcon}</button>
                         <button onclick="releaseNetboxIP(${ip.id})" title="Release" class="p-1 text-slate-500 hover:text-red-500 transition-colors text-xs">Release</button>
@@ -1156,6 +1164,19 @@ async function submitNetboxAllocateIP() {
         } else {
             showToast('Error: ' + (d.message || 'Allocation failed'), 'error');
         }
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+// Turn Zabbix monitoring of an IPAM address on or off; the next monitoring sync applies it.
+async function toggleNetboxMonitor(ipId, monitor) {
+    const ip = (window._nbIPs || []).find(x => x.id === ipId);
+    if (!ip) { showToast('Row data not found — refresh and try again', 'error'); return; }
+    const name = String(ip.dns_name || ip.device || '').split('.')[0];
+    try {
+        await apiJson('/api/monitoring/watch', { method: 'PUT', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ tenant: currentTenant, ip: String(ip.address).split('/')[0], name, monitor }) });
+        showToast(monitor ? 'Monitoring on — added to Zabbix on the next sync' : 'Monitoring off — removed from Zabbix on the next sync', 'success');
+        loadNetboxData('IP Addresses');
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
