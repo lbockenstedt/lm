@@ -30,6 +30,15 @@ import ssl as _ssl
 # websockets: the client connection to the spoke's /ws/agent listener.
 import websockets
 
+try:
+    from hw_identity import collect_hw_identity as _collect_hw_identity
+except ImportError:  # package-style import
+    try:
+        from .hw_identity import collect_hw_identity as _collect_hw_identity
+    except ImportError:
+        def _collect_hw_identity():
+            return {}
+
 # Frame signing helpers, from whichever package layout is installed.
 try:
     from core.src.security.signer import MessageSigner, encode_frame, split_frame
@@ -532,9 +541,11 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
         while True:
             await asyncio.sleep(30)
             try:
+                # Hardware serial/make/model: lets the hub link this host to its iLO/iDRAC.
+                hw = await asyncio.get_running_loop().run_in_executor(None, _collect_hw_identity)
                 msg = {"header": {"sender_id": self.agent_id},
                        "payload": {"type": "HEARTBEAT",
-                                   "data": {"agent_id": self.agent_id}}}
+                                   "data": {"agent_id": self.agent_id, **hw}}}
                 await self.websocket.send(encode_frame(self.signer, msg))
             except Exception:  # noqa: BLE001
                 return

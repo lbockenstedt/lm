@@ -206,6 +206,10 @@ class TruenasCacheMixin:
         # Stamp and schedule a save.
         entry["fetched_at"] = time.time()
         self._truenas_cache_file.schedule_save()
+        # The appliance's hardware serial may now match a management controller's.
+        if getattr(self, "state", None) is not None:
+            import hw_serial_links
+            hw_serial_links.refresh_hw_serial_links(self, min_interval_s=30.0)
 
     # ── persist ───────────────────────────────────────────────────────────────
     # Persistence itself lives in cache_core.JsonCacheFile — see nw_cache for
