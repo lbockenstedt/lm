@@ -1803,7 +1803,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=500, detail=str(e))
 
     # ── Network scan (fingerprint discovery) ────────────────────────────────
-    _SCAN_OBJECT_TYPES = ("aos_switch", "cx_switch", "ex_switch", "gateway")
+    _SCAN_OBJECT_TYPES = ("aos_switch", "cx_switch", "ex_switch", "gateway", "ipmi")
 
     async def _nw_netbox_prefix_split(hub, tenant_id):
         """The tenant's NetBox IPv4 prefixes split into ``(leaf, supernets)``.
@@ -2687,7 +2687,16 @@ def register(app, hub, ctx):
                             tenant_id, addr, dev.get("hostname"), same.get("id"))
                 known.add(addr)
                 if not dry_run:
-                    same["alt_addresses"] = sorted(set(same.get("alt_addresses") or []) | {addr})
+                    old_primary = str(same.get("address") or "").strip()
+                    alts = set(same.get("alt_addresses") or []) | {addr}
+                    # The primary was scanned and is silent while this address
+                    # answers (DHCP moved the management IP): make it the primary.
+                    if old_primary in targets and old_primary not in alive and addr in alive:
+                        same["address"] = addr
+                        alts = (alts | {old_primary}) - {addr}
+                        logger.info("nw scan tenant=%s %s: address %s is silent, now %s",
+                                    tenant_id, same.get("id"), old_primary, addr)
+                    same["alt_addresses"] = sorted(alts)
                     alt_added = True
                 continue
             # The credential set that worked (else the first chosen one), and a summary of the
@@ -3286,7 +3295,7 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=400, detail="Missing device name or object_type")
             _validate_nw_address(new_dev.get("address"))
             if new_dev.get("object_type") not in ("aos_switch", "cx_switch",
-                                                   "ex_switch", "gateway"):
+                                                   "ex_switch", "gateway", "ipmi"):
                 raise HTTPException(status_code=400, detail="Invalid object_type")
             # Bind it to the caller's tenant and check its vault reference.
             _enforce_tenant_bind(request, new_dev, "network device")

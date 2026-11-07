@@ -1773,7 +1773,7 @@ class NwDiscoverySyncMixin:
         """Map a NetBox role/device_type to an nw object_type via the config map
         (case-insensitive on role then device_type), else the default."""
         # Allowed nw object types.
-        valid = {"aos_switch", "cx_switch", "ex_switch", "gateway"}
+        valid = {"aos_switch", "cx_switch", "ex_switch", "gateway", "ipmi"}
         # Normalize the map keys so lookups ignore case and separators.
         norm_map = {self._nw_role_norm(k): v for k, v in cfg["object_type_map"].items()}
         # Try the role first, then the device type.
