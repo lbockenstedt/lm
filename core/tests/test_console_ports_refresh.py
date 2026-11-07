@@ -66,3 +66,23 @@ def test_unwrap_ports_matches_route_envelope():
     assert HubVncConsoleMixin._console_unwrap_ports({"ports": [3]}) == [3]
     assert HubVncConsoleMixin._console_unwrap_ports(None) == []
     assert HubVncConsoleMixin._console_unwrap_ports({"payload": {"data": {}}}) == []
+
+
+def test_sweep_backs_off_a_spoke_that_keeps_failing_and_recovers():
+    hub = _Hub(connected=["con-1", "con-2"], fail=["con-1"])
+    polled = []
+    real = hub.request_response
+
+    async def spy(sid, *a, **kw):
+        polled.append(sid)
+        return await real(sid, *a, **kw)
+    hub.request_response = spy
+    run = asyncio.get_event_loop().run_until_complete
+    run(hub.refresh_console_ports_cache())
+    run(hub.refresh_console_ports_cache())
+    # con-1 failed once so the next sweep skips it; con-2 is polled every time.
+    assert polled == ["con-1", "con-2", "con-2"]
+    # An explicit refresh ignores the backoff, and success clears it.
+    hub._fail.clear()
+    run(hub.refresh_console_ports_cache(["con-1"]))
+    assert "con-1" not in hub._console_ports_backoff
