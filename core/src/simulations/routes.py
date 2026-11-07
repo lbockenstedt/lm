@@ -1989,7 +1989,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 # total_quotas>0 but adaptive=0 = quotas aren't adaptive (min==max /
                 # disabled) → no firing eval → an "underfilled" row is a fixed-count
                 # pool-fill issue, not a firing issue.
-                logger.info("adaptive-controller diag [%s]: total_quotas=%d adaptive=%d %s",
+                logger.debug("adaptive-controller diag [%s]: total_quotas=%d adaptive=%d %s",
                             tid, len(all_q), len(adaptive),
                             [f"{q.get('alert_id')}@{q.get('site')} min={q.get('min')} "
                              f"max={q.get('max')} learn={q.get('learning')}" for q in adaptive])

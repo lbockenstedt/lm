@@ -163,6 +163,7 @@ def test_rung2_fleet_on_cpu_distributed_load():
     h.signals.clear()
     h._proc_cpu = 30.0
     h.spoke_mps = {"a": 2, "b": 2, "c": 2}
+    h._fleet_backoff_since = time.monotonic() - 100
     for s in ("a", "b", "c"):
         h._backoff_since[s] = time.monotonic() - 100
     _ladder(h, loop_lag=0.0)
@@ -182,6 +183,7 @@ def test_rung2_fleet_on_loop_lag():
     h.signals.clear()
     h.mps = 10
     h.spoke_mps = {"a": 2, "b": 2, "c": 2}
+    h._fleet_backoff_since = time.monotonic() - 100
     for s in ("a", "b", "c"):
         h._backoff_since[s] = time.monotonic() - 100
     _ladder(h, loop_lag=0.05)
