@@ -112,6 +112,8 @@ from api import build_server, _refresh_module_all_tenants
 from hub_os_updates import HubOsUpdatesMixin
 # VM snapshot helpers.
 import vm_snapshots
+# Hardware-serial stitching of management controllers to their host OS.
+import hw_serial_links
 from hub_mtls_enforcement import HubMtlsEnforcementMixin
 from update_pipeline import UpdatePipelineMixin
 from endpoint_sync import EndpointSyncMixin
@@ -5565,6 +5567,25 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # Errors fail open so relays never crash.
             return True
 
+    def _note_agent_hw(self, agent_pk: str, original_msg: Dict[str, Any]) -> None:
+        """Record the hardware serial an agent reports in its heartbeat/telemetry
+        and re-run the controller<->host stitching when it is new or changed."""
+        try:
+            data = (original_msg or {}).get("payload", {}).get("data") or {}
+            serial = hw_serial_links.normalize_serial(data.get("hw_serial"))
+            if not serial:
+                return
+            info = self.agent_info[agent_pk]
+            changed = info.get("hw_serial") != serial
+            info["hw_serial"] = serial
+            for k in ("hw_manufacturer", "hw_product"):
+                if data.get(k):
+                    info[k] = str(data[k])[:80]
+            if changed:
+                hw_serial_links.refresh_hw_serial_links(self)
+        except Exception:  # noqa: BLE001 - hardware identity is best-effort
+            logger.debug("agent hw serial note failed", exc_info=True)
+
     async def _handle_agent_relay_up(self, spoke_id: str, msg_data, payload,
                                       _dec_secret: Optional[str] = None) -> bool:
         """Dispatch a relayed agent frame (AGENT_RELAY_UP) from a pxmx spoke.
@@ -5619,12 +5640,17 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         if agent_id and agent_pk is not None:
             _spk_pk = self._primary_key(spoke_id)
             _now = time.time()
+            _prev_info = self.agent_info.get(agent_pk) or {}
             self.agent_info[agent_pk] = {
                 "spoke_id":  _spk_pk,
                 "agent_id":  agent_id,
                 "hostname":  (relay_data.get("hostname") or "").strip() or agent_id,
                 "last_seen": _now,
+                # Hardware identity survives the per-frame rewrite until re-reported.
+                **{k: _prev_info[k] for k in ("hw_serial", "hw_manufacturer", "hw_product",
+                                              "linked_controller") if _prev_info.get(k)},
             }
+            self._note_agent_hw(agent_pk, original_msg)
             # Durable last-seen for the agent card: stamp the PERSISTED composite
             # heartbeat key ({spoke_pk}:{agent_pk}) on EVERY relayed frame — not
             # only AGENT_HEARTBEAT (which for a pxmx agent may never land under
