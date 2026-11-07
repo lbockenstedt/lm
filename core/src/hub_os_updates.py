@@ -545,8 +545,8 @@ class HubOsUpdatesMixin:
         is instant after a hub restart instead of waiting for the next check.
         Best-effort: never raises."""
         try:
-            # Short delay so startup work finishes first; computing fleet CVEs warms the caches.
-            await asyncio.sleep(5)
+            # Wait out the post-restart reconnect storm; computing fleet CVEs warms the caches.
+            await asyncio.sleep(120)
             n = len(await self.osu_fleet_cves(None))
             logger.info("os-updates: cache warmed from %s (%d affecting CVE(s))", _STATE_FILE, n)
         except asyncio.CancelledError:
