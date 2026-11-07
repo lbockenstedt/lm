@@ -552,7 +552,9 @@ _DEPLOY_ROLE_PURGE = {
     "zbxproxy": {
         "packages": ("zabbix-proxy-sqlite3",),
         "unit_files": (),
-        "paths": ("/etc/zabbix/zabbix_proxy.conf", "/var/lib/zabbix/zabbix_proxy.db"),
+        "paths": ("/etc/zabbix/zabbix_proxy.conf", "/var/lib/zabbix/zabbix_proxy.db",
+                  "/etc/systemd/system/zabbix-proxy.service.d/lm-ramdb.conf",
+                  "/run/zabbix-db"),
     },
     "zbxagent": {
         "packages": ("zabbix-agent2",),
