@@ -1230,8 +1230,11 @@ class NwDiscoverySyncMixin:
                 "serial": str(device_info.get("serial", "") or ""),
                 "mac": base_mac,
                 "firmware": str(device_info.get("firmware", "") or ""),
+                "host_model": str(device_info.get("host_model", "") or ""),
+                # A controller is racked with its server, so size it by the server's model.
                 "spec": await get_device_spec(
-                    self, str(device_info.get("model", "") or ""),
+                    self, str(device_info.get("host_model")
+                              or device_info.get("model", "") or ""),
                     str(device_cfg.get("object_type", "") or ""),
                     [i.get("name") for i in interfaces or [] if isinstance(i, dict)]),
             },
