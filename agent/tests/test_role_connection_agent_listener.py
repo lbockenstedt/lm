@@ -315,3 +315,42 @@ def test_role_connection_persists_session_secret_per_role(monkeypatch, tmp_path)
     conn4 = cp_module.RoleConnection(
         "netbox", "lm-agent", "wss://127.0.0.1:443", _make_role_instance())
     assert conn4.secret is None
+
+
+def test_disk_cache_write_does_not_block_loop(monkeypatch, tmp_path):
+    """A slow cache write (stalled disk flush) must not freeze the event loop,
+    and telemetry arriving mid-write coalesces into one follow-up write."""
+    import asyncio
+    import threading
+    import time as _time
+    monkeypatch.setattr(cp_module.RoleConnection, "AGENT_CONFIG_PATH",
+                       str(tmp_path / "agent-config.json"))
+    conn = cp_module.RoleConnection(
+        "proxmox", "lm-agent", "wss://127.0.0.1:443", _make_role_instance())
+    conn._disk_cache_path = str(tmp_path / "cache.json")
+    conn.connected_agents = {"a1": {"hostname": "h1"}}
+    release = threading.Event()
+    writes = []
+    real_write = conn._write_disk_cache
+
+    def _slow_write(payload):
+        release.wait(5)
+        writes.append(payload)
+        real_write(payload)
+
+    monkeypatch.setattr(conn, "_write_disk_cache", _slow_write)
+
+    async def _run():
+        conn._save_disk_cache()
+        await asyncio.sleep(0.05)
+        started = _time.monotonic()
+        for _ in range(5):          # telemetry while the first write is stuck
+            conn._save_disk_cache()
+        await asyncio.sleep(0.05)   # the loop keeps running
+        assert _time.monotonic() - started < 1
+        release.set()
+        await conn._disk_cache_task
+
+    asyncio.run(_run())
+    assert len(writes) == 2
+    assert json.loads(open(conn._disk_cache_path).read())["agents"]["a1"]["hostname"] == "h1"
