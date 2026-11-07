@@ -33,10 +33,13 @@ def _decision_source() -> str:
     return textwrap.dedent(src[start:end])
 
 
-def _run(identified, *, push_creds, dry_run_req=True, auto_add=False, by_name=None):
+def _run(identified, *, push_creds, dry_run_req=True, auto_add=False, by_name=None,
+         targets=(), alive=()):
     """Execute the real dry-run/auto-add decision. Returns (added, preview)."""
     ns = {
         "by_name": by_name or {},
+        "targets": list(targets),
+        "alive": set(alive),
         "alt_added": False,
         "nw_short_name": nw_short_name,
         "data": {"dry_run": dry_run_req, "auto_add": auto_add},
@@ -124,3 +127,24 @@ def test_known_box_at_another_address_is_an_alt_address_not_a_new_device():
                              auto_add=True, by_name={("switch", "core-sw1"): core})
     assert added == [] and preview == []
     assert core["alt_addresses"] == ["10.1.1.6"]
+
+
+def test_silent_primary_is_replaced_by_the_address_the_box_now_answers_on():
+    """DHCP moved the management IP: the old primary was scanned and is silent."""
+    core = {"id": "d1", "name": "CORE-SW1", "object_type": "switch", "address": "10.1.1.1"}
+    moved = dict(_SSH_HIT, hostname="core-sw1")
+    _run([moved], push_creds=[_CRED], dry_run_req=False, auto_add=True,
+         by_name={("switch", "core-sw1"): core},
+         targets=["10.1.1.1", "10.1.1.6"], alive=["10.1.1.6"])
+    assert core["address"] == "10.1.1.6"
+    assert core["alt_addresses"] == ["10.1.1.1"]
+
+
+def test_primary_outside_the_scan_or_still_answering_is_kept():
+    for targets, alive in ((["10.1.1.6"], ["10.1.1.6"]),
+                           (["10.1.1.1", "10.1.1.6"], ["10.1.1.1", "10.1.1.6"])):
+        core = {"id": "d1", "name": "CORE-SW1", "object_type": "switch", "address": "10.1.1.1"}
+        _run([dict(_SSH_HIT, hostname="core-sw1")], push_creds=[_CRED], dry_run_req=False,
+             auto_add=True, by_name={("switch", "core-sw1"): core}, targets=targets, alive=alive)
+        assert core["address"] == "10.1.1.1"
+        assert core["alt_addresses"] == ["10.1.1.6"]

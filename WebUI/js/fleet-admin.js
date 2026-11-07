@@ -24,6 +24,7 @@ const _NW_OBJECT_TYPES = {
     cx_switch:  'CX Switch',
     ex_switch:  'EX Switch',
     gateway:    'Gateway',
+    ipmi:       'IPMI / BMC (iLO, iDRAC)',
 };
 const _NW_TRANSPORTS = { ssh: 'SSH/CLI', rest: 'REST API', snmp: 'SNMP', auto: 'Auto' };
 
