@@ -69,12 +69,17 @@ def test_no_llm_connected_is_not_recorded(tmp_path):
     assert _get(hub)["model"] == "8325-48Y8C"
 
 
-def test_unusable_reply_is_not_recorded_and_is_asked_again(tmp_path):
+def test_prose_reply_is_retried_once_then_not_recorded(tmp_path):
     device_specs._CACHE.clear()
     hub = _Hub(tmp_path, ["Sorry, I am not sure.", json.dumps(_ANSWER)])
-    assert _get(hub) is None
-    assert _get(hub)["model"] == "8325-48Y8C"
-    assert hub.roles == ["final", "final"]       # catalog answers use the strongest model
+    assert _get(hub)["model"] == "8325-48Y8C"    # the retry answered in JSON
+    assert len(hub.asks) == 2
+    device_specs._CACHE.clear()
+    hub = _Hub(tmp_path / "x", ["prose", "more prose", json.dumps(_ANSWER)])
+    (tmp_path / "x").mkdir()
+    assert _get(hub) is None                     # still prose: not recorded
+    assert _get(hub)["model"] == "8325-48Y8C"    # asked again on the next poll
+    assert hub.roles == ["final"] * 3            # catalog answers use the strongest model
 
 
 def test_legacy_null_record_without_an_explicit_unknown_is_asked_again(tmp_path):
