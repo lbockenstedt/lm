@@ -9816,9 +9816,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                       and loop_lag <= p["fleet_lag_clear_s"]
                       and self.mps < p["fleet_soft_mps"] * 0.6)
         # Set or clear fleet backoff.
+        # Stay in fleet backoff for at least 60s so CPU hovering at the ceiling
+        # doesn't flap ACTIVE/CLEARED every few seconds.
         if fleet_hot:
+            if not self._fleet_backoff:
+                self._fleet_backoff_since = time.monotonic()
             self._fleet_backoff = True
-        elif fleet_cool:
+        elif fleet_cool and time.monotonic() - getattr(self, "_fleet_backoff_since", 0.0) >= 60:
             self._fleet_backoff = False
 
         # Per-spoke desired level = 2 (fleet) else 1 (offender) else 0.
