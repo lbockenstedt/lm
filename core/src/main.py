@@ -1234,13 +1234,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         self._REPLAY_WINDOW_S = float(os.environ.get("LM_REPLAY_WINDOW_S", "120"))
         # Max clock skew (seconds) a signed frame's timestamp may be into the
         # future before it's dropped as forged. Env-configurable like the replay
-        # window above. Default 15s (was a hardcoded 5s): real fleet console/edge
-        # hosts routinely drift a few seconds off NTP, and a too-tight bound drops
-        # their legitimate signed responses — a single ~5s-fast console host had
-        # every CONSOLE_LIST_PORTS reply discarded, surfacing as "agent connected
-        # but no serial ports". Replay is still bounded by _REPLAY_WINDOW_S +
-        # message_id dedupe; this only caps forged-future timestamps.
-        self._REPLAY_FUTURE_SKEW_S = float(os.environ.get("LM_REPLAY_FUTURE_SKEW_S", "15"))
+        # window above. Default 120s, matching the past-side window: real fleet
+        # console/edge hosts drift off NTP (a ~5s then ~18s-fast console host had
+        # every signed reply discarded, surfacing as "agent connected but no
+        # serial ports" and a spoke out of contact for days). Replay is still
+        # bounded by _REPLAY_WINDOW_S + message_id dedupe; this only caps
+        # forged-future timestamps.
+        self._REPLAY_FUTURE_SKEW_S = float(os.environ.get("LM_REPLAY_FUTURE_SKEW_S", "120"))
         # Seen message ids live for the replay window.
         self._REPLAY_SEEN_TTL = self._REPLAY_WINDOW_S  # seen-set lives for the window
         # Per-spoke throttle for replay/stale warnings so a replay flood doesn't
