@@ -30,6 +30,10 @@ def _fake_run(unit_state, calls):
         calls.append(list(cmd))
         unit = cmd[-1]
         state = unit_state.get(unit, {})
+        if cmd[:4] == ["systemctl", "show", "-p", "UnitFileState,ActiveState"]:
+            return _proc(stdout="%s\n%s\n" % (
+                "enabled" if state.get("enabled") else "disabled",
+                state.get("active_state") or ("active" if state.get("active") else "inactive")))
         if cmd[:3] == ["systemctl", "show", "-p"]:
             return _proc(stdout="loaded" if state.get("loaded") else "not-found")
         if cmd[:2] == ["systemctl", "is-enabled"]:
@@ -39,6 +43,9 @@ def _fake_run(unit_state, calls):
         if cmd[:2] == ["systemctl", "enable"]:
             state["enabled"] = True
             state["active"] = True
+            return _proc(returncode=0)
+        if cmd[:2] in (["systemctl", "disable"], ["systemctl", "reset-failed"]):
+            state.update(enabled=False, active=False, active_state="inactive")
             return _proc(returncode=0)
         raise AssertionError(f"unexpected systemctl call: {cmd}")
     return run
@@ -92,13 +99,31 @@ def test_disabled_dead_sidecar_is_enabled_and_started(monkeypatch):
     state = {"kea-dhcp4-server": {"loaded": True, "enabled": True, "active": True},
              "kea-ctrl-agent": {"loaded": True, "enabled": True, "active": True},
              "lm-dhcp-worker": {"loaded": True, "enabled": False, "active": False},
-             "kea-ha-agent": {"loaded": True, "enabled": True, "active": True}}
+             "kea-ha-agent": {"loaded": False}}
     monkeypatch.setattr(agent_spoke.subprocess, "run", _fake_run(state, calls))
 
     actions = _heal_deploy_role_sidecars(["dhcp-server"])
 
     assert actions == ["enabled+started lm-dhcp-worker (was disabled/stopped)"]
     assert ["systemctl", "enable", "--now", "lm-dhcp-worker"] in calls
+
+
+def test_retired_kea_ha_agent_is_disabled_not_restarted(monkeypatch):
+    """Production: the self-heal kept re-enabling kea-ha-agent, which AppArmor
+    blocks and kea-dhcp4's own HA listener replaces — 1000+ restarts per node."""
+    calls = []
+    state = {"kea-dhcp4-server": {"loaded": True, "enabled": True, "active": True},
+             "kea-ctrl-agent": {"loaded": True, "enabled": True, "active": True},
+             "lm-dhcp-worker": {"loaded": True, "enabled": True, "active": True},
+             "kea-ha-agent": {"loaded": True, "enabled": True, "active": False,
+                              "active_state": "failed"}}
+    monkeypatch.setattr(agent_spoke.subprocess, "run", _fake_run(state, calls))
+
+    assert _heal_deploy_role_sidecars(["dhcp-server"]) == ["disabled retired kea-ha-agent"]
+    assert ["systemctl", "disable", "--now", "kea-ha-agent"] in calls
+    assert not any(c[:2] == ["systemctl", "enable"] for c in calls)
+    # Once off, the next pass leaves it alone.
+    assert _heal_deploy_role_sidecars(["dhcp-server"]) == []
 
 
 def test_unloaded_role_sidecars_stay_disabled(monkeypatch):
