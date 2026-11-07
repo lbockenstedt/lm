@@ -144,11 +144,17 @@ def gather_inputs(hub: Any, serial_override: Optional[Dict[str, str]] = None) ->
                             "address": d.get("address"), "serial": serial})
     hosts = []
     cache = getattr(hub, "truenas_appliance_cache", {}) or {}
+    # The fleet listing also carries each appliance's probed system info.
+    fleet = (getattr(hub, "truenas_fleet_cache", {}) or {}).get("appliances")
+    if isinstance(fleet, dict):
+        fleet = fleet.get("data")
+    fleet_info = {str(r.get("id")): r.get("info") for r in (fleet or []) if isinstance(r, dict)}
     for a in gc.get("truenas_appliances", []) or []:
         if not isinstance(a, dict) or not a.get("id"):
             continue
         entry = cache.get(str(a["id"])) or {}
-        serial = _dig_serial(entry.get("info")) or a.get("hw_serial") or ""
+        serial = (_dig_serial(entry.get("info")) or _dig_serial(fleet_info.get(str(a["id"])))
+                  or a.get("hw_serial") or "")
         hosts.append({"kind": "truenas", "id": str(a["id"]),
                       "name": a.get("name") or a["id"], "serial": serial})
     for pk, info in (getattr(hub, "agent_info", {}) or {}).items():

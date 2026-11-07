@@ -959,6 +959,11 @@ def register(app, hub, ctx):
         for d in visible:
             if d.get("id") and isinstance(d.get("site"), dict):
                 info_by_id.setdefault(d["id"], {})["site"] = d["site"]
+            # Host OS record stitched to a management controller by hardware serial.
+            hl = d.get("host_link")
+            if d.get("id") and isinstance(hl, dict) and hl.get("name"):
+                info_by_id.setdefault(d["id"], {})["linked_host"] = {
+                    k: hl.get(k) for k in ("kind", "id", "name") if hl.get(k)}
 
         def _overlay_names(env):
             """Return a copy of the envelope with each row's name and identity details taken from

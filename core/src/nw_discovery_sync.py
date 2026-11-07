@@ -60,6 +60,7 @@ except Exception:  # pragma: no cover - access always importable in-app
 from access import unwrap_spoke  # sibling leaf (no main/api back-import)
 # Device spec lookup (e.g. object type defaults) from the device_specs leaf.
 from device_specs import get_spec as get_device_spec  # sibling leaf
+import hw_serial_links  # sibling leaf: serial matcher for controller<->host stitching
 # Shared scheduling helpers for the periodic discovery loop.
 from sync_loop import next_schedule_delay, run_sync_loop  # sibling leaf
 
@@ -113,7 +114,7 @@ def nw_hardware_primaries(devices: List[Dict[str, Any]],
             continue
         did = str(d["id"])
         # Build the serial key (if a serial is known) and the type+short-name key.
-        sk = f"{_t(d)}|s|{_serial(did)}" if _serial(did) else ""
+        sk = f"{_t(d)}|s|{str(d.get('object_type') or '').casefold()}|{_serial(did)}" if _serial(did) else ""
         nk = f"{_t(d)}|n|{str(d.get('object_type') or '').casefold()}|{_name(d)}" if _name(d) else ""
         # Join an existing group by serial first.
         g = by_key.get(sk) if sk else None
@@ -418,6 +419,9 @@ class NwDiscoverySyncMixin:
                 dm = (norm_mac(di.get("mac")) if norm_mac else str(di.get("mac") or "")).strip().casefold() \
                     if di.get("mac") else ""
                 # Same serial is a match; with no serials, same MAC plus same hostname is a match.
+                # A controller shares its server's serial: never fold across object types.
+                if str(d.get("object_type") or "").lower() != str(device_cfg.get("object_type") or "").lower():
+                    continue
                 if serial and ds == serial:
                     stale.append((d, ["serial"]))
                 elif not serial and not ds and mac and dm == mac and host and host == nw_short_name(d.get("name")):
@@ -1219,6 +1223,14 @@ class NwDiscoverySyncMixin:
         if not base_mac:
             base_mac = self._nw_lldp_self_identity(
                 device_cfg.get("address", "")).get("mac", "")
+        # Stitch a management controller to its host OS by hardware serial (no-op for
+        # other types); the link rides to NetBox so both records point at each other.
+        linked_host: Dict[str, Any] = {}
+        if str(device_cfg.get("object_type") or "").lower() == "ipmi":
+            fresh = {device_id: str(device_info.get("serial", "") or "")} if device_info.get("serial") else None
+            hw_serial_links.refresh_hw_serial_links(self, fresh)
+            linked_host = hw_serial_links.controller_link_for(
+                device_cfg, str(device_info.get("serial", "") or ""))
         # Inventory payload: device identity, hardware spec, interfaces, and tenant slug.
         payload = {
             "device": {
@@ -1231,6 +1243,7 @@ class NwDiscoverySyncMixin:
                 "mac": base_mac,
                 "firmware": str(device_info.get("firmware", "") or ""),
                 "host_model": str(device_info.get("host_model", "") or ""),
+                "linked_host": linked_host,
                 # A controller is racked with its server, so size it by the server's model.
                 "spec": await get_device_spec(
                     self, str(device_info.get("host_model")

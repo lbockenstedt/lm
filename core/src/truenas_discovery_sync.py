@@ -207,6 +207,14 @@ class TruenasDiscoverySyncMixin:
         if isinstance(pools, list):
             healthy = all(str(p.get("status", "ONLINE")).upper() == "ONLINE"
                           for p in pools if isinstance(p, dict)) if pools else True
+        # The management controller (iLO) stitched to this box by hardware serial.
+        linked = ""
+        try:
+            for a in (self.state.get_global_config().get("truenas_appliances") or []):
+                if isinstance(a, dict) and str(a.get("id")) == str(app.get("id")):
+                    linked = str((a.get("linked_controller") or {}).get("name") or "")
+        except Exception:  # noqa: BLE001
+            linked = ""
         # NetBox device record.
         return {
             "hostname": str(app.get("name") or app.get("id") or ""),
@@ -224,6 +232,7 @@ class TruenasDiscoverySyncMixin:
                 "healthy": "true" if healthy else "false",
                 "pool_count": str(app.get("_n_pools", 0)),
                 "discovered_from": "TrueNAS",
+                **({"linked_device": linked} if linked else {}),
             },
         }
 
