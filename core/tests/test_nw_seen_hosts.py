@@ -28,9 +28,13 @@ def test_prune_and_monitor_window():
            "10.0.0.3": {"address": "10.0.0.3", "hostname": "sw1", "last_seen": 38 * day}}
     assert seen.prune(reg, now=38 * day) == 1 and "10.0.0.1" not in reg
     rows = seen.monitor_rows({"t": reg}, 38 * day, skip_addresses=set(), skip_names={"sw1"})
-    # .2 is two days stale; .3 clashes with a monitored name so it uses its IP.
+    # .2 is two days stale; .3 is ping-only, so nothing is monitored.
+    assert rows == []
+    reg["10.0.0.3"].update(snmp_ok=True, snmp_credential_id="snmp:t:S")
+    rows = seen.monitor_rows({"t": reg}, 38 * day, skip_addresses=set(), skip_names={"sw1"})
+    # .3 clashes with a monitored name so it uses its IP.
     assert rows == [{"tenant_id": "t", "name": "10.0.0.3", "address": "10.0.0.3",
-                     "type": "host", "snmp_ok": False, "snmp_secret": ""}]
+                     "type": "host", "snmp_ok": True, "snmp_secret": "snmp:t:S"}]
 
 
 def test_unchanged_hosts_are_pushed_at_most_every_interval():
