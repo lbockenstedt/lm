@@ -356,6 +356,12 @@ front door, so many console servers are reachable through one address.
   second apart (CRLF, then bare CRs); other rates get up to 3 Enters in 1.5s. A silent
   port's full sweep takes about 20s. If the sweep still misses, identify presses Enter
   up to 6 more times; a clean login/shell prompt there locks that rate too.
+- **Moving up to 115200.** An automatic lock below 115200 is not final. When identify
+  runs (at start-up, then on its normal schedule) and at most every 6 hours per port, the
+  spoke first tries a patient 115200 probe; if the device answers readably there, the lock
+  moves up to 115200. An operator-pinned rate is never re-probed. A device whose console
+  is *configured* for 9600 still only talks 9600 — change its console speed on the device
+  to use 115200.
 - **115200 is the standing default.** A port nobody has configured opens at **115200**,
   and a sweep that never gets a readable reply reports 115200 rather than whichever rate
   happened to rattle loudest — so a port can never quietly settle on 9600. Only a
