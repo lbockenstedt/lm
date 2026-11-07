@@ -5650,7 +5650,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 **{k: _prev_info[k] for k in ("hw_serial", "hw_manufacturer", "hw_product",
                                               "linked_controller") if _prev_info.get(k)},
             }
-            self._note_agent_hw(agent_pk, original_msg)
+            _note = getattr(self, "_note_agent_hw", None)
+            if _note:
+                _note(agent_pk, original_msg)
             # Durable last-seen for the agent card: stamp the PERSISTED composite
             # heartbeat key ({spoke_pk}:{agent_pk}) on EVERY relayed frame — not
             # only AGENT_HEARTBEAT (which for a pxmx agent may never land under
