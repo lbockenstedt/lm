@@ -1536,6 +1536,14 @@ async function loadTruenasData(subMenu) {
         }
         return [];
     };
+    // Human-readable byte count (1024-based).
+    const _fmtBytes = n => {
+        if (typeof n !== 'number' || !isFinite(n)) return '-';
+        const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
+        let i = 0;
+        while (Math.abs(n) >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+        return `${n.toFixed(i ? 1 : 0)} ${u[i]}`;
+    };
     // Normalize a per-appliance endpoint response into the payload list/dict.
     const _extract = data => {
         if (Array.isArray(data)) return data;
@@ -1597,6 +1605,65 @@ async function loadTruenasData(subMenu) {
                         </table>
                     </div>
                 </div>`;
+            return;
+        }
+
+        // ---- Live performance: one card per appliance ----
+        if (subMenu === 'Performance') {
+            let fleet = [];
+            try {
+                const dr = await fetch(`/api/truenas/appliances${tenantQs}`);
+                if (dr.ok) fleet = _fleetRows(await dr.json());
+            } catch (e) { /* handled below */ }
+            if (!fleet.length) {
+                container.innerHTML = `<div class="py-12 text-center text-amber-600 italic">Storage spoke not connected or no appliances configured.</div>`;
+                return;
+            }
+            const results = await Promise.allSettled(fleet.map(a =>
+                fetch(`/api/truenas/${a.id}/performance`)
+                    .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))));
+            const num = v => (typeof v === 'number' && isFinite(v)) ? v : null;
+            const ops = v => num(v) === null ? '—' : Math.round(v).toLocaleString();
+            const rate = v => num(v) === null ? '—' : `${_fmtBytes(v)}/s`;
+            const tile = (label, value) => `<div class="rounded-md border border-slate-200 bg-slate-50 px-4 py-3">
+                <div class="text-xs text-slate-500">${label}</div>
+                <div class="text-lg font-semibold text-slate-800 font-mono">${value}</div></div>`;
+            container.innerHTML = `<div class="space-y-6">${fleet.map((a, i) => {
+                const res = results[i];
+                const name = escapeHtml(a.name || a.id);
+                if (res.status !== 'fulfilled') {
+                    return `<div><h3 class="font-semibold text-slate-700 mb-2">${name}</h3>
+                        <div class="text-sm text-amber-600">Performance unavailable (${escapeHtml(String(res.reason && res.reason.message || res.reason))}).</div></div>`;
+                }
+                const p = _extract(res.value) || {};
+                const d = p.disks || {};
+                const stale = res.value && res.value.stale ? ' <span class="text-xs text-amber-600 font-normal">(last poll — spoke offline)</span>' : '';
+                const ifRows = (Array.isArray(p.interfaces) ? p.interfaces : []).map(f => `<tr>
+                    <td class="px-4 py-2 font-mono text-xs">${escapeHtml(f.name || '')}</td>
+                    <td class="px-4 py-2 text-xs ${f.link_state === 'LINK_STATE_UP' ? 'text-green-600' : 'text-slate-500'}">${f.link_state === 'LINK_STATE_UP' ? 'up' : 'down'}</td>
+                    <td class="px-4 py-2 font-mono text-xs">${num(f.speed) ? `${f.speed} Mb/s` : '—'}</td>
+                    <td class="px-4 py-2 font-mono text-xs">${rate(f.received_bytes_rate)}</td>
+                    <td class="px-4 py-2 font-mono text-xs">${rate(f.sent_bytes_rate)}</td></tr>`).join('');
+                return `<div>
+                    <h3 class="font-semibold text-slate-700 mb-2">${name}${stale}</h3>
+                    <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+                        ${tile('Read IOPS', ops(d.read_ops))}
+                        ${tile('Write IOPS', ops(d.write_ops))}
+                        ${tile('Read throughput', rate(d.read_bytes))}
+                        ${tile('Write throughput', rate(d.write_bytes))}
+                        ${tile('Disk busy', num(d.busy) === null ? '—' : `${d.busy.toFixed(1)}%`)}
+                        ${tile('CPU', num(p.cpu_usage) === null ? '—' : `${p.cpu_usage.toFixed(1)}%`)}
+                        ${tile('Network in/out', `${rate((p.interfaces || []).reduce((s, f) => s + (num(f.received_bytes_rate) || 0), 0))}<br>${rate((p.interfaces || []).reduce((s, f) => s + (num(f.sent_bytes_rate) || 0), 0))}`)}
+                    </div>
+                    ${ifRows ? `<div class="mt-3 overflow-x-auto rounded-md border border-slate-200 bg-white">
+                        <table class="w-full text-left text-sm">
+                            <thead class="bg-slate-100 text-slate-600 text-xs"><tr><th class="px-4 py-2">INTERFACE</th><th class="px-4 py-2">LINK</th><th class="px-4 py-2">SPEED</th><th class="px-4 py-2">RECEIVE</th><th class="px-4 py-2">SEND</th></tr></thead>
+                            <tbody class="divide-y divide-slate-200">${ifRows}</tbody>
+                        </table></div>` : ''}
+                </div>`;
+            }).join('')}
+            <div class="text-xs text-slate-500">Live sample from each appliance (all disks combined). <button onclick="loadTruenasData('Performance')" class="text-emerald-600 hover:text-emerald-800 font-medium ml-1">Refresh</button></div>
+            </div>`;
             return;
         }
 
@@ -1662,6 +1729,8 @@ async function loadTruenasData(subMenu) {
                 let raw = item[k];
                 // TrueNAS ZFS properties arrive as {value, rawvalue, parsed}; show the readable value.
                 if (raw && typeof raw === 'object') raw = raw.value ?? raw.parsed ?? raw.rawvalue ?? JSON.stringify(raw);
+                if (subMenu === 'Capacity' && (k === 'used' || k === 'avail') && typeof raw === 'number') raw = _fmtBytes(raw);
+                if (k === 'pct_used' && typeof raw === 'number') raw = `${raw}%`;
                 const val = raw !== undefined && raw !== null && raw !== '' ? String(raw) : '-';
                 if (k === 'appliance') return `<td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(val)}</td>`;
                 if (k === 'status') {
