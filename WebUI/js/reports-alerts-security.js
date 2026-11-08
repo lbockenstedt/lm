@@ -1231,6 +1231,9 @@ function initView(viewId, subView) {
         case 'le':
             loadLEData(subView || 'Certificates');
             break;
+        case 'truenas':
+            loadTruenasData(subView || 'Appliances');
+            break;
         case 'cs':
             loadCSData(subView || 'Dashboard', currentSubChild);
             break;
