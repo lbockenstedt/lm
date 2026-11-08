@@ -130,11 +130,10 @@ def register(app, hub, ctx):
     # List the TrueNAS appliances the caller may see.
     @app.get("/api/truenas/appliances")
     async def truenas_list_appliances(request: Request, tenant: str = None):
-        """List the truenas fleet, tenant-scoped. Admin → the whole fleet (all
-        connected truenas spokes). Non-admin → own-tenant + shared appliances
-        only. The hub config (``truenas_appliances``, tenant-stamped) is the
-        AUTHORITATIVE visibility gate. Caches the whole-fleet (admin) fetch +
-        serves it tenant-filtered when no relevant spoke is connected."""
+        """List the truenas fleet, tenant-scoped. Admin → the whole fleet.
+        Non-admin → own-tenant + shared appliances only. The hub config
+        (``truenas_appliances``, tenant-stamped) is the visibility gate; status
+        and version come from the spoke's last background poll."""
         # Who is asking and whether they are an admin.
         hub = app.state.hub
         sess = _session_user(request)
@@ -153,85 +152,25 @@ def register(app, hub, ctx):
             # Admins see everything; others see their own and shared tenants' appliances.
             return is_admin or access.spoke_visible_to_session(sess, tid)
 
-        # Configured appliances visible to the caller, and their ids for filtering live results.
+        # Configured appliances visible to the caller.
         visible = [a for a in all_apps if isinstance(a, dict) and _app_visible(a.get("tenant_id", ""))]
-        visible_ids = {a.get("id") for a in visible if a.get("id")}
 
-        # Admins query every connected, approved storage spoke without a tenant filter.
-        if is_admin:
-            spokes = [s for s in (hub.get_all_spokes_by_type("storage") or [])
-                      if s in hub.active_connections
-                      and hub.approved_modules.get(s, False)]
-            spoke_to_tid = {s: "" for s in spokes}
-        # Non-admins query only the spokes for their own tenants (plus the shared one).
-        else:
-            spoke_to_tid = {}
-            # Map each of the caller's tenants to its storage spoke.
-            for t in ((sess or {}).get("user", {}).get("tenants") or []):
-                s = hub.get_truenas_spoke_for_tenant(t)
-                if s:
-                    spoke_to_tid[s] = t
-            # Add the shared storage spoke unless this tenant hides shared storage.
-            shared_tid = access.shared_tenant_id()
-            if shared_tid and not hide_shared:
-                s = hub.get_truenas_spoke_for_shared()
-                if s:
-                    spoke_to_tid[s] = shared_tid
-            # Keep only connected, approved spokes.
-            spoke_to_tid = {s: t for s, t in spoke_to_tid.items()
-                            if s in hub.active_connections
-                            and hub.approved_modules.get(s, False)}
-            spokes = list(spoke_to_tid)
-
-        # No spoke to ask: serve the last cached fleet filtered for this caller, marked stale.
-        if not spokes:
-            cached = hub.truenas_cache_get_fleet_filtered(
-                lambda r: _app_visible(r.get("tenant_id", "")))
-            if cached:
-                out = dict((cached.get("appliances") or {}))
-                out["stale"] = True
-                out["fetched_at"] = cached.get("fetched_at")
-                out["message"] = (out.get("message") or
-                                 "TrueNAS spoke offline — showing last-known data")
-                return out
-            # Nothing cached either.
-            raise HTTPException(status_code=503,
-                                detail="No spoke connected")
-
-        # Merge appliance rows from every spoke, dropping duplicate ids.
-        merged, seen = [], set()
-        for sid in spokes:
-            # Pass the tenant filter to tenant-specific spokes.
-            tid = spoke_to_tid.get(sid, "")
-            payload = {"tenant": tid} if tid else {}
-            # Ask the spoke for its appliances and unwrap the reply.
-            try:
-                result = await hub.request_response(sid, "TRUENAS_LIST_APPLIANCES",
-                                                    payload, timeout=60.0)
-                env = access.unwrap_spoke(result)
-                rows = env.get("data") if isinstance(env, dict) else None
-                if isinstance(rows, list):
-                    for r in rows:
-                        if isinstance(r, dict) and r.get("id") and r["id"] not in seen:
-                            seen.add(r["id"])
-                            merged.append(r)
-            # One spoke failing should not hide the others' appliances.
-            except Exception as e:
-                logger.warning("truenas_list_appliances: spoke %s fetch failed: %s", sid, e)
-
-        # Hide any live row the hub config says this caller may not see.
-        if visible_ids:
-            merged = [r for r in merged if r.get("id") in visible_ids]
-        # Response envelope in the spoke's own shape.
-        env = {"status": "SUCCESS", "data": merged,
-               "message": f"{len(merged)} appliance(s)"}
-        # Cache the full admin view for offline fallback; a cache error is not fatal.
-        if is_admin:
-            try:
-                await hub.truenas_cache_set_fleet(env)
-            except Exception:
-                logger.debug("truenas_list_appliances: cache set failed", exc_info=True)
-        return env
+        # Rows come from the hub config + the spoke's background poll (no live
+        # round-trip), so the list is instant and shows the last-polled state.
+        rows = []
+        for a in visible:
+            entry = hub.truenas_appliance_cache.get(a.get("id")) or {}
+            info = (entry.get("info") or {}).get("data") or {}
+            rows.append({
+                "id": a.get("id"), "name": a.get("name"), "host": a.get("host"),
+                "object_type": a.get("object_type", "truenas"),
+                "verify_ssl": a.get("verify_ssl"), "tenant_id": a.get("tenant_id", ""),
+                "info": info if isinstance(info, dict) else {},
+                # None = never polled yet (shown as "—").
+                "reachable": entry.get("reachable"),
+                "polled_at": entry.get("polled_at"),
+            })
+        return {"status": "SUCCESS", "data": rows, "message": f"{len(rows)} appliance(s)"}
 
     # ── per-appliance live relay (with offline-cache fallback) ────────────────
     # Read live appliance data, falling back to cache when the spoke is offline.
@@ -272,14 +211,16 @@ def register(app, hub, ctx):
             relay_payload["tenant"] = tid
         # capacity/poll fan several WS calls on the spoke — give them room.
         timeout = 45.0 if endpoint == "capacity" else 20.0
-        # No connected spoke: serve cached data marked stale, else 503.
+        # Serve the background poll's cached data first (like Firewall): pages
+        # load instantly; the spoke refreshes it every poll interval.
+        cached = hub.truenas_cache_get_appliance(appliance_id, endpoint)
+        if cached is not None:
+            out = dict(cached) if isinstance(cached, dict) else cached
+            if isinstance(out, dict) and not spoke_id:
+                out["stale"] = True
+            return out
+        # Nothing cached and no connected spoke: 503.
         if not spoke_id:
-            cached = hub.truenas_cache_get_appliance(appliance_id, endpoint)
-            if cached is not None:
-                filtered = dict(cached) if isinstance(cached, dict) else cached
-                if isinstance(filtered, dict):
-                    filtered["stale"] = True
-                return filtered
             raise HTTPException(status_code=503,
                                 detail="No spoke connected")
         # Live fetch; cache the result for offline fallback and return it.
