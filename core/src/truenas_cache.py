@@ -19,6 +19,7 @@ per-reader from the same cached raw, exactly like ``nw_cache``)::
       "alerts":     <TRUENAS_GET_ALERTS envelope>,
       "services":   <TRUENAS_GET_SERVICES envelope>,
       "capacity":   <TRUENAS_GET_CAPACITY envelope>,
+      "performance": <TRUENAS_GET_PERFORMANCE envelope>,
       "poll":       <last TRUENAS_POLL result>,        # rich envelope
       "fetched_at": epoch,                              # most recent per-appliance write
   }}
@@ -60,7 +61,7 @@ class TruenasCacheMixin:
     # Cache file name and the per-appliance endpoints that may be cached.
     TRUENAS_CACHE_FILE = "truenas_data.json"
     _TRUENAS_CACHE_ENDPOINTS = ("info", "pools", "datasets", "disks", "shares",
-                                "alerts", "services", "capacity")
+                                "alerts", "services", "capacity", "performance")
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -200,7 +201,7 @@ class TruenasCacheMixin:
         failed = {str(e).split(":", 1)[0].split(".", 1)[0]
                   for e in (poll_result.get("errors") or [])}
         for key in ("system_info", "pools", "datasets", "disks", "shares",
-                    "alerts", "services", "capacity"):
+                    "alerts", "services", "capacity", "performance"):
             val = data.get(key)
             if val is None or key in failed:
                 continue
