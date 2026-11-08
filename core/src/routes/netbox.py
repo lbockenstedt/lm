@@ -75,6 +75,25 @@ def nb_cache_job(hub, module_key: str, scope: dict, slice_query: dict = None) ->
     return CacheJob(ns, key, fetch, tenants, lane="netbox", detail=bool(slice_sig))
 
 
+def filter_autorack_report(res: dict, scope: dict) -> dict:
+    """Limit an auto-rack sweep result to one tenant scope: a concrete tenant or
+    group sees only its own devices; the unscoped admin view sees everything."""
+    scoped = bool(scope.get("tenant") or scope.get("tenant_group"))
+    slugs = {str(s).lower() for s in scope.get("slugs") or []}
+
+    def keep(x):
+        return not scoped or str(x.get("tenant") or "").lower() in slugs
+
+    conflicts = [x for x in res.get("conflicts") or [] if keep(x)]
+    cannot = [x for x in res.get("cannot") or [] if keep(x)]
+    return {"status": "SUCCESS", "ts": res.get("ts"), "scope": scope.get("key"),
+            "conflicts": conflicts, "cannot": cannot,
+            "mismatches": [x for x in cannot if x.get("mismatch")],
+            "summary": {"conflicts": len(conflicts), "cannot": len(cannot),
+                        "racked": None if scoped else res.get("racked"),
+                        "named": None if scoped else res.get("named")}}
+
+
 def nb_cache_feed(hub):
     """Feed: every tenant's (and the admin view's) four NetBox lists."""
     # (namespace, key) pairs already yielded, so shared entries are produced once.
@@ -757,6 +776,34 @@ def register(app, hub, ctx):
         tenant cache, admins/multi-tenant switches go live (see _netbox_list_get)."""
         return await _netbox_list_get(request, tenant, "netbox_racks", "NETBOX_GET_RACKS",
                                       {"site": site}, None, "netbox_get_racks")
+
+    @app.get("/api/netbox/autorack")
+    async def netbox_autorack_report(request: Request, tenant: str = None, refresh: bool = False):
+        """Rack-placement dashboard data: devices whose name asks for a rack slot
+        that is in conflict, cannot be used, or differs from where NetBox has them
+        (from the NetBox spoke's last auto-rack sweep), limited to the caller's
+        tenant scope. ``refresh`` (admin) re-evaluates now with a read-only run."""
+        hub = app.state.hub
+        scope = netbox_tenant_scope(hub, _resolve_tenant(request, tenant))
+        sess = _session_user(request)
+        admin = bool(sess and _is_admin(sess))
+        spoke_id = get_netbox_spoke(hub)
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="No spoke connected")
+        payload = {"report": True}
+        if refresh and admin:
+            payload = {"dry_run": True}
+        try:
+            res = _unwrap_netbox(await hub.request_response(
+                spoke_id, "NETBOX_AUTORACK_SWEEP", payload, timeout=120.0))
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("netbox_autorack_report failed")
+            raise HTTPException(status_code=500, detail=str(e))
+        if not isinstance(res, dict) or res.get("status") == "ERROR":
+            raise HTTPException(status_code=502, detail=str((res or {}).get("message") or "autorack unavailable"))
+        return filter_autorack_report(res, scope)
 
     @app.post("/api/netbox/racks")
     async def netbox_add_rack(request: Request):
