@@ -140,7 +140,7 @@ def test_prefixes_table_renders_dhcp_indicator_column_and_badge():
 
 def test_prefixes_nav_action_renders_add_prefix_button():
     source = _source()
-    fn = source.split("async function loadNetboxData(subMenu)", 1)[1]
+    fn = source.split("async function loadNetboxData(subMenu", 1)[1]
     fn = fn.split("async function showNetboxAddModal()", 1)[0]
     assert ">Add Prefix</button>" in fn
     assert ">New Subnet</button>" not in fn
