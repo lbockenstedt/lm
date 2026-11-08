@@ -1584,6 +1584,34 @@ def register(app, hub, ctx):
                 "spoke_queue": reply.get("data", reply),
                 "hub_timeouts": dict(hub._request_timeouts_by_spoke.get(target, {}))}
 
+    # Tail the log lines a spoke has relayed to the hub (SPOKE_LOG buffer).
+    @app.post("/admin/ops/spoke-logs")
+    async def admin_ops_spoke_logs(request: Request):
+        """Return the last ``lines`` (1..500, default 100) relayed log lines for
+        a spoke, optionally only those containing ``contains`` (case-insensitive).
+        Reads the hub's in-memory buffer, so it works while the spoke is offline.
+
+        Body: ``{"target": "<spoke_id or name>", "lines": 100, "contains": "truenas"}``."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        target = str((body or {}).get("target") or "").strip()
+        if not target:
+            raise HTTPException(status_code=400, detail="target required")
+        try:
+            lines = int((body or {}).get("lines") or 100)
+        except (TypeError, ValueError):
+            lines = 100
+        lines = max(1, min(lines, 500))
+        needle = str((body or {}).get("contains") or "").lower()
+        entries = [str(e) for e in (hub.agent_logs.get(hub._primary_key(target)) or [])]
+        if needle:
+            entries = [e for e in entries if needle in e.lower()]
+        return {"status": "ok", "target": target, "count": len(entries),
+                "lines": entries[-lines:]}
+
     # Run the curated diagnostic bundle on a target in one call.
     @app.post("/admin/ops/spoke-diag")
     async def admin_ops_spoke_diag(request: Request):

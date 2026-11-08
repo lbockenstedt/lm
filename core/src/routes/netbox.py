@@ -86,7 +86,7 @@ def filter_autorack_report(res: dict, scope: dict) -> dict:
 
     conflicts = [x for x in res.get("conflicts") or [] if keep(x)]
     cannot = [x for x in res.get("cannot") or [] if keep(x)]
-    return {"status": "SUCCESS", "ts": res.get("ts"), "scope": scope.get("key"),
+    return {"status": "SUCCESS", "ts": res.get("ts"), "pending": bool(res.get("pending")), "scope": scope.get("key"),
             "conflicts": conflicts, "cannot": cannot,
             "mismatches": [x for x in cannot if x.get("mismatch")],
             "summary": {"conflicts": len(conflicts), "cannot": len(cannot),
