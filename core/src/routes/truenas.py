@@ -178,7 +178,7 @@ def register(app, hub, ctx):
     async def truenas_get_appliance_data(request: Request, appliance_id: str,
                                          endpoint: str, tenant: str = None):
         """Live per-appliance truenas data
-        (info|pools|datasets|disks|shares|alerts|services|capacity),
+        (info|pools|datasets|disks|shares|alerts|services|capacity|performance),
         tenant-gated. ``_authz_truenas_appliance`` resolves the appliance
         record + scope + spoke. Caches the raw envelope on every live fetch +
         serves it (marked ``stale``) when the spoke is offline."""
@@ -193,6 +193,7 @@ def register(app, hub, ctx):
             "alerts":    "TRUENAS_GET_ALERTS",
             "services":  "TRUENAS_GET_SERVICES",
             "capacity":  "TRUENAS_GET_CAPACITY",
+            "performance": "TRUENAS_GET_PERFORMANCE",
         }
         # Unknown endpoints are rejected.
         spoke_cmd = command_map.get(endpoint)
@@ -213,8 +214,10 @@ def register(app, hub, ctx):
         timeout = 45.0 if endpoint == "capacity" else 20.0
         # Serve the background poll's cached data first (like Firewall): pages
         # load instantly; the spoke refreshes it every poll interval.
+        # Performance is a live per-second sample, so it skips the cache while
+        # the spoke is connected (the cache is only the fallback).
         cached = hub.truenas_cache_get_appliance(appliance_id, endpoint)
-        if cached is not None:
+        if cached is not None and not (endpoint == "performance" and spoke_id):
             out = dict(cached) if isinstance(cached, dict) else cached
             if isinstance(out, dict) and not spoke_id:
                 out["stale"] = True
