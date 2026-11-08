@@ -2200,45 +2200,91 @@ function _elevTextOn(hex) {
     return lum > 0.6 ? '#1e293b' : '#ffffff';
 }
 
-function _elevFaceTable(units, faceLabel) {
-    // units: [{unit, device|null}] top→bottom. Merge consecutive same-device-id
-    // units into one rowspan cell (multi-U device); empty units stay blank.
-    // Row height is driven by the shared `--elev-uh` CSS var set by _fitElevation
-    // so the whole rack scales to fit the viewport (see showRackElevationModal).
-    const rows = [];
-    let i = 0;
-    while (i < units.length) {
-        const u = units[i];
-        const dev = u && u.device;
-        let span = 1;
-        if (dev && dev.id != null) {
-            while (i + span < units.length && units[i + span].device && units[i + span].device.id === dev.id) span++;
-        }
-        const rowStyle = `style="height:calc(var(--elev-uh,20px) * ${span})"`;
-        const label = `<td class="px-1 text-xs text-slate-500 font-mono w-7 text-right align-top border-b border-slate-100 leading-none pt-0.5">${u && u.unit != null ? u.unit : ''}</td>`;
-        let cell;
-        if (dev) {
-            const color = dev.role_color || '9e9e9e';
-            const fg = _elevTextOn(color);
-            cell = `<td rowspan="${span}" class="px-1 text-xs align-top border-b border-white/20 overflow-hidden leading-tight" style="background:#${color};color:${fg}">
-                <div class="font-semibold truncate leading-tight">${escapeHtml(dev.name || '')}</div>
-                <div class="opacity-85 truncate leading-tight">${escapeHtml(dev.model || '')}${dev.role ? ' · ' + escapeHtml(dev.role) : ''}</div>
-                ${dev.primary_ip ? `<div class="font-mono opacity-85 truncate leading-tight">${escapeHtml(dev.primary_ip)}</div>` : ''}
-            </td>`;
-        } else {
-            cell = `<td rowspan="${span}" class="border-b border-slate-100 bg-slate-50/40"></td>`;
-        }
-        rows.push(`<tr ${rowStyle}>${label}${cell}</tr>`);
-        i += span;
-    }
-    if (!rows.length) {
+// Front-panel style glyph for a device, picked from its role/model text.
+const _ELEV_ICONS = {
+    switch: '<rect x="2" y="8" width="20" height="8" rx="1"/><path d="M5 11h2v2H5zM9 11h2v2H9zM13 11h2v2h-2zM17 11h2v2h-2z"/>',
+    server: '<rect x="3" y="4" width="18" height="7" rx="1"/><rect x="3" y="13" width="18" height="7" rx="1"/><path d="M7 7.5h.01M7 16.5h.01M11 7.5h6M11 16.5h6"/>',
+    gateway: '<circle cx="12" cy="12" r="8"/><path d="M12 6v12M6 12h12M10 8l2-2 2 2M10 16l2 2 2-2M8 10l-2 2 2 2M16 10l2 2-2 2"/>',
+    firewall: '<rect x="3" y="5" width="18" height="14"/><path d="M3 10h18M3 15h18M9 5v5M15 10v5M9 15v4"/>',
+    bmc: '<rect x="7" y="7" width="10" height="10"/><path d="M9 3v4M12 3v4M15 3v4M9 17v4M12 17v4M15 17v4M3 9h4M3 12h4M3 15h4M17 9h4M17 12h4M17 15h4"/>',
+    storage: '<ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3"/>',
+    power: '<path d="M13 3L5 14h6l-1 7 8-11h-6l1-7z"/>',
+    wireless: '<path d="M5 10a10 10 0 0114 0M8 13a6 6 0 018 0"/><circle cx="12" cy="17" r="1.5"/>',
+    patch: '<rect x="2" y="8" width="20" height="8"/><path d="M6 12h.01M9 12h.01M12 12h.01M15 12h.01M18 12h.01"/>',
+    generic: '<rect x="3" y="7" width="18" height="10" rx="1"/>',
+};
+function _elevIconKind(dev) {
+    const t = `${dev.role || ''} ${dev.model || ''} ${dev.name || ''}`.toLowerCase();
+    if (/bmc|ipmi|ilo\b|idrac|lights-out|management controller/.test(t)) return 'bmc';
+    if (/firewall|fortigate|palo|opnsense|pfsense|srx/.test(t)) return 'firewall';
+    if (/gateway|router|\bsd-?wan\b|vpnc/.test(t)) return 'gateway';
+    if (/switch|\btor\b|aruba (?:2|3|5|6|8|9)\d{3}|\bcx\b|\bex\d{4}/.test(t)) return 'switch';
+    if (/wireless|\bap\b|access point|mist/.test(t)) return 'wireless';
+    if (/pdu|\bups\b|power/.test(t)) return 'power';
+    if (/storage|\bnas\b|truenas|\bsan\b|array|disk/.test(t)) return 'storage';
+    if (/patch|panel/.test(t)) return 'patch';
+    if (/server|proliant|poweredge|proxmox|pxmx|hypervisor|\bdl\d{3}|\bvm ?host/.test(t)) return 'server';
+    return 'generic';
+}
+function _elevIcon(dev) {
+    return `<svg class="shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${_ELEV_ICONS[_elevIconKind(dev)]}</svg>`;
+}
+
+function _elevFaceTable(units, faceLabel, uHeight) {
+    // NetBox-style elevation: dark rails carrying the U numbers on both sides,
+    // light slots between them, and each device drawn as ONE block anchored at
+    // its bottom U with its own height (so neighbours can never overlap).
+    // Row height comes from the shared `--elev-uh` CSS var set by _fitElevation.
+    const devs = new Map();
+    units.forEach(u => {
+        const d = u && u.device;
+        if (!d || d.id == null || u.unit == null) return;
+        const e = devs.get(d.id) || { dev: d, lo: Infinity };
+        e.lo = Math.min(e.lo, Number(u.unit));
+        devs.set(d.id, e);
+    });
+    const H = uHeight > 0 ? uHeight : Math.max(0, ...units.map(u => (u && u.unit) || 0));
+    if (!H) {
         return `<div class="elev-face flex-1 min-w-0">
             <div class="text-xs font-bold text-slate-500 mb-1">${faceLabel}</div>
             <p class="text-xs text-slate-500 italic">empty</p></div>`;
     }
+    const uh = 'var(--elev-uh,20px)';
+    const slots = [];
+    for (let n = H; n >= 1; n--) {
+        const odd = n % 2 === 1;
+        slots.push(`<div class="absolute left-0 right-0 flex items-stretch" style="top:calc(${uh} * ${H - n});height:${uh}">
+            <span class="w-7 shrink-0 text-right pr-1 font-mono text-slate-300 leading-none flex items-center justify-end" style="font-size:10px">${n}</span>
+            <span class="flex-1 border-b border-slate-300/70 ${odd ? 'bg-slate-100' : 'bg-slate-200/70'}"></span>
+            <span class="w-7 shrink-0 pl-1 font-mono text-slate-300 leading-none flex items-center" style="font-size:10px">${n}</span>
+        </div>`);
+    }
+    const blocks = [...devs.values()].map(({ dev, lo }) => {
+        const h = Math.max(1, Math.round(Number(dev.u_height) || 1));
+        const top = H - (lo + h - 1);
+        const color = dev.role_color || '9e9e9e';
+        const fg = _elevTextOn(color);
+        const inactive = dev.status && dev.status !== 'active';
+        const tip = [dev.name, dev.model, dev.role, dev.primary_ip, dev.tenant, `U${lo}${h > 1 ? '–' + (lo + h - 1) : ''} · ${h}U`, dev.status_label || dev.status]
+            .filter(Boolean).join(' · ');
+        const detail = h >= 2
+            ? `<div class="truncate opacity-90 leading-tight" style="font-size:10px">${escapeHtml(dev.model || '')}${dev.role ? ' · ' + escapeHtml(dev.role) : ''}</div>`
+              + (dev.primary_ip && h >= 3 ? `<div class="font-mono truncate opacity-90 leading-tight" style="font-size:10px">${escapeHtml(dev.primary_ip)}</div>` : '')
+            : '';
+        return `<div class="absolute overflow-hidden rounded-sm px-1.5 flex items-center gap-1.5 shadow-sm" title="${escapeHtml(tip)}"
+            style="left:0;right:0;top:calc(${uh} * ${top} + 1px);height:calc(${uh} * ${h} - 2px);background:#${color};color:${fg};border:1px ${inactive ? 'dashed' : 'solid'} rgba(0,0,0,.35);${inactive ? 'opacity:.6;' : ''}">
+            ${_elevIcon(dev)}
+            <div class="min-w-0 flex-1"><div class="font-semibold truncate leading-tight" style="font-size:11px">${escapeHtml(dev.name || '')}</div>${detail}</div>
+        </div>`;
+    }).join('');
     return `<div class="elev-face flex-1 min-w-0">
-        <div class="text-xs font-bold text-slate-500 mb-1">${faceLabel}</div>
-        <table class="w-full table-fixed border-collapse">${rows.join('')}</table>
+        <div class="text-xs font-bold text-slate-500 mb-1 text-center">${faceLabel}</div>
+        <div class="rounded-md bg-slate-700 p-1 shadow-inner">
+            <div class="relative" style="height:calc(${uh} * ${H})">
+                ${slots.join('')}
+                <div class="absolute" style="left:1.75rem;right:1.75rem;top:0;bottom:0">${blocks}</div>
+            </div>
+        </div>
     </div>`;
 }
 
@@ -2256,7 +2302,7 @@ function _fitElevation() {
     // still leaves the grid a usable slice before it falls back to scrolling.
     const chrome = 190 + (grid.nextElementSibling ? grid.nextElementSibling.offsetHeight : 0);
     const avail = Math.max(0, Math.floor(window.innerHeight * 0.9) - chrome);
-    const rowH = Math.max(13, Math.min(24, Math.floor(avail / uHeight) || 24));
+    const rowH = Math.max(13, Math.min(26, Math.floor(avail / uHeight) || 26));
     grid.style.setProperty('--elev-uh', rowH + 'px');
 }
 window.addEventListener('resize', _fitElevation);
@@ -2298,7 +2344,7 @@ async function showRackElevationModal(rackId) {
         // present if u_height is missing so the grid still fits.
         const maxUnit = Math.max(0, ...front.concat(rear).map(u => (u && u.unit) || 0));
         const uHeight = (r.u_height && r.u_height > 0) ? r.u_height : maxUnit;
-        const grid = `<div class="elev-grid flex gap-4 items-start" data-uheight="${uHeight}" style="--elev-uh:20px">${_elevFaceTable(front, 'Front')}${_elevFaceTable(rear, 'Rear')}</div>`;
+        const grid = `<div class="elev-grid flex gap-4 items-start" data-uheight="${uHeight}" style="--elev-uh:20px">${_elevFaceTable(front, 'Front', uHeight)}${_elevFaceTable(rear, 'Rear', uHeight)}</div>`;
         const zero = d.zero_u || [];
         const zeroHtml = zero.length ? `<div class="mt-4">
             <div class="text-xs font-bold text-slate-500 mb-1">0U / side</div>
