@@ -2259,7 +2259,14 @@ function _elevFaceTable(units, faceLabel, uHeight) {
             <span class="w-7 shrink-0 pl-1 font-mono text-slate-300 leading-none flex items-center" style="font-size:10px">${n}</span>
         </div>`);
     }
+    // Half-width chassis (e.g. Aruba CX 9004) sit two to a U: lane 0 left, 1 right.
+    const lane = new Map();
+    const seen = {};
+    [...devs.values()].filter(e => e.dev.half_width).sort((x, y) => x.dev.id - y.dev.id)
+        .forEach(e => { lane.set(e.dev.id, (seen[e.lo] = (seen[e.lo] || 0) + 1) - 1); });
     const blocks = [...devs.values()].map(({ dev, lo }) => {
+        const half = lane.has(dev.id);
+        const lx = half ? (lane.get(dev.id) % 2 ? 'left:50%;right:0;' : 'left:0;right:50%;') : 'left:0;right:0;';
         const h = Math.max(1, Math.round(Number(dev.u_height) || 1));
         const top = H - (lo + h - 1);
         const color = dev.role_color || '9e9e9e';
@@ -2267,12 +2274,12 @@ function _elevFaceTable(units, faceLabel, uHeight) {
         const inactive = dev.status && dev.status !== 'active';
         const tip = [dev.name, dev.model, dev.role, dev.primary_ip, dev.tenant, `U${lo}${h > 1 ? '–' + (lo + h - 1) : ''} · ${h}U`, dev.status_label || dev.status]
             .filter(Boolean).join(' · ');
-        const detail = h >= 2
+        const detail = h >= 2 && !half
             ? `<div class="truncate opacity-90 leading-tight" style="font-size:10px">${escapeHtml(dev.model || '')}${dev.role ? ' · ' + escapeHtml(dev.role) : ''}</div>`
               + (dev.primary_ip && h >= 3 ? `<div class="font-mono truncate opacity-90 leading-tight" style="font-size:10px">${escapeHtml(dev.primary_ip)}</div>` : '')
             : '';
         return `<div class="absolute overflow-hidden rounded-sm px-1.5 flex items-center gap-1.5 shadow-sm" title="${escapeHtml(tip)}"
-            style="left:0;right:0;top:calc(${uh} * ${top} + 1px);height:calc(${uh} * ${h} - 2px);background:#${color};color:${fg};border:1px ${inactive ? 'dashed' : 'solid'} rgba(0,0,0,.35);${inactive ? 'opacity:.6;' : ''}">
+            style="${lx}top:calc(${uh} * ${top} + 1px);height:calc(${uh} * ${h} - 2px);background:#${color};color:${fg};border:1px ${inactive ? 'dashed' : 'solid'} rgba(0,0,0,.35);${inactive ? 'opacity:.6;' : ''}">
             ${_elevIcon(dev)}
             <div class="min-w-0 flex-1"><div class="font-semibold truncate leading-tight" style="font-size:11px">${escapeHtml(dev.name || '')}</div>${detail}</div>
         </div>`;
@@ -2338,8 +2345,14 @@ async function showRackElevationModal(rackId) {
             <span><span class="text-slate-500">Height:</span> ${r.u_height || 0}U</span>
             <button onclick="_addDeviceFromElev(${rackId})" class="ml-auto bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-full text-xs font-bold transition-all">+ Add device</button>
         </div>`;
-        const front = (d.faces && d.faces.front) || [];
-        const rear  = (d.faces && d.faces.rear)  || [];
+        let front = (d.faces && d.faces.front) || [];
+        let rear  = (d.faces && d.faces.rear)  || [];
+        // Two half-width chassis share a U but NetBox holds them one per face;
+        // show both side by side on each view.
+        const halves = u => (u && u.device && u.device.half_width && u.device.id != null);
+        const fh = front.filter(halves), rh = rear.filter(halves);
+        front = front.concat(rh.filter(u => !fh.some(x => x.unit === u.unit && x.device.id === u.device.id)));
+        rear = rear.concat(fh.filter(u => !rh.some(x => x.unit === u.unit && x.device.id === u.device.id)));
         // Rack height drives the per-U scaling; fall back to the tallest unit
         // present if u_height is missing so the grid still fits.
         const maxUnit = Math.max(0, ...front.concat(rear).map(u => (u && u.unit) || 0));

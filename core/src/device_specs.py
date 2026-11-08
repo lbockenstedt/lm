@@ -52,6 +52,7 @@ _SYS_SPEC = (
     "e.g. 8325-48Y8C>\", \"part_number\": \"<SKU or null>\", \"role\": \"<one of: "
     "switch, router, firewall, gateway, access-point, server, storage, "
     "load-balancer, other>\", \"u_height\": int, \"is_full_depth\": bool, "
+    "\"is_half_width\": bool, "
     "\"ports\": [{\"prefix\": \"...\", \"start\": int, \"count\": int, \"type\": "
     "\"<NetBox interface type slug, e.g. 1000base-t, 10gbase-x-sfpp, "
     "25gbase-x-sfp28, 100gbase-x-qsfp28>\"}], \"console\": {\"name\": \"...\", "
@@ -179,6 +180,12 @@ def clean_spec(js: Any) -> Optional[Dict[str, Any]]:
     # Keep the console only if its type is a valid slug (default name "Console").
     console = ({"name": str(con.get("name") or "Console")[:30], "type": _slug(con.get("type"))}
                if con and _slug(con.get("type")) else None)
+    # Half-width chassis (two side by side in one U, e.g. Aruba CX 9004) are
+    # never full depth, and carry a marker the NetBox sync/auto-rack reads.
+    half = bool(js.get("is_half_width", False))
+    comments = str(js.get("comments") or "").strip()[:200]
+    if half and "half-width" not in comments.lower():
+        comments = (comments[:180] + " [half-width]").strip()
     # Assemble the clean spec, filling safe defaults (role "other", 1U, full depth).
     return {
         "manufacturer": mfr,
@@ -186,8 +193,8 @@ def clean_spec(js: Any) -> Optional[Dict[str, Any]]:
         "part_number": str(js.get("part_number") or "").strip()[:40],
         "role": _slug(js.get("role")) or "other",
         "u_height": _int(js.get("u_height"), 0, 60) or 1,
-        "is_full_depth": bool(js.get("is_full_depth", True)),
-        "comments": str(js.get("comments") or "").strip()[:200],
+        "is_full_depth": False if half else bool(js.get("is_full_depth", True)),
+        "comments": comments,
         "ports": ports,
         "console": console,
         "power": power,
