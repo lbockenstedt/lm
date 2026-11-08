@@ -6,7 +6,7 @@
 
 // ─── NetBox IPAM / DCIM ──────────────────────────────────────────────────────
 
-async function loadNetboxData(subMenu) {
+async function loadNetboxData(subMenu, refresh = false) {
     const container = document.getElementById('netbox-content');
     if (!container) return;
     container.innerHTML = '<p class="text-sm text-slate-500 italic p-4">Loading…</p>';
@@ -140,8 +140,7 @@ async function loadNetboxData(subMenu) {
             // Devices are racked automatically from their names
             // (SITE+NET-TENANT-RACK-R<RU>[R]-DEVICE). This lists the ones that could not be:
             // two online devices claiming one slot, or a slot/rack that cannot be used.
-            const refresh = isAdmin() ? '&refresh=1' : '';
-            const r = await fetch(`/api/netbox/autorack?tenant=${encodeURIComponent(currentTenant)}${refresh}`);
+            const r = await fetch(`/api/netbox/autorack?tenant=${encodeURIComponent(currentTenant)}${refresh ? '&refresh=1' : ''}`);
             const d = await r.json().catch(() => ({}));
             if (!r.ok || d.status === 'ERROR') { container.innerHTML = `<p class="p-4 text-amber-600 text-sm font-medium">Error: ${d.message || d.detail || 'NetBox spoke not connected'}</p>`; return; }
             const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
@@ -164,7 +163,8 @@ async function loadNetboxData(subMenu) {
                 </div>`;
             const when = d.ts ? new Date(d.ts * 1000).toLocaleString() : 'not yet run';
             container.innerHTML = `
-                <p class="text-xs text-slate-500 px-4 pt-3">Devices are placed in racks from their names, e.g. <span class="font-mono">MIPBE-SSPLM-N31-R45-VPNC1</span> = rack N31, RU 45 (add a trailing <span class="font-mono">R</span> to the RU for the rear). Last checked: ${esc(when)}.</p>
+                <p class="text-xs text-slate-500 px-4 pt-3">Devices are placed in racks from their names, e.g. <span class="font-mono">MIPBE-SSPLM-N31-R45-VPNC1</span> = rack N31, RU 45 (add a trailing <span class="font-mono">R</span> to the RU for the rear). Last checked: ${esc(when)}${d.pending ? ' (first check is running — reload in a minute)' : ''}.
+                ${isAdmin() ? `<button onclick="loadNetboxData('Rack Placement', true)" class="ml-2 bg-white border border-brand text-primary-text hover:bg-primary hover:text-white px-3 py-0.5 rounded-full text-xs font-bold" title="Re-evaluate every device now (can take a minute)">Re-check now</button>` : ''}</p>
                 ${section('Conflicts', 'Two online devices are named for the same slot. Rename one of them; an offline holder is replaced automatically.', d.conflicts || [], conflictBadge)}
                 ${section('Cannot auto-rack', 'The name asks for a rack or slot that cannot be used, so the device stays where NetBox has it.', d.cannot || [], cannotBadge)}`;
 
