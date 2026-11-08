@@ -2777,7 +2777,8 @@ def register(app, hub, ctx):
             for d in snmp_only:
                 addr = str(d["address"]).strip()
                 mine[addr] = {"tenant_id": tenant_id, "name": d.get("hostname") or addr,
-                              "address": addr, "type": "switch", "snmp_ok": True,
+                              "address": addr, "type": nw_seen_hosts.monitor_type(d, "switch"),
+                              "snmp_ok": True,
                               "snmp_secret": d["snmp_credential_id"]}
             # Replace this tenant's entries with the updated set.
             gc["nw_monitor_neighbors"] = [n for n in (gc.get("nw_monitor_neighbors") or [])
