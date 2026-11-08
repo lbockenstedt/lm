@@ -2232,7 +2232,7 @@ const VIEW_SUBMENUS = {
     ldap: ['Users', 'Groups'],
     cppm: ['NAC Status', 'Access Tracker', 'My Devices', 'Unknown Devices', 'My Users'],
     cs: ['Dashboard', 'Clients', 'Central', 'Central On-Prem', 'Mist', 'VM Server', 'Config', 'Setup', 'Spoke Management', 'Assistant'],
-    netbox: ['Overview', 'Devices', 'Racks', 'Prefixes', 'IP Addresses'],
+    netbox: ['Overview', 'Devices', 'Racks', 'Rack Placement', 'Prefixes', 'IP Addresses'],
     dns: ['Overview', 'Records', 'Forwarders', 'Overrides', 'External DNS', 'Diagnostics'],
     dhcp: ['Overview', 'Subnets', 'Leases', 'Reservations', 'Diagnostics'],
     nw: ['Overview', 'Gateways', 'Switches', 'Firewalls', 'IPMI', 'Other', 'Topology', 'Scan'],
