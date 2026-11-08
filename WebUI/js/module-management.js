@@ -401,6 +401,7 @@ const DEVICE_TYPES = {
         rowSummary: d => `${d.host || '—'} · ${d.api_key_set ? 'key set' : 'no key'}`,
         fields: [
             { id: 'host', label: 'Host / IP', placeholder: '10.0.0.50' },
+            { id: 'username', label: 'API Key User', placeholder: 'truenas_admin (owner of the API key)' },
             { id: 'api_key', label: 'API Key', type: 'password', placeholder: 'TrueNAS → Settings → API Keys (blank = keep)' },
             { id: 'verify_ssl', label: 'Verify SSL', type: 'select', coerce: 'bool', options: [['false','Off (self-signed)'],['true','On (trusted CA)']] },
             { id: 'auth_mechanism', label: 'Auth Mechanism', type: 'select', options: [['auto','Auto (SCRAM→PLAIN)'],['PLAIN','PLAIN (Core / 24.x)'],['SCRAM','SCRAM-SHA-512 (26+)']] },
