@@ -1659,7 +1659,10 @@ async function loadTruenasData(subMenu) {
         const headers = keys.map(k => `<th class="px-4 py-3">${k.toUpperCase().replace(/_/g, ' ')}</th>`).join('');
         const rows = items.map(item => {
             const cells = keys.map(k => {
-                const val = item[k] !== undefined && item[k] !== null && item[k] !== '' ? String(item[k]) : '-';
+                let raw = item[k];
+                // TrueNAS ZFS properties arrive as {value, rawvalue, parsed}; show the readable value.
+                if (raw && typeof raw === 'object') raw = raw.value ?? raw.parsed ?? raw.rawvalue ?? JSON.stringify(raw);
+                const val = raw !== undefined && raw !== null && raw !== '' ? String(raw) : '-';
                 if (k === 'appliance') return `<td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(val)}</td>`;
                 if (k === 'status') {
                     const color = val === 'ONLINE' || val === 'up' ? 'text-green-600' : (val === 'DEGRADED' || val === 'FAULTED' ? 'text-red-600' : 'text-slate-500');
