@@ -1646,14 +1646,13 @@ async function loadTruenasData(subMenu) {
                     <td class="px-4 py-2 font-mono text-xs">${rate(f.sent_bytes_rate)}</td></tr>`).join('');
                 return `<div>
                     <h3 class="font-semibold text-slate-700 mb-2">${name}${stale}</h3>
-                    <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+                    <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
                         ${tile('Read IOPS', ops(d.read_ops))}
                         ${tile('Write IOPS', ops(d.write_ops))}
                         ${tile('Read throughput', rate(d.read_bytes))}
                         ${tile('Write throughput', rate(d.write_bytes))}
                         ${tile('Disk busy', num(d.busy) === null ? '—' : `${d.busy.toFixed(1)}%`)}
                         ${tile('CPU', num(p.cpu_usage) === null ? '—' : `${p.cpu_usage.toFixed(1)}%`)}
-                        ${tile('Network in/out', `${rate((p.interfaces || []).reduce((s, f) => s + (num(f.received_bytes_rate) || 0), 0))}<br>${rate((p.interfaces || []).reduce((s, f) => s + (num(f.sent_bytes_rate) || 0), 0))}`)}
                     </div>
                     ${ifRows ? `<div class="mt-3 overflow-x-auto rounded-md border border-slate-200 bg-white">
                         <table class="w-full text-left text-sm">
