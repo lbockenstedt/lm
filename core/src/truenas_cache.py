@@ -194,15 +194,21 @@ class TruenasCacheMixin:
         # Keep the raw poll result.
         entry = self.truenas_appliance_cache.setdefault(appliance_id, {})
         entry["poll"] = poll_result
-        # Copy each sub-resource into its endpoint slot as a SUCCESS envelope.
-        data = poll_result.get("data") if isinstance(poll_result.get("data"), dict) else {}
+        # Accept the full envelope ({status, data, errors}) or the bare data dict.
+        data = poll_result.get("data") if isinstance(poll_result.get("data"), dict) else poll_result
+        # Parts that failed ("pools: ..." / "shares.smb: ...") keep their last good value.
+        failed = {str(e).split(":", 1)[0].split(".", 1)[0]
+                  for e in (poll_result.get("errors") or [])}
         for key in ("system_info", "pools", "datasets", "disks", "shares",
                     "alerts", "services", "capacity"):
             val = data.get(key)
-            if val is None:
+            if val is None or key in failed:
                 continue
             slot = "info" if key == "system_info" else key
             entry[slot] = {"status": "SUCCESS", "data": val}
+        # Reachable = the appliance answered system.info on this poll.
+        entry["reachable"] = bool(data.get("system_info")) and "system_info" not in failed
+        entry["polled_at"] = time.time()
         # Stamp and schedule a save.
         entry["fetched_at"] = time.time()
         self._truenas_cache_file.schedule_save()

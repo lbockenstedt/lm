@@ -7788,7 +7788,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         _tn_aid = _td.get("appliance_id")
         _tn_pdata = _td.get("data") if isinstance(_td.get("data"), dict) else _td
         if _tn_aid and isinstance(_tn_pdata, dict):
-            asyncio.create_task(self.truenas_cache_set_poll(_tn_aid, _tn_pdata))
+            # Pass the failed parts too, so they keep their last good value.
+            asyncio.create_task(self.truenas_cache_set_poll(
+                _tn_aid, {"data": _tn_pdata, "errors": _td.get("errors") or []}))
 
     async def _spoke_msg_le_cert_renewed(self, conn, msg_data, payload, dec_secret):
         """LE cert renewed → re-push the material to its targets now.
