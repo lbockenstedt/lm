@@ -523,6 +523,25 @@ def register(app, hub, ctx):
         # Dry run unless the caller explicitly passes apply=true.
         return await hub.merge_nw_hardware_duplicates(bool((body or {}).get("apply")))
 
+    @app.post("/admin/ops/netbox-autorack")
+    async def admin_ops_netbox_autorack(request: Request):
+        """Run (or report on) the NetBox rack-from-name sweep. Body
+        {"apply": bool, "tenant_slug": str, "report": bool}; default dry run."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        ipam = hub.get_spoke_by_type("ipam")
+        if not ipam:
+            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        rr = await hub.request_response(
+            ipam, "NETBOX_AUTORACK_SWEEP",
+            {"dry_run": not bool((body or {}).get("apply")),
+             "tenant": str((body or {}).get("tenant_slug") or "").strip(),
+             "report": bool((body or {}).get("report"))}, timeout=180.0)
+        return rr
+
     # Remove network devices from the LM fleet.
     @app.post("/admin/ops/nw-delete")
     async def admin_ops_nw_delete(request: Request):
