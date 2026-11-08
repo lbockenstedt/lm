@@ -180,3 +180,14 @@ async def test_fleet_filtered_preserves_envelope_shape_and_message(tmp_path):
     assert got["appliances"]["status"] == "SUCCESS"
     assert got["appliances"]["message"] == "3 appliance(s)"
     assert [r["id"] for r in got["appliances"]["data"]] == ["a"]
+
+async def test_poll_keeps_last_good_part_when_that_part_failed(tmp_path):
+    hub = _CacheHub(str(tmp_path))
+    await hub.truenas_cache_set_poll("nas1", {"system_info": {"version": "25.04"},
+                                              "pools": [{"name": "tank"}]})
+    assert hub.truenas_cache_get_appliance("nas1", "pools")["data"] == [{"name": "tank"}]
+    assert hub.truenas_appliance_cache["nas1"]["reachable"] is True
+    await hub.truenas_cache_set_poll("nas1", {"data": {"system_info": {}, "pools": []},
+                                              "errors": ["system_info: closed", "pools: closed"]})
+    assert hub.truenas_cache_get_appliance("nas1", "pools")["data"] == [{"name": "tank"}]
+    assert hub.truenas_appliance_cache["nas1"]["reachable"] is False
