@@ -136,6 +136,38 @@ async function loadNetboxData(subMenu) {
                 ? '<p class="p-4 text-slate-500 italic text-sm">No racks found in NetBox.</p>'
                 : tw(th(cols) + `<tbody>${rows}</tbody>`);
 
+        } else if (subMenu === 'Rack Placement') {
+            // Devices are racked automatically from their names
+            // (SITE+NET-TENANT-RACK-R<RU>[R]-DEVICE). This lists the ones that could not be:
+            // two online devices claiming one slot, or a slot/rack that cannot be used.
+            const refresh = isAdmin() ? '&refresh=1' : '';
+            const r = await fetch(`/api/netbox/autorack?tenant=${encodeURIComponent(currentTenant)}${refresh}`);
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok || d.status === 'ERROR') { container.innerHTML = `<p class="p-4 text-amber-600 text-sm font-medium">Error: ${d.message || d.detail || 'NetBox spoke not connected'}</p>`; return; }
+            const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+            const badge = (cls, t) => `<span class="px-2 py-0.5 rounded-full text-xs font-medium ${cls}">${t}</span>`;
+            const rowsOf = (items, kindBadge) => items.map(x => `<tr class="border-b border-slate-100 hover:bg-slate-50">
+                <td class="px-4 py-2 font-medium">${esc(x.name)}</td>
+                <td class="px-4 py-2">${kindBadge(x)}</td>
+                <td class="px-4 py-2 text-xs font-mono">${esc(x.wanted) || '—'}</td>
+                <td class="px-4 py-2 text-xs font-mono">${esc(x.current) || '—'}</td>
+                <td class="px-4 py-2 text-xs">${esc(x.reason)}${x.holder ? ` <span class="text-slate-500">(held by ${esc(x.holder)})</span>` : ''}</td>
+            </tr>`).join('');
+            const cols = ['Device', 'Issue', 'Name asks for', 'Currently', 'Reason'];
+            const conflictBadge = () => badge('bg-red-100 text-red-700', 'Conflict');
+            const cannotBadge = x => x.mismatch ? badge('bg-amber-100 text-amber-700', 'Mismatch') : badge('bg-slate-100 text-slate-600', 'Cannot auto-rack');
+            const section = (title, hint, items, kindBadge) => `
+                <div class="mb-6">
+                    <h3 class="text-sm font-bold text-navy px-4 pt-2">${title} <span class="text-slate-500 font-medium">(${items.length})</span></h3>
+                    <p class="text-xs text-slate-500 px-4 pb-2">${hint}</p>
+                    ${items.length ? tw(th(cols) + `<tbody>${rowsOf(items, kindBadge)}</tbody>`) : '<p class="px-4 pb-2 text-slate-500 italic text-sm">None.</p>'}
+                </div>`;
+            const when = d.ts ? new Date(d.ts * 1000).toLocaleString() : 'not yet run';
+            container.innerHTML = `
+                <p class="text-xs text-slate-500 px-4 pt-3">Devices are placed in racks from their names, e.g. <span class="font-mono">MIPBE-SSPLM-N31-R45-VPNC1</span> = rack N31, RU 45 (add a trailing <span class="font-mono">R</span> to the RU for the rear). Last checked: ${esc(when)}.</p>
+                ${section('Conflicts', 'Two online devices are named for the same slot. Rename one of them; an offline holder is replaced automatically.', d.conflicts || [], conflictBadge)}
+                ${section('Cannot auto-rack', 'The name asks for a rack or slot that cannot be used, so the device stays where NetBox has it.', d.cannot || [], cannotBadge)}`;
+
         } else if (subMenu === 'Prefixes') {
             const r = await fetch(`/api/netbox/prefixes?tenant=${encodeURIComponent(currentTenant)}`);
             // 503 {detail} (new) or 200+{status:'ERROR'} (old) — both mean spoke-down.
