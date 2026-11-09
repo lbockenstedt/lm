@@ -2312,10 +2312,10 @@ function _elevFaceTable(units, faceLabel, uHeight) {
             data-elev-dev="${Number(dev.id)}"
             style="${lx}top:calc(${uh} * ${top} + 1px);height:calc(${uh} * ${h} - 2px);background:#2a2f38;border:1px ${inactive ? 'dashed' : 'solid'} #0b0d10;${inactive ? 'opacity:.55;' : ''}">
             <div class="w-1.5 shrink-0" style="background:#${color}"></div>
-            <div class="absolute inset-y-0 right-0" style="left:42%;${_elevPlate(dev)}opacity:.92"></div>
-            <div class="relative min-w-0 px-1.5 flex items-center gap-1.5 text-white" style="max-width:62%;background:linear-gradient(90deg,rgba(20,23,28,.92) 75%,rgba(20,23,28,0))">
-                ${_elevIcon(dev)}
-                <div class="min-w-0 flex-1"><div class="font-semibold truncate leading-tight" style="font-size:11px;text-shadow:0 1px 1px #000">${escapeHtml(dev.name || '')}</div>${detail}</div>
+            <div class="absolute inset-y-0 right-0" style="left:${h >= 2 ? 42 : 80}%;${_elevPlate(dev)}opacity:.92"></div>
+            <div class="relative min-w-0 px-1.5 flex items-center gap-1.5 text-white" style="max-width:${h >= 2 ? 62 : 86}%;background:linear-gradient(90deg,rgba(20,23,28,.92) 75%,rgba(20,23,28,0))">
+                ${h >= 2 ? _elevIcon(dev) : ''}
+                <div class="min-w-0 flex-1"><div class="font-semibold leading-tight ${h >= 2 ? '' : 'truncate'}" style="font-size:${h >= 2 ? 11 : 10}px;${h >= 2 ? 'word-break:break-all;' : ''}text-shadow:0 1px 1px #000">${escapeHtml(dev.name || '')}</div>${detail}</div>
             </div>
         </div>`;
     }).join('');
