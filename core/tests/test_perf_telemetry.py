@@ -44,3 +44,36 @@ def test_spoke_queue_snapshot_collects_stats_and_skips_silent_spokes():
 
     out = asyncio.run(main.LabManagerHub._spoke_queue_snapshot(Hub()))
     assert out == {"spoke-a": {"inflight": 4, "max_inflight": 4, "rejected_full": 9}}
+
+
+def test_fleet_health_snapshot_summarises_netbox_and_dhcp():
+    """Auto-rack problems, duplicate groups and DHCP declines reach the report."""
+    import asyncio
+    import os
+    os.environ.setdefault("LM_FERNET_KEY", __import__("cryptography.fernet",
+                                                      fromlist=["Fernet"]).Fernet.generate_key().decode())
+    import main
+
+    replies = {
+        "NETBOX_AUTORACK_SWEEP": {"status": "SUCCESS", "ts": 1, "named": 5,
+                                  "conflicts": [{"name": "srv-N31-R44", "reason": "slot taken"}],
+                                  "cannot": []},
+        "NETBOX_DEDUPE_DEVICES": {"status": "SUCCESS", "scanned": 9,
+                                  "groups": [{"key": "SN1", "survivor_name": "a", "duplicate_ids": [2]}]},
+        "DHCP_STATS": {"status": "SUCCESS", "subnets": [
+            {"subnet": "10.0.0.0/24", "declined_addresses": 7, "total_addresses": 200},
+            {"subnet": "10.0.1.0/24", "declined_addresses": 0, "total_addresses": 200}]},
+    }
+
+    class Hub:
+        def get_spoke_by_type(self, t):
+            return t
+
+        async def request_response(self, sid, cmd, data, timeout=None):
+            return {"payload": {"data": replies[cmd]}}
+
+    h = Hub()
+    out = asyncio.run(main.LabManagerHub._fleet_health_snapshot(h))
+    assert out["autorack"]["conflicts"] == 1 and out["autorack"]["sample"][0]["name"] == "srv-N31-R44"
+    assert out["netbox_duplicates"]["groups"] == 1
+    assert out["dhcp_declines"] == [{"subnet": "10.0.0.0/24", "declined": 7, "total": 200}]
