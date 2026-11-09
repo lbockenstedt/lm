@@ -82,6 +82,26 @@ def test_new_central_posts_client_credentials_to_sso():
     assert "client_id=cid" in seen["body"]
 
 
+def test_new_central_token_url_override_for_dev_cluster():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        return httpx.Response(200, json={"access_token": "TOK", "expires_in": 7200})
+
+    cfg = {"cluster_url": "https://cnx-apigw-cordelia.arubadev.cloud.hpe.com",
+           "api_version": "new_central", "client_id": "cid", "client_secret": "sec",
+           "token_url": "https://pavo-sso.common.cloud.hpe.com/as/token.oauth2",
+           "workspace_id": "ws1"}
+    client = ArubaClient(cfg)
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            return await client._ensure_token(http)
+    assert asyncio.run(go()) == "TOK"
+    assert seen["url"] == "https://pavo-sso.common.cloud.hpe.com/as/token.oauth2"
+
+
 def test_classic_posts_refresh_token_to_cluster():
     seen = {}
 

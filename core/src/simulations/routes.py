@@ -84,6 +84,28 @@ def _cs_config_hash(payload: dict) -> str:
     body = {k: v for k, v in (payload or {}).items() if k not in _CS_CONFIG_META_KEYS}
     return hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()
 
+async def _check_token_url(cfg: Dict[str, Any]) -> None:
+    """Validate an optional SSO ``token_url`` override (public HTTPS, external DNS)."""
+    # Blank clears the override; anything else must be safe to POST secrets to.
+    url = str(cfg.get("token_url") or "").strip()
+    cfg["token_url"] = url
+    if not url:
+        return
+    if not safe_external_url(url, require_https=True):
+        raise HTTPException(
+            status_code=400,
+            detail="token_url must be a public https:// URL "
+                   "(internal hosts, IP literals, and plain http are blocked).",
+        )
+    host = urlsplit(url).hostname
+    if host and not await asyncio.to_thread(host_resolves_external, host):
+        raise HTTPException(
+            status_code=400,
+            detail="token_url resolves to an internal address — "
+                   "DNS rebinding to a private/loopback host is blocked.",
+        )
+
+
 # Pure helpers + the short-TTL caches live in helpers.py; imported back so
 # behavior is unchanged (the route handlers mutate the cache dicts in place
 # via these references). main.py also imports _normalize_usb_vidpids/
@@ -3115,6 +3137,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     detail="cluster_url resolves to an internal address — "
                            "DNS rebinding to a private/loopback host is blocked.",
                 )
+        # Optional SSO token URL for a cluster outside the public list. The hub
+        # POSTs the client secret there, so it gets the same guard.
+        await _check_token_url(cfg)
         # Central poll interval (seconds). Optional; coerce + floor at 60s here so
         # a bad value can't be stored (the poller also floors defensively).
         if "poll_interval_s" in cfg:
@@ -3450,6 +3475,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         cfg = dict(hub_cc)
         if mode:
             cfg["mode"] = mode
+        # Optional SSO token URL for a cluster outside the public list. The hub
+        # POSTs the client secret there, so it gets the same guard.
+        await _check_token_url(cfg)
         # SSRF guard: same as cloud Central — on-prem cluster_url is still an
         # outbound hub target (the hub POSTs the Aruba client_id/secret to it in
         # classic mode and GETs monitoring data from it). This route is reachable
