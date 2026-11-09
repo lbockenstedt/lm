@@ -12,6 +12,10 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ## Week of 2026-11-09
 
+### Credential Vault
+
+- **TrueNAS appliance API keys go in the vault.** Add/edit now requires selecting a vault credential when the vault is enabled; the key is no longer stored inline. Existing appliances must be re-saved with a vault credential. See [credential-vault.md](credential-vault.md).
+
 ### NetBox auto-rack
 
 - **Devices are racked from their name.** `MIPBE-SSPLM-N31-R45-VPNC1` goes to

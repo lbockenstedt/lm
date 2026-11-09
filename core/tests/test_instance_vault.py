@@ -361,3 +361,17 @@ def test_firewall_overlay_from_api_key_secret_pair(monkeypatch):
     out = _run(iv.overlay(object(), {"host": "h", "vault_credential": {"bucket": "b", "name": "n"}},
                           "firewalls"))
     assert out["api_key"] == "KEY" and out["api_secret"] == "SECRET"
+
+
+def test_truenas_appliance_requires_vault_ref_and_overlays_api_key(monkeypatch):
+    monkeypatch.setattr(cred_vault, "_vault_available", lambda hub: True)
+    with pytest.raises(HTTPException) as ei:
+        _run(iv.validate_ref(object(), {"host": "h", "api_key": "inline"},
+                             {"user": {"tenants": []}}, is_admin=True,
+                             storage_key="truenas_appliances"))
+    assert ei.value.status_code == 400
+    _patch_get(monkeypatch, {"apikey": "KEY"})
+    rec = {"host": "h", "api_key": "inline", "vault_credential": {"bucket": "b", "name": "n"}}
+    assert "api_key" not in iv.strip_inline_secrets(dict(rec), "truenas_appliances")
+    out = _run(iv.overlay(object(), rec, "truenas_appliances"))
+    assert out["api_key"] == "KEY" and "vault_credential" not in out
