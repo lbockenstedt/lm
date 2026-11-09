@@ -250,6 +250,32 @@ def register(app, hub, ctx):
             logger.exception("truenas_get_appliance_data failed (%s/%s)", appliance_id, endpoint)
             raise HTTPException(status_code=500, detail=str(e))
 
+    # ── performance trend (5-minute averages kept by the spoke) ──────────────
+    @app.get("/api/truenas/{appliance_id}/performance/history")
+    async def truenas_performance_history(request: Request, appliance_id: str,
+                                          start: float = None, end: float = None):
+        """The appliance's 5-minute performance averages. No range = the last
+        7 days from the hub's copy; a ``start``/``end`` (epoch seconds) range
+        is read from the spoke, which stores the data (hub copy if it's offline)."""
+        hub = app.state.hub
+        app_, _scope, spoke_id = _authz_truenas_appliance(request, appliance_id)
+        if start is not None and spoke_id:
+            payload = {"appliance_id": appliance_id, "start": start, "end": end}
+            if app_.get("tenant_id"):
+                payload["tenant"] = app_["tenant_id"]
+            try:
+                res = access.unwrap_spoke(await hub.request_response(
+                    spoke_id, "TRUENAS_GET_PERF_HISTORY", payload, timeout=20.0))
+                if isinstance(res, dict) and res.get("status") == "SUCCESS":
+                    return {"status": "SUCCESS", "interval": 300, "source": "spoke",
+                            "data": res.get("data") or []}
+                logger.warning("truenas perf history %s from spoke: %s", appliance_id,
+                               (res or {}).get("message") if isinstance(res, dict) else res)
+            except Exception as e:  # noqa: BLE001 — fall back to the hub copy
+                logger.warning("truenas perf history %s from spoke failed: %s", appliance_id, e)
+        rows = hub.storage_perf.get("truenas", appliance_id, start, end)
+        return {"status": "SUCCESS", "interval": 300, "source": "hub", "data": rows}
+
     # ── poll now (admin) ───────────────────────────────────────────────────────
     @app.post("/api/truenas/{appliance_id}/poll")
     async def truenas_poll_appliance(appliance_id: str, request: Request):

@@ -488,6 +488,37 @@ async function showDeviceDashboard(item) {
                 </div>`;
             }).join('') : empty));
 
+        // Local escaper for the cards below (every interpolated value is untrusted).
+        const hEsc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+        // Monitoring (Zabbix): availability, templates and open problems.
+        const mon = d.monitoring || [];
+        cards.push(card('Monitoring (Zabbix)', mon.length ? 'bg-red-50 text-red-700' : 'bg-slate-50 text-slate-500',
+            mon.length ? mon.slice(0, 3).map(h => {
+                const availCls = h.availability === 'available' ? 'bg-green-100 text-green-700'
+                    : h.availability === 'unavailable' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-500';
+                const probs = (h.problems || []).slice(0, 5).map(p =>
+                    `<div class="text-xs text-red-600 truncate">⚠ ${hEsc(p.name || '')}</div>`).join('');
+                return `<div class="py-1.5 border-b border-slate-50 last:border-0">
+                    <div class="flex items-center justify-between gap-2">
+                        <span class="text-xs font-semibold text-slate-700 truncate">${hEsc(h.name || '—')}</span>
+                        ${badge(hEsc(h.availability || 'unknown'), availCls)}
+                    </div>
+                    <div class="text-xs text-slate-500 font-mono">${hEsc([h.ip, h.method, h.enabled === false ? 'disabled' : '', (h.problem_count || 0) + ' problem(s)'].filter(Boolean).join(' · '))}</div>
+                    ${(h.templates || []).length ? `<div class="text-xs text-slate-500 truncate">Templates: ${hEsc(h.templates.join(', '))}</div>` : ''}
+                    ${h.error ? `<div class="text-xs text-amber-600 truncate">${hEsc(h.error)}</div>` : ''}
+                    ${probs}
+                </div>`;
+            }).join('') : empty));
+
+        // DNS records that name this device or point at its address.
+        const dnsRecs = d.dns || [];
+        cards.push(card('DNS', dnsRecs.length ? 'bg-teal-50 text-teal-700' : 'bg-slate-50 text-slate-500',
+            dnsRecs.length ? dnsRecs.slice(0, 10).map(r => `
+                <div class="flex justify-between text-xs py-1 border-b border-slate-50 last:border-0 gap-2">
+                    <span class="font-medium text-slate-700 truncate">${hEsc(r.name || '')}</span>
+                    <span class="font-mono text-slate-500 truncate">${hEsc(r.type || '')} ${hEsc(r.value || '')}</span>
+                </div>`).join('') : empty));
+
         // LDAP
         const ld = d.ldap || [];
         cards.push(card('Directory (LDAP)', ld.length ? 'bg-yellow-50 text-yellow-700' : 'bg-slate-50 text-slate-500',
