@@ -11,6 +11,9 @@ from api import (
     HTTPException, Request, _hub_msg, _unwrap_spoke, access,
     logger, uuid,
 )
+import time
+
+from warm_cache import ALL_SCOPE, CacheJob
 
 
 def register(app, hub, ctx):
@@ -113,6 +116,12 @@ def register(app, hub, ctx):
         if scope == "deny" or (scope in ("filtered", "constrained") and _shared_truenas_hidden(request)):
             raise HTTPException(status_code=403,
                                 detail="You do not have access to this TrueNAS appliance")
+        return app_, scope, _truenas_spoke_for(app_)
+
+    def _truenas_spoke_for(app_):
+        """The connected spoke serving an appliance, or "" (callers use the cache)."""
+        hub = app.state.hub
+        tid = app_.get("tenant_id", "")
         # Use the appliance's bound spoke when it is connected.
         spoke_id = app_.get("spoke_id") or ""
         # Otherwise fall back to the shared or tenant storage spoke.
@@ -121,10 +130,10 @@ def register(app, hub, ctx):
             spoke_id = (hub.get_truenas_spoke_for_shared()
                         if access.tenant_is_shared(tid)
                         else hub.get_truenas_spoke_for_tenant(tid)) or ""
-        # A resolved spoke that is not connected is treated as none (callers use the cache).
+        # A resolved spoke that is not connected is treated as none.
         if spoke_id and hub._primary_key(spoke_id) not in hub.active_connections:
             spoke_id = ""
-        return app_, scope, spoke_id
+        return spoke_id
 
     # ── fleet list (tenant-scoped, offline-cache fallback) ─────────────────────
     # List the TrueNAS appliances the caller may see.
@@ -251,15 +260,15 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=500, detail=str(e))
 
     # ── performance trend (5-minute averages kept by the spoke) ──────────────
-    @app.get("/api/truenas/{appliance_id}/performance/history")
-    async def truenas_performance_history(request: Request, appliance_id: str,
-                                          start: float = None, end: float = None):
-        """The appliance's 5-minute performance averages. No range = the last
-        7 days from the hub's copy; a ``start``/``end`` (epoch seconds) range
-        is read from the spoke, which stores the data (hub copy if it's offline)."""
+    PERF_RECENT_S = 3600  # the Overview's default range, kept warm by the hub
+
+    async def _perf_history(app_, start, end):
+        """5-minute averages for ``start``..``end`` from the spoke that stores
+        them; the hub's pushed copy when the spoke is offline or fails."""
         hub = app.state.hub
-        app_, _scope, spoke_id = _authz_truenas_appliance(request, appliance_id)
-        if start is not None and spoke_id:
+        appliance_id = app_.get("id")
+        spoke_id = _truenas_spoke_for(app_)
+        if spoke_id:
             payload = {"appliance_id": appliance_id, "start": start, "end": end}
             if app_.get("tenant_id"):
                 payload["tenant"] = app_["tenant_id"]
@@ -275,6 +284,44 @@ def register(app, hub, ctx):
                 logger.warning("truenas perf history %s from spoke failed: %s", appliance_id, e)
         rows = hub.storage_perf.get("truenas", appliance_id, start, end)
         return {"status": "SUCCESS", "interval": 300, "source": "hub", "data": rows}
+
+    def _perf_recent_job(app_):
+        """Warm-cache job: the appliance's last hour of averages."""
+        tid = app_.get("tenant_id", "")
+
+        async def fetch():
+            now = time.time()
+            return await _perf_history(app_, now - PERF_RECENT_S, now)
+
+        tenants = (tid,) if tid and not access.tenant_is_shared(tid) else (ALL_SCOPE,)
+        return CacheJob("truenas_perf_recent", app_.get("id"), fetch, tenants, lane="truenas")
+
+    def truenas_cache_feed(_hub):
+        """Feed: every appliance's last hour, so the Overview opens instantly."""
+        appliances = (app.state.hub.state.system_state.get("global_config", {}) or {}) \
+            .get("truenas_appliances", []) or []
+        for a in appliances:
+            if isinstance(a, dict) and a.get("id"):
+                yield _perf_recent_job(a)
+
+    if hasattr(hub, "cache_register_feed"):
+        hub.cache_register_feed("truenas", truenas_cache_feed)
+
+    @app.get("/api/truenas/{appliance_id}/performance/history")
+    async def truenas_performance_history(request: Request, appliance_id: str,
+                                          start: float = None, end: float = None):
+        """The appliance's 5-minute performance averages. No range = the last
+        hour, served from the hub's warm cache; a ``start``/``end`` range
+        (epoch seconds) is read from the spoke, which stores 7 days (the hub's
+        copy if the spoke is offline)."""
+        hub = app.state.hub
+        app_, _scope, _spoke = _authz_truenas_appliance(request, appliance_id)
+        if start is None:
+            job = _perf_recent_job(app_)
+            data = await hub.cache_read(job.ns, job.key, job.fetch,
+                                        tenants=job.tenants, lane=job.lane)
+            return hub.cache_annotate(data, job.ns, job.key)
+        return await _perf_history(app_, start, end if end is not None else time.time())
 
     # ── poll now (admin) ───────────────────────────────────────────────────────
     @app.post("/api/truenas/{appliance_id}/poll")
