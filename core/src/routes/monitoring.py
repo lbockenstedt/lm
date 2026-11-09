@@ -175,15 +175,19 @@ async def inventory_devices(hub):
 
 def vault_snmp_scan_sets(hub, tenant):
     """Scan credential sets for every hub-mode vault secret of type "snmp" in the
-    tenant's bucket and the Global Admin slot, so a scan tries each community."""
+    tenant's bucket (or a tenant group it belongs to) and the Global Admin slot, so a scan tries each community."""
     # Vault helpers (admin bucket name) and the global config holding the vault index.
     import cred_vault
+    import access
     gc = hub.state.system_state.get("global_config", {})
     # Walk each vault bucket; only the tenant's own bucket (and the admin slot for "default") is
     # eligible.
     out = []
     for bucket, secrets in ((gc.get("cred_vault", {}) or {}).get("secrets", {}) or {}).items():
-        if bucket != tenant and not (tenant == "default" and bucket == cred_vault.ADMIN_BUCKET):
+        # A tenant's communities may also live in the bucket of a tenant group it belongs to.
+        in_group = str(bucket).startswith("group:") and access.tenant_in(tenant, bucket)
+        if bucket != tenant and not in_group and not (
+                tenant == "default" and bucket == cred_vault.ADMIN_BUCKET):
             continue
         # Keep hub-mode SNMP secrets and turn each into a scan credential set referencing the vault.
         for name, meta in (secrets or {}).items():
