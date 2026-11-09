@@ -577,3 +577,12 @@ async def test_stub_merged_only_when_live_poll_of_its_ip_returns_the_same_serial
     n = len(h.request_log)
     await h.nw_merge_stubs_by_live_poll(cfg, "SN1")
     assert len([1 for _, c, _p in h.request_log[n:] if c == "NW_GET_DEVICE_INFO"]) == 0
+
+
+def test_oobm_address_is_the_one_on_the_mgmt_interface():
+    from nw_discovery_sync import nw_oobm_address
+    dev = {"address": "172.21.0.11", "alt_addresses": ["10.0.4.2", "1.1.1.1"]}
+    rows = [{"name": "vlan10", "ip": "172.21.0.11"}, {"name": "mgmt", "ip": "10.0.4.2/24"}]
+    assert nw_oobm_address(dev, {"data": rows}) == "10.0.4.2"
+    assert nw_oobm_address(dev, [{"name": "vlan10", "ip": "172.21.0.11"}]) == ""
+    assert nw_oobm_address(dev, None) == ""
