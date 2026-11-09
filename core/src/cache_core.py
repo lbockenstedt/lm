@@ -56,7 +56,7 @@ logger = logging.getLogger("Hub")
 
 # Default timings (seconds): write debounce, then the three staleness thresholds
 # (refresh in background, show "cached" badge, treat as expired) described above.
-DEFAULT_FLUSH_DELAY_S = 5.0
+DEFAULT_FLUSH_DELAY_S = 60.0
 DEFAULT_REFRESH_AFTER_S = 30.0
 DEFAULT_STALE_AFTER_S = 300.0
 DEFAULT_EXPIRE_AFTER_S = 86400.0

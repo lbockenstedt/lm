@@ -74,8 +74,9 @@ class NwCacheMixin:
     # ── lifecycle ────────────────────────────────────────────────────────────
 
     # Coalescing window: a poll burst of N devices marks dirty N times but
-    # produces ONE write per dirty tenant at most every this many seconds.
-    _NW_CACHE_FLUSH_DELAY_S = 30.0
+    # produces ONE write per dirty tenant at most every this many seconds (the data is a warm-start
+    # seed only; the next poll refills anything lost).
+    _NW_CACHE_FLUSH_DELAY_S = 300.0
 
     def nw_cache_init(self) -> None:
         """Initialize the in-memory cache slots. Call once from ``__init__``."""
@@ -312,11 +313,12 @@ class NwCacheMixin:
         touched = False
         for r in rows:
             if isinstance(r, dict) and r.get("id") == device_id:
+                # Latency jitters every sweep; only an up/down flip is worth a disk write.
+                touched = r.get("reachable") != reachable
                 r["reachable"] = reachable
                 r["latency_ms"] = latency_ms
-                touched = True
                 break
-        # Persist only if a row actually changed (that tenant's fleet file only).
+        # Persist only on a reachability flip (that tenant's fleet file only).
         if touched:
             self._nw_fleet_file.schedule_save(self._nw_tenant_of_device(device_id))
 
