@@ -27,6 +27,75 @@ def _restore_root(handlers, level):
     root.setLevel(level)
 
 
+def _opnsense_timeout_record(endpoint="https://172.21.2.5:443/api/kea/leases4/search",
+                             milliseconds=10002):
+    return logging.LogRecord(
+        "OpnsenseEngine", logging.ERROR, __file__, 1,
+        "Curl request failed for %s: curl: (28) Connection timed out after %d milliseconds",
+        (endpoint, milliseconds), None)
+
+
+def test_opnsense_timeout_burst_and_interval():
+    # Reproduce the reported 1323-record burst without network calls or sleeps.
+    limiter = logging_setup._OpnsenseTimeoutFilter()
+    records = [_opnsense_timeout_record(milliseconds=10000 + i) for i in range(1323)]
+    assert len(records) == 1323  # unfiltered baseline
+    with mock.patch.object(logging_setup.time, "monotonic", return_value=0.0):
+        assert sum(limiter.filter(r) for r in records) == 1
+    with mock.patch.object(logging_setup.time, "monotonic", return_value=299.9):
+        assert not limiter.filter(_opnsense_timeout_record())
+    with mock.patch.object(logging_setup.time, "monotonic", return_value=300.0):
+        record = _opnsense_timeout_record()
+        assert limiter.filter(record)
+        assert "suppressed 1323 repeated connect timeouts" in record.getMessage()
+        assert not limiter.filter(_opnsense_timeout_record())
+    with mock.patch.object(logging_setup.time, "monotonic", return_value=600.0):
+        record = _opnsense_timeout_record()
+        assert limiter.filter(record)
+        assert "suppressed 1 repeated connect timeouts" in record.getMessage()
+
+
+def test_opnsense_timeout_filter_scope_and_bound():
+    limiter = logging_setup._OpnsenseTimeoutFilter()
+    with mock.patch.object(logging_setup.time, "monotonic", return_value=100.0):
+        assert limiter.filter(_opnsense_timeout_record())
+        assert limiter.filter(_opnsense_timeout_record("https://other/api/kea/leases4/search"))
+        assert limiter.filter(_opnsense_timeout_record("https://172.21.2.5:443/api/arp"))
+        for i in range(300):
+            assert limiter.filter(_opnsense_timeout_record(f"https://host-{i}/api/leases"))
+        assert len(limiter._timeouts) == 256
+    for attribute, value in (("name", "OtherEngine"), ("levelno", logging.CRITICAL),
+                             ("exc_info", (RuntimeError, RuntimeError("failure"), None))):
+        record = _opnsense_timeout_record()
+        setattr(record, attribute, value)
+        with mock.patch.object(logging_setup.time, "monotonic") as clock:
+            assert limiter.filter(record)
+            clock.assert_not_called()
+    record = _opnsense_timeout_record()
+    record.msg, record.args = "Curl request failed: curl: (7) Connection refused", ()
+    with mock.patch.object(logging_setup.time, "monotonic") as clock:
+        assert limiter.filter(record)
+        clock.assert_not_called()
+
+
+def test_opnsense_timeout_filter_installed_once():
+    saved_h, saved_lvl = _root_handlers(), logging.getLogger().level
+    logger = logging.getLogger("OpnsenseEngine")
+    saved_filters = logger.filters[:]
+    try:
+        logger.filters = []
+        with mock.patch.object(logging_setup, "_start_log_cap_watchdog"):
+            logging_setup.configure_logging(line_buffered=False)
+            first = logger.filters[:]
+            logging_setup.configure_logging(line_buffered=False)
+        assert len(first) == 1
+        assert isinstance(first[0], logging_setup._OpnsenseTimeoutFilter)
+        assert logger.filters == first
+    finally:
+        logger.filters = saved_filters
+        _restore_root(saved_h, saved_lvl)
+
+
 def test_configure_logging_default_is_info():
     saved_h, saved_lvl = _root_handlers(), logging.getLogger().level
     try:
