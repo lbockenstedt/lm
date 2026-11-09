@@ -2039,7 +2039,7 @@ async function _renderMonitoring(container) {
     const hostRows = shown.map(h => {
         const pl = (h.problems || []).map(p => `<div>${escapeHtml(sevName[p.severity] || '')}: ${escapeHtml(p.name)}</div>`).join('') || '<span class="text-slate-500">none</span>';
         return `<tr class="border-t border-slate-100">
-        <td class="px-3 pt-2 pb-0 text-xs font-medium text-slate-700 whitespace-nowrap">${escapeHtml(h.name)}</td>
+        <td class="px-3 pt-2 pb-0 text-xs font-medium text-slate-700 whitespace-nowrap">${escapeHtml(String(h.name || '').toUpperCase())}</td>
         <td class="px-3 pt-2 pb-0 text-xs text-slate-500">${escapeHtml(h.tenant)}</td>
         <td class="px-3 pt-2 pb-0 text-xs font-mono text-slate-500">${escapeHtml(h.ip)}</td>
         <td class="px-3 pt-2 pb-0 text-xs text-slate-500">${h.method}</td>
