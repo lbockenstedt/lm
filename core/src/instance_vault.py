@@ -74,6 +74,13 @@ SECRET_FIELDS = {
         "api_key":    ("api_key", "username", "key", "apikey"),
         "api_secret": ("api_secret", "password", "secret", "token"),
     },
+    "truenas_appliances": {
+        # A TrueNAS appliance authenticates with a single API key (plus the
+        # non-secret key-owner username that stays inline). Store it as a
+        # Credential Vault "API key" ({apikey}), "Token" ({token}) or "Generic"
+        # secret.
+        "api_key": ("api_key", "apikey", "token", "key", "value", "password"),
+    },
     "nw_devices": {
         # Network-device login password / enable secret / REST token / SNMP
         # community — a device uses whichever its transport needs; only the
@@ -107,7 +114,7 @@ SECRET_FIELDS = {
 # username/password login (no client_id), the inline client_id is kept as-is.
 # Products whose connection only works with a secret: once the hub's cloud
 # vault is available, a record must reference a vault credential.
-VAULT_REQUIRED = {"firewalls"}
+VAULT_REQUIRED = {"firewalls", "truenas_appliances"}
 
 
 NONSECRET_VAULT_FIELDS = {
