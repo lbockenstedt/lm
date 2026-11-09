@@ -67,14 +67,41 @@ optional and explain why in your final report.
 
 ## 3 — The view — REQUIRED
 
-### ☐ The control's markup, in the view function that renders this feature area
-- `main.js` / `js/*.js` for anything outside Simulations (the file whose
-  header names the feature area); `sim-views.js` for anything
-  inside it (see §5 for the twin implication of choosing `sim-views.js`).
-- Match the existing button convention: inline
-  `onclick="fnName('${arg}')"` on a template-literal `<button>` — not
-  `addEventListener` wiring, which is not how buttons are built elsewhere in
-  this file.
+### ☐ The control's markup, built with `safeHtml`
+- Read `docs/webui.md` → "How to write markup" first; `js/views/os-updates.js`
+  is the reference view.
+- Where it goes:
+  - Feature area already an ES module in `js/views/` → add it there.
+  - Feature area is a classic `js/*.js` / `main.js` page → classic scripts
+    cannot `import`, so put the control's render function and its actions in
+    an ES module (extend the area's module in `js/views/`, or add one with a
+    `<script type="module" src="js/views/<name>.js?v=__WEBUI_VERSION__">` tag
+    at the end of `index.html`), register its entry point on `lmViews`
+    (`lmViews.fwoverview = renderFirewallOverview;` in
+    `js/views/firewall-overview.js`) and call `lmViews.<name>(container, …)`
+    from the classic loader (`js/fleet-admin.js` does this for the firewall
+    Overview tab).
+  - `sim-views.js` (Simulations; classic, with a cs twin — §7) → render the
+    button, then wire it with `addEventListener` (the shape its Save buttons
+    use). No inline `onclick=`.
+- Markup shape:
+  ```js
+  import { safeHtml } from '../core/safe-html.js';
+  import { delegate } from '../core/view.js';
+
+  // One row's "do the thing" button; the id rides in data-id.
+  const thingButton = row => safeHtml`<button data-action="doThing"
+      data-id="${row.id}" title="Explain exactly what the action does"
+      class="px-2 py-1 rounded text-xs font-bold bg-[#01A982]/10
+             hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982]">
+      Do thing</button>`;
+  ```
+  - Every `${value}` is escaped by `safeHtml`; never call `escapeHtml()`
+    inside it (double escape). Trusted markup (e.g. `helpIcon()`) goes in
+    `rawHtml(...)`. Arrays of `safeHtml` results are inserted as-is (no
+    `.join('')`).
+  - Never print a UUID as text: `_spokeName(obj)` (`main.js`) for names, raw
+    id only in a `title=`.
 - Class tokens (from `docs/webui-style.md`, confirm current values there
   before copying — it's the canonical source, this list is illustrative):
   - Primary/HPE-green: `bg-[#01A982]/10 hover:bg-[#01A982]/20
@@ -90,29 +117,39 @@ optional and explain why in your final report.
   restatement of the label) — every existing HPE-green action button in
   this codebase carries one; this is not optional.
 
-## 4 — JS handler — REQUIRED
+## 4 — JS action — REQUIRED
 
-### ☐ An `async function` beside the view, following the established shape
+### ☐ An entry in the `delegate()` actions object
 ```js
-async function <feature>DoThing(arg) {
-    showToast('Doing the thing…', 'info');           // optimistic, if not instant
-    try {
-        const { ok, data, detail } = await _spokeFetch('/api/<feature>/thing', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ arg })
-        });
-        if (!ok) { showToast('Failed: ' + (detail || ''), 'error'); return; }
-        showToast('Done.', 'success');
-        // re-render/refresh the affected part of the view here — never a full page reload
-    } catch (e) { showToast('Failed: ' + (e.message || e), 'error'); }
-}
+// Actions for every data-action control on this page (js/core/view.js delegate).
+delegate(container, {
+    // POST the thing for one row, then refresh the list.
+    async doThing(el) {
+        showToast('Doing the thing…', 'info');           // optimistic, if not instant
+        try {
+            const r = await fetch(`/api/<feature>/thing/${encodeURIComponent(el.dataset.id)}`,
+                                  { method: 'POST' });
+            const body = await r.json().catch(() => ({}));
+            if (!r.ok) { showToast('Failed: ' + (body.detail || r.status), 'error'); return; }
+            showToast('Done.', 'success');
+            // re-render the affected part (view.refresh() / setState) — never a full page reload
+        } catch (e) { showToast('Failed: ' + (e.message || e), 'error'); }
+    },
+});
 ```
+- `delegate(root, actions)` puts one listener on `root`: `data-action` fires
+  on click (or on change for inputs/selects), `data-input` on each keystroke,
+  `data-submit` on form submit. Calling it again on the same root swaps the
+  actions, so a re-render is safe.
 - Use whichever fetch helper the surrounding module already uses
-  (`_spokeFetch`/`setupFetch`/`csFetch`/plain `fetch`) — don't introduce a
-  fourth.
-- `showToast(message, type)` — `type` is `'success'` / `'error'` / `'info'`.
-  For a destructive action, use `showConfirmToast(message, opts)` first
-  rather than acting immediately on click.
+  (`_spokeFetch` in `js/dns-dhcp-cluster.js`, or plain `fetch` as in
+  `js/views/firewall-overview.js`) — don't introduce another one, and only
+  call helpers that exist (lm `6958d5ee`: an undefined `apiFetch` threw
+  `ReferenceError` and blanked OS Updates).
+- `showToast(message, type)` (`main.js`) — `type` is `'success'` / `'error'` /
+  `'info'`. For a destructive action, use `showConfirmToast(message, opts)`
+  first rather than acting immediately on click.
+- No `window.<fn> =` global for the handler: the ratchet counts them.
 
 ## 5 — State/status wiring (OPTIONAL — only if the control introduces a new state)
 
@@ -151,7 +188,11 @@ async function <feature>DoThing(arg) {
 
 ## 8 — Verify
 
-- ☐ `python3 -m py_compile` on any touched `.py`.
+- ☐ `python3 -m py_compile` on any touched `.py`; `node --check` on every
+  touched `.js` (CI runs it on all WebUI JS — one stray brace blanks the UI,
+  lm `743fe9df`).
+- ☐ `cd lm/core && /tmp/nbvenv/bin/python -m pytest -q tests/test_webui_ratchets.py tests/test_webui_safe_html.py tests/test_webui_view.py`
+  (the ratchet fails on any new inline `on*=`, `escapeHtml(` or `window.x =`).
 - ☐ Run the repo's own relevant self-tests if the feature area has them.
 - ☐ Run `dual-copy-guard` (cheap even when §7 was a no-op — confirms it
   actually was).

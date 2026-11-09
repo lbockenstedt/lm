@@ -41,7 +41,6 @@ jobs:
           path: _ab
           sparse-checkout: |
             fleet_checks.py
-            fleet_rules.md
           sparse-checkout-cone-mode: false
       - name: Check out CI helpers (lm)
         # lm uses its own checkout, so helper changes are tested on lm dev
