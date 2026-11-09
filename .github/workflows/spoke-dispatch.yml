@@ -1,0 +1,47 @@
+name: Spoke compatibility
+
+# Every spoke inherits BaseSpoke from lm/core, but a spoke's CI only runs on
+# that spoke's own pushes -- so an lm/core change that breaks a spoke surfaced
+# days later on someone else's unrelated PR. On each lm/core push to dev, ask
+# every spoke that imports lm/core to re-run its CI on its dev branch against
+# this exact lm commit. Report only: results land in each spoke's Actions tab
+# (run "CI", event repository_dispatch); nothing here blocks lm.
+
+on:
+  push:
+    branches: [ dev ]
+    paths: [ 'core/**' ]
+  workflow_dispatch:
+
+concurrency:
+  group: spoke-dispatch
+  cancel-in-progress: true
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch lm-changed to spokes
+        env:
+          # Cross-repo dispatch needs a token with repo scope on the targets.
+          GH_TOKEN: ${{ secrets.WORKFLOW_TOKEN }}
+          LM_SHA: ${{ github.sha }}
+        run: |
+          set -u
+          # Repos whose ci.yml checks out lbockenstedt/lm as _lm (dhcp and dns are
+          # archived; their code now lives in lm).
+          spokes="ab cppm cs ldap le netbox opnsense pxmx qa truenas zabbix"
+          failed=""
+          for s in $spokes; do
+            if gh api -X POST "repos/lbockenstedt/$s/dispatches" \
+                 -f event_type=lm-changed \
+                 -f "client_payload[lm_ref]=$LM_SHA" \
+                 -f "client_payload[spoke_ref]=dev" >/dev/null; then
+              echo "- [$s](https://github.com/lbockenstedt/$s/actions/workflows/ci.yml?query=event%3Arepository_dispatch)" >> "$GITHUB_STEP_SUMMARY"
+            else
+              failed="$failed $s"
+            fi
+          done
+          # A dispatch that cannot be sent is worth a warning, not a red lm run.
+          if [ -n "$failed" ]; then echo "::warning title=spoke dispatch::could not dispatch to:$failed"; fi

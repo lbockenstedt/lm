@@ -1,0 +1,19 @@
+name: Fleet rules
+
+# Thin caller; the checks live in fleet-rules-reusable.yml. Dev only: the
+# promotion PRs into qa/main carry commits that already passed here.
+# (lm calls its own copy by path; the other fleet repos call it @main.)
+
+on:
+  push:
+    branches: [ dev ]
+  pull_request:
+    branches: [ dev ]
+
+concurrency:
+  group: fleet-rules-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rules:
+    uses: ./.github/workflows/fleet-rules-reusable.yml

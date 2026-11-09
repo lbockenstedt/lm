@@ -1,0 +1,19 @@
+{
+  "_doc": "Files that must stay in step (see .claude/skills/dual-copy-guard/reference.md). Checked by scripts/check_twins.py in every repo's CI. 'byte' pairs must be identical; 'keys' pairs must define the same named list. Paths are repo:path.",
+  "pairs": [
+    {"name": "client common.sh", "kind": "byte",
+     "files": ["cs:clients/lib/common.sh", "cs:clients/linux/common.sh"]},
+    {"name": "dns_fail.txt", "kind": "byte",
+     "files": ["cs:clients/linux/dns_fail.txt", "cs:configs/dns_fail.txt", "cs:clients/windows/dns_fail.txt"]},
+    {"name": "probe_signatures.py", "kind": "byte",
+     "files": ["lm:core/src/security/probe_signatures.py", "ab:probe_signatures.py"]},
+    {"name": "SIM_QUOTA_KEYS", "kind": "keys", "symbol": "SIM_QUOTA_KEYS",
+     "files": ["lm:core/src/simulations/sim_quota.py", "cs:lm-spoke/src/sim_quota.py"]},
+    {"name": "QUOTA_TIERS", "kind": "keys", "symbol": "QUOTA_TIERS",
+     "files": ["lm:core/src/simulations/sim_quota.py", "cs:lm-spoke/src/sim_quota.py"]},
+    {"name": "CS_CONTROL_FLAGS", "kind": "keys", "symbol": "CS_CONTROL_FLAGS",
+     "files": ["lm:WebUI/sim-views.js", "cs:lm-spoke/static/sim-views.js"]},
+    {"name": "CS_OVERRIDE_KEYS", "kind": "keys", "symbol": "CS_OVERRIDE_KEYS",
+     "files": ["cs:clients/lib/common.sh", "cs:clients/windows/common.ps1"]}
+  ]
+}

@@ -245,7 +245,7 @@ class HubOsUpdatesMixin:
         f = getattr(self, "_osu_cache_file", None)
         if f is None:
             f = JsonCacheFile("os-updates", lambda: os.path.join(self.cache_dir, _STATE_FILE),
-                              self._osu_state, flush_delay_s=1.0)
+                              self._osu_state)
             self._osu_cache_file = f
         return f
 
