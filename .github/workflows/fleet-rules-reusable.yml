@@ -44,12 +44,19 @@ jobs:
             fleet_rules.md
           sparse-checkout-cone-mode: false
       - name: Check out CI helpers (lm)
+        # lm uses its own checkout, so helper changes are tested on lm dev
+        # before any other repo sees them.
+        if: github.repository != 'lbockenstedt/lm'
         uses: actions/checkout@v4
         with:
           repository: lbockenstedt/lm
           ref: main
           path: _lmci
           sparse-checkout: .github
+      - name: Locate CI helpers
+        run: |
+          if [ "$GITHUB_REPOSITORY" = lbockenstedt/lm ]; then h=.; else h=_lmci; fi
+          echo "HELPERS=$h" >> "$GITHUB_ENV"
       - uses: actions/setup-python@v5
         with: { python-version: '3.11' }
       - name: Install linters
@@ -58,13 +65,13 @@ jobs:
         run: python _ab/fleet_checks.py --base "$BASE" --repo "$GITHUB_REPOSITORY"
       - name: Ruff (new errors only)
         if: always()
-        run: python _lmci/.github/scripts/ruff_new.py --base "$BASE"
+        run: python "$HELPERS/.github/scripts/ruff_new.py" --base "$BASE"
       - name: Twin files in sync
         if: always()
         run: >-
-          python _lmci/.github/scripts/check_twins.py
+          python "$HELPERS/.github/scripts/check_twins.py"
           --repo "${{ github.event.repository.name }}" --branch "$TWIN_BRANCH"
-          --twins _lmci/.github/twins.json --root .
+          --twins "$HELPERS/.github/twins.json" --root .
       - name: Dependency audit (requirements changed)
         if: always()
         # Advisory: a CVE in a pinned dependency is worth seeing on the PR but
