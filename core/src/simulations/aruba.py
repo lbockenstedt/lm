@@ -167,6 +167,10 @@ class ArubaClient:
 
     def _new_central_token_url(self) -> str:
         """Return the OAuth token URL: GreenLake workspace URL when set, else HPE SSO."""
+        # A cluster outside the public list (e.g. a dev cluster) has its own SSO.
+        override = str(self.config.get("token_url") or "").strip()
+        if override.lower().startswith("https://"):
+            return override
         # A workspace id selects the GreenLake token endpoint.
         workspace_id = str(self.config.get("workspace_id") or "").strip()
         if workspace_id:

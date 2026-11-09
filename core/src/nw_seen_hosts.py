@@ -179,3 +179,22 @@ def monitor_rows(by_tenant: Dict[str, Dict[str, Dict[str, Any]]], now: float,
                         "type": monitor_type(e, "host"),
                         "snmp_ok": True, "snmp_secret": e["snmp_credential_id"]})
     return out
+
+
+def apply_appliance_names(rows: List[Dict[str, Any]], appliances: Iterable[Dict[str, Any]],
+                          tenant_in) -> None:
+    """Rename SNMP-seen rows that sit at a TrueNAS appliance's address to the
+    appliance's LM name, so a rename in LM reaches Zabbix without changing the
+    box's own sysName. The appliance must belong to the row's tenant or group."""
+    for r in rows:
+        if r.get("snmp_ok") is not True:
+            continue
+        for a in appliances or []:
+            if not isinstance(a, dict) or not str(a.get("name") or "").strip():
+                continue
+            host = str(a.get("host") or "").split("://")[-1].split("/")[0].split(":")[0].strip()
+            if host and host == str(r.get("address") or "").strip() and (
+                    str(a.get("tenant_id") or "") == str(r.get("tenant_id") or "")
+                    or tenant_in(a.get("tenant_id"), r.get("tenant_id"))):
+                r["name"] = str(a["name"]).strip()
+                break
