@@ -65,10 +65,6 @@ class TruenasCacheMixin:
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
-    # Coalescing window: a poll burst of N appliances marks dirty N times but
-    # produces ONE full-file dump at most every this many seconds.
-    _TRUENAS_CACHE_FLUSH_DELAY_S = 5.0
-
     def truenas_cache_init(self) -> None:
         """Initialize the in-memory cache slots. Call once from ``__init__``."""
         # Empty fleet and per-appliance caches, plus a staleness policy.
@@ -79,8 +75,7 @@ class TruenasCacheMixin:
         self._truenas_cache_file = JsonCacheFile(
             "truenas cache", self._truenas_cache_path,
             lambda: {"fleet": self.truenas_fleet_cache,
-                     "appliances": self.truenas_appliance_cache},
-            flush_delay_s=self._TRUENAS_CACHE_FLUSH_DELAY_S)
+                     "appliances": self.truenas_appliance_cache})
 
     def _truenas_cache_path(self) -> str:
         """Return the path of the TrueNAS cache file under cache_dir."""

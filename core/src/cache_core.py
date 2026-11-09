@@ -56,7 +56,10 @@ logger = logging.getLogger("Hub")
 
 # Default timings (seconds): write debounce, then the three staleness thresholds
 # (refresh in background, show "cached" badge, treat as expired) described above.
-DEFAULT_FLUSH_DELAY_S = 60.0
+# THE one write-frequency setting for every persisted cache (nw, truenas, certs,
+# storage perf, os updates, warm cache): the data lives in memory and a poll
+# refills anything a crash loses, so disk is only a warm-start seed.
+DEFAULT_FLUSH_DELAY_S = 300.0
 DEFAULT_REFRESH_AFTER_S = 30.0
 DEFAULT_STALE_AFTER_S = 300.0
 DEFAULT_EXPIRE_AFTER_S = 86400.0
@@ -70,7 +73,47 @@ EXPIRED = "expired"
 MISSING = "missing"
 
 
-class JsonCacheFile:
+class _DebouncedFlusher:
+    """Shared plumbing of every persisted cache: a loop-aware lazy lock and ONE
+    delayed flusher task. Subclasses decide what "dirty" means and what a flush
+    writes (``_flush_after_delay``/``_persist``)."""
+
+    _lock: Optional[asyncio.Lock] = None
+    _lock_loop: Any = None
+    _label = "cache"
+
+    def _get_lock(self) -> asyncio.Lock:
+        """A lock bound to the RUNNING loop, created on first use.
+
+        These objects are built in a synchronous ``__init__`` during hub startup,
+        before any event loop exists; on Python < 3.10 a lock captured from the
+        wrong loop raises "got Future attached to a different loop" the first
+        time two writers contend. Binding lazily avoids that."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if self._lock is None or self._lock_loop is not loop:
+            self._lock = asyncio.Lock()
+            self._lock_loop = loop
+        return self._lock
+
+    def _ensure_flusher(self) -> None:
+        """Start the delayed flusher unless one is already pending (it will pick the change up)."""
+        if any(not t.done() for t in self._tasks):  # type: ignore[attr-defined]
+            return
+        coro = self._flush_after_delay()  # type: ignore[attr-defined]
+        try:
+            task = asyncio.create_task(coro)
+            self._tasks.add(task)  # type: ignore[attr-defined]
+            task.add_done_callback(self._tasks.discard)  # type: ignore[attr-defined]
+        except RuntimeError:  # pragma: no cover - no running loop (startup path)
+            # Close the coroutine, or Python warns "never awaited" on every startup-path set.
+            coro.close()
+            logger.debug("%s: skipping async persist (no running loop)", self._label)
+
+
+class JsonCacheFile(_DebouncedFlusher):
     """
     Manages atomic JSON persistence of cache data.
 
@@ -105,29 +148,6 @@ class JsonCacheFile:
         self._tasks: Set[asyncio.Task] = set()
         # True when there are changes not yet written.
         self._dirty = False
-
-    def _get_lock(self) -> asyncio.Lock:
-        """A lock bound to the RUNNING loop, created on first use.
-
-        These cache objects are constructed in a synchronous ``__init__`` during
-        hub startup — before any event loop exists. On Python < 3.10
-        ``asyncio.Lock()`` captures a loop at construction time, and a lock
-        captured from the wrong loop raises "got Future attached to a different
-        loop" the first time two writers genuinely contend. That is exactly the
-        poll-burst case this class exists to serialize, so it would fail only
-        under load. Binding lazily keeps the behaviour identical across
-        interpreter versions.
-        """
-        # The loop we are running on, or None if called outside a loop.
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-        # Create a new lock if none exists yet or the loop has changed.
-        if self._lock is None or self._lock_loop is not loop:
-            self._lock = asyncio.Lock()
-            self._lock_loop = loop
-        return self._lock
 
     def load(self) -> Optional[Dict[str, Any]]:
         """
@@ -164,21 +184,7 @@ class JsonCacheFile:
         """
         # Remember there is something to write.
         self._dirty = True
-        # A flusher already pending will write this change too.
-        if any(not t.done() for t in self._tasks):
-            return  # a flusher is already pending — it will pick this up
-
-        # Start a delayed flusher task, keeping a reference so it is not garbage-collected.
-        coro = self._flush_after_delay()
-        try:
-            task = asyncio.create_task(coro)
-            self._tasks.add(task)
-            task.add_done_callback(self._tasks.discard)
-        except RuntimeError:  # pragma: no cover - no running loop (startup path)
-            # Close the coroutine we just built, or Python warns "coroutine was
-            # never awaited" on every startup-path set.
-            coro.close()
-            logger.debug("%s: skipping async persist (no running loop)", self._label)
+        self._ensure_flusher()
 
     async def flush_now(self) -> None:
         """
@@ -236,7 +242,7 @@ class JsonCacheFile:
         os.replace(tmp, path)
 
 
-class TenantShardCache:
+class TenantShardCache(_DebouncedFlusher):
     """Debounced persistence of a tenant-keyed cache, one JSON file per tenant.
 
     Files live at ``<data_dir>/tenants/<tenant>/<module>/<name>`` (the layout
@@ -272,9 +278,6 @@ class TenantShardCache:
         self._written: Set[str] = set()
         self._digest: Dict[str, str] = {}
 
-    # Reuse JsonCacheFile's loop-aware lazy lock.
-    _get_lock = JsonCacheFile._get_lock
-
     def load(self) -> Dict[str, Any]:
         """Merge every tenant's file back into one resident dict (bad files skipped)."""
         import glob
@@ -296,17 +299,7 @@ class TenantShardCache:
         """Mark ``tenant`` (None = every tenant) dirty and ensure one delayed flusher is pending."""
         self._dirty_tenants.add(self.ALL if tenant is None else str(tenant))
         self._dirty = True
-        # A flusher already pending will write this change too.
-        if any(not t.done() for t in self._tasks):
-            return
-        coro = self._flush_after_delay()
-        try:
-            task = asyncio.create_task(coro)
-            self._tasks.add(task)
-            task.add_done_callback(self._tasks.discard)
-        # No running loop (startup): close the coroutine to avoid a "never awaited" warning.
-        except RuntimeError:  # pragma: no cover
-            coro.close()
+        self._ensure_flusher()
 
     async def _flush_after_delay(self) -> None:
         """Wait the debounce delay and persist; repeat while tenants are still dirty."""
@@ -496,7 +489,7 @@ def _ns_filename(ns: str) -> str:
     return "ns-" + hashlib.sha1((ns or "").encode()).hexdigest() + CACHE_FILE_SUFFIX
 
 
-class ShardedCacheFile:
+class ShardedCacheFile(_DebouncedFlusher):
     """Debounced, per-namespace persistence for the hub data cache.
 
     Like ``JsonCacheFile`` it owns NO data: ``snapshot_fn(ns)`` returns the
@@ -533,9 +526,6 @@ class ShardedCacheFile:
         # Per-namespace write time and file size, for status display.
         self.last_write_at: Dict[str, float] = {}
         self.last_size: Dict[str, int] = {}
-
-    # Reuse JsonCacheFile's loop-aware lazy lock.
-    _get_lock = JsonCacheFile._get_lock
 
     # ── encode / decode (pure, synchronous, unit-testable) ────────────────────
 
@@ -628,18 +618,7 @@ class ShardedCacheFile:
         if ns is not None:
             self._dirty_ns.add(ns)
         self._dirty = bool(self._dirty_ns)
-        # A flusher already pending will write this change too.
-        if any(not t.done() for t in self._tasks):
-            return
-        # Start a delayed flusher task, keeping a reference so it is not garbage-collected.
-        coro = self._flush_after_delay()
-        try:
-            task = asyncio.create_task(coro)
-            self._tasks.add(task)
-            task.add_done_callback(self._tasks.discard)
-        # No running loop (startup): close the coroutine to avoid a "never awaited" warning.
-        except RuntimeError:  # pragma: no cover - no running loop (startup path)
-            coro.close()
+        self._ensure_flusher()
 
     async def _flush_after_delay(self) -> None:
         """Wait the debounce delay and persist; repeat while namespaces are still dirty."""

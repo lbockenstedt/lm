@@ -73,11 +73,6 @@ class NwCacheMixin:
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
-    # Coalescing window: a poll burst of N devices marks dirty N times but
-    # produces ONE write per dirty tenant at most every this many seconds (the data is a warm-start
-    # seed only; the next poll refills anything lost).
-    _NW_CACHE_FLUSH_DELAY_S = 300.0
-
     def nw_cache_init(self) -> None:
         """Initialize the in-memory cache slots. Call once from ``__init__``."""
         # Fleet snapshot and per-device endpoint data, both empty until first fetch or load.
@@ -89,12 +84,10 @@ class NwCacheMixin:
         # the per-device data, each rewritten only when its tenant changed.
         self._nw_fleet_file = TenantShardCache(
             "nw fleet cache", self._nw_data_dir, self.NW_SHARD_MODULE,
-            self.NW_FLEET_SHARD, self._nw_fleet_resident,
-            flush_delay_s=self._NW_CACHE_FLUSH_DELAY_S)
+            self.NW_FLEET_SHARD, self._nw_fleet_resident)
         self._nw_cache_file = TenantShardCache(
             "nw device cache", self._nw_data_dir, self.NW_SHARD_MODULE,
-            self.NW_DEVICES_SHARD, self._nw_devices_resident,
-            flush_delay_s=self._NW_CACHE_FLUSH_DELAY_S)
+            self.NW_DEVICES_SHARD, self._nw_devices_resident)
 
     def _nw_data_dir(self) -> str:
         """Root holding ``tenants/``: the hub's data dir, else the cache dir (tests)."""
