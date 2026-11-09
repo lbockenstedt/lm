@@ -54,11 +54,13 @@ Sync family:
 - `NETBOX_PROVISION_CUSTOM_FIELDS` — `force=True` re-run of `_ensure_custom_fields` (WebUI "Apply schema changes" button).
 - `NETBOX_GET_TENANT_GROUPS` — `get_tenant_groups()`: every NetBox tenant group with its **transitive** member tenants (a group owns its own tenants plus those of all descendant groups). Feeds the hub's tenant-group pseudo-tenants; see below.
 
+Auto-rack: `NETBOX_AUTORACK_SWEEP` (dry-run / apply / cached report of the rack-from-name sweep), `NETBOX_NW_DEVICE` (stores a polled device in the on-disk NW inventory; applied by the scheduled flush), `NETBOX_LIST_STUBS` / `NETBOX_MERGE_STUB` (duplicate-stub merge, see below; `NETBOX_MERGE_STUB` is a `_PICKLIST_MUTATIONS` member).
+
 Plus `GET_VERSION`, `UPDATE_CONFIG`, `SPOKE_UPDATE`.
 
 ## Key files
 
-`src/netbox_spoke.py` (dispatch, KEA loop, `_persist_env`), `src/netbox_engine.py` (~154-line composition class `NetboxEngine(DcimMixin, IpamMixin, VmSyncMixin, ChangelogMixin, SyncMixin, StalenessMixin, TenancyMixin)` — the work lives in the mixin modules: `netbox_dcim.py`, `netbox_ipam.py`, `netbox_vmsync.py` (also `_ensure_custom_fields`), `netbox_sync.py` (the largest — `sync_devices`/`sync_vms`/`sync_nw_device`/`sync_access_tracker`/`_journal`), `netbox_staleness.py` (`staleness_sweep`), `netbox_changelog.py`, `netbox_tenancy.py`), `src/netbox_xlsx.py` (pure-parse Excel rack-layout detection — `detect_rack_sheets` for both sheet shapes + `parse_one_rack_sheet`/`parse_summary_block_by_name` commit-time re-parse; lazy openpyxl), `src/custom_fields_spec.py` (pure-data `CUSTOM_FIELDS_SPEC` — single source of truth for the engine self-heal, the Django shell block, and the REST provisioning block), `src/control_plane.py`, `install.sh`, `install_kea.sh`, `API_SPEC.md`.
+`src/netbox_spoke.py` (dispatch, KEA loop, `_persist_env`), `src/netbox_engine.py` (~154-line composition class `NetboxEngine(DcimMixin, IpamMixin, VmSyncMixin, ChangelogMixin, SyncMixin, StalenessMixin, TenancyMixin)` — the work lives in the mixin modules: `netbox_dcim.py`, `netbox_ipam.py`, `netbox_vmsync.py` (also `_ensure_custom_fields`), `netbox_sync.py` (the largest — `sync_devices`/`sync_vms`/`sync_nw_device`/`sync_access_tracker`/`_journal`), `netbox_staleness.py` (`staleness_sweep`), `netbox_changelog.py`, `netbox_tenancy.py`), `src/netbox_autorack.py` (`parse_rack_name`, pure `plan()`, `resolve_rack`, the sweep), `src/netbox_xlsx.py` (pure-parse Excel rack-layout detection — `detect_rack_sheets` for both sheet shapes + `parse_one_rack_sheet`/`parse_summary_block_by_name` commit-time re-parse; lazy openpyxl), `src/custom_fields_spec.py` (pure-data `CUSTOM_FIELDS_SPEC` — single source of truth for the engine self-heal, the Django shell block, and the REST provisioning block), `src/control_plane.py`, `install.sh`, `install_kea.sh`, `API_SPEC.md`.
 
 ## Notable behaviors & gotchas
 
@@ -134,9 +136,90 @@ Recreating a lab's racks + devices by hand is infeasible, and a rigid fixed-sche
 
 **Access:** Global-Admin only — the WebUI button is hidden for non-admins (`isAdmin()`), and both POST routes return **403** for non-admin sessions. Defense in depth. The spoke's token-gated `GET /api/netbox/racks/import-xlsx/{upload_id}` download is session-exempt (the spoke has no browser session) — gated by the one-time bearer token inside the route, like the template-refresh download. **Tenant:** the current tenant (header picker) is stamped on every rack + device; `default` = global. **Dep:** `openpyxl` on the spoke (`netbox/requirements.txt`); a missing dep degrades to a clear ERROR, not a spoke crash.
 
+## Auto-rack (rack placement from the device name)
+
+Devices are racked in NetBox automatically from their **name** plus the tenant
+they were found under, so almost nothing is configured by hand in LM.
+
+**Name grammar** (domain suffix ignored; `netbox_autorack.parse_rack_name`):
+
+```
+<SITE3><NET>-<TENANT>-<RACK>-R<RU>[R][H]-<DEVICE>
+MIPBE-SSPLM-N31-R45-VPNC1        rack N31, RU 45, front
+MIPBE-SSPLM-N31-R45R-VPNC1       rack N31, RU 45, rear (reverse mounted)
+MIPBE-SSPLM-PXMX01-N31-R18-ILO   device-before-rack form is accepted too
+MIPBE-SSPLM-N31-R43H-GW01        half width: GW01 left, GW02 right (see below)
+```
+
+`SITE3` is the 3-letter site code, `NET` 0-3 letters of network role (e.g. `BE`
+backend), `TENANT` the tenant group. A trailing `R` on the RU means **rear**.
+
+- **Height** comes from the device type in NetBox. If the type has no RU height,
+  the hub asks the LLM for the model's height (`device_specs`) and records it.
+  An iLO/iDRAC/BMC reports its host server model via SNMP so the host is sized
+  from that.
+- **Servers** take their slot from their management controller's name
+  (iLO/iDRAC/BMC, linked on the server as `linked_device` once matched by
+  serial). If the two names carry different slots the server is reported as
+  unable to rack.
+- **Conflicts** (`plan()` is pure): a holder that is moving elsewhere moves out
+  first, an *offline* holder is unracked (replaced), and only an *online* holder
+  still named for the slot is a real conflict. Chains are capped so swaps and
+  cycles are reported, not looped. A slot held by a device's own management
+  controller is released (it sits inside the server).
+- **Half-width chassis** (two per U, e.g. Aruba CX 9004): a device type is
+  half-width when its comments say `half-width` or the model is a known one
+  (9004), **or** the name carries `H` after the RU (`R43H`). Devices naming the
+  same rack and RU are ordered by the number in their name: the **lower-numbered
+  device is on the left**, the next on the right. NetBox cannot hold two devices
+  on one face of a U, so they are stored as non-full-depth chassis on the front
+  and rear face of the same U (the type is switched to non-full-depth on first
+  use); the elevation draws both side by side on the **Front** view only. The
+  `R` rear flag is not combined with `H`.
+- **Rename** keeps history: a device renamed on the hub (`reconcile_nw_device_name`)
+  is matched in NetBox by serial / MAC / `nw_device_id` / IP and renamed **in
+  place** (`_adopt_real_name`), so its changelog is preserved.
+- **Schedule.** The hub pushes each polled device with `NETBOX_NW_DEVICE`; the
+  spoke keeps the inventory on disk and applies changes every
+  `LM_NETBOX_NW_FLUSH_S` seconds (default 900), **rack-named devices first and
+  racked immediately**, then runs an autorack sweep. Device polls run every 6 h
+  by default, so a rename typically shows up racked within one flush after the
+  next poll (the first rename test took about 15-45 minutes end to end).
+- **Report.** `GET /api/netbox/autorack` (tenant-scoped) feeds **NetBox → Rack
+  Placement**: conflicts and "cannot auto-rack" entries with tenant / wanted /
+  current / mismatch. It serves the cached report (the first sweep runs in the
+  background); **Re-check now** forces a dry-run. Admin ops:
+  `/admin/ops/netbox-autorack`, hub `/setup/netbox-autorack/run` (dry-run /
+  apply / report).
+
+### Duplicate stub devices
+
+Firewall/ARP feeders (e.g. OPNsense) file a switch's extra MACs and IPs as a
+separate, serial-less *stub* device. They are folded into the real polled
+device two ways; in both the stub's IPs move to an interface `lm-merged` on the
+real device, a journal entry records it and the stub is deleted (the real device
+keeps its history; the stub's few changelog entries are lost).
+
+1. **Sibling MAC** (`_merge_sibling_stubs`, during `sync_nw_device`): a stub whose
+   MAC shares the first 5 octets with the polled base MAC, has no serial (or the
+   same one), is not itself a polled device and is the same kind (not a
+   management controller).
+2. **Live poll** (`nw_merge_stubs_by_live_poll`, hub): after a successful push the
+   hub lists stubs (`NETBOX_LIST_STUBS`: IP, no serial, no `nw_device_id`), takes
+   those in the same /16 as the device, probes each stub IP through the device's
+   own nw spoke (`NW_GET_DEVICE_INFO` with an `address` override, so the
+   device's credentials are tried against that IP) and, when the returned serial
+   equals the device's, sends `NETBOX_MERGE_STUB`. Limits: one probe per
+   stub/device pair per 24 h and 5 probes per call. A stub that has since gained
+   a different serial is never merged.
+
 ## Rack elevation view
 
 A NetBox-style front/back rack elevation, opened from the **eye button** on each rack row (IPAM → Racks). `GET /api/netbox/racks/{rack_id}/elevation` relays `NETBOX_GET_RACK_ELEVATION` to the ipam spoke, which calls NetBox's `/api/dcim/racks/{id}/elevation/?face=front|rear` (one entry per RU, top→bottom, multi-U devices occupying consecutive units) plus the rack's device list for 0U / side devices (position null/0). The render model is `{rack:{name,u_height,site,tenant}, faces:{front,rear:[{unit,device}]}, zero_u:[…]}` — each device summary carries the role `color` so the WebUI tints the slot like NetBox; consecutive same-device units are merged into one rowspan cell; 0U/side devices render in a tray below the two grids.
+
+**Look and feel.** Each device is a dark chassis block with a role-colour strip, per-type front-panel artwork (switch ports, drive bays, gateway/firewall ports, patch panel, PDU outlets, BMC, wireless) and its name (wrapped on multi-U devices). Half-width chassis sit side by side in one U (see Auto-rack). **Click a device** to open the same all-module detail as the global search (`/api/device-detail`: IPAM, Zabbix, DNS, DHCP, NAC, NW, Proxmox, LDAP, console; admin only).
+
+**Performance.** The spoke reads the front face, rear face and rack device list concurrently and caches the half-width device-type lookup for 5 minutes.
 
 **Access:** read-only, but non-admins are ownership-gated against their tenant's racks cache (`_verify_owns`, same cross-tenant guard as the rack PUT/DELETE routes) so a user can't enumerate another tenant's rack layout by guessing the sequential `rack_id`; admins bypass.
 
