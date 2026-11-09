@@ -379,11 +379,11 @@ function _renderNwOverview(devices, counts) {
 
     // Reachability stat cards (non-clickable summary).
     const stat = (label, n, valueCls) => `
-        <div class="bg-white rounded-xl border border-slate-200 p-5">
-            <p class="text-xs font-bold text-slate-500 mb-2">${label}</p>
-            <p class="text-3xl font-bold ${valueCls || 'text-navy'}">${n}</p>
+        <div class="bg-white rounded-lg border border-slate-200 px-3 py-2">
+            <p class="text-xs font-bold text-slate-500">${label}</p>
+            <p class="text-xl font-bold ${valueCls || 'text-navy'}">${n}</p>
         </div>`;
-    const statCards = `<div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
+    const statCards = `<div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
         ${stat('Total Devices', total)}
         ${stat('Reachable', up, 'text-green-600')}
         ${stat('Unreachable', down, 'text-red-500')}
@@ -393,11 +393,11 @@ function _renderNwOverview(devices, counts) {
     // Per-category cards → click navigates to that category tab.
     const CATEGORIES = ['Gateways', 'Switches', 'Firewalls', 'IPMI', 'Other'];
     const catCard = c => `
-        <div onclick="setSubView('${c}')" class="cursor-pointer bg-white rounded-xl border border-slate-200 p-5 hover:border-brand hover:shadow-md transition-all" title="Filter network devices by ${c}">
-            <p class="text-xs font-bold text-slate-500 mb-2">${c}</p>
-            <p class="text-3xl font-bold text-navy">${counts[c] || 0}</p>
+        <div onclick="setSubView('${c}')" class="cursor-pointer bg-white rounded-lg border border-slate-200 px-3 py-2 hover:border-brand hover:shadow-md transition-all" title="Filter network devices by ${c}">
+            <p class="text-xs font-bold text-slate-500">${c}</p>
+            <p class="text-xl font-bold text-navy">${counts[c] || 0}</p>
         </div>`;
-    const catCards = `<div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
+    const catCards = `<div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 gap-2 mt-2">
         ${CATEGORIES.map(catCard).join('')}
     </div>`;
 
@@ -2039,7 +2039,7 @@ async function _renderMonitoring(container) {
     const hostRows = shown.map(h => {
         const pl = (h.problems || []).map(p => `<div>${escapeHtml(sevName[p.severity] || '')}: ${escapeHtml(p.name)}</div>`).join('') || '<span class="text-slate-500">none</span>';
         return `<tr class="border-t border-slate-100">
-        <td class="px-3 pt-2 pb-0 text-xs font-medium text-slate-700 whitespace-nowrap">${escapeHtml(h.name)}</td>
+        <td class="px-3 pt-2 pb-0 text-xs font-medium text-slate-700 whitespace-nowrap">${escapeHtml(String(h.name || '').toUpperCase())}</td>
         <td class="px-3 pt-2 pb-0 text-xs text-slate-500">${escapeHtml(h.tenant)}</td>
         <td class="px-3 pt-2 pb-0 text-xs font-mono text-slate-500">${escapeHtml(h.ip)}</td>
         <td class="px-3 pt-2 pb-0 text-xs text-slate-500">${h.method}</td>
