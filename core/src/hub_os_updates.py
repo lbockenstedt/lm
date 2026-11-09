@@ -924,7 +924,7 @@ class HubOsUpdatesMixin:
             n = by_key.get(key) or {}
             clustered = _is_cluster_node(n)
             nodes.append({"key": key, "label": n.get("label") or key,
-                          "note": ("may reboot (Proxmox cluster, HA maintenance mode)" if clustered
+                          "note": ("may reboot (Proxmox maintenance mode: guests moved or shut down first)" if clustered
                                    else "reboots after patching")})
         return {"in_window": bounds is not None or run.get("status") == "running",
                 "window": cfg["window"], "nodes": nodes}
@@ -1602,25 +1602,25 @@ class HubOsUpdatesMixin:
         key, label = f"{n['kind']}:{n['id']}", n["label"]
         run["current"] = f"{label} — entering maintenance mode"
         self._osu_save()
-        logger.warning("OS-UPDATE: %s (Proxmox cluster %s) → maintenance mode before reboot by %s",
-                       label, (n.get("pve_cluster") or {}).get("name", "?"), actor)
+        logger.warning("OS-UPDATE: %s (Proxmox %s) → maintenance mode before reboot by %s",
+                       label, (n.get("pve_cluster") or {}).get("name") or "standalone", actor)
         # Turn on maintenance mode.
         r = await self._osu_maintenance(n, "enable")
         if r.get("status") != "SUCCESS":
             return f"failed: maintenance mode: {r.get('message', '')}", False
         # Wait for HA guests to move off, with a time limit.
         deadline = time.time() + _MAINT_MIGRATE_TIMEOUT_S
-        guests = r.get("ha_guests") or []
-        while guests:
+        guests = (r.get("ha_guests") or []) + (r.get("local_guests") or [])
+        while guests or r.get("draining"):
             if time.time() > deadline:
                 await self._osu_maintenance(n, "disable")
-                return (f"failed: HA guests did not move off in time ({', '.join(guests)}) — "
+                return (f"failed: guests did not move off in time ({', '.join(guests)}) — "
                         "not rebooted, maintenance mode cleared"), False
-            run["current"] = f"{label} — waiting for {len(guests)} HA guest(s) to migrate"
+            run["current"] = f"{label} — moving/shutting down {len(guests)} guest(s)"
             await asyncio.sleep(_MAINT_POLL_S)
             r = await self._osu_maintenance(n, "status")
             if r.get("status") == "SUCCESS":
-                guests = r.get("ha_guests") or []
+                guests = (r.get("ha_guests") or []) + (r.get("local_guests") or [])
         # Reboot; clear maintenance mode if that fails.
         res = await self._osu_reboot(n, actor)
         if res.get("status") != "SUCCESS":
@@ -1685,8 +1685,9 @@ class HubOsUpdatesMixin:
 
 
 def _is_cluster_node(n: Dict[str, Any]) -> bool:
-    """A Proxmox host in a cluster whose agent can do HA maintenance mode."""
-    return bool(n.get("pve_cluster")) and "maintenance" in (n.get("features") or [])
+    """A Proxmox host whose agent can do maintenance mode (HA migration on a
+    cluster, graceful guest shutdown on a standalone host) before a reboot."""
+    return "maintenance" in (n.get("features") or [])
 
 
 def _unwrap(resp: Any) -> Dict[str, Any]:
