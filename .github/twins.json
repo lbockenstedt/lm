@@ -1,5 +1,16 @@
 {
   "_doc": "Files that must stay in step (see .claude/skills/dual-copy-guard/reference.md). Checked by scripts/check_twins.py in every repo's CI. 'byte' pairs must be identical; 'keys' pairs must define the same named list. Paths are repo:path.",
+  "fleet": {
+    "_doc": "lm owns these; sync-fleet-files.yml copies them to every repo below on lm dev changes. Edit only in lm. In dirs, a repo keeps its own '<repo>-*' entries. agents_md places the rules file between the fleet-rules markers in each AGENTS.md (lm's own included).",
+    "source": "lm",
+    "repos": ["ab", "cppm", "cs", "kvm", "ldap", "le", "netbox", "nw", "opnsense", "pxmx", "qa", "truenas", "tsa", "zabbix"],
+    "files": [".github/fleet-rules.md"],
+    "dirs": [".github/agents", ".claude/skills"],
+    "agents_md": {
+      "source": ".github/fleet-rules.md",
+      "target": "AGENTS.md"
+    }
+  },
   "pairs": [
     {"name": "client common.sh", "kind": "byte",
      "files": ["cs:clients/lib/common.sh", "cs:clients/linux/common.sh"]},

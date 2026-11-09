@@ -84,6 +84,63 @@ def check(twins, repo, root, branch):
     return errors, warnings
 
 
+def _agents_md_warning(fleet, repo, root, branch):
+    """A warning when this repo's AGENTS.md fleet-rules block is missing or
+    differs from lm's rules file (sync_fleet_files.py writes that block)."""
+    spec = fleet.get("agents_md")
+    if not spec:
+        return []
+    rules = read_side("%s:%s" % (fleet["source"], spec["source"]), repo, root, branch)
+    mine = read_side("%s:%s" % (repo, spec.get("target", "AGENTS.md")), repo, root, branch)
+    if rules is None:
+        return []
+    begin, end = "<!-- fleet-rules:begin", "<!-- fleet-rules:end -->"
+    if mine is None or begin not in mine or end not in mine:
+        return ["%s has no fleet-rules block (the next sync adds it)" % spec.get("target", "AGENTS.md")]
+    # Compare the block body with the rules file minus its comment header.
+    block = mine.split(begin, 1)[1].split("-->", 1)[1].split(end, 1)[0].strip()
+    want = re.sub(r"<!--.*?-->\s*", "", rules, count=1, flags=re.S).strip()
+    if block != want:
+        return ["%s fleet-rules block differs from %s:%s -- edit the rules there; the block is "
+                "rewritten by the next sync" % (spec.get("target", "AGENTS.md"), fleet["source"], spec["source"])]
+    return []
+
+
+def check_fleet(twins, repo, root, branch):
+    """Warnings for fleet-owned copies (twins.json "fleet") that differ from lm.
+
+    Only warnings: sync-fleet-files.yml overwrites the copies anyway, so drift
+    here means someone edited the copy instead of lm's original."""
+    fleet = twins.get("fleet") or {}
+    if repo != fleet.get("source") and repo not in fleet.get("repos", []):
+        return []
+    out = _agents_md_warning(fleet, repo, root, branch)
+    if repo == fleet.get("source"):
+        return out
+    src = fleet["source"]
+    rels = list(fleet.get("files", []))
+    # Directory entries: this repo's copies of lm's files (not its own "<repo>-*").
+    for d in fleet.get("dirs", []):
+        for base, _dirs, names in os.walk(os.path.join(root, d)):
+            for n in names:
+                rel = os.path.relpath(os.path.join(base, n), root)
+                if not os.path.relpath(rel, d).split(os.sep)[0].startswith(repo + "-"):
+                    rels.append(rel)
+    for rel in sorted(set(rels)):
+        mine = read_side("%s:%s" % (repo, rel), repo, root, branch)
+        theirs = read_side("%s:%s" % (src, rel), repo, root, branch)
+        if mine is None and theirs is None:
+            continue
+        if mine is None:
+            out.append("%s is missing here (the next sync adds it from %s)" % (rel, src))
+        elif theirs is None:
+            out.append("%s is not in %s (stale copy; the next sync removes it)" % (rel, src))
+        elif mine != theirs:
+            out.append("%s differs from %s's copy -- edit it in %s; this copy is overwritten "
+                       "by the next sync" % (rel, src, src))
+    return out
+
+
 def main(argv=None):
     """CLI: print GitHub annotations; exit 1 when a same-repo pair differs."""
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -96,6 +153,7 @@ def main(argv=None):
     with open(args.twins, encoding="utf-8") as fh:
         twins = json.load(fh)
     errors, warnings = check(twins, args.repo, args.root, args.branch)
+    warnings += check_fleet(twins, args.repo, args.root, args.branch)
     for w in warnings:
         print("::warning title=Twin files out of step::%s" % w)
     for e in errors:
