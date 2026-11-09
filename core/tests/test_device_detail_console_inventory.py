@@ -147,3 +147,34 @@ def test_webui_main_js_forwards_serial():
     assert "params.set('serial', item.serial);" in content
     assert "params.set('port_id', item.port_id);" in content
     assert "params.set('device', item.device);" in content
+
+
+@pytest.mark.asyncio
+async def test_get_device_detail_monitoring_and_dns_legs():
+    app = FastAPI()
+    hub = MockHub()
+    app.state.hub = hub
+    hub.get_spoke_by_type = MagicMock(side_effect=lambda t: {"monitoring": "mon1", "ipam": "ipam1"}.get(t))
+    hub.get_all_spokes_by_type = MagicMock(side_effect=lambda t: ["dns1"] if t == "dns" else [])
+
+    async def rr(spoke, cmd, data, **kw):
+        if cmd == "NETBOX_SEARCH":
+            return {"payload": {"data": {"results": [
+                {"type": "device", "id": 1, "name": "MIPBE-SSPLM-N31-R39R-CRSW1", "ip": "172.21.0.11/24"}]}}}
+        if cmd == "MON_HOSTS":
+            return {"payload": {"data": {"hosts": [
+                {"name": "MIPBE-SSPLM-N31-R39R-CRSW1", "ip": "172.21.0.11"}, {"name": "other", "ip": "1.1.1.1"}]}}}
+        if cmd == "DNS_LIST":
+            return {"payload": {"data": {"records": [
+                {"name": "mipbe-ssplm-n31-r39r-crsw1.example", "type": "A", "value": "172.21.0.11"},
+                {"name": "x.example", "type": "A", "value": "9.9.9.9"}]}}}
+        return {"payload": {"data": {}}}
+    hub.request_response = AsyncMock(side_effect=rr)
+    app.state.console_list_visible_ports = AsyncMock(return_value={"ports": []})
+
+    register(app, hub, MockCtx())
+    route = next(r.endpoint for r in app.routes if getattr(r, "path", "") == "/api/device-detail")
+    res = await route(Request({"type": "http", "method": "GET"}), hostname="MIPBE-SSPLM-N31-R39R-CRSW1", ip="172.21.0.11")
+    assert [h["name"] for h in res["monitoring"]] == ["MIPBE-SSPLM-N31-R39R-CRSW1"]
+    assert [r["value"] for r in res["dns"]] == ["172.21.0.11"]
+    assert len(res["netbox"]) == 1

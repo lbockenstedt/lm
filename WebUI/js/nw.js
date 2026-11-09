@@ -1546,7 +1546,7 @@ function _tnTrendChart(id, title, rows, lines, fmt, t0, t1) {
     }
     _tnTrends[id] = { rows, lines, fmt, t0, t1, W };
     return `<div class="rounded-md border border-slate-200 bg-white p-3">${head}
-        <svg viewBox="0 0 ${W} ${H}" class="w-full" onmousemove="_tnTrendHover(event,'${id}')" onmouseleave="_tnTrendHover(null,'${id}')">
+        <svg viewBox="0 0 ${W} ${H}" class="w-full" data-tn-chart="${id}">
             <line x1="0" x2="${W}" y1="${H - B}" y2="${H - B}" stroke="#cbd5e1"/>${ticks}
             <text x="2" y="10" font-size="10" fill="#64748b">${escapeHtml(fmt(max))}</text>${paths}
             <line id="${id}-cursor" x1="-1" x2="-1" y1="0" y2="${H - B}" stroke="#94a3b8" stroke-dasharray="3 3"/>
@@ -1622,6 +1622,10 @@ async function _tnLoadTrends() {
             ${_tnTrendChart(`tn-tput-${i}`, 'Throughput', rows, [{ key: 'read_bytes', label: 'Read', color: '#0ea5e9' }, { key: 'write_bytes', label: 'Write', color: '#f97316' }], bytes, t0, t1)}
             ${_tnTrendChart(`tn-net-${i}`, 'Network', rows, [{ key: 'net_rx', label: 'Receive', color: '#10b981' }, { key: 'net_tx', label: 'Send', color: '#8b5cf6' }], bytes, t0, t1)}
             ${_tnTrendChart(`tn-util-${i}`, 'Utilization', rows, [{ key: 'busy', label: 'Disk busy', color: '#ef4444' }, { key: 'cpu', label: 'CPU', color: '#64748b' }], pct, t0, t1)}`;
+        box.querySelectorAll('[data-tn-chart]').forEach(svg => {
+            svg.addEventListener('mousemove', e => _tnTrendHover(e, svg.dataset.tnChart));
+            svg.addEventListener('mouseleave', () => _tnTrendHover(null, svg.dataset.tnChart));
+        });
     }));
 }
 
@@ -1750,7 +1754,7 @@ async function loadTruenasData(subMenu) {
                 <div class="text-xs text-slate-500">${label}</div>
                 <div class="text-lg font-semibold text-slate-800 font-mono">${value}</div></div>`;
             _tnPerfFleet = fleet;
-            const rangeBtn = (v, t) => `<button data-tn-range="${v}" onclick="_tnSetRange(${v === 'custom' ? "'custom'" : v})">${t}</button>`;
+            const rangeBtn = (v, t) => `<button data-tn-range="${v}">${t}</button>`;
             const local = t => new Date(t * 1000 - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16);
             const nowS = Date.now() / 1000;
             const rangeBar = `<div class="flex flex-wrap items-center gap-2 text-xs">
@@ -1799,6 +1803,10 @@ async function loadTruenasData(subMenu) {
             }).join('')}
             <div class="text-xs text-slate-500">Tiles are a live sample from each appliance (all disks combined); charts are 5-minute averages, kept 7 days by the storage spoke. <button onclick="loadTruenasData('Performance')" class="text-emerald-600 hover:text-emerald-800 font-medium ml-1">Refresh</button></div>
             </div>`;
+            container.querySelectorAll('[data-tn-range]').forEach(b => b.addEventListener('click', () => {
+                const v = b.dataset.tnRange;
+                _tnSetRange(v === 'custom' ? v : Number(v));
+            }));
             _tnLoadTrends();
             return;
         }
