@@ -21,7 +21,7 @@ def test_escape_html_calls_only_go_down():
 
 
 def test_inline_event_handlers_only_go_down():
-    assert _count(r"\son[a-z]+=[\"']") <= 998
+    assert _count(r"\son[a-z]+=[\"']") <= 995
 
 
 def test_window_globals_only_go_down():

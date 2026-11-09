@@ -2260,6 +2260,7 @@ function _elevFaceTable(units, faceLabel, uHeight) {
         </div>`);
     }
     // Half-width chassis (e.g. Aruba CX 9004) sit two to a U: lane 0 left, 1 right.
+    devs.forEach(e => { _elevDevices[e.dev.id] = e.dev; });
     const lane = new Map();
     const seen = {};
     [...devs.values()].filter(e => e.dev.half_width).sort((x, y) => x.dev.id - y.dev.id)
@@ -2278,7 +2279,8 @@ function _elevFaceTable(units, faceLabel, uHeight) {
             ? `<div class="truncate opacity-90 leading-tight" style="font-size:10px">${escapeHtml(dev.model || '')}${dev.role ? ' · ' + escapeHtml(dev.role) : ''}</div>`
               + (dev.primary_ip && h >= 3 ? `<div class="font-mono truncate opacity-90 leading-tight" style="font-size:10px">${escapeHtml(dev.primary_ip)}</div>` : '')
             : '';
-        return `<div class="absolute overflow-hidden rounded-sm px-1.5 flex items-center gap-1.5 shadow-sm" title="${escapeHtml(tip)}"
+        return `<div class="absolute overflow-hidden rounded-sm px-1.5 flex items-center gap-1.5 shadow-sm cursor-pointer hover:brightness-110" title="${escapeHtml(tip)} (click for details)"
+            data-elev-dev="${Number(dev.id)}"
             style="${lx}top:calc(${uh} * ${top} + 1px);height:calc(${uh} * ${h} - 2px);background:#${color};color:${fg};border:1px ${inactive ? 'dashed' : 'solid'} rgba(0,0,0,.35);${inactive ? 'opacity:.6;' : ''}">
             ${_elevIcon(dev)}
             <div class="min-w-0 flex-1"><div class="font-semibold truncate leading-tight" style="font-size:11px">${escapeHtml(dev.name || '')}</div>${detail}</div>
@@ -2293,6 +2295,28 @@ function _elevFaceTable(units, faceLabel, uHeight) {
             </div>
         </div>
     </div>`;
+}
+
+// Click a racked device: open the same all-modules dashboard the global search
+// opens (IPAM, Zabbix, DNS, DHCP, NAC, NW, ...), looked up by name + primary IP.
+const _elevDevices = {};
+document.addEventListener('click', ev => {
+    const t = ev.target.closest && ev.target.closest('[data-elev-dev],[data-elev-close],[data-elev-add]');
+    if (!t) return;
+    if (t.dataset.elevDev) openRackDevice(Number(t.dataset.elevDev));
+    else if (t.dataset.elevClose !== undefined) document.getElementById('nb-rack-elev-modal')?.remove();
+    else if (t.dataset.elevAdd) _addDeviceFromElev(Number(t.dataset.elevAdd));
+});
+function openRackDevice(id) {
+    const dev = _elevDevices[id];
+    if (!dev) return;
+    if (typeof isAdmin === 'function' && !isAdmin()) {
+        showToast('Device details are available to admins only', 'error');
+        return;
+    }
+    const ip = String(dev.primary_ip || '').split('/')[0];
+    document.getElementById('nb-rack-elev-modal')?.remove();
+    showDeviceDashboard({ name: dev.name, ip: ip || undefined, source: 'netbox', type: 'device' });
 }
 
 // Scale the rack-elevation U-rows so the full rack fits the visible modal
@@ -2323,7 +2347,7 @@ async function showRackElevationModal(rackId) {
     openModal('nb-rack-elev-modal', `
         <div class="flex justify-between items-center mb-3">
             <h3 class="text-lg font-bold">Rack elevation — ${escapeHtml(rackName || '')}</h3>
-            <button onclick="document.getElementById('nb-rack-elev-modal').remove()" class="text-slate-500 hover:text-slate-600 text-xl leading-none">×</button>
+            <button data-elev-close class="text-slate-500 hover:text-slate-600 text-xl leading-none">×</button>
         </div>
         <div id="nb-rack-elev-body" class="text-xs text-slate-500">Loading…</div>
     `, { card: 'w-full max-w-3xl p-6 space-y-4 max-h-[90vh] overflow-y-auto', backdropClose: true });
@@ -2343,7 +2367,7 @@ async function showRackElevationModal(rackId) {
             <span><span class="text-slate-500">Site:</span> ${escapeHtml(r.site || '—')}</span>
             <span><span class="text-slate-500">Tenant:</span> ${escapeHtml(r.tenant || '—')}</span>
             <span><span class="text-slate-500">Height:</span> ${r.u_height || 0}U</span>
-            <button onclick="_addDeviceFromElev(${rackId})" class="ml-auto bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-full text-xs font-bold transition-all">+ Add device</button>
+            <button data-elev-add="${Number(rackId)}" class="ml-auto bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-3 py-1 rounded-full text-xs font-bold transition-all">+ Add device</button>
         </div>`;
         let front = (d.faces && d.faces.front) || [];
         let rear  = (d.faces && d.faces.rear)  || [];

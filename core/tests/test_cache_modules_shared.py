@@ -182,8 +182,9 @@ async def test_shutdown_flushes_every_cache_even_if_one_fails():
         nw_cache_flush_now = staticmethod(_flush("nw", fail=True))
         le_cache_flush_now = staticmethod(_flush("le"))
         truenas_cache_flush_now = staticmethod(_flush("truenas"))
+        storage_perf = type("_P", (), {"flush_now": staticmethod(_flush("storage_perf"))})()
         warm_cache_flush_now = staticmethod(_flush("warm"))
         state = type("_S", (), {"_flush_if_dirty": staticmethod(_flush("state"))})()
 
     await api.persist_on_shutdown(_Hub())
-    assert flushed == ["nw", "le", "truenas", "warm", "state"]
+    assert flushed == ["nw", "le", "truenas", "storage_perf", "warm", "state"]
