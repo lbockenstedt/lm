@@ -250,6 +250,15 @@ def register(app, hub, ctx):
             logger.exception("truenas_get_appliance_data failed (%s/%s)", appliance_id, endpoint)
             raise HTTPException(status_code=500, detail=str(e))
 
+    # ── performance trend (5-minute averages pushed by the spoke) ─────────────
+    @app.get("/api/truenas/{appliance_id}/performance/history")
+    async def truenas_performance_history(request: Request, appliance_id: str,
+                                          days: float = 7):
+        """Up to 7 days of the appliance's 5-minute performance averages."""
+        _authz_truenas_appliance(request, appliance_id)
+        rows = app.state.hub.storage_perf.get("truenas", appliance_id, days)
+        return {"status": "SUCCESS", "interval": 300, "data": rows}
+
     # ── poll now (admin) ───────────────────────────────────────────────────────
     @app.post("/api/truenas/{appliance_id}/poll")
     async def truenas_poll_appliance(appliance_id: str, request: Request):

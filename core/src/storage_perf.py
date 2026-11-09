@@ -1,0 +1,68 @@
+"""7 days of 5-minute storage performance averages, per device.
+
+Storage spokes average their own samples and push them as
+``STORAGE_PERF_SAMPLE`` ``{module, samples: [{device_id, ts, samples, metrics}]}``.
+This keeps them in memory, keyed ``<module>:<device_id>``, and persists them to
+``<cache_dir>/storage_perf.json``. Not tied to Zabbix or to any one array type.
+
+A leaf: stdlib + cache_core only.
+"""
+from __future__ import annotations
+
+import os
+import time
+from typing import Any, Dict, List
+
+from cache_core import JsonCacheFile
+
+KEEP_S = 7 * 86400
+
+
+class StoragePerfStore:
+    """Per-device lists of ``{ts, samples, metrics}``, oldest first."""
+
+    def __init__(self, cache_dir_fn):
+        self.series: Dict[str, List[Dict[str, Any]]] = {}
+        self._file = JsonCacheFile(
+            "storage perf", lambda: os.path.join(cache_dir_fn(), "storage_perf.json"),
+            lambda: {"series": self.series}, flush_delay_s=60.0)
+
+    def load(self) -> None:
+        data = self._file.load() or {}
+        series = data.get("series")
+        if isinstance(series, dict):
+            self.series = {k: v for k, v in series.items() if isinstance(v, list)}
+
+    async def flush_now(self) -> None:
+        await self._file.flush_now()
+
+    def add(self, module: str, samples: Any, now: float = None) -> int:
+        """Store pushed averages; returns how many were kept. A repeat of an
+        existing bucket replaces it (a spoke re-sends after a lost ack)."""
+        now = time.time() if now is None else now
+        new: Dict[str, Dict[int, Dict[str, Any]]] = {}
+        for s in samples if isinstance(samples, list) else []:
+            if not isinstance(s, dict) or not s.get("device_id"):
+                continue
+            ts, metrics = s.get("ts"), s.get("metrics")
+            if not isinstance(ts, (int, float)) or not isinstance(metrics, dict):
+                continue
+            if ts < now - KEEP_S or ts > now + 600:
+                continue
+            new.setdefault(f"{module}:{s['device_id']}", {})[int(ts)] = {
+                "ts": int(ts), "samples": s.get("samples"),
+                "metrics": {k: v for k, v in metrics.items()
+                            if isinstance(v, (int, float)) and not isinstance(v, bool)}}
+        for key, rows in new.items():
+            merged = {r["ts"]: r for r in self.series.get(key, [])}
+            merged.update(rows)
+            self.series[key] = [merged[t] for t in sorted(merged) if t >= now - KEEP_S]
+        if new:
+            self._file.schedule_save()
+        return sum(len(rows) for rows in new.values())
+
+    def get(self, module: str, device_id: str, days: float = 7, now: float = None) -> List[Dict[str, Any]]:
+        """The device's averages from the last ``days`` days, oldest first."""
+        now = time.time() if now is None else now
+        since = now - min(max(days, 0), 7) * 86400
+        return [r for r in self.series.get(f"{module}:{device_id}", []) if r["ts"] >= since]

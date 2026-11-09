@@ -344,6 +344,7 @@ async def persist_on_shutdown(hub):
     for name, flush in (("nw-cache", hub.nw_cache_flush_now),
                         ("le-cache", hub.le_cache_flush_now),
                         ("truenas-cache", hub.truenas_cache_flush_now),
+                        ("storage-perf", hub.storage_perf.flush_now),
                         ("data-cache", hub.warm_cache_flush_now),
                         ("state", hub.state._flush_if_dirty)):
         try:
