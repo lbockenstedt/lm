@@ -777,6 +777,14 @@ class HubOsUpdatesMixin:
         # Take the snapshot, keeping only the last few.
         res = await vm_snapshots.take_snapshot(self, vm, _PREPATCH_PREFIX, cfg["keep"],
                                                run.get("actor") or "os-updates")
+        # Storage that cannot snapshot at all: nothing to roll back to, so patch with a warning.
+        if res.get("status") != "SUCCESS" and "snapshotfeatureisnotavailable" in (
+                res.get("message") or "").lower().replace(" ", "").replace("_", ""):
+            logger.warning("OS-UPDATE: %s → VM storage cannot snapshot; patching without a snapshot", n["label"])
+            if item:
+                item["snapshot"] = ""
+                item["warning"] = "VM storage does not support snapshots — patched without one"
+            return True
         # Failure: mark the item and block patching.
         if res.get("status") != "SUCCESS":
             if item:

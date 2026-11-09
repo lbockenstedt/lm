@@ -12,6 +12,11 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ## Week of 2026-11-09
 
+### OS Updates
+
+- **Proxmox hosts drain before a reboot.** Every Proxmox host (clustered or standalone) goes into maintenance mode first: HA guests migrate, other running guests live-migrate where possible and are otherwise shut down gracefully, then the host reboots, maintenance clears, and the guests that were shut down are started again. Hosts reboot one at a time.
+- **VMs on storage that cannot snapshot are patched** (with a warning on the run item) instead of being skipped; other snapshot failures still block patching.
+
 ### Credential Vault
 
 - **TrueNAS appliance API keys go in the vault.** Add/edit now requires selecting a vault credential when the vault is enabled; the key is no longer stored inline. Existing appliances must be re-saved with a vault credential. See [credential-vault.md](credential-vault.md).
