@@ -42,6 +42,15 @@ def _clean_ip(value: Any) -> str:
         return ""
 
 
+def monitor_type(host: Dict[str, Any], default: str) -> str:
+    """Monitoring type of an SNMP host: picks its Zabbix template. Appliances
+    the scanner does not manage are recognised from their sysDescr."""
+    descr = str((host.get("profile") or {}).get("sys_descr") or "").lower()
+    if descr.startswith(("truenas", "freenas")):
+        return "truenas"
+    return str(host.get("object_type") or default)
+
+
 def record(registry: Dict[str, Dict[str, Any]], hosts: Iterable[Dict[str, Any]],
            now: float) -> List[str]:
     """Merge scan results (``{address, hostname, open_ports, snmp_ok, profile, …}``,
@@ -165,6 +174,6 @@ def monitor_rows(by_tenant: Dict[str, Dict[str, Dict[str, Any]]], now: float,
             if not name or name.casefold() in skip_names:
                 continue
             out.append({"tenant_id": tid, "name": name, "address": ip,
-                        "type": str(e.get("object_type") or "host"),
+                        "type": monitor_type(e, "host"),
                         "snmp_ok": True, "snmp_secret": e["snmp_credential_id"]})
     return out

@@ -41,6 +41,10 @@ def test_prune_and_monitor_window():
     # .4 has no sysName and is not monitored; .5 is named by its sysName.
     assert rows == [{"tenant_id": "t", "name": "pdu-a", "address": "10.0.0.5",
                      "type": "host", "snmp_ok": True, "snmp_secret": "snmp:t:S"}]
+    # A TrueNAS sysDescr types the host for its Zabbix template.
+    reg["10.0.0.5"]["profile"] = {"sys_descr": "TrueNAS-25.10.7. Hardware: x86_64"}
+    rows = seen.monitor_rows({"t": reg}, 38 * day, skip_addresses=set(), skip_names={"sw1"})
+    assert rows[0]["type"] == "truenas"
 
 
 def test_unchanged_hosts_are_pushed_at_most_every_interval():
