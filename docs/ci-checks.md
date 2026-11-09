@@ -19,7 +19,7 @@ passed here.
   deterministic rules AB gates its own changes with. Covers secrets and the
   vault, the WebUI ratchet, UUIDs in UI text, docstrings and step comments,
   docs updated for new routes/fields, and more. Rule text is in
-  `ab/fleet_rules.md`. Error-level findings fail the run; warnings show as
+  `lm/.github/fleet-rules.md`. Error-level findings fail the run; warnings show as
   annotations.
 - **Ruff, new errors only**: `.github/scripts/ruff_new.py` lints each changed
   `.py` file at the base and at HEAD (E9, F63, F7, F82) and fails only on
@@ -57,3 +57,21 @@ with repo scope on the spokes.
 `promote.yml` and waits for the promotion PR and its checks. It merges each
 unit with a merge commit until none remain. It never opens a PR or pushes a
 branch itself: if no PR appears, it reports this and stops.
+
+It waits until GitHub reports the PR as mergeable, not just until the listed
+checks pass. A promotion PR whose head was pushed with `GITHUB_TOKEN` starts
+no CI, so the required `test` check never appears. When the PR is still
+blocked after two minutes, the script closes and reopens it as you, which
+starts CI.
+
+## Rules, agents and skills sync (`sync-fleet-files.yml`)
+
+On an lm `dev` push that changes `.github/fleet-rules.md`, `.github/agents/`,
+`.claude/skills/` or the `fleet` section of `twins.json`, this workflow runs
+`.github/scripts/sync_fleet_files.py`. The script copies those files to every
+fleet repo's `dev` and writes the rules into each repo's `AGENTS.md`, between
+the `fleet-rules` markers. It pushes with `WORKFLOW_TOKEN`. The `fleet-rules`
+check warns when a repo's copy differs from lm's. See
+[agents-and-skills.md](agents-and-skills.md).
+
+`dhcp` and `dns` are archived (read-only); every fleet list leaves them out.
