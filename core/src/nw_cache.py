@@ -73,10 +73,6 @@ class NwCacheMixin:
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
-    # Coalescing window: a poll burst of N devices marks dirty N times but
-    # produces ONE write per dirty tenant at most every this many seconds.
-    _NW_CACHE_FLUSH_DELAY_S = 30.0
-
     def nw_cache_init(self) -> None:
         """Initialize the in-memory cache slots. Call once from ``__init__``."""
         # Fleet snapshot and per-device endpoint data, both empty until first fetch or load.
@@ -88,12 +84,10 @@ class NwCacheMixin:
         # the per-device data, each rewritten only when its tenant changed.
         self._nw_fleet_file = TenantShardCache(
             "nw fleet cache", self._nw_data_dir, self.NW_SHARD_MODULE,
-            self.NW_FLEET_SHARD, self._nw_fleet_resident,
-            flush_delay_s=self._NW_CACHE_FLUSH_DELAY_S)
+            self.NW_FLEET_SHARD, self._nw_fleet_resident)
         self._nw_cache_file = TenantShardCache(
             "nw device cache", self._nw_data_dir, self.NW_SHARD_MODULE,
-            self.NW_DEVICES_SHARD, self._nw_devices_resident,
-            flush_delay_s=self._NW_CACHE_FLUSH_DELAY_S)
+            self.NW_DEVICES_SHARD, self._nw_devices_resident)
 
     def _nw_data_dir(self) -> str:
         """Root holding ``tenants/``: the hub's data dir, else the cache dir (tests)."""
@@ -312,11 +306,12 @@ class NwCacheMixin:
         touched = False
         for r in rows:
             if isinstance(r, dict) and r.get("id") == device_id:
+                # Latency jitters every sweep; only an up/down flip is worth a disk write.
+                touched = r.get("reachable") != reachable
                 r["reachable"] = reachable
                 r["latency_ms"] = latency_ms
-                touched = True
                 break
-        # Persist only if a row actually changed (that tenant's fleet file only).
+        # Persist only on a reachability flip (that tenant's fleet file only).
         if touched:
             self._nw_fleet_file.schedule_save(self._nw_tenant_of_device(device_id))
 
