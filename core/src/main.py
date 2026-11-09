@@ -1975,6 +1975,33 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             raise
 
 
+    async def _spoke_queue_snapshot(self) -> Dict[str, Any]:
+        """Command-queue stats for every connected spoke, keyed by spoke label.
+
+        Asked in parallel with a short timeout (spokes answer inline even when
+        their queue is full); a spoke that does not answer is left out."""
+        # Ask each connected spoke for SPOKE_GET_QUEUE_STATS at once.
+        sids = list((getattr(self, "active_connections", {}) or {}).keys())
+
+        async def _one(sid):
+            try:
+                resp = await self.request_response(sid, "SPOKE_GET_QUEUE_STATS", {}, timeout=8.0)
+                reply = ((resp or {}).get("payload", {}) or {}).get("data", resp) or {}
+                return sid, reply.get("data", reply)
+            except Exception:  # noqa: BLE001
+                return sid, None
+        results = await asyncio.gather(*(_one(s) for s in sids))
+        # Keep only real stats, labelled with the spoke's human name.
+        out = {}
+        for sid, stats in results:
+            if isinstance(stats, dict) and "inflight" in stats:
+                try:
+                    label = self._spoke_label(sid)
+                except Exception:  # noqa: BLE001
+                    label = sid
+                out[label] = stats
+        return out
+
     async def request_response(self, spoke_id: str, command_type: str, data: Dict[str, Any], timeout: Optional[float] = None, signing_secret: Optional[str] = None) -> Dict[str, Any]:
         """Timed wrapper: feeds per-command latency to the health report."""
         t0 = time.time()
@@ -8738,7 +8765,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
             # Slow routes/commands, timeouts and host load for AppBuilder's health check.
             if req_type == "GET_HEALTH_REPORT":
-                return await asyncio.to_thread(_perf_telemetry.build_report, self)
+                report = await asyncio.to_thread(_perf_telemetry.build_report, self)
+                report["spoke_queues"] = await self._spoke_queue_snapshot()
+                return report
 
             # Return only error lines.
             if req_type == "GET_ERROR_LOGS":
