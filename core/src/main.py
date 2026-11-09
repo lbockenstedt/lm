@@ -2015,7 +2015,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         out: Dict[str, Any] = {}
 
         async def _ask(spoke, cmd, data, timeout):
-            # One spoke call, unwrapped; None on any failure.
+            """One spoke call, unwrapped; None on any failure."""
             try:
                 res = _access.unwrap_spoke(await self.request_response(spoke, cmd, data, timeout=timeout))
                 return res if isinstance(res, dict) and res.get("status") != "ERROR" else None
@@ -2023,7 +2023,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 return None
 
         def _brief(rows):
-            # Name + reason for the first few report rows.
+            """Name + reason for the first few report rows."""
             return [{"name": r.get("name"), "reason": r.get("reason"), "wanted": r.get("wanted"),
                      "current": r.get("current")} for r in (rows or [])[:10] if isinstance(r, dict)]
 

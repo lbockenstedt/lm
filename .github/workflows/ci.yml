@@ -34,6 +34,16 @@ jobs:
           done < <(find . -name 'requirements*.txt' \
                      -not -path './_lm/*' -not -path '*/venv/*' \
                      -not -path '*/node_modules/*' | sort)
+      - name: WebUI JavaScript syntax check
+        # A single stray brace in one WebUI script blanks the whole page, and
+        # the browser smoke test reports that only as a missing view. node
+        # --check fails fast and names the file and line. Vendored minified
+        # bundles under WebUI/assets are third-party and skipped.
+        run: |
+          set -e
+          find WebUI -name '*.js' -not -path 'WebUI/assets/*' \
+               -not -path '*/node_modules/*' -not -name '*.min.js' -print0 |
+            xargs -0 -n1 node --check
       - name: Install browser for the WebUI smoke test
         # CI only -- the fleet never installs this. core/tests/
         # test_webui_browser_smoke.py walks every WebUI view in headless
