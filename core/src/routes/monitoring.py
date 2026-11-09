@@ -76,6 +76,9 @@ async def inventory_devices(hub):
     extra += nw_seen_hosts.monitor_rows(
         gc.get("nw_seen_hosts") or {}, time.time(), addrs,
         names | {str(n["name"]).casefold() for n in extra})
+    # A TrueNAS appliance is named in LM, not by the box's own sysName.
+    import access as _acc
+    nw_seen_hosts.apply_appliance_names(extra, gc.get("truenas_appliances") or [], _acc.tenant_in)
     # Addresses a scan reached over SNMP, with the vault credential that worked.
     snmp_seen = {ip: e["snmp_credential_id"]
                  for reg in (gc.get("nw_seen_hosts") or {}).values() if isinstance(reg, dict)
