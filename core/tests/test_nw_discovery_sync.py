@@ -546,3 +546,34 @@ async def test_inventory_push_uses_device_tenant_for_overlapping_mgmt_ip():
     cfg = h.state.system_state["global_config"]["nw_devices"][1]
     _, _, slug = await h.push_nw_device_inventory(cfg, {}, [])
     assert slug == "lrb"
+
+
+@pytest.mark.asyncio
+async def test_stub_merged_only_when_live_poll_of_its_ip_returns_the_same_serial():
+    h = _SyncHub(responses={
+        ("netbox-1", "NETBOX_LIST_STUBS"): {"payload": {"data": {"stubs": [
+            {"id": 8, "name": "OLD-A", "ip": "172.21.2.2"},
+            {"id": 9, "name": "OTHER-B", "ip": "172.21.2.9"},
+            {"id": 10, "name": "FAR", "ip": "10.9.9.9"}]}}},
+        ("netbox-1", "NETBOX_MERGE_STUB"): {"payload": {"data": {"status": "SUCCESS", "merged": True}}},
+    }, global_config=_global_config())
+    serials = {"172.21.2.2": "SN1", "172.21.2.9": "SN-OTHER"}
+    base = h.request_response
+
+    async def rr(spoke_id, command, payload, timeout=30.0):
+        if command == "NW_GET_DEVICE_INFO":
+            h.request_log.append((spoke_id, command, payload))
+            return {"payload": {"data": {"status": "SUCCESS",
+                                         "data": {"serial": serials[payload["address"]]}}}}
+        return await base(spoke_id, command, payload, timeout)
+    h.request_response = rr
+    cfg = {"id": "nw1", "name": "CRSW1", "address": "172.21.0.11", "spoke_id": "nw-1",
+           "object_type": "cx_switch"}
+    assert await h.nw_merge_stubs_by_live_poll(cfg, "SN1") == 1
+    merges = [p for _, c, p in h.request_log if c == "NETBOX_MERGE_STUB"]
+    assert merges == [{"stub_id": 8, "nw_device_id": "nw1", "serial": "SN1"}]
+    # Out-of-/16 stubs are never probed; a repeat within the TTL probes nothing.
+    assert all(p["address"] != "10.9.9.9" for _, c, p in h.request_log if c == "NW_GET_DEVICE_INFO")
+    n = len(h.request_log)
+    await h.nw_merge_stubs_by_live_poll(cfg, "SN1")
+    assert len([1 for _, c, _p in h.request_log[n:] if c == "NW_GET_DEVICE_INFO"]) == 0
