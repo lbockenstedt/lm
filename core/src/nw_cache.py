@@ -20,10 +20,12 @@ exactly like ``_filter_fw`` over the firewall cache)::
       "fetched_at": epoch,                          # most recent per-device write
   }}
 
-Persisted to ``<data_dir>/cache/nw_data.json`` (atomic tmp + ``os.replace``,
-best-effort, ``asyncio.Lock``-guarded, written off the event loop via
-``asyncio.to_thread``). Loaded on startup via ``nw_cache_load`` so the UI is
-seeded immediately; subsequent live fetches refresh + re-persist.
+Persisted per tenant (``cache_core.TenantShardCache``) as
+``<data_dir>/tenants/<tenant>/nw/nw_fleet.json`` (that tenant's fleet rows) and
+``.../nw/nw_devices.json`` (that tenant's per-device data): a poll rewrites only
+its tenant's file, atomically, off the event loop. Loaded on startup via
+``nw_cache_load`` so the UI is seeded immediately; subsequent live fetches
+refresh + re-persist. A legacy ``cache/nw_data.json`` is split once on load.
 
 A leaf: stdlib only. MUST NOT import ``main`` or ``api`` (dependency direction
 is ``main → nw_cache`` only). Audience: Hub developers.
@@ -40,7 +42,7 @@ from typing import Any, Dict, Optional
 
 # Shared cache helpers: JsonCacheFile does debounced atomic JSON persistence and
 # StalenessPolicy decides when cached data is old.
-from cache_core import JsonCacheFile, StalenessPolicy
+from cache_core import JsonCacheFile, StalenessPolicy, TenantShardCache
 
 # Logs under the shared "Hub" logger so cache messages appear with other hub output.
 logger = logging.getLogger("Hub")
@@ -56,8 +58,15 @@ class NwCacheMixin:
     ``cache/nw_data.json`` and reloaded on startup to seed the UI.
     """
 
-    # File name of the persisted cache inside the hub's cache directory.
+    # Legacy single-file cache (split into per-tenant files on first load).
     NW_CACHE_FILE = "nw_data.json"
+    # Per-tenant shard files under tenants/<tenant>/nw/.
+    NW_SHARD_MODULE = "nw"
+    NW_FLEET_SHARD = "nw_fleet.json"
+    NW_DEVICES_SHARD = "nw_devices.json"
+    # Bucket for devices whose tenant is not (yet) known from the fleet list.
+    NW_UNASSIGNED = "_unassigned"
+    _NW_KEYSEP = "\x1f"
     # Per-device endpoint slots that may be cached ("poll" is handled separately).
     _NW_CACHE_ENDPOINTS = ("info", "macs", "arp", "interfaces",
                            "endpoints", "vlans", "lldp")
@@ -65,9 +74,8 @@ class NwCacheMixin:
     # ── lifecycle ────────────────────────────────────────────────────────────
 
     # Coalescing window: a poll burst of N devices marks dirty N times but
-    # produces ONE full-file dump at most every this many seconds (previously
-    # every nw_cache_set_* fire-and-forgot its own full persist).
-    _NW_CACHE_FLUSH_DELAY_S = 5.0
+    # produces ONE write per dirty tenant at most every this many seconds.
+    _NW_CACHE_FLUSH_DELAY_S = 30.0
 
     def nw_cache_init(self) -> None:
         """Initialize the in-memory cache slots. Call once from ``__init__``."""
@@ -76,13 +84,57 @@ class NwCacheMixin:
         self.nw_device_cache: Dict[str, Dict[str, Any]] = {}
         # Staleness rules used by the read path to decide when to revalidate.
         self.nw_policy = StalenessPolicy()
-        # Persistence helper: label, path function, a callable that returns what to save,
-        # and the coalescing delay between disk writes.
-        self._nw_cache_file = JsonCacheFile(
-            "nw cache", self._nw_cache_path,
-            lambda: {"fleet": self.nw_fleet_cache,
-                     "devices": self.nw_device_cache},
+        # Persistence: one small file per tenant for the fleet rows and one for
+        # the per-device data, each rewritten only when its tenant changed.
+        self._nw_fleet_file = TenantShardCache(
+            "nw fleet cache", self._nw_data_dir, self.NW_SHARD_MODULE,
+            self.NW_FLEET_SHARD, self._nw_fleet_resident,
             flush_delay_s=self._NW_CACHE_FLUSH_DELAY_S)
+        self._nw_cache_file = TenantShardCache(
+            "nw device cache", self._nw_data_dir, self.NW_SHARD_MODULE,
+            self.NW_DEVICES_SHARD, self._nw_devices_resident,
+            flush_delay_s=self._NW_CACHE_FLUSH_DELAY_S)
+
+    def _nw_data_dir(self) -> str:
+        """Root holding ``tenants/``: the hub's data dir, else the cache dir (tests)."""
+        state = getattr(self, "state", None)
+        return getattr(state, "data_dir", None) or getattr(self, "cache_dir", ".")
+
+    def _nw_tenant_of_device(self, device_id: str) -> str:
+        """Tenant owning a device, from the cached fleet rows."""
+        env = (self.nw_fleet_cache or {}).get("devices")
+        rows = env.get("data") if isinstance(env, dict) else None
+        for r in rows if isinstance(rows, list) else ():
+            if isinstance(r, dict) and r.get("id") == device_id:
+                return str(r.get("tenant_id") or "") or self.NW_UNASSIGNED
+        return self.NW_UNASSIGNED
+
+    def _nw_fleet_resident(self) -> Dict[str, Any]:
+        """``{tenant\\x1f_fleet: {rows, envelope, fetched_at}}`` for the fleet store."""
+        f = self.nw_fleet_cache or {}
+        env = f.get("devices")
+        rows = env.get("data") if isinstance(env, dict) else None
+        if not isinstance(rows, list):
+            return {}
+        meta = {k: v for k, v in env.items() if k != "data"}
+        by_tenant: Dict[str, list] = {}
+        for r in rows:
+            if isinstance(r, dict):
+                by_tenant.setdefault(str(r.get("tenant_id") or "") or self.NW_UNASSIGNED, []).append(r)
+        return {t + self._NW_KEYSEP + "_fleet":
+                {"rows": rs, "envelope": meta, "fetched_at": f.get("fetched_at", 0.0)}
+                for t, rs in by_tenant.items()}
+
+    def _nw_devices_resident(self) -> Dict[str, Any]:
+        """``{tenant\\x1fdevice_id: entry}`` for the per-device store."""
+        owner = {}
+        env = (self.nw_fleet_cache or {}).get("devices")
+        rows = env.get("data") if isinstance(env, dict) else None
+        for r in rows if isinstance(rows, list) else ():
+            if isinstance(r, dict) and r.get("id") is not None:
+                owner[r["id"]] = str(r.get("tenant_id") or "") or self.NW_UNASSIGNED
+        return {owner.get(did, self.NW_UNASSIGNED) + self._NW_KEYSEP + str(did): entry
+                for did, entry in list(self.nw_device_cache.items())}
 
     def _nw_cache_path(self) -> str:
         """Return the full path of the persisted nw cache file."""
@@ -97,32 +149,53 @@ class NwCacheMixin:
         The read itself is ``cache_core``'s, so a truncated or non-JSON file
         degrades identically here and in every other module.
         """
-        # Read the persisted file; anything that is not a dict means start cold.
-        data = self._nw_cache_file.load()
-        if not isinstance(data, dict):
-            return
-        # Restore the fleet snapshot, coercing fetched_at to a float.
-        fleet = data.get("fleet")
-        if isinstance(fleet, dict):
-            self.nw_fleet_cache = {
-                "devices": fleet.get("devices"),
-                "fetched_at": float(fleet.get("fetched_at", 0.0) or 0.0),
-            }
-        # Restore per-device entries, skipping non-dict values.
-        devices = data.get("devices")
-        if isinstance(devices, dict):
-            # Drop failed envelopes persisted before set_device refused them, so
-            # a restart serves a cold miss (live fetch) rather than a cached ERROR.
-            self.nw_device_cache = {
-                str(did): {k: e for k, e in v.items()
-                           if not self._nw_failed_envelope(e)}
-                for did, v in devices.items()
-                if isinstance(v, dict)
-            }
+        # Split a legacy single-file cache into per-tenant files, once.
+        self._nw_migrate_legacy()
+        # Per-tenant fleet rows → one merged fleet envelope.
+        fleet_rows, meta, fetched = [], {}, 0.0
+        for key, v in sorted(self._nw_fleet_file.load().items()):
+            if isinstance(v, dict) and isinstance(v.get("rows"), list):
+                fleet_rows.extend(r for r in v["rows"] if isinstance(r, dict))
+                meta = v.get("envelope") if isinstance(v.get("envelope"), dict) else meta
+                fetched = max(fetched, float(v.get("fetched_at", 0.0) or 0.0))
+        if fleet_rows or meta:
+            self.nw_fleet_cache = {"devices": {**meta, "data": fleet_rows}, "fetched_at": fetched}
+        # Per-tenant device entries; drop failed envelopes persisted before
+        # set_device refused them, so a restart serves a cold miss (live fetch)
+        # rather than a cached ERROR.
+        self.nw_device_cache = {
+            key.split(self._NW_KEYSEP, 1)[-1]: {k: e for k, e in v.items()
+                                                 if not self._nw_failed_envelope(e)}
+            for key, v in self._nw_cache_file.load().items()
+            if isinstance(v, dict)
+        }
         # Log what was restored so operators can see the warm start happened.
         if self.nw_fleet_cache or self.nw_device_cache:
-            logger.info("nw cache: restored %d device(s) + fleet snapshot from %s",
-                        len(self.nw_device_cache), self._nw_cache_path())
+            logger.info("nw cache: restored %d device(s) + fleet snapshot from per-tenant files under %s",
+                        len(self.nw_device_cache), self._nw_data_dir())
+
+    def _nw_migrate_legacy(self) -> None:
+        """One-time split of ``cache/nw_data.json`` into per-tenant files
+        (the old file is kept as ``.migrated``). Best-effort; never raises."""
+        legacy = self._nw_cache_path()
+        try:
+            if not os.path.exists(legacy):
+                return
+            data = JsonCacheFile("legacy nw cache", lambda: legacy, dict).load()
+            if isinstance(data, dict):
+                fleet, devices = data.get("fleet"), data.get("devices")
+                if isinstance(fleet, dict):
+                    self.nw_fleet_cache = {"devices": fleet.get("devices"),
+                                           "fetched_at": float(fleet.get("fetched_at", 0.0) or 0.0)}
+                if isinstance(devices, dict):
+                    self.nw_device_cache = {str(k): v for k, v in devices.items() if isinstance(v, dict)}
+                # Write every tenant's files now (no event loop is needed).
+                self._nw_fleet_file._write(self._nw_fleet_resident(), {TenantShardCache.ALL})
+                self._nw_cache_file._write(self._nw_devices_resident(), {TenantShardCache.ALL})
+            os.replace(legacy, legacy + ".migrated")
+            logger.info("nw cache: split %s into per-tenant files", legacy)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("nw cache: legacy migration failed (left in place): %s", exc)
 
     # ── read ──────────────────────────────────────────────────────────────────
 
@@ -212,6 +285,8 @@ class NwCacheMixin:
             return
         # Store the new envelope with the current time and schedule a debounced save.
         self.nw_fleet_cache = {"devices": data, "fetched_at": time.time()}
+        self._nw_fleet_file.schedule_save()
+        # Rows may have changed tenant: re-evaluate device ownership too.
         self._nw_cache_file.schedule_save()
 
     async def nw_cache_set_reachability(self, device_id: str,
@@ -241,9 +316,9 @@ class NwCacheMixin:
                 r["latency_ms"] = latency_ms
                 touched = True
                 break
-        # Persist only if a row actually changed.
+        # Persist only if a row actually changed (that tenant's fleet file only).
         if touched:
-            self._nw_cache_file.schedule_save()
+            self._nw_fleet_file.schedule_save(self._nw_tenant_of_device(device_id))
 
     async def nw_cache_set_device(self, device_id: str, endpoint: str,
                                   data: Any) -> None:
@@ -259,8 +334,8 @@ class NwCacheMixin:
         entry = self.nw_device_cache.setdefault(device_id, {})
         entry[endpoint] = data
         entry["fetched_at"] = time.time()
-        # Schedule a debounced write to disk.
-        self._nw_cache_file.schedule_save()
+        # Schedule a debounced write of this device's tenant file.
+        self._nw_cache_file.schedule_save(self._nw_tenant_of_device(device_id))
 
     async def nw_cache_set_poll(self, device_id: str, poll_result: Dict[str, Any]
                                 ) -> None:
@@ -309,7 +384,7 @@ class NwCacheMixin:
                 entry["vlans"] = {"status": "SUCCESS", "data": vlans}
         # Stamp the write time and schedule a debounced save.
         entry["fetched_at"] = time.time()
-        self._nw_cache_file.schedule_save()
+        self._nw_cache_file.schedule_save(self._nw_tenant_of_device(device_id))
 
     # ── persist ───────────────────────────────────────────────────────────────
     # Persistence itself lives in cache_core.JsonCacheFile: the debounced
@@ -319,6 +394,7 @@ class NwCacheMixin:
     async def nw_cache_flush_now(self) -> None:
         """Immediate persist (shutdown path) — skips the coalescing delay."""
         # Write the cache to disk now, bypassing the debounce timer.
+        await self._nw_fleet_file.flush_now()
         await self._nw_cache_file.flush_now()
 
     # ── staleness ─────────────────────────────────────────────────────────────

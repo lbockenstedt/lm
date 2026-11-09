@@ -40,6 +40,7 @@ from __future__ import annotations
 # asyncio provides the write lock, debounced flush tasks and off-thread file writes.
 import asyncio
 # json serialises cache contents.
+import hashlib
 import json
 # Standard-library logging for load/persist warnings.
 import logging
@@ -227,10 +228,141 @@ class JsonCacheFile:
             os.makedirs(d, exist_ok=True)
         # Write to a temp file, lock down permissions, then atomically replace the real file.
         tmp = path + ".tmp"
+        # json.dumps uses the C encoder (json.dump streams through the far slower
+        # pure-Python one, which held the GIL for seconds on a large cache).
         with open(tmp, "w") as f:
-            json.dump(snapshot, f, default=str)
+            f.write(json.dumps(snapshot, default=str, separators=(",", ":")))
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)
+
+
+class TenantShardCache:
+    """Debounced persistence of a tenant-keyed cache, one JSON file per tenant.
+
+    Files live at ``<data_dir>/tenants/<tenant>/<module>/<name>`` (the layout
+    ``tenant_sharded`` already uses). Like ``JsonCacheFile`` it owns NO data:
+    ``resident_fn()`` returns ``{"<tenant>\\x1f<key>": entry}`` at write time.
+
+    A change marks only its tenant dirty, so a flush rewrites that tenant's
+    file instead of every tenant's data, and a tenant whose content is
+    byte-identical to the last write is skipped.
+    """
+
+    # Marker meaning "every tenant" in the dirty set.
+    ALL = "\x00all"
+
+    def __init__(self, label: str, data_dir_fn: Callable[[], str], module: str, name: str,
+                 resident_fn: Callable[[], Dict[str, Any]], *,
+                 flush_delay_s: float = DEFAULT_FLUSH_DELAY_S) -> None:
+        """Store the configuration; nothing is read or written yet."""
+        self._label = label
+        self._data_dir_fn = data_dir_fn
+        self._module = module
+        self._name = name
+        self._resident_fn = resident_fn
+        self._flush_delay_s = flush_delay_s
+        # Lock is created lazily (see _get_lock); _tasks holds the pending flusher.
+        self._lock: Optional[asyncio.Lock] = None
+        self._lock_loop: Any = None
+        self._tasks: Set[asyncio.Task] = set()
+        self._dirty = False
+        self._dirty_tenants: Set[str] = set()
+        # Tenants written so far (so an emptied tenant's file is removed) and the
+        # digest of each tenant's last written content.
+        self._written: Set[str] = set()
+        self._digest: Dict[str, str] = {}
+
+    # Reuse JsonCacheFile's loop-aware lazy lock.
+    _get_lock = JsonCacheFile._get_lock
+
+    def load(self) -> Dict[str, Any]:
+        """Merge every tenant's file back into one resident dict (bad files skipped)."""
+        import glob
+        merged: Dict[str, Any] = {}
+        pattern = os.path.join(self._data_dir_fn(), "tenants", "*", self._module, self._name)
+        for p in glob.glob(pattern):
+            try:
+                with open(p, "rb") as f:
+                    data = json.loads(f.read().decode() or "{}")
+                if isinstance(data, dict):
+                    merged.update(data)
+                    # Remember tenants with files so an emptied slice removes them.
+                    self._written.add(os.path.relpath(p, os.path.join(self._data_dir_fn(), "tenants")).split(os.sep)[0])
+            except Exception as exc:  # noqa: BLE001 - a bad file loses one tenant only
+                logger.warning("%s: skipped bad shard %s: %s", self._label, p, exc)
+        return merged
+
+    def schedule_save(self, tenant: Optional[str] = None) -> None:
+        """Mark ``tenant`` (None = every tenant) dirty and ensure one delayed flusher is pending."""
+        self._dirty_tenants.add(self.ALL if tenant is None else str(tenant))
+        self._dirty = True
+        # A flusher already pending will write this change too.
+        if any(not t.done() for t in self._tasks):
+            return
+        coro = self._flush_after_delay()
+        try:
+            task = asyncio.create_task(coro)
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+        # No running loop (startup): close the coroutine to avoid a "never awaited" warning.
+        except RuntimeError:  # pragma: no cover
+            coro.close()
+
+    async def _flush_after_delay(self) -> None:
+        """Wait the debounce delay and persist; repeat while tenants are still dirty."""
+        while self._dirty_tenants:
+            await asyncio.sleep(self._flush_delay_s)
+            await self._persist()
+
+    async def flush_now(self) -> None:
+        """Write every dirty tenant immediately (shutdown path)."""
+        await self._persist()
+
+    async def _persist(self) -> None:
+        """Write the dirty tenants in a worker thread (best-effort)."""
+        async with self._get_lock():
+            dirty, self._dirty_tenants = self._dirty_tenants, set()
+            self._dirty = False
+            try:
+                resident = self._resident_fn()
+                await asyncio.to_thread(self._write, resident, dirty)
+            except Exception as exc:  # noqa: BLE001 - best-effort persist
+                self._dirty_tenants |= dirty
+                self._dirty = True
+                logger.warning("%s persist failed: %s", self._label, exc)
+
+    def _write(self, resident: Dict[str, Any], dirty: Set[str]) -> None:
+        """Serialise and atomically replace each dirty tenant's file."""
+        data_dir = self._data_dir_fn()
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for k, v in resident.items():
+            t = str(k).split("\x1f", 1)[0]
+            if t:
+                grouped.setdefault(t, {})[k] = v
+        targets = set(grouped) | self._written if self.ALL in dirty else set(dirty)
+        for t in sorted(targets):
+            path = os.path.join(data_dir, "tenants", t, self._module, self._name)
+            slice_ = grouped.get(t)
+            if not slice_:
+                # Tenant emptied: remove its file so a restart cannot resurrect it.
+                if os.path.exists(path):
+                    os.remove(path)
+                self._written.discard(t)
+                self._digest.pop(t, None)
+                continue
+            # The C encoder (json.dumps) is atomic with respect to other threads.
+            blob = json.dumps(slice_, default=str, separators=(",", ":")).encode()
+            digest = hashlib.sha1(blob).hexdigest()
+            if self._digest.get(t) == digest and os.path.exists(path):
+                continue  # identical content already on disk
+            os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+            tmp = path + ".tmp"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(blob)
+            os.replace(tmp, path)
+            self._written.add(t)
+            self._digest[t] = digest
 
 
 class StalenessPolicy:
