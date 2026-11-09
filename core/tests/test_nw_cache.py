@@ -30,6 +30,10 @@ class _CacheHub(NwCacheMixin):
         self.nw_cache_init()
 
 
+def _shard(base, tenant, name):
+    return os.path.join(str(base), "tenants", tenant, "nw", name)
+
+
 def _envelope(data):
     return {"status": "SUCCESS", "data": data}
 
@@ -37,7 +41,7 @@ def _envelope(data):
 async def _flush(hub):
     """Force the debounced persist NOW (tests must not wait out the ~5s
     coalescing window): cancel any pending delayed flusher and write."""
-    for t in list(hub._nw_cache_file._tasks):
+    for t in list(hub._nw_cache_file._tasks) + list(hub._nw_fleet_file._tasks):
         t.cancel()
     await hub.nw_cache_flush_now()
 
@@ -53,11 +57,11 @@ async def test_set_fleet_then_get_and_persist(tmp_path):
     assert got["fetched_at"] > 0
     await _flush(hub)
     # Persisted to disk.
-    path = os.path.join(str(tmp_path), "nw_data.json")
+    path = _shard(tmp_path, "_unassigned", "nw_fleet.json")
     assert os.path.exists(path)
     with open(path) as f:
         on_disk = json.load(f)
-    assert on_disk["fleet"]["devices"] == envelope
+    assert on_disk["_unassigned\x1f_fleet"]["rows"] == envelope["data"]
 
 
 async def test_fetched_at_helpers_drive_cache_first_freshness(tmp_path):
@@ -217,9 +221,12 @@ async def test_atomic_write_uses_tmp_then_replace(tmp_path):
     hub = _CacheHub(str(tmp_path))
     await hub.nw_cache_set_fleet(_envelope([]))
     await _flush(hub)
-    assert os.path.exists(os.path.join(str(tmp_path), "nw_data.json"))
+    await hub.nw_cache_set_device("sw1", "info", _envelope({"n": 1}))
+    await _flush(hub)
+    p = _shard(tmp_path, "_unassigned", "nw_devices.json")
+    assert os.path.exists(p)
     # No leftover .tmp once the replace completes.
-    assert not os.path.exists(os.path.join(str(tmp_path), "nw_data.json.tmp"))
+    assert not os.path.exists(p + ".tmp")
 
 
 async def test_write_burst_coalesces_to_one_pending_flusher(tmp_path):
@@ -230,9 +237,9 @@ async def test_write_burst_coalesces_to_one_pending_flusher(tmp_path):
     assert len(hub._nw_cache_file._tasks) == 1
     assert hub._nw_cache_file._dirty is True
     await _flush(hub)
-    with open(os.path.join(str(tmp_path), "nw_data.json")) as f:
+    with open(_shard(tmp_path, "_unassigned", "nw_devices.json")) as f:
         on_disk = json.load(f)
-    assert len(on_disk["devices"]) == 10  # single write carried the whole burst
+    assert len(on_disk) == 10  # single write carried the whole burst
 
 
 # ── nw_cache_get_fleet_filtered — tenant-scoped offline cache serve ─────────
@@ -323,3 +330,36 @@ async def test_set_reachability_noop_when_device_absent(tmp_path):
     await hub.nw_cache_set_fleet(_envelope([{"id": "sw1", "reachable": True}]))
     await hub.nw_cache_set_reachability("ghost", False, None)
     assert hub.nw_cache_get_fleet()["devices"]["data"][0]["reachable"] is True
+
+
+async def test_poll_rewrites_only_its_tenant_file(tmp_path):
+    hub = _CacheHub(str(tmp_path))
+    await hub.nw_cache_set_fleet(_envelope([
+        {"id": "a1", "tenant_id": "acme"}, {"id": "o1", "tenant_id": "other"}]))
+    await hub.nw_cache_set_device("a1", "info", _envelope({"m": 1}))
+    await hub.nw_cache_set_device("o1", "info", _envelope({"m": 2}))
+    await _flush(hub)
+    other = _shard(tmp_path, "other", "nw_devices.json")
+    before = os.stat(other).st_mtime_ns
+    await hub.nw_cache_set_device("a1", "info", _envelope({"m": 3}))
+    assert hub._nw_cache_file._dirty_tenants == {"acme"}
+    await _flush(hub)
+    assert os.stat(other).st_mtime_ns == before
+    restarted = _CacheHub(str(tmp_path))
+    restarted.nw_cache_load()
+    assert restarted.nw_cache_get_device("a1", "info")["data"] == {"m": 3}
+    assert restarted.nw_cache_get_device("o1", "info")["data"] == {"m": 2}
+    assert len(restarted.nw_cache_get_fleet()["devices"]["data"]) == 2
+
+
+async def test_legacy_nw_data_json_is_split_once(tmp_path):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    legacy = {"fleet": {"devices": _envelope([{"id": "a1", "tenant_id": "acme"}]), "fetched_at": 5.0},
+              "devices": {"a1": {"info": _envelope({"m": 1}), "fetched_at": 5.0}}}
+    (cache / "nw_data.json").write_text(json.dumps(legacy))
+    hub = _CacheHub(str(cache))
+    hub.nw_cache_load()
+    assert hub.nw_cache_get_device("a1", "info")["data"] == {"m": 1}
+    assert not (cache / "nw_data.json").exists()
+    assert os.path.exists(_shard(cache, "acme", "nw_devices.json"))
