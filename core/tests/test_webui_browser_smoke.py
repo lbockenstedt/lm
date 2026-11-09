@@ -30,6 +30,9 @@ import api as api_mod  # noqa: E402
 from test_auth_session_security import _FakeHub  # noqa: E402
 
 
+SPOKE_UUID = "3f2b8c1e-9d4a-4e6b-8a71-2c5d9e0f1a22"
+
+
 def _free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -78,3 +81,24 @@ def test_every_view_renders_without_js_errors(hub_url_and_session):
         finally:
             browser.close()
     assert not failures, "WebUI errors:\n" + "\n".join(failures)
+
+
+def test_uuid_check_sees_visible_text_only():
+    """visible_uuids flags ids a user can read, not ones kept in attributes or hidden nodes."""
+    from webui_walk import visible_uuids
+    with sync_api.sync_playwright() as p:
+        try:
+            browser = p.chromium.launch()
+        except Exception as e:  # noqa: BLE001
+            if os.environ.get("CI"):
+                raise
+            pytest.skip(f"Chromium not installed: {e}")
+        try:
+            page = browser.new_page()
+            page.set_content(f'<div data-id="{SPOKE_UUID}">Acme Labs</div>'
+                             f'<div style="display:none">{SPOKE_UUID}</div>')
+            assert visible_uuids(page) == []
+            page.set_content(f"<td>{SPOKE_UUID}</td>")
+            assert visible_uuids(page) == [SPOKE_UUID]
+        finally:
+            browser.close()
