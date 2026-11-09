@@ -2002,6 +2002,66 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 out[label] = stats
         return out
 
+    async def _fleet_health_snapshot(self) -> Dict[str, Any]:
+        """Data-quality signals for AppBuilder's health check.
+
+        * ``autorack``: devices whose rack-from-name placement conflicts or
+          cannot be done (the NetBox spoke's last sweep; cheap to read).
+        * ``netbox_duplicates``: duplicate device groups (serial/MAC) from a
+          dry-run dedupe, refreshed at most hourly because it reads every device.
+        * ``dhcp_declines``: scopes holding DECLINEd addresses.
+        Each part is optional; a spoke that is down or slow is left out."""
+        import access as _access
+        out: Dict[str, Any] = {}
+
+        async def _ask(spoke, cmd, data, timeout):
+            # One spoke call, unwrapped; None on any failure.
+            try:
+                res = _access.unwrap_spoke(await self.request_response(spoke, cmd, data, timeout=timeout))
+                return res if isinstance(res, dict) and res.get("status") != "ERROR" else None
+            except Exception:  # noqa: BLE001
+                return None
+
+        def _brief(rows):
+            # Name + reason for the first few report rows.
+            return [{"name": r.get("name"), "reason": r.get("reason"), "wanted": r.get("wanted"),
+                     "current": r.get("current")} for r in (rows or [])[:10] if isinstance(r, dict)]
+
+        # NetBox: the last auto-rack report, plus the hourly duplicate scan.
+        ipam = self.get_spoke_by_type("ipam")
+        if ipam:
+            ar = await _ask(ipam, "NETBOX_AUTORACK_SWEEP", {"report": True}, 20.0)
+            if ar and not ar.get("pending"):
+                out["autorack"] = {"ts": ar.get("ts"), "named": ar.get("named"),
+                                   "conflicts": len(ar.get("conflicts") or []),
+                                   "cannot": len(ar.get("cannot") or []),
+                                   "sample": _brief((ar.get("conflicts") or []) + (ar.get("cannot") or []))}
+            cache = self.__dict__.setdefault("_hc_dedupe", {"ts": 0.0, "data": None})
+            if time.time() - cache["ts"] >= 3600:
+                cache["ts"] = time.time()
+                dd = await _ask(ipam, "NETBOX_DEDUPE_DEVICES", {"apply": False}, 120.0)
+                if dd is not None:
+                    groups = dd.get("groups") or []
+                    cache["data"] = {"ts": int(cache["ts"]), "scanned": dd.get("scanned"),
+                                     "groups": len(groups),
+                                     "sample": [{"key": g.get("key"), "name": g.get("survivor_name"),
+                                                 "duplicates": len(g.get("duplicate_ids") or [])}
+                                                for g in groups[:10]]}
+            if cache["data"] is not None:
+                out["netbox_duplicates"] = cache["data"]
+
+        # DHCP: scopes with declined addresses (ARP conflicts on the wire).
+        dhcp = self.get_spoke_by_type("dhcp")
+        if dhcp:
+            st = await _ask(dhcp, "DHCP_STATS", {}, 25.0)
+            if st:
+                out["dhcp_declines"] = [
+                    {"subnet": s.get("subnet"), "declined": int(s.get("declined_addresses") or 0),
+                     "total": int(s.get("total_addresses") or 0)}
+                    for s in st.get("subnets") or []
+                    if isinstance(s, dict) and int(s.get("declined_addresses") or 0) > 0]
+        return out
+
     async def request_response(self, spoke_id: str, command_type: str, data: Dict[str, Any], timeout: Optional[float] = None, signing_secret: Optional[str] = None) -> Dict[str, Any]:
         """Timed wrapper: feeds per-command latency to the health report."""
         t0 = time.time()
@@ -8767,6 +8827,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             if req_type == "GET_HEALTH_REPORT":
                 report = await asyncio.to_thread(_perf_telemetry.build_report, self)
                 report["spoke_queues"] = await self._spoke_queue_snapshot()
+                report["fleet"] = await self._fleet_health_snapshot()
                 return report
 
             # Return only error lines.

@@ -8,19 +8,32 @@ nothing here can change state on the hub.
 The walk visits every view in VIEW_SUBMENUS plus the standalone views, every
 sub-view of each, and every child / grandchild tab (Simulations, Settings ->
 Cloud). An uncaught exception or unhandled promise rejection anywhere along
-the way is a failure, tagged with where it happened.
+the way is a failure, tagged with where it happened, and so is a UUID in
+visible text outside the diagnostic pages.
 """
 import json
+import re
+
+# Pages whose job is to show raw ids (diagnostics, admin tooling) may show UUIDs.
+UUID_ALLOWED = ("diagnostic", "fleet", "audit", "logs", "debug", "ops", "bugs")
+_UUID = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)
+
+
+def visible_uuids(page):
+    """UUIDs in the text a user can see (not attributes, hidden nodes or inputs)."""
+    text = page.evaluate("document.body ? document.body.innerText : ''")
+    return sorted(set(_UUID.findall(text or "")))
 
 # Views reached from the sidebar / header that have no VIEW_SUBMENUS entry.
 STANDALONE_VIEWS = ["reports", "credvault", "templates", "security", "osupdates",
                     "mydevices", "bugs", "features", "certmon"]
 
 
-def walk_ui(page, url, pause_ms=250):
+def walk_ui(page, url, pause_ms=250, check_uuids=True):
     """Open ``url`` (the page's context must hold a logged-in session), then
     visit every view, sub-view and child tab. Returns a list of failures,
-    each ``"<where>: <message>"``."""
+    each ``"<where>: <message>"``. With ``check_uuids``, a UUID in visible
+    text outside the diagnostic pages is a failure too: users see names."""
     failures = []
     where = ["startup"]
     page.on("pageerror", lambda e: failures.append(f"{where[0]}: {e}"))
@@ -37,6 +50,10 @@ def walk_ui(page, url, pause_ms=250):
         except Exception as e:  # noqa: BLE001 - a throw in the navigation call itself
             failures.append(f"{label}: {str(e).splitlines()[0]}")
         page.wait_for_timeout(pause_ms)
+        if check_uuids and not any(k in label.lower() for k in UUID_ALLOWED):
+            shown = visible_uuids(page)
+            if shown:
+                failures.append(f"{label}: UUID shown in the UI ({', '.join(shown[:3])})")
 
     # Cert Expiry Monitor only opens while enabled; the walk should still see it.
     page.evaluate("window.__lmCertMonEnabled = true")
