@@ -1685,6 +1685,12 @@ class HubOsUpdatesMixin:
             n = nodes.get(item["key"])
             if n is None or "reboot" not in (n.get("features") or []):
                 item["auto_reboot"] = "failed: node can't be rebooted from LM (needs an LM update)"
+            elif (n.get("pve_cluster") or n.get("vm_note") == "Proxmox host (bare metal)") \
+                    and not _is_cluster_node(n):
+                # A bare plain reboot could take several Proxmox hosts down at
+                # once; only the one-at-a-time maintenance flow is allowed.
+                item["auto_reboot"] = ("not rebooted: the Proxmox agent needs an update before "
+                                       "it can reboot safely (one host at a time)")
             else:
                 res = await self._osu_reboot(n, _AUTOREBOOT_ACTOR)
                 item["auto_reboot"] = ("scheduled" if res.get("status") == "SUCCESS"
