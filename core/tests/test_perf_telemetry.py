@@ -21,3 +21,26 @@ def test_build_report_tolerates_a_bare_hub():
     rep = pt.build_report(Hub())
     assert rep["timeouts_total"] == 3 and rep["timeouts_by_spoke"] == {"s1": {"NW_POLL": 3}}
     assert "host" in rep and "perf" in rep
+
+
+def test_spoke_queue_snapshot_collects_stats_and_skips_silent_spokes():
+    """GET_HEALTH_REPORT's spoke_queues: one entry per answering spoke, by label."""
+    import asyncio
+    import os
+    os.environ.setdefault("LM_FERNET_KEY", __import__("cryptography.fernet",
+                                                      fromlist=["Fernet"]).Fernet.generate_key().decode())
+    import main
+
+    class Hub:
+        active_connections = {"a": 1, "b": 1}
+
+        def _spoke_label(self, sid):
+            return "spoke-" + sid
+
+        async def request_response(self, sid, cmd, data, timeout=None):
+            if sid == "b":
+                raise TimeoutError
+            return {"payload": {"data": {"inflight": 4, "max_inflight": 4, "rejected_full": 9}}}
+
+    out = asyncio.run(main.LabManagerHub._spoke_queue_snapshot(Hub()))
+    assert out == {"spoke-a": {"inflight": 4, "max_inflight": 4, "rejected_full": 9}}
