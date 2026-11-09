@@ -10,6 +10,14 @@ Sync-rule legend:
 - **twin** — two copies of the same module in different repos; keep logic +
   shared constants matched.
 
+**CI enforces the mechanical part.** `lm/.github/twins.json` lists the byte
+pairs and the key-list pairs (CS_OVERRIDE_KEYS, SIM_QUOTA_KEYS, QUOTA_TIERS,
+CS_CONTROL_FLAGS); `lm/.github/scripts/check_twins.py` runs in every repo's
+`Fleet rules` workflow on pushes/PRs to dev. Same-repo drift fails the run;
+cross-repo drift (the other copy read from GitHub on the same branch) warns.
+Add a pair to `twins.json` when you add one here. Field arrays and "judge
+intent" parity still need a human.
+
 ---
 
 ## 1. sim-views.js  — the sim-config WebUI  (parity)
