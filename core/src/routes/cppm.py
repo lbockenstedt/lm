@@ -547,6 +547,11 @@ def register(app, hub, ctx):
 
         if spoke_ipam and search_q:
             tasks["netbox"] = safe(req(spoke_ipam, "NETBOX_SEARCH", {"q": search_q}))
+            # A record is often keyed on another identifier (name vs IP vs serial):
+            # search each one we were given and merge below.
+            for extra_key, extra in (("netbox_host", hostname), ("netbox_ip", ip), ("netbox_serial", serial)):
+                if extra and extra != search_q:
+                    tasks[extra_key] = safe(req(spoke_ipam, "NETBOX_SEARCH", {"q": extra}))
         if spoke_pxmx and (ip or hostname):
             tasks["proxmox"] = safe(req(spoke_pxmx, "SEARCH_VMS", {"q": ip or hostname}))
         if spoke_ldap and (hostname or ip):
@@ -587,7 +592,15 @@ def register(app, hub, ctx):
             nac_result = {"sessions": nac_sess["sessions"]}
 
         # NetBox, Proxmox and LDAP matches (empty if their lookups failed).
-        nb_results  = (data.get("netbox") or {}).get("results", []) if isinstance(data.get("netbox"), dict) else []
+        nb_results = []
+        _nb_seen = set()
+        for _k in ("netbox", "netbox_host", "netbox_ip", "netbox_serial"):
+            _v = data.get(_k)
+            for _r in ((_v or {}).get("results", []) if isinstance(_v, dict) else []):
+                _id = (_r.get("type"), _r.get("id"), _r.get("name"), _r.get("ip"))
+                if _id not in _nb_seen:
+                    _nb_seen.add(_id)
+                    nb_results.append(_r)
         px_results  = (data.get("proxmox") or {}).get("results", []) if isinstance(data.get("proxmox"), dict) else []
         ld_results  = (data.get("ldap") or {}).get("results", []) if isinstance(data.get("ldap"), dict) else []
 
@@ -640,8 +653,53 @@ def register(app, hub, ctx):
         except Exception as e:
             logger.warning(f"device-detail: nw leg failed: {e}")
 
+        # Monitoring (Zabbix) and DNS legs: matched on the identity gathered above
+        # (name or IP), so a device found by MAC still resolves its host/records.
+        def _short(n):
+            return str(n or "").strip().lower().split(".", 1)[0]
+        want_names = {x for x in (_short(identity.get("hostname")), _short(hostname)) if x}
+        want_ip = (identity.get("ip") or ip or "").strip()
+        for nb in nb_results:
+            if nb.get("type") == "device" and nb.get("name"):
+                want_names.add(_short(nb["name"]))
+        # NetBox gives the device's primary IP as "a.b.c.d/nn".
+        want_ips = {want_ip} if want_ip else set()
+        for nb in nb_results:
+            if nb.get("type") == "device" and nb.get("ip"):
+                want_ips.add(str(nb["ip"]).split("/", 1)[0])
+        want_ips.discard("")
+
+        monitoring_results = []
+        try:
+            spoke_mon = hub.get_spoke_by_type("monitoring")
+            if spoke_mon and (want_names or want_ips):
+                mon = await safe(req(spoke_mon, "MON_HOSTS", {}))
+                for h in ((mon or {}).get("hosts") or []) if isinstance(mon, dict) else []:
+                    if _short(h.get("name")) in want_names or str(h.get("ip") or "") in want_ips:
+                        monitoring_results.append(h)
+        except Exception as e:
+            logger.warning(f"device-detail: monitoring leg failed: {e}")
+
+        dns_results = []
+        try:
+            _dns_seen = set()
+            for dns_sp in (hub.get_all_spokes_by_type("dns") or []):
+                if not (want_names or want_ips):
+                    break
+                recs = await safe(req(dns_sp, "DNS_LIST", {}))
+                for r in ((recs or {}).get("records") or []) if isinstance(recs, dict) else []:
+                    if _short(r.get("name")) in want_names or str(r.get("value") or "") in want_ips:
+                        key = (r.get("name"), r.get("type"), r.get("value"))
+                        if key not in _dns_seen:
+                            _dns_seen.add(key)
+                            dns_results.append(r)
+        except Exception as e:
+            logger.warning(f"device-detail: dns leg failed: {e}")
+
         # Return everything we found.
         return {
+            "monitoring": monitoring_results,
+            "dns":      dns_results,
             "identity": identity,
             "nac":      nac_result,
             "dhcp":     dhcp_result,

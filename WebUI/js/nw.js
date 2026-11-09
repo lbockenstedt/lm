@@ -1504,6 +1504,131 @@ function _renderNwDeviceList(category, devices, counts) {
 // appliance). ?tenant= scopes the server-side fleet filter to the selected
 // tenant. Spoke-down serves the hub cache twin (no 503) — the route falls back
 // to truenas_data.json when no spoke is connected.
+
+// 7-day trend chart of 5-minute averages (rows = [{ts, metrics}]); a gap of
+// more than one bucket breaks the line. Hovering shows that bucket's values.
+const _tnTrends = {};
+function _tnTrendChart(id, title, rows, lines, fmt, t0, t1) {
+    const W = 720, H = 150, B = 16;
+    const legend = lines.map(l => `<span class="inline-flex items-center gap-1 mr-3"><span class="inline-block w-3 h-0.5" style="background:${l.color}"></span>${l.label}</span>`).join('');
+    const head = `<div class="flex justify-between text-xs text-slate-500 mb-1"><span><span class="font-medium text-slate-700 mr-3">${title}</span>${legend}</span><span id="${id}-read" class="font-mono"></span></div>`;
+    if (!rows.length) {
+        return `<div class="rounded-md border border-slate-200 bg-white p-3">${head}<div class="text-xs text-slate-400 italic py-8 text-center">No data for this range. The spoke records a 5-minute average every 5 minutes.</div></div>`;
+    }
+    let max = 0;
+    rows.forEach(r => lines.forEach(l => { const v = r.metrics[l.key]; if (typeof v === 'number' && v > max) max = v; }));
+    max = max || 1;
+    const x = ts => (ts - t0) / (t1 - t0) * W;
+    const y = v => (H - B) - v / max * (H - B - 14);
+    const paths = lines.map(l => {
+        let d = '', prev = null;
+        rows.forEach(r => {
+            const v = r.metrics[l.key];
+            if (typeof v !== 'number') { prev = null; return; }
+            d += `${prev === null || r.ts - prev > 600 ? 'M' : 'L'}${x(r.ts).toFixed(1)},${y(v).toFixed(1)}`;
+            prev = r.ts;
+        });
+        return `<path d="${d}" fill="none" stroke="${l.color}" stroke-width="1.2" vector-effect="non-scaling-stroke"/>`;
+    }).join('');
+    // Gridlines spaced to suit the range: days for long ranges, else hours.
+    const span = t1 - t0;
+    const step = span > 3 * 86400 ? 86400 : span > 86400 ? 21600 : span > 6 * 3600 ? 10800 : span > 2 * 3600 ? 3600 : 900;
+    const label = t => step >= 86400
+        ? new Date(t * 1000).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
+        : new Date(t * 1000).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+    let ticks = '';
+    const first = new Date(t0 * 1000); first.setMinutes(0, 0, 0);
+    if (step >= 86400) first.setHours(0);
+    for (let t = first.getTime() / 1000; t < t1; t += step) {
+        if (t <= t0) continue;
+        const tx = x(t).toFixed(1);
+        ticks += `<line x1="${tx}" x2="${tx}" y1="0" y2="${H - B}" stroke="#e2e8f0"/><text x="${tx}" y="${H - 3}" font-size="10" fill="#64748b" text-anchor="middle">${label(t)}</text>`;
+    }
+    _tnTrends[id] = { rows, lines, fmt, t0, t1, W };
+    return `<div class="rounded-md border border-slate-200 bg-white p-3">${head}
+        <svg viewBox="0 0 ${W} ${H}" class="w-full" data-tn-chart="${id}">
+            <line x1="0" x2="${W}" y1="${H - B}" y2="${H - B}" stroke="#cbd5e1"/>${ticks}
+            <text x="2" y="10" font-size="10" fill="#64748b">${escapeHtml(fmt(max))}</text>${paths}
+            <line id="${id}-cursor" x1="-1" x2="-1" y1="0" y2="${H - B}" stroke="#94a3b8" stroke-dasharray="3 3"/>
+        </svg></div>`;
+}
+
+function _tnTrendHover(evt, id) {
+    const c = _tnTrends[id];
+    const read = document.getElementById(`${id}-read`);
+    const cursor = document.getElementById(`${id}-cursor`);
+    if (!c || !read || !cursor) return;
+    if (!evt) { read.textContent = ''; cursor.setAttribute('x1', -1); cursor.setAttribute('x2', -1); return; }
+    const box = evt.currentTarget.getBoundingClientRect();
+    const ts = c.t0 + (evt.clientX - box.left) / box.width * (c.t1 - c.t0);
+    // Nearest bucket.
+    let lo = 0, hi = c.rows.length - 1;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (c.rows[mid].ts < ts) lo = mid + 1; else hi = mid; }
+    if (lo > 0 && ts - c.rows[lo - 1].ts < c.rows[lo].ts - ts) lo--;
+    const r = c.rows[lo];
+    const cx = ((r.ts - c.t0) / (c.t1 - c.t0) * c.W).toFixed(1);
+    cursor.setAttribute('x1', cx); cursor.setAttribute('x2', cx);
+    const when = new Date(r.ts * 1000).toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    read.textContent = `${when} · ` + c.lines.map(l => `${l.label} ${typeof r.metrics[l.key] === 'number' ? c.fmt(r.metrics[l.key]) : '—'}`).join(' · ');
+}
+
+// Performance chart range: a preset (seconds back from now) or a custom start/end.
+// 7 days is the default and comes from the hub's copy; any other range is
+// read from the spoke, which stores the 5-minute averages.
+let _tnRange = { preset: 604800 };
+let _tnPerfFleet = [];
+
+function _tnSetRange(preset) {
+    if (preset === 'custom') {
+        const st = Date.parse(document.getElementById('tn-range-start').value);
+        const en = Date.parse(document.getElementById('tn-range-end').value);
+        if (!isFinite(st) || !isFinite(en) || en <= st) { showToast('Pick a start before the end', 'error'); return; }
+        _tnRange = { start: st / 1000, end: en / 1000 };
+    } else {
+        _tnRange = { preset: preset };
+    }
+    _tnLoadTrends();
+}
+
+async function _tnLoadTrends() {
+    const now = Date.now() / 1000;
+    const t1 = _tnRange.preset ? now : _tnRange.end;
+    const t0 = _tnRange.preset ? now - _tnRange.preset : _tnRange.start;
+    // The default range needs no query: the hub serves its copy.
+    const qs = _tnRange.preset === 604800 ? '' : `?start=${Math.floor(t0)}&end=${Math.ceil(t1)}`;
+    document.querySelectorAll('[data-tn-range]').forEach(b => {
+        const on = String(_tnRange.preset || 'custom') === b.dataset.tnRange;
+        b.className = `px-2 py-1 rounded ${on ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`;
+    });
+    const pct = v => `${v.toFixed(1)}%`;
+    const bytes = v => {
+        const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+        let i = 0;
+        while (Math.abs(v) >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+        return `${v.toFixed(i ? 1 : 0)} ${u[i]}/s`;
+    };
+    await Promise.all(_tnPerfFleet.map(async (a, i) => {
+        const box = document.getElementById(`tn-trends-${i}`);
+        if (!box) return;
+        box.innerHTML = `<div class="text-xs text-slate-400 animate-pulse py-4">Loading history…</div>`;
+        let rows = [];
+        try {
+            const r = await fetch(`/api/truenas/${a.id}/performance/history${qs}`);
+            const j = r.ok ? await r.json() : null;
+            rows = (j && Array.isArray(j.data)) ? j.data : [];
+        } catch (e) { /* empty chart */ }
+        box.innerHTML = `
+            ${_tnTrendChart(`tn-iops-${i}`, 'IOPS', rows, [{ key: 'read_ops', label: 'Read', color: '#0ea5e9' }, { key: 'write_ops', label: 'Write', color: '#f97316' }], v => Math.round(v).toLocaleString(), t0, t1)}
+            ${_tnTrendChart(`tn-tput-${i}`, 'Throughput', rows, [{ key: 'read_bytes', label: 'Read', color: '#0ea5e9' }, { key: 'write_bytes', label: 'Write', color: '#f97316' }], bytes, t0, t1)}
+            ${_tnTrendChart(`tn-net-${i}`, 'Network', rows, [{ key: 'net_rx', label: 'Receive', color: '#10b981' }, { key: 'net_tx', label: 'Send', color: '#8b5cf6' }], bytes, t0, t1)}
+            ${_tnTrendChart(`tn-util-${i}`, 'Utilization', rows, [{ key: 'busy', label: 'Disk busy', color: '#ef4444' }, { key: 'cpu', label: 'CPU', color: '#64748b' }], pct, t0, t1)}`;
+        box.querySelectorAll('[data-tn-chart]').forEach(svg => {
+            svg.addEventListener('mousemove', e => _tnTrendHover(e, svg.dataset.tnChart));
+            svg.addEventListener('mouseleave', () => _tnTrendHover(null, svg.dataset.tnChart));
+        });
+    }));
+}
+
 async function loadTruenasData(subMenu) {
     const container = document.getElementById('truenas-table-container');
     if (!container) return;
@@ -1628,12 +1753,26 @@ async function loadTruenasData(subMenu) {
             const tile = (label, value) => `<div class="rounded-md border border-slate-200 bg-slate-50 px-4 py-3">
                 <div class="text-xs text-slate-500">${label}</div>
                 <div class="text-lg font-semibold text-slate-800 font-mono">${value}</div></div>`;
-            container.innerHTML = `<div class="space-y-6">${fleet.map((a, i) => {
+            _tnPerfFleet = fleet;
+            const rangeBtn = (v, t) => `<button data-tn-range="${v}">${t}</button>`;
+            const local = t => new Date(t * 1000 - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+            const nowS = Date.now() / 1000;
+            const rangeBar = `<div class="flex flex-wrap items-center gap-2 text-xs">
+                <span class="text-slate-500 mr-1">History (5-minute averages):</span>
+                ${rangeBtn(3600, '1h')}${rangeBtn(21600, '6h')}${rangeBtn(86400, '24h')}${rangeBtn(259200, '3d')}${rangeBtn(604800, '7d')}
+                <span class="ml-3 text-slate-500">or</span>
+                <input id="tn-range-start" type="datetime-local" class="border border-slate-300 rounded px-1 py-0.5" value="${local(_tnRange.start || nowS - 86400)}">
+                <span class="text-slate-500">to</span>
+                <input id="tn-range-end" type="datetime-local" class="border border-slate-300 rounded px-1 py-0.5" value="${local(_tnRange.end || nowS)}">
+                ${rangeBtn('custom', 'Show')}
+            </div>`;
+            container.innerHTML = `<div class="space-y-6">${rangeBar}${fleet.map((a, i) => {
                 const res = results[i];
                 const name = escapeHtml(a.name || a.id);
+                const trends = `<div id="tn-trends-${i}" class="mt-3 grid grid-cols-1 xl:grid-cols-2 gap-3"></div>`;
                 if (res.status !== 'fulfilled') {
                     return `<div><h3 class="font-semibold text-slate-700 mb-2">${name}</h3>
-                        <div class="text-sm text-amber-600">Performance unavailable (${escapeHtml(String(res.reason && res.reason.message || res.reason))}).</div></div>`;
+                        <div class="text-sm text-amber-600">Performance unavailable (${escapeHtml(String(res.reason && res.reason.message || res.reason))}).</div>${trends}</div>`;
                 }
                 const p = _extract(res.value) || {};
                 const d = p.disks || {};
@@ -1659,10 +1798,16 @@ async function loadTruenasData(subMenu) {
                             <thead class="bg-slate-100 text-slate-600 text-xs"><tr><th class="px-4 py-2">INTERFACE</th><th class="px-4 py-2">LINK</th><th class="px-4 py-2">SPEED</th><th class="px-4 py-2">RECEIVE</th><th class="px-4 py-2">SEND</th></tr></thead>
                             <tbody class="divide-y divide-slate-200">${ifRows}</tbody>
                         </table></div>` : ''}
+                    ${trends}
                 </div>`;
             }).join('')}
-            <div class="text-xs text-slate-500">Live sample from each appliance (all disks combined). <button onclick="loadTruenasData('Performance')" class="text-emerald-600 hover:text-emerald-800 font-medium ml-1">Refresh</button></div>
+            <div class="text-xs text-slate-500">Tiles are a live sample from each appliance (all disks combined); charts are 5-minute averages, kept 7 days by the storage spoke. <button onclick="loadTruenasData('Performance')" class="text-emerald-600 hover:text-emerald-800 font-medium ml-1">Refresh</button></div>
             </div>`;
+            container.querySelectorAll('[data-tn-range]').forEach(b => b.addEventListener('click', () => {
+                const v = b.dataset.tnRange;
+                _tnSetRange(v === 'custom' ? v : Number(v));
+            }));
+            _tnLoadTrends();
             return;
         }
 

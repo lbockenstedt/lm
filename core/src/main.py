@@ -125,6 +125,7 @@ from nw_discovery_sync import NwDiscoverySyncMixin
 from truenas_discovery_sync import TruenasDiscoverySyncMixin
 from nw_cache import NwCacheMixin
 from truenas_cache import TruenasCacheMixin
+from storage_perf import StoragePerfStore
 from le_cache import LeCacheMixin
 from warm_cache import WarmCacheMixin
 from dns_dhcp_sync import DnsDhcpSyncMixin
@@ -1422,6 +1423,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Initialise and load the TrueNAS cache.
         self.truenas_cache_init()
         self.truenas_cache_load()
+        # 7 days of 5-minute storage performance averages pushed by spokes.
+        self.storage_perf = StoragePerfStore(lambda: getattr(self, "cache_dir", "."))
+        self.storage_perf.load()
         # Certificates warm cache — same pattern as nw_cache so the Certificates
         # page renders last-known certs instantly (stale) instead of blocking on
         # a live LE_LIST_CERTS round-trip or 503-ing until the le spoke reconnects.
@@ -7567,6 +7571,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         "NW_POLL_RESULT": "_spoke_msg_nw_poll_result",
         "NW_REACHABILITY": "_spoke_msg_nw_reachability",
         "TRUENAS_POLL_RESULT": "_spoke_msg_truenas_poll_result",
+        "STORAGE_PERF_SAMPLE": "_spoke_msg_storage_perf_sample",
         "LE_CERT_RENEWED": "_spoke_msg_le_cert_renewed",
         "LE_CERT_RENEW_FAILED": "_spoke_msg_le_cert_renew_failed",
         "STATUS_RUN_DEMO": "_spoke_msg_status_run_demo",
@@ -7791,6 +7796,24 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # Pass the failed parts too, so they keep their last good value.
             asyncio.create_task(self.truenas_cache_set_poll(
                 _tn_aid, {"data": _tn_pdata, "errors": _td.get("errors") or []}))
+
+    async def _spoke_msg_storage_perf_sample(self, conn, msg_data, payload, dec_secret):
+        """5-minute performance averages from a storage spoke. Only kept for
+        appliances that exist and aren't bound to a different spoke."""
+        data = payload.get("data", {}) or {}
+        if data.get("module") != "truenas":
+            return
+        appliances = {a.get("id"): a for a in
+                      (self.state.system_state.get("global_config", {}) or {})
+                      .get("truenas_appliances", []) or [] if isinstance(a, dict)}
+        me = self._primary_key(conn.spoke_id)
+
+        def _mine(s):
+            a = appliances.get(s.get("device_id")) if isinstance(s, dict) else None
+            return a is not None and (not a.get("spoke_id")
+                                      or self._primary_key(a["spoke_id"]) == me)
+        samples = [s for s in data.get("samples") or [] if _mine(s)]
+        self.storage_perf.add("truenas", samples)
 
     async def _spoke_msg_le_cert_renewed(self, conn, msg_data, payload, dec_secret):
         """LE cert renewed → re-push the material to its targets now.
