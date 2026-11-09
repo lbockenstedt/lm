@@ -1907,6 +1907,21 @@ def create_app(hub):
                 },
             )
 
+    @app.middleware("http")
+    async def perf_timing_middleware(request, call_next):
+        """Record per-route latency (route template, never the raw path) for the health report."""
+        t0 = time.time()
+        resp = await call_next(request)
+        try:
+            route = getattr(request.scope.get("route"), "path", None)
+            if route and not route.startswith(("/assets", "/static")):
+                import perf_telemetry
+                perf_telemetry.TELEMETRY.record_route(
+                    request.method, route, time.time() - t0, resp.status_code)
+        except Exception:  # noqa: BLE001 - telemetry must never break a request
+            pass
+        return resp
+
     # ── Security response headers (outermost: decorates last → wraps everything) ─
     # HSTS is emitted ONLY when cookies are served Secure (``_cookie_secure()``),
     # i.e. when the hub is reachable over TLS — emitting HSTS over plaintext

@@ -147,10 +147,17 @@ async def inventory_devices(hub):
         if not community and not pinned:
             skipped += 1
             continue
+        # A box seen at several addresses is polled over its out-of-band port when the
+        # cached interface data shows which address that is.
+        oobm_ip = ""
+        getter = getattr(hub, "nw_cache_get_device", None)
+        if d.get("id") and callable(getter) and d.get("alt_addresses"):
+            from nw_discovery_sync import nw_oobm_address
+            oobm_ip = nw_oobm_address(d, getter(str(d["id"]), "interfaces"))
         # The row the monitoring spoke syncs into Zabbix (IP without any /prefix).
         row = {"tenant": tenant, "name": d.get("name"),
                "type": d.get("type") or d.get("object_type") or d.get("model") or "",
-               "ip": str(d.get("address") or "").split("/")[0],
+               "ip": oobm_ip or str(d.get("address") or "").split("/")[0],
                "snmp": bool(community), "snmp_community": community}
         if members:
             # Proxies to try after the group's own: its member tenants'.
