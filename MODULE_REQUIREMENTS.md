@@ -29,3 +29,13 @@ When a user selects a category:
 
 ## Module Developer Requirements
 Any new module must be assigned to one of the predefined classes. The module must implement a standard set of command interfaces for its class to ensure the "Stitched View" and category-based navigation work seamlessly.
+
+### Credentials must live in the Credential Vault
+Any new module that holds a connection secret (API key, token, password) MUST store it in the Credential Vault whenever the vault is enabled. Never persist the secret inline in `global_config`.
+- Add the product's secret fields to `SECRET_FIELDS` in `core/src/instance_vault.py`; add its storage key to `VAULT_REQUIRED` if it cannot work without the secret.
+- The stored record keeps only a non-secret `vault_credential: {bucket, name}` reference.
+- On create/update routes call `instance_vault.validate_ref` then `strip_inline_secrets`.
+- At push time (spoke connect and fleet push) call `overlay` / `overlay_many` on a copy so the secret reaches the spoke without being stored.
+- List routes must never return the secret; expose a boolean such as `api_key_set`.
+- In the WebUI device type set `vaultPicker: true`, `vaultRequired: true` and `vaultSecret: true` on the secret field (see `DEVICE_TYPES.firewall`/`truenas` in `module-management.js`).
+- Add a test in `core/tests/test_instance_vault.py` covering the missing-reference rejection and the overlay.
