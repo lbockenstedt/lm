@@ -1,7 +1,7 @@
 # Dual-Copy / Twin Pairs — authoritative reference
 
 All paths relative to the workspace root (`/Users/lbockenstedt/vscode`, the nw.git
-checkout that holds the sibling repos `lm/`, `cs/`, `pxmx/`, `dns/`, `dhcp/`, …).
+checkout that holds the sibling repos `lm/`, `cs/`, `pxmx/`, `netbox/`, …).
 
 Sync-rule legend:
 - **byte** — must be byte-identical; one side is canonical, the other is a `cp`.
@@ -76,12 +76,18 @@ intent" parity still need a human.
 - Note the separate but related engine `cs/lm-spoke/src/sim_quota_engine.py`
   (spoke-side placement/harvest/stacking) has no hub twin — don't confuse it.
 
-## 6. dns / dhcp  — dual module copies  (twin, drift-prone)
-- `dns/`  ⇄  `lm/dns/`   and   `dhcp/`  ⇄  `lm/dhcp/`
-- These intentionally exist in two shapes (standalone module repo + the copy
-  under `lm/`). **Don't delete either.** When you touch one, port to the other.
-- (The workspace root itself is the nw.git checkout — see the memory
-  `vscode-root-is-nw-checkout-and-dns-dhcp-dual-shape`.)
+## 6. dns / dhcp  — NOT twins (standalone repos archived)
+- The `lbockenstedt/dns` and `lbockenstedt/dhcp` repos are **archived**. The
+  only live code is `lm/dns/` and `lm/dhcp/` (each with its own `src/` and
+  `tests/`). There is nothing to port: edit the lm copy and you are done.
+- The agent loads these roles from lm: `_ROLE_MAP` in
+  `lm/agent/src/agent_spoke.py` gives the `dns` and `dhcp` roles a `repo_url`
+  of `None`, so they update with lm, not from a module repo.
+- Lesson (lm `b6c82e0a`): a fix landed in a copy that is not run, and the
+  resolvers kept answering "Unknown command". Always confirm you are editing
+  the path that actually runs.
+- Ignore any leftover `dns/` or `dhcp/` checkout at the workspace root; never
+  copy changes into it.
 
 ## 7. hub ⇄ cs-spoke twin for SHARED client-sim modules  (twin)
 - A fix to a client-simulation module that exists on BOTH the hub and the cs
@@ -112,25 +118,25 @@ intent" parity still need a human.
 
 ---
 
-## 10. CI/CD pipeline files  — 16-way copies across every repo  (byte)
+## 10. CI/CD pipeline files  — copies across every active repo  (byte)
 - CANONICAL: `.pipeline-templates/{bump_version.py,promote.sh,promote.yml,selftest.sh}`
   (in the workspace-root `nw` repo)
-- COPIES: in **all 16 repos** (`lm cs pxmx ab cppm dns dhcp ldap le netbox
-  nw opnsense qa kvm truenas tsa`) as
+- COPIES: in **every active repo** (`lm cs pxmx ab cppm ldap le netbox
+  nw opnsense qa kvm truenas tsa zabbix`; dns/dhcp are archived) as
   `<repo>/.github/scripts/bump_version.py`, `<repo>/.github/scripts/promote.sh`,
   `<repo>/.github/scripts/promotion_selftest.sh` (from `selftest.sh`) and
   `<repo>/.github/workflows/promote.yml`.
 - Rule: **byte-identical**. Each repo runs its own GitHub Actions and cannot
   import from a sibling repo, so every repo ships its own copy. Fixing a
   promotion bug in one repo and not the rest means that repo promotes correctly
-  and the other fifteen keep the old behaviour — silently, because promotion
+  and the others keep the old behaviour — silently, because promotion
   still "succeeds".
 - These enforce that **VERSION is branch-owned**: dev's version never leaks into
   qa/main, and each promotion advances only the target's own sequence.
 - Edit the canonical, then re-run the distribute loop:
   ```bash
   cd /Users/lbockenstedt/vscode
-  for r in lm cs pxmx ab cppm dns dhcp ldap le netbox opnsense qa kvm truenas tsa .; do
+  for r in lm cs pxmx ab cppm ldap le netbox opnsense qa kvm truenas tsa zabbix .; do
     cp .pipeline-templates/bump_version.py .pipeline-templates/promote.sh $r/.github/scripts/
     cp .pipeline-templates/selftest.sh $r/.github/scripts/promotion_selftest.sh
     cp .pipeline-templates/promote.yml  $r/.github/workflows/promote.yml
@@ -139,7 +145,7 @@ intent" parity still need a human.
   ```
 - Verify (drift sweep):
   ```bash
-  for r in lm cs pxmx ab cppm dns dhcp ldap le netbox opnsense qa kvm truenas tsa .; do
+  for r in lm cs pxmx ab cppm ldap le netbox opnsense qa kvm truenas tsa zabbix .; do
     for f in scripts/bump_version.py scripts/promote.sh workflows/promote.yml; do
       c=.pipeline-templates/$(basename $f); [ "$(basename $f)" = promote.yml ] && c=.pipeline-templates/promote.yml
       cmp -s $c $r/.github/$f || echo "DRIFT: $r/.github/$f"
@@ -147,7 +153,7 @@ intent" parity still need a human.
   done
   ```
 - `nw/tests/test_promotion_pipeline.py` pins the behaviour, but it only runs in
-  the `nw` repo — it cannot catch drift in the other fifteen copies. Use the
+  the `nw` repo — it cannot catch drift in the other copies. Use the
   sweep above.
 
 ---

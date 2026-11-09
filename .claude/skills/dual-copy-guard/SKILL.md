@@ -5,12 +5,13 @@ description: >-
   workspace, or when asked to audit for drift between duplicated files. This
   codebase deliberately keeps several files in lockstep (the two sim-views.js
   copies, the canonical vs generated common.sh, the common.sh↔common.ps1
-  parity, the sim_quota.py hub/spoke twin, linux↔windows client scripts, the
-  dns/dhcp dual copies). Editing one copy and forgetting the other silently
-  half-ships a change — this skill finds every pair, detects drift, and syncs
-  it the correct direction. Invoke it after touching any client script,
-  sim-views.js, common.sh/ps1, sim_quota.py, or a dns/dhcp module, and any time
-  you want a full drift sweep.
+  parity, the sim_quota.py hub/spoke twin, linux↔windows client scripts).
+  The dns/dhcp modules are NOT twins: their standalone repos are archived and
+  `lm/dns/` + `lm/dhcp/` are the only live copies. Editing one copy and
+  forgetting the other silently half-ships a change — this skill finds every
+  pair, detects drift, and syncs it the correct direction. Invoke it after
+  touching any client script, sim-views.js, common.sh/ps1 or sim_quota.py,
+  and any time you want a full drift sweep.
 ---
 
 # Dual-Copy Guard

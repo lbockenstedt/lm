@@ -54,12 +54,42 @@ promote_hop() {
       [ "${last%% *}" = "failure" ] && return 1
       return 0
     fi
-    # Checks must finish green; a short sleep lets them register first.
-    sleep 15
-    if ! gh pr checks "$n" -R "$OWNER/$repo" --watch -i 20 >/dev/null 2>&1; then
+    # Checks must finish green. The promote run may force-push the branch while
+    # we watch, cancelling the run being watched, so judge by a fresh look:
+    # gh exits 0 = all passed, 8 = still pending (watch again), else failed.
+    local rc=8 tries=0
+    while [ $rc -eq 8 ] && [ $tries -lt 6 ]; do
+      sleep 15
+      gh pr checks "$n" -R "$OWNER/$repo" --watch -i 20 >/dev/null 2>&1
+      gh pr checks "$n" -R "$OWNER/$repo" >/dev/null 2>&1; rc=$?
+      tries=$((tries + 1))
+    done
+    if [ $rc -ne 0 ]; then
       echo "[$repo] PR #$n checks failed -- not merging: https://github.com/$OWNER/$repo/pull/$n"
       return 1
     fi
+    # Green listed checks are not enough: a required check that has not
+    # registered yet leaves the PR BLOCKED. Wait for GitHub to call it CLEAN.
+    local state="" w=0
+    while [ $w -lt 1200 ]; do
+      state=$(gh pr view "$n" -R "$OWNER/$repo" --json mergeStateStatus -q .mergeStateStatus 2>/dev/null)
+      case "$state" in CLEAN|HAS_HOOKS|UNSTABLE) break ;; DIRTY) break ;; esac
+      sleep 20; w=$((w + 20))
+      # A head pushed with GITHUB_TOKEN starts no CI, so the required check
+      # never appears. Close + reopen (as this user) once to start it.
+      if [ $w -eq 120 ] && [ "$state" = BLOCKED ]; then
+        echo "[$repo] PR #$n still BLOCKED -- reopening to start missing checks"
+        gh pr close "$n" -R "$OWNER/$repo" >/dev/null 2>&1
+        gh pr reopen "$n" -R "$OWNER/$repo" >/dev/null 2>&1
+        sleep 20
+      fi
+      # A late check may have started: watch it through before looking again.
+      gh pr checks "$n" -R "$OWNER/$repo" --watch -i 20 >/dev/null 2>&1
+    done
+    case "$state" in CLEAN|HAS_HOOKS|UNSTABLE) ;; *)
+      echo "[$repo] PR #$n is $state -- not merging: https://github.com/$OWNER/$repo/pull/$n"
+      return 1 ;;
+    esac
     gh pr merge "$n" -R "$OWNER/$repo" --merge >/dev/null || {
       echo "[$repo] PR #$n merge refused: https://github.com/$OWNER/$repo/pull/$n"; return 1; }
     echo "[$repo] merged #$n into $tgt"
