@@ -87,6 +87,55 @@ _DEFAULT_QUIET_ACCESS_PATHS = _QUIET_ACCESS_ALL
 _ACCESS_LINE_RE = re.compile(r'"[A-Z]+\s+(?P<path>\S+)\s+HTTP/\d\S*"\s+(?P<status>\d{3})')
 
 
+class _OpnsenseTimeoutFilter(logging.Filter):
+    """Log recurring curl connect timeouts once per endpoint per five minutes.
+
+    Installed on the originating logger so local files and the hub relay see
+    the same records. Requests and their error responses are unchanged.
+    """
+
+    _pattern = re.compile(
+        r"Curl request failed for (\S+): curl: \(28\) "
+        r"Connection timed out after \d+ milliseconds\s*\Z")
+
+    def __init__(self):
+        super().__init__()
+        self._timeouts = {}
+        self._lock = threading.Lock()
+
+    def filter(self, record):
+        # Only this known failure path pays for parsing, locking or timekeeping.
+        if (record.name != "OpnsenseEngine" or record.levelno != logging.ERROR
+                or record.exc_info):
+            return True
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        match = self._pattern.fullmatch(message)
+        if not match:
+            return True
+        endpoint = match.group(1)
+        with self._lock:
+            now = time.monotonic()
+            previous = self._timeouts.get(endpoint)
+            if previous is not None and now - previous[0] < 300.0:
+                self._timeouts[endpoint] = (previous[0], previous[1] + 1)
+                return False
+            suppressed = previous[1] if previous is not None else 0
+            # Bound memory even if targets change repeatedly. Eviction permits
+            # a fresh diagnostic rather than hiding a previously unseen target.
+            self._timeouts.pop(endpoint, None)
+            if len(self._timeouts) >= 256:
+                self._timeouts.pop(next(iter(self._timeouts)))
+            self._timeouts[endpoint] = (now, 0)
+        if suppressed:
+            record.msg = message.rstrip() + (
+                f" [suppressed {suppressed} repeated connect timeouts since last log]")
+            record.args = ()
+        return True
+
+
 class _QuietSuccessAccessFilter(logging.Filter):
     """Drop successful (status < 400) uvicorn.access lines so routine request
     chatter stays out of the hub log; failing requests (4xx/5xx) still log so
@@ -380,6 +429,12 @@ def configure_logging(default_level: int = logging.INFO, *,
         _lg = logging.getLogger(_lname)
         if not any(isinstance(f, _QuietUvicornLifecycleFilter) for f in _lg.filters):
             _lg.addFilter(_QuietUvicornLifecycleFilter())
+
+    # Filter at the source, before both local handlers and SPOKE_LOG relay.
+    # Keep the existing window across repeated logging configuration calls.
+    opnsense_logger = logging.getLogger("OpnsenseEngine")
+    if not any(isinstance(f, _OpnsenseTimeoutFilter) for f in opnsense_logger.filters):
+        opnsense_logger.addFilter(_OpnsenseTimeoutFilter())
 
     # Start the 50 MB circular-log watchdog. Derive the log dir from log_file
     # when given, else the canonical /var/log/lm (CS + some spokes call
