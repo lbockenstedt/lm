@@ -1573,9 +1573,9 @@ function _tnTrendHover(evt, id) {
 }
 
 // Performance chart range: a preset (seconds back from now) or a custom start/end.
-// 7 days is the default and comes from the hub's copy; any other range is
-// read from the spoke, which stores the 5-minute averages.
-let _tnRange = { preset: 604800 };
+// The last hour is the default and comes from the hub's warm cache; any other
+// range is read from the spoke, which stores 7 days of 5-minute averages.
+let _tnRange = { preset: 3600 };
 let _tnPerfFleet = [];
 
 function _tnSetRange(preset) {
@@ -1594,8 +1594,8 @@ async function _tnLoadTrends() {
     const now = Date.now() / 1000;
     const t1 = _tnRange.preset ? now : _tnRange.end;
     const t0 = _tnRange.preset ? now - _tnRange.preset : _tnRange.start;
-    // The default range needs no query: the hub serves its copy.
-    const qs = _tnRange.preset === 604800 ? '' : `?start=${Math.floor(t0)}&end=${Math.ceil(t1)}`;
+    // The default range needs no query: the hub serves it from its warm cache.
+    const qs = _tnRange.preset === 3600 ? '' : `?start=${Math.floor(t0)}&end=${Math.ceil(t1)}`;
     document.querySelectorAll('[data-tn-range]').forEach(b => {
         const on = String(_tnRange.preset || 'custom') === b.dataset.tnRange;
         b.className = `px-2 py-1 rounded ${on ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`;
@@ -1734,7 +1734,7 @@ async function loadTruenasData(subMenu) {
         }
 
         // ---- Live performance: one card per appliance ----
-        if (subMenu === 'Performance') {
+        if (subMenu === 'Overview') {
             let fleet = [];
             try {
                 const dr = await fetch(`/api/truenas/appliances${tenantQs}`);
@@ -1777,9 +1777,9 @@ async function loadTruenasData(subMenu) {
                 const p = _extract(res.value) || {};
                 const d = p.disks || {};
                 const stale = res.value && res.value.stale ? ' <span class="text-xs text-amber-600 font-normal">(last poll — spoke offline)</span>' : '';
-                const ifRows = (Array.isArray(p.interfaces) ? p.interfaces : []).map(f => `<tr>
+                const ifRows = (Array.isArray(p.interfaces) ? p.interfaces : [])
+                    .filter(f => f.link_state === 'LINK_STATE_UP').map(f => `<tr>
                     <td class="px-4 py-2 font-mono text-xs">${escapeHtml(f.name || '')}</td>
-                    <td class="px-4 py-2 text-xs ${f.link_state === 'LINK_STATE_UP' ? 'text-green-600' : 'text-slate-500'}">${f.link_state === 'LINK_STATE_UP' ? 'up' : 'down'}</td>
                     <td class="px-4 py-2 font-mono text-xs">${num(f.speed) ? `${f.speed} Mb/s` : '—'}</td>
                     <td class="px-4 py-2 font-mono text-xs">${rate(f.received_bytes_rate)}</td>
                     <td class="px-4 py-2 font-mono text-xs">${rate(f.sent_bytes_rate)}</td></tr>`).join('');
@@ -1795,14 +1795,15 @@ async function loadTruenasData(subMenu) {
                     </div>
                     ${ifRows ? `<div class="mt-3 overflow-x-auto rounded-md border border-slate-200 bg-white">
                         <table class="w-full text-left text-sm">
-                            <thead class="bg-slate-100 text-slate-600 text-xs"><tr><th class="px-4 py-2">INTERFACE</th><th class="px-4 py-2">LINK</th><th class="px-4 py-2">SPEED</th><th class="px-4 py-2">RECEIVE</th><th class="px-4 py-2">SEND</th></tr></thead>
+                            <thead class="bg-slate-100 text-slate-600 text-xs"><tr><th class="px-4 py-2">INTERFACE</th><th class="px-4 py-2">SPEED</th><th class="px-4 py-2">RECEIVE</th><th class="px-4 py-2">SEND</th></tr></thead>
                             <tbody class="divide-y divide-slate-200">${ifRows}</tbody>
                         </table></div>` : ''}
                     ${trends}
                 </div>`;
             }).join('')}
-            <div class="text-xs text-slate-500">Tiles are a live sample from each appliance (all disks combined); charts are 5-minute averages, kept 7 days by the storage spoke. <button onclick="loadTruenasData('Performance')" class="text-emerald-600 hover:text-emerald-800 font-medium ml-1">Refresh</button></div>
+            <div class="text-xs text-slate-500">Tiles are a live sample from each appliance (all disks combined); charts are 5-minute averages, kept 7 days by the storage spoke. <button data-tn-refresh class="text-emerald-600 hover:text-emerald-800 font-medium ml-1">Refresh</button></div>
             </div>`;
+            container.querySelector('[data-tn-refresh]').addEventListener('click', () => loadTruenasData('Overview'));
             container.querySelectorAll('[data-tn-range]').forEach(b => b.addEventListener('click', () => {
                 const v = b.dataset.tnRange;
                 _tnSetRange(v === 'custom' ? v : Number(v));

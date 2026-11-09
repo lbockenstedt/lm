@@ -1232,7 +1232,7 @@ function initView(viewId, subView) {
             loadLEData(subView || 'Certificates');
             break;
         case 'truenas':
-            loadTruenasData(subView || 'Appliances');
+            loadTruenasData(subView || 'Overview');
             break;
         case 'cs':
             loadCSData(subView || 'Dashboard', currentSubChild);
