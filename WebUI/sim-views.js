@@ -7681,14 +7681,14 @@ async function csRenderSetupCentralApi() {
         // Dev clusters: third element is the cluster's own SSO token URL.
         ['Dev - Cordelia', 'https://cnx-apigw-cordelia.arubadev.cloud.hpe.com', 'https://pavo-sso.common.cloud.hpe.com/as/token.oauth2'],
     ];
-    window._csCentralClusters = CENTRAL_CLUSTERS;
+    _csCentralClusters = CENTRAL_CLUSTERS;
     const clusterField = `<label class="text-xs text-slate-500">Cluster URL
-      <input id="cs-csc-cluster" list="cs-central-clusters" value="${csEscape(hc.cluster_url || '')}" oninput="csCentralClusterPick('cs-csc')" placeholder="select a known cluster or type a custom URL" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+      <input id="cs-csc-cluster" list="cs-central-clusters" value="${csEscape(hc.cluster_url || '')}" data-cs-central-pick="cs-csc" placeholder="select a known cluster or type a custom URL" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
       <datalist id="cs-central-clusters">${CENTRAL_CLUSTERS.map(([region, url]) => `<option value="${url}" label="${csEscape(region)}">`).join('')}</datalist>
     </label>
     <div class="md:col-span-2">
       <label class="text-xs text-slate-500 inline-flex items-center gap-2">
-        <input id="cs-csc-ssoovr" type="checkbox" ${hc.token_url ? 'checked' : ''} onchange="csCentralSsoToggle('cs-csc')"> Override SSO token URL (dev / private clusters)
+        <input id="cs-csc-ssoovr" type="checkbox" ${hc.token_url ? 'checked' : ''} data-cs-central-sso="cs-csc"> Override SSO token URL (dev / private clusters)
       </label>
       <input id="cs-csc-tokenurl" value="${csEscape(hc.token_url || '')}" placeholder="https://…/as/token.oauth2" class="${hc.token_url ? '' : 'hidden '}w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
       <span class="block text-xs text-slate-500 mt-1">Unticked: the default HPE SSO (or GreenLake when a workspace is set) is used.</span>
@@ -7889,20 +7889,29 @@ window.csCscMonSync = function () {
 
 // Picking a known cluster that has its own SSO fills + ticks the override;
 // picking a standard cluster clears it. Typed custom URLs leave it alone.
-window.csCentralClusterPick = function (pre) {
+let _csCentralClusters = [];
+function csCentralClusterPick(pre) {
     const url = ((csEl(pre + '-cluster') || {}).value || '').trim().replace(/\/+$/, '');
-    const hit = (window._csCentralClusters || []).find(c => c[1] === url);
+    const hit = _csCentralClusters.find(c => c[1] === url);
     if (!hit) return;
     const box = csEl(pre + '-ssoovr'), tok = csEl(pre + '-tokenurl');
     if (!box || !tok) return;
     box.checked = !!hit[2];
     tok.value = hit[2] || '';
     csCentralSsoToggle(pre);
-};
-window.csCentralSsoToggle = function (pre) {
+}
+function csCentralSsoToggle(pre) {
     const box = csEl(pre + '-ssoovr'), tok = csEl(pre + '-tokenurl');
     if (box && tok) tok.classList.toggle('hidden', !box.checked);
-};
+}
+document.addEventListener('input', e => {
+    const pre = e.target.closest && e.target.closest('[data-cs-central-pick]');
+    if (pre) csCentralClusterPick(pre.getAttribute('data-cs-central-pick'));
+});
+document.addEventListener('change', e => {
+    const pre = e.target.closest && e.target.closest('[data-cs-central-sso]');
+    if (pre) csCentralSsoToggle(pre.getAttribute('data-cs-central-sso'));
+});
 
 window.csSaveCentralConn = async function () {
     const v = id => (csEl(id) && csEl(id).value) || '';
@@ -8024,14 +8033,14 @@ async function csRenderSetupCentralOnPremApi() {
         // Dev clusters: third element is the cluster's own SSO token URL.
         ['Dev - Cordelia', 'https://cnx-apigw-cordelia.arubadev.cloud.hpe.com', 'https://pavo-sso.common.cloud.hpe.com/as/token.oauth2'],
     ];
-    window._csCentralClusters = CENTRAL_CLUSTERS;
+    _csCentralClusters = CENTRAL_CLUSTERS;
     const clusterField = `<label class="text-xs text-slate-500">Cluster URL
-      <input id="cs-cop-csc-cluster" list="cs-central-clusters" value="${csEscape(hc.cluster_url || '')}" oninput="csCentralClusterPick('cs-cop-csc')" placeholder="select a known cluster or type a custom URL" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+      <input id="cs-cop-csc-cluster" list="cs-central-clusters" value="${csEscape(hc.cluster_url || '')}" data-cs-central-pick="cs-cop-csc" placeholder="select a known cluster or type a custom URL" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
       <datalist id="cs-central-clusters">${CENTRAL_CLUSTERS.map(([region, url]) => `<option value="${url}" label="${csEscape(region)}">`).join('')}</datalist>
     </label>
     <div class="md:col-span-2">
       <label class="text-xs text-slate-500 inline-flex items-center gap-2">
-        <input id="cs-cop-csc-ssoovr" type="checkbox" ${hc.token_url ? 'checked' : ''} onchange="csCentralSsoToggle('cs-cop-csc')"> Override SSO token URL (dev / private clusters)
+        <input id="cs-cop-csc-ssoovr" type="checkbox" ${hc.token_url ? 'checked' : ''} data-cs-central-sso="cs-cop-csc"> Override SSO token URL (dev / private clusters)
       </label>
       <input id="cs-cop-csc-tokenurl" value="${csEscape(hc.token_url || '')}" placeholder="https://…/as/token.oauth2" class="${hc.token_url ? '' : 'hidden '}w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
       <span class="block text-xs text-slate-500 mt-1">Unticked: the default HPE SSO (or GreenLake when a workspace is set) is used.</span>
