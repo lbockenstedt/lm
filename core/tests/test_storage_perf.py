@@ -52,3 +52,77 @@ def test_handler_keeps_only_known_appliances_of_this_spoke(tmp_path):
             t.cancel()
     asyncio.new_event_loop().run_until_complete(_go())
     assert sorted(hub.storage_perf.series) == ["truenas:bound", "truenas:mine"]
+
+
+def _route_app(connected):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from routes import truenas
+
+    class _Hub:
+        def __init__(self, tmp):
+            self.storage_perf = StoragePerfStore(lambda: tmp)
+            self.state = types.SimpleNamespace(system_state={"global_config": {
+                "truenas_appliances": [{"id": "a1", "tenant_id": "acme", "spoke_id": "tn-1"}]}})
+            self.active_connections = {"tn-1": object()} if connected else {}
+            self.feeds, self.calls, self.reads = {}, [], []
+
+        def _primary_key(self, s):
+            return s
+
+        def get_truenas_spoke_for_tenant(self, tid):
+            return ""
+
+        def cache_register_feed(self, name, fn):
+            self.feeds[name] = fn
+
+        async def cache_read(self, ns, key, fetch, **kw):
+            self.reads.append((ns, key))
+            return await fetch()
+
+        def cache_annotate(self, resp, ns, key):
+            return dict(resp, cached_at=1)
+
+        async def request_response(self, sid, cmd, payload, timeout=0):
+            self.calls.append((cmd, payload))
+            return {"payload": {"data": {"status": "SUCCESS", "data": [{"ts": 1}]}}}
+
+    import tempfile
+    app = FastAPI()
+    hub = _Hub(tempfile.mkdtemp())
+    app.state.hub = hub
+    truenas.register(app, hub, types.SimpleNamespace(
+        _session_user=lambda r: {"user": {"role": "admin"}}, _is_admin=lambda s: True,
+        _is_tenant_admin=lambda s: True))
+    return TestClient(app), hub
+
+
+def test_default_history_is_the_warm_cached_last_hour(monkeypatch):
+    import access
+    monkeypatch.setattr(access, "is_admin", lambda s: True)
+    client, hub = _route_app(connected=True)
+    # The feed keeps every appliance's last hour warm.
+    jobs = list(hub.feeds["truenas"](hub))
+    assert [(j.ns, j.key) for j in jobs] == [("truenas_perf_recent", "a1")]
+    body = client.get("/api/truenas/a1/performance/history").json()
+    assert hub.reads == [("truenas_perf_recent", "a1")]
+    assert body["source"] == "spoke" and body["cached_at"] == 1
+    cmd, payload = hub.calls[-1]
+    assert cmd == "TRUENAS_GET_PERF_HISTORY"
+    assert 3590 <= payload["end"] - payload["start"] <= 3610
+    # Any other range goes straight to the spoke, not the cache.
+    client.get("/api/truenas/a1/performance/history?start=100&end=200")
+    assert hub.calls[-1][1]["start"] == 100 and len(hub.reads) == 1
+
+
+def test_history_falls_back_to_the_hub_copy_when_the_spoke_is_offline(monkeypatch):
+    import access
+    monkeypatch.setattr(access, "is_admin", lambda s: True)
+    client, hub = _route_app(connected=False)
+    ts = (int(__import__("time").time()) // 300) * 300 - 300
+    hub.storage_perf.add("truenas", [_sample("a1", ts, 7)])
+    for t in list(hub.storage_perf._file._tasks):
+        t.cancel()
+    body = client.get("/api/truenas/a1/performance/history").json()
+    assert body["source"] == "hub" and body["data"][0]["metrics"]["write_ops"] == 7
+    assert hub.calls == []

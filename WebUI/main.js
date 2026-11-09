@@ -2236,7 +2236,7 @@ const VIEW_SUBMENUS = {
     dns: ['Overview', 'Records', 'Forwarders', 'Overrides', 'External DNS', 'Diagnostics'],
     dhcp: ['Overview', 'Subnets', 'Leases', 'Reservations', 'Diagnostics'],
     nw: ['Overview', 'Gateways', 'Switches', 'Firewalls', 'IPMI', 'Other', 'Topology', 'Scan'],
-    truenas: ['Appliances', 'Pools', 'Datasets', 'Shares', 'Disks', 'Alerts', 'Capacity', 'Performance'],
+    truenas: ['Overview', 'Appliances', 'Pools', 'Datasets', 'Shares', 'Disks', 'Alerts', 'Capacity'],
     zabbix: ['Overview'],
 };
 
