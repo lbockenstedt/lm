@@ -952,6 +952,7 @@ def test_pending_reboots_follows_the_running_run():
 class _VmHub(_RecordingHub):
     """A spoke that runs in Proxmox VM 101 on pve1; its agent is the PVE host."""
     fail_snapshot = False
+    fail_message = "storage full"
 
     def warm_get(self, ns, key):
         return {"vms": [{"unique_id": "C/pve1/101", "name": "spoke1", "vmid": 101,
@@ -963,7 +964,7 @@ class _VmHub(_RecordingHub):
     async def request_response(self, target, cmd, data, timeout=None):
         if cmd == "PXMX_VM_ACTION" and data["action"] == "snapshot" and self.fail_snapshot:
             self.sent.append((target, cmd, dict(data)))
-            return {"payload": {"data": {"status": "ERROR", "message": "storage full"}}}
+            return {"payload": {"data": {"status": "ERROR", "message": self.fail_message}}}
         return await super().request_response(target, cmd, data, timeout)
 
 
@@ -1009,6 +1010,20 @@ async def test_a_failed_snapshot_means_the_node_is_not_patched():
     item = hub._osu_state()["run"]["items"][0]
     assert item["status"] == "failed" and "storage full" in item["message"]
     assert item["cause"] == "pre-patch VM snapshot failed: storage full"
+
+
+@pytest.mark.asyncio
+async def test_storage_that_cannot_snapshot_is_patched_with_a_warning():
+    hub = _vm_hub()
+    hub.fail_snapshot = True
+    hub.fail_message = 'failed: {"exitstatus":"snapshotfeatureisnotavailable"}'
+    await hub.osu_check_fleet(refresh=False)
+    hub.sent.clear()
+    await hub.osu_apply_fleet(node_keys=["spoke:spoke-1"])
+    await _drain()
+    assert [s for s in hub.sent if s[1] == "OS_UPDATE_APPLY"]
+    item = hub._osu_state()["run"]["items"][0]
+    assert item["status"] == "done" and "does not support snapshots" in item["warning"]
 
 
 @pytest.mark.asyncio
