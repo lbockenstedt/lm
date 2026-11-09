@@ -1,0 +1,91 @@
+name: Fleet rules (reusable)
+
+# The deterministic checks AB and the Copilot sessions apply to every change,
+# run in CI so a hand-made push gets them too. Each fleet repo calls this from
+# a thin .github/workflows/fleet-rules.yml on pushes and PRs to dev only:
+# promotion PRs into qa/main carry commits that already passed here.
+#
+#   fleet rules  ab/fleet_checks.py -- secrets/vault, WebUI ratchet, UUIDs in
+#                UI, comments/docstrings, docs-updated ... (errors block)
+#   ruff         syntax/undefined-name errors the change INTRODUCES (block)
+#   twins        files that must stay identical across copies (same-repo
+#                drift blocks, cross-repo drift warns)
+#   pip-audit    only when a requirements file changed (report only)
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  rules:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # PR: diff against the target branch tip. Push: against the previous tip.
+      BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+      # Branch the other repos' twin copies are read from.
+      TWIN_BRANCH: ${{ github.base_ref || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # The rules and the helper scripts live in ab and lm; both are public,
+      # so a plain sparse checkout of main needs no token.
+      - name: Check out fleet rules (ab)
+        uses: actions/checkout@v4
+        with:
+          repository: lbockenstedt/ab
+          ref: main
+          path: _ab
+          sparse-checkout: |
+            fleet_checks.py
+            fleet_rules.md
+          sparse-checkout-cone-mode: false
+      - name: Check out CI helpers (lm)
+        # lm uses its own checkout, so helper changes are tested on lm dev
+        # before any other repo sees them.
+        if: github.repository != 'lbockenstedt/lm'
+        uses: actions/checkout@v4
+        with:
+          repository: lbockenstedt/lm
+          ref: main
+          path: _lmci
+          sparse-checkout: .github
+      - name: Locate CI helpers
+        run: |
+          if [ "$GITHUB_REPOSITORY" = lbockenstedt/lm ]; then h=.; else h=_lmci; fi
+          echo "HELPERS=$h" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - name: Install linters
+        run: python -m pip install -q ruff
+      - name: Fleet code rules
+        run: python _ab/fleet_checks.py --base "$BASE" --repo "$GITHUB_REPOSITORY"
+      - name: Ruff (new errors only)
+        if: always()
+        run: python "$HELPERS/.github/scripts/ruff_new.py" --base "$BASE"
+      - name: Twin files in sync
+        if: always()
+        run: >-
+          python "$HELPERS/.github/scripts/check_twins.py"
+          --repo "${{ github.event.repository.name }}" --branch "$TWIN_BRANCH"
+          --twins "$HELPERS/.github/twins.json" --root .
+      - name: Dependency audit (requirements changed)
+        if: always()
+        # Advisory: a CVE in a pinned dependency is worth seeing on the PR but
+        # is not something the author of an unrelated change can always fix.
+        continue-on-error: true
+        run: |
+          if [ -z "${BASE//0/}" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            echo "no usable base; skipped"; exit 0
+          fi
+          reqs=$(git diff --name-only --diff-filter=AM "$BASE...HEAD" -- '*requirements*.txt' | grep -v '^_' || true)
+          if [ -z "$reqs" ]; then echo "no requirements change"; exit 0; fi
+          python -m pip install -q pip-audit
+          rc=0
+          for r in $reqs; do
+            echo "::group::$r"; pip-audit -r "$r" --progress-spinner off || rc=1; echo "::endgroup::"
+          done
+          if [ $rc -ne 0 ]; then echo "::warning title=pip-audit::vulnerable dependency in $reqs"; fi

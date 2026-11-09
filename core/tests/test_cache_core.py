@@ -301,3 +301,16 @@ def test_is_a_stdlib_leaf():
             imported.add(node.module.split(".")[0])
     assert imported <= {"asyncio", "glob", "hashlib", "json", "logging", "os", "re",
                         "time", "typing", "zlib", "__future__"}, f"non-stdlib import: {imported}"
+
+
+def test_every_persisted_cache_uses_the_shared_flush_delay():
+    """Write frequency is ONE setting (cache_core.DEFAULT_FLUSH_DELAY_S): no module
+    may pass its own flush_delay_s to a cache constructor."""
+    import glob
+    import re
+    src = os.path.join(os.path.dirname(__file__), "..", "src")
+    assert cache_core.DEFAULT_FLUSH_DELAY_S == 300.0
+    for path in glob.glob(os.path.join(src, "*.py")):
+        if path.endswith("cache_core.py"):
+            continue
+        assert not re.search(r"flush_delay_s\s*=", open(path).read()), path

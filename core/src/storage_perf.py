@@ -28,7 +28,7 @@ class StoragePerfStore:
         self.series: Dict[str, List[Dict[str, Any]]] = {}
         self._file = JsonCacheFile(
             "storage perf", lambda: os.path.join(cache_dir_fn(), "storage_perf.json"),
-            lambda: {"series": self.series}, flush_delay_s=60.0)
+            lambda: {"series": self.series})
 
     def load(self) -> None:
         data = self._file.load() or {}
