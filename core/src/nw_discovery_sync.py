@@ -1280,12 +1280,79 @@ class NwDiscoverySyncMixin:
                                device_id, payload["device"]["name"],
                                netbox_push["status"] or "error",
                                netbox_push["message"] or "no message")
+            # With the device written, check whether NetBox holds look-alike stubs of it.
+            if netbox_push["status"] == "SUCCESS" and not netbox_push["errors"]:
+                asyncio.ensure_future(self.nw_merge_stubs_by_live_poll(
+                    device_cfg, str(device_info.get("serial", "") or "")))
             # Return the summary, any errors, and the tenant slug used.
             return netbox_push, errors, tenant_slug
         # The push call itself failed; report it without raising.
         except Exception as e:
             errors.append(f"netbox push: {e}")
             return {"status": "ERROR", "message": str(e)}, errors, tenant_slug
+
+    _NW_STUB_PROBE_TTL_S = 86400
+    _NW_STUB_PROBE_MAX = 5
+
+    async def nw_merge_stubs_by_live_poll(self, device_cfg: Dict[str, Any], serial: str) -> int:
+        """Fold NetBox stubs of this box into its record, proven by a live poll.
+
+        Another feeder (firewall ARP/DHCP) can file a switch's VLAN address as a
+        device of its own with no serial. For each such stub in the same /16, ask
+        the nw spoke to read device info from the stub's IP using THIS device's
+        credentials; when the IP answers with this device's serial it is the same
+        box, and NetBox merges the stub into the polled device (keeping its
+        history). Each (stub, device) pair is tried at most once a day. Never raises."""
+        merged = 0
+        try:
+            import ipaddress
+            addr = str(device_cfg.get("address") or "").strip()
+            spoke_id = str(device_cfg.get("spoke_id") or "").strip()
+            if (not serial or not addr or str(device_cfg.get("object_type") or "").lower() == "ipmi"):
+                return 0
+            nw_spokes = list(self.get_all_spokes_by_type("nw") or [])
+            if not spoke_id or spoke_id not in nw_spokes:
+                spoke_id = nw_spokes[0] if nw_spokes else ""
+            netbox = self.get_spoke_by_type(self._NW_DISCOVERY_TARGET_MODULE)
+            if not (spoke_id and netbox):
+                return 0
+            net = ipaddress.ip_network(f"{addr}/16", strict=False)
+            rr = await self.request_response(netbox, "NETBOX_LIST_STUBS", {}, timeout=120.0)
+            stubs = (unwrap_spoke(rr) or {}).get("stubs") or []
+            cache = self.__dict__.setdefault("_nw_stub_probe_cache", {})
+            now = time.time()
+            probes = 0
+            for st in stubs:
+                ip = str(st.get("ip") or "")
+                try:
+                    inside = ipaddress.ip_address(ip) in net
+                except ValueError:
+                    continue
+                key = (st.get("id"), device_cfg.get("id"))
+                if not inside or ip == addr or now - cache.get(key, 0) < self._NW_STUB_PROBE_TTL_S:
+                    continue
+                if probes >= self._NW_STUB_PROBE_MAX:
+                    break
+                probes += 1
+                cache[key] = now
+                info = unwrap_spoke(await self.request_response(
+                    spoke_id, "NW_GET_DEVICE_INFO",
+                    {"device_id": device_cfg.get("id"), "address": ip}, timeout=60.0)) or {}
+                got = str((info.get("data") or {}).get("serial") or "").strip() \
+                    if isinstance(info.get("data"), dict) else ""
+                if not got or got.casefold() != serial.casefold():
+                    continue
+                res = unwrap_spoke(await self.request_response(
+                    netbox, "NETBOX_MERGE_STUB",
+                    {"stub_id": st.get("id"), "nw_device_id": device_cfg.get("id"),
+                     "serial": serial}, timeout=120.0)) or {}
+                if res.get("merged"):
+                    merged += 1
+                    logger.info("nw: merged NetBox stub %s (%s) into %s by live poll (serial %s)",
+                                st.get("name"), ip, device_cfg.get("name"), serial)
+        except Exception as e:  # best-effort
+            logger.debug("nw stub merge for %s: %s", device_cfg.get("id"), e)
+        return merged
 
     def _nw_record_site(self, device_cfg: Dict[str, Any], site: Any) -> None:
         """Keep the NetBox site (from the site-scoped prefix of its address)
