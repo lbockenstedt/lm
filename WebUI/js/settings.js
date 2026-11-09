@@ -2259,7 +2259,7 @@ function _elevPlate(dev) {
     return `background-image:url("data:image/svg+xml,${encodeURIComponent(svg)}");background-size:auto var(--elev-uh,20px);background-repeat:repeat;`;
 }
 
-function _elevFaceTable(units, faceLabel, uHeight) {
+function _elevFaceTable(units, faceLabel, uHeight, otherUnits) {
     // NetBox-style elevation: dark rails carrying the U numbers on both sides,
     // light slots between them, and each device drawn as ONE block anchored at
     // its bottom U with its own height (so neighbours can never overlap).
@@ -2272,6 +2272,17 @@ function _elevFaceTable(units, faceLabel, uHeight) {
         e.lo = Math.min(e.lo, Number(u.unit));
         devs.set(d.id, e);
     });
+    // Side-by-side half-width chassis face the same way; NetBox can only hold
+    // them as one per face of the U, so draw both on the front view only.
+    if (faceLabel === 'Front') {
+        (otherUnits || []).forEach(u => {
+            const d = u && u.device;
+            if (!d || !d.half_width || d.id == null || u.unit == null || devs.has(d.id)) return;
+            devs.set(d.id, { dev: d, lo: Number(u.unit) });
+        });
+    } else {
+        devs.forEach((e, id) => { if (e.dev.half_width) devs.delete(id); });
+    }
     const H = uHeight > 0 ? uHeight : Math.max(0, ...units.map(u => (u && u.unit) || 0));
     if (!H) {
         return `<div class="elev-face flex-1 min-w-0">
@@ -2291,9 +2302,9 @@ function _elevFaceTable(units, faceLabel, uHeight) {
     // Half-width chassis (e.g. Aruba CX 9004) sit two to a U: lane 0 left, 1 right.
     devs.forEach(e => { _elevDevices[e.dev.id] = e.dev; });
     const lane = new Map();
-    const seen = {};
-    [...devs.values()].filter(e => e.dev.half_width).sort((x, y) => x.dev.id - y.dev.id)
-        .forEach(e => { lane.set(e.dev.id, (seen[e.lo] = (seen[e.lo] || 0) + 1) - 1); });
+    // Front face = left lane, rear face = right lane (name order sets the face).
+    [...devs.values()].filter(e => e.dev.half_width)
+        .forEach(e => { lane.set(e.dev.id, e.dev.face === 'rear' ? 1 : 0); });
     const blocks = [...devs.values()].map(({ dev, lo }) => {
         const half = lane.has(dev.id);
         const lx = half ? (lane.get(dev.id) % 2 ? 'left:50%;right:0;' : 'left:0;right:50%;') : 'left:0;right:0;';
@@ -2312,10 +2323,10 @@ function _elevFaceTable(units, faceLabel, uHeight) {
             data-elev-dev="${Number(dev.id)}"
             style="${lx}top:calc(${uh} * ${top} + 1px);height:calc(${uh} * ${h} - 2px);background:#2a2f38;border:1px ${inactive ? 'dashed' : 'solid'} #0b0d10;${inactive ? 'opacity:.55;' : ''}">
             <div class="w-1.5 shrink-0" style="background:#${color}"></div>
-            <div class="absolute inset-y-0 right-0" style="left:42%;${_elevPlate(dev)}opacity:.92"></div>
-            <div class="relative min-w-0 px-1.5 flex items-center gap-1.5 text-white" style="max-width:62%;background:linear-gradient(90deg,rgba(20,23,28,.92) 75%,rgba(20,23,28,0))">
-                ${_elevIcon(dev)}
-                <div class="min-w-0 flex-1"><div class="font-semibold truncate leading-tight" style="font-size:11px;text-shadow:0 1px 1px #000">${escapeHtml(dev.name || '')}</div>${detail}</div>
+            <div class="absolute inset-y-0 right-0" style="left:${h >= 2 ? 42 : 80}%;${_elevPlate(dev)}opacity:.92"></div>
+            <div class="relative min-w-0 px-1.5 flex items-center gap-1.5 text-white" style="max-width:${h >= 2 ? 62 : 86}%;background:linear-gradient(90deg,rgba(20,23,28,.92) 75%,rgba(20,23,28,0))">
+                ${h >= 2 ? _elevIcon(dev) : ''}
+                <div class="min-w-0 flex-1"><div class="font-semibold leading-tight ${h >= 2 ? '' : 'truncate'}" style="font-size:${h >= 2 ? 11 : 10}px;${h >= 2 ? 'word-break:break-all;' : ''}text-shadow:0 1px 1px #000">${escapeHtml(dev.name || '')}</div>${detail}</div>
             </div>
         </div>`;
     }).join('');
@@ -2414,7 +2425,7 @@ async function showRackElevationModal(rackId) {
         // present if u_height is missing so the grid still fits.
         const maxUnit = Math.max(0, ...front.concat(rear).map(u => (u && u.unit) || 0));
         const uHeight = (r.u_height && r.u_height > 0) ? r.u_height : maxUnit;
-        const grid = `<div class="elev-grid flex gap-4 items-start" data-uheight="${uHeight}" style="--elev-uh:20px">${_elevFaceTable(front, 'Front', uHeight)}${_elevFaceTable(rear, 'Rear', uHeight)}</div>`;
+        const grid = `<div class="elev-grid flex gap-4 items-start" data-uheight="${uHeight}" style="--elev-uh:20px">${_elevFaceTable(front, 'Front', uHeight, rear)}${_elevFaceTable(rear, 'Rear', uHeight, front)}</div>`;
         const zero = d.zero_u || [];
         const zeroHtml = zero.length ? `<div class="mt-4">
             <div class="text-xs font-bold text-slate-500 mb-1">0U / side</div>
