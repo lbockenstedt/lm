@@ -23,7 +23,7 @@ class _Hub:
         if cmd == "GET_ENDPOINT_DETAIL":
             return {"payload": {"data": dict(self.ep)}}
         self.lease_calls.append((sid, timeout))
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.5)
         leases = [{"mac": "08:76:71:08:7d:81", "ip": "10.1.1.9", "hostname": "cam"}] if sid == "fw-2" else []
         return {"payload": {"data": leases}}
 
@@ -47,9 +47,12 @@ def _route(hub):
 
 def test_firewalls_are_queried_in_parallel_with_short_timeout():
     hub = _Hub({"mac": "087671087d81"})
+    # Parse/compile the route before starting the clock: on a busy CI runner
+    # that alone took >0.15s and made this test flaky.
+    route = _route(hub)
     t0 = time.monotonic()
-    ep = asyncio.run(_route(hub)(object(), "087671087d81"))
-    assert time.monotonic() - t0 < 0.35          # both firewalls at once, not 0.4s
+    ep = asyncio.run(route(object(), "087671087d81"))
+    assert time.monotonic() - t0 < 0.7           # both firewalls at once (0.5s), not one after another (1.0s)
     assert ep["ip"] == "10.1.1.9" and ep["sources"]["ip"] == "DHCP"
     assert all(t and t <= 10 for _, t in hub.lease_calls)
 
