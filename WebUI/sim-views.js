@@ -7678,11 +7678,21 @@ async function csRenderSetupCentralApi() {
         ['UAE-North-1', 'https://ae1.api.central.arubanetworks.com'],
         ['China', 'https://cn1.api.central.arubanetworks.com.cn'],
         ['Internal', 'https://internal.api.central.arubanetworks.com'],
+        // Dev clusters: third element is the cluster's own SSO token URL.
+        ['Dev - Cordelia', 'https://cnx-apigw-cordelia.arubadev.cloud.hpe.com', 'https://pavo-sso.common.cloud.hpe.com/as/token.oauth2'],
     ];
+    _csCentralClusters = CENTRAL_CLUSTERS;
     const clusterField = `<label class="text-xs text-slate-500">Cluster URL
-      <input id="cs-csc-cluster" list="cs-central-clusters" value="${csEscape(hc.cluster_url || '')}" placeholder="select a known cluster or type a custom URL" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+      <input id="cs-csc-cluster" list="cs-central-clusters" value="${csEscape(hc.cluster_url || '')}" data-cs-central-pick="cs-csc" placeholder="select a known cluster or type a custom URL" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
       <datalist id="cs-central-clusters">${CENTRAL_CLUSTERS.map(([region, url]) => `<option value="${url}" label="${csEscape(region)}">`).join('')}</datalist>
-    </label>`;
+    </label>
+    <div class="md:col-span-2">
+      <label class="text-xs text-slate-500 inline-flex items-center gap-2">
+        <input id="cs-csc-ssoovr" type="checkbox" ${hc.token_url ? 'checked' : ''} data-cs-central-sso="cs-csc"> Override SSO token URL (dev / private clusters)
+      </label>
+      <input id="cs-csc-tokenurl" value="${csEscape(hc.token_url || '')}" placeholder="https://…/as/token.oauth2" class="${hc.token_url ? '' : 'hidden '}w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+      <span class="block text-xs text-slate-500 mt-1">Unticked: the default HPE SSO (or GreenLake when a workspace is set) is used.</span>
+    </div>`;
 
     const connCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <h3 class="text-sm font-bold text-slate-500 mb-2">Central API Connection ${helpIcon('cs', null, 'Simulations help')}</h3>
@@ -7877,11 +7887,38 @@ window.csCscMonSync = function () {
     window._csCscMonitoredChecks = checks;
 };
 
+// Picking a known cluster that has its own SSO fills + ticks the override;
+// picking a standard cluster clears it. Typed custom URLs leave it alone.
+let _csCentralClusters = [];
+function csCentralClusterPick(pre) {
+    const url = ((csEl(pre + '-cluster') || {}).value || '').trim().replace(/\/+$/, '');
+    const hit = _csCentralClusters.find(c => c[1] === url);
+    if (!hit) return;
+    const box = csEl(pre + '-ssoovr'), tok = csEl(pre + '-tokenurl');
+    if (!box || !tok) return;
+    box.checked = !!hit[2];
+    tok.value = hit[2] || '';
+    csCentralSsoToggle(pre);
+}
+function csCentralSsoToggle(pre) {
+    const box = csEl(pre + '-ssoovr'), tok = csEl(pre + '-tokenurl');
+    if (box && tok) tok.classList.toggle('hidden', !box.checked);
+}
+document.addEventListener('input', e => {
+    const pre = e.target.closest && e.target.closest('[data-cs-central-pick]');
+    if (pre) csCentralClusterPick(pre.getAttribute('data-cs-central-pick'));
+});
+document.addEventListener('change', e => {
+    const pre = e.target.closest && e.target.closest('[data-cs-central-sso]');
+    if (pre) csCentralSsoToggle(pre.getAttribute('data-cs-central-sso'));
+});
+
 window.csSaveCentralConn = async function () {
     const v = id => (csEl(id) && csEl(id).value) || '';
     const mode = v('cs-csc-mode');
     const hub_central_config = {
         cluster_url: v('cs-csc-cluster'),
+        token_url: (csEl('cs-csc-ssoovr') && csEl('cs-csc-ssoovr').checked) ? v('cs-csc-tokenurl').trim() : '',
         client_id: v('cs-csc-clientid'),
         customer_id: v('cs-csc-customerid'),
         api_version: mode === 'central' ? 'new_central' : 'classic',
@@ -7993,11 +8030,21 @@ async function csRenderSetupCentralOnPremApi() {
         ['UAE-North-1', 'https://ae1.api.central.arubanetworks.com'],
         ['China', 'https://cn1.api.central.arubanetworks.com.cn'],
         ['Internal', 'https://internal.api.central.arubanetworks.com'],
+        // Dev clusters: third element is the cluster's own SSO token URL.
+        ['Dev - Cordelia', 'https://cnx-apigw-cordelia.arubadev.cloud.hpe.com', 'https://pavo-sso.common.cloud.hpe.com/as/token.oauth2'],
     ];
+    _csCentralClusters = CENTRAL_CLUSTERS;
     const clusterField = `<label class="text-xs text-slate-500">Cluster URL
-      <input id="cs-cop-csc-cluster" list="cs-central-clusters" value="${csEscape(hc.cluster_url || '')}" placeholder="select a known cluster or type a custom URL" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+      <input id="cs-cop-csc-cluster" list="cs-central-clusters" value="${csEscape(hc.cluster_url || '')}" data-cs-central-pick="cs-cop-csc" placeholder="select a known cluster or type a custom URL" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
       <datalist id="cs-central-clusters">${CENTRAL_CLUSTERS.map(([region, url]) => `<option value="${url}" label="${csEscape(region)}">`).join('')}</datalist>
-    </label>`;
+    </label>
+    <div class="md:col-span-2">
+      <label class="text-xs text-slate-500 inline-flex items-center gap-2">
+        <input id="cs-cop-csc-ssoovr" type="checkbox" ${hc.token_url ? 'checked' : ''} data-cs-central-sso="cs-cop-csc"> Override SSO token URL (dev / private clusters)
+      </label>
+      <input id="cs-cop-csc-tokenurl" value="${csEscape(hc.token_url || '')}" placeholder="https://…/as/token.oauth2" class="${hc.token_url ? '' : 'hidden '}w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+      <span class="block text-xs text-slate-500 mt-1">Unticked: the default HPE SSO (or GreenLake when a workspace is set) is used.</span>
+    </div>`;
 
     const connCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <h3 class="text-sm font-bold text-slate-500 mb-2">Central On-Prem API Connection ${helpIcon('central-on-prem', null, 'Central On-Prem help')}</h3>
@@ -8197,6 +8244,7 @@ window.csSaveCentralOnPremConn = async function () {
     const mode = v('cs-cop-csc-mode');
     const hub_central_on_prem_config = {
         cluster_url: v('cs-cop-csc-cluster'),
+        token_url: (csEl('cs-cop-csc-ssoovr') && csEl('cs-cop-csc-ssoovr').checked) ? v('cs-cop-csc-tokenurl').trim() : '',
         client_id: v('cs-cop-csc-clientid'),
         customer_id: v('cs-cop-csc-customerid'),
         api_version: mode === 'central' ? 'new_central' : 'classic',
