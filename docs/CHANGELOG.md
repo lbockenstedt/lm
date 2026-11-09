@@ -10,6 +10,45 @@ first. This is a pointer index, not the source of truth — each entry links to
 the module doc that describes the behaviour in full. Internal refactors and
 CI/tooling changes are omitted unless they change what an operator sees.
 
+## Week of 2026-11-09
+
+### NetBox auto-rack
+
+- **Devices are racked from their name.** `MIPBE-SSPLM-N31-R45-VPNC1` goes to
+  rack N31, RU 45 (`R45R` = rear, `R43H` = half width, lower-numbered device on
+  the left). Rack height comes from NetBox or the LLM. Renamed devices are
+  renamed in place in NetBox, keeping history, and are racked on the next flush
+  (about 15 minutes after the poll). See [netbox.md](netbox.md#auto-rack-rack-placement-from-the-device-name).
+- **NetBox → Rack Placement** lists conflicts and devices that cannot be
+  racked, with a **Re-check now** button.
+- **Duplicate stubs are merged.** Firewall/ARP entries for the same switch are
+  folded into the polled device, by shared base MAC or by polling the stub's IP
+  and matching the serial.
+- **Rack elevation** looks like NetBox: U rails, device blocks with front-panel
+  artwork per device type, half-width chassis side by side, longer names, and
+  loads faster (parallel reads). **Click a device** for everything the search
+  shows, now including Zabbix monitoring and DNS records.
+
+### Network devices
+
+- New **IPMI** object type (iLO/iDRAC/BMC) with vendor-neutral identity
+  (serial, host model, MAC); a server's iLO is linked to it by serial.
+- Switch and gateway serials/MACs/models are read at poll time on CX, AOS-S and
+  gateways.
+
+### Storage (TrueNAS)
+
+- Storage opens on an **Overview** tab and loads from the background cache.
+- **Performance** tab charts IOPS and throughput over a selectable range
+  (7 days of averages are stored); down interfaces are hidden.
+- TrueNAS appliances can use an API-key user; SNMP hosts are typed `truenas` for
+  Zabbix.
+
+### Monitoring
+
+- Only SNMP-verified devices are sent to Zabbix, with an IPAM **Monitor**
+  toggle; seen hosts join Zabbix under their sysName.
+
 ## Week of 2026-11-02
 
 ### DNS
