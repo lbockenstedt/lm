@@ -2036,16 +2036,18 @@ async function _renderMonitoring(container) {
     const down = shown.filter(h => h.availability === 'unavailable').length;
     const probs = shown.reduce((n, h) => n + (h.problem_count || (h.problems || []).length), 0);
     const tile = (label, val, cls) => `<div class="rounded border border-slate-200 px-4 py-3"><div class="text-xs text-slate-500">${label}</div><div class="text-2xl font-semibold ${cls || 'text-slate-700'}">${val}</div></div>`;
-    const hostRows = shown.map(h => `<tr class="border-t border-slate-100">
-        <td class="px-3 py-2 text-xs font-medium text-slate-700">${escapeHtml(h.name)}</td>
-        <td class="px-3 py-2 text-xs text-slate-500">${escapeHtml(h.tenant)}</td>
-        <td class="px-3 py-2 text-xs font-mono text-slate-500">${escapeHtml(h.ip)}</td>
-        <td class="px-3 py-2 text-xs text-slate-500">${h.method}</td>
-        <td class="px-3 py-2 text-xs"><span class="px-2 py-0.5 rounded ${availCls[h.availability] || availCls.unknown}" title="${escapeHtml(h.error || '')}">${h.availability}${h.enabled ? '' : ' (disabled)'}</span></td>
-        <td class="px-3 py-2 text-xs text-slate-600">${(h.problems || []).map(p => `<div>${escapeHtml(sevName[p.severity] || '')}: ${escapeHtml(p.name)}</div>`).join('') || '<span class="text-slate-500">none</span>'}</td>
-    </tr>`).join('');
+    const hostRows = shown.map(h => {
+        const pl = (h.problems || []).map(p => `<div>${escapeHtml(sevName[p.severity] || '')}: ${escapeHtml(p.name)}</div>`).join('') || '<span class="text-slate-500">none</span>';
+        return `<tr class="border-t border-slate-100">
+        <td class="px-3 pt-2 pb-0 text-xs font-medium text-slate-700 whitespace-nowrap">${escapeHtml(h.name)}</td>
+        <td class="px-3 pt-2 pb-0 text-xs text-slate-500">${escapeHtml(h.tenant)}</td>
+        <td class="px-3 pt-2 pb-0 text-xs font-mono text-slate-500">${escapeHtml(h.ip)}</td>
+        <td class="px-3 pt-2 pb-0 text-xs text-slate-500">${h.method}</td>
+        <td class="px-3 pt-2 pb-0 text-xs"><span class="px-2 py-0.5 rounded ${availCls[h.availability] || availCls.unknown}" title="${escapeHtml(h.error || '')}">${h.availability}${h.enabled ? '' : ' (disabled)'}</span></td>
+    </tr><tr><td colspan="5" class="px-3 pt-0 pb-2 text-xs text-slate-600">${pl}</td></tr>`;
+    }).join('');
     const table = shown.length
-        ? `<table class="w-full text-left mt-4"><thead><tr class="text-xs text-slate-500"><th class="px-3 py-2">Device</th><th class="px-3 py-2">Tenant</th><th class="px-3 py-2">Address</th><th class="px-3 py-2">Method</th><th class="px-3 py-2">Status</th><th class="px-3 py-2">Problems</th></tr></thead><tbody>${hostRows}</tbody></table>`
+        ? `<table class="w-full text-left mt-4"><thead><tr class="text-xs text-slate-500"><th class="px-3 py-2 whitespace-nowrap min-w-[28rem]">Device / Problems</th><th class="px-3 py-2">Tenant</th><th class="px-3 py-2">Address</th><th class="px-3 py-2">Method</th><th class="px-3 py-2">Status</th></tr></thead><tbody>${hostRows}</tbody></table>`
         : `<div class="py-8 text-center text-slate-500 italic">No monitored devices${tenant ? ` for tenant "${escapeHtml(tenant)}"` : ''}.</div>`;
     const info = admin ? `<div class="mt-4 text-xs text-slate-500">Zabbix ${escapeHtml(String(res.version || '?'))} · ${escapeHtml(String(res.managed_hosts ?? '?'))} managed hosts</div>` : '';
     const sevCls = ['bg-slate-100 text-slate-600', 'bg-sky-100 text-sky-700', 'bg-yellow-100 text-yellow-800', 'bg-amber-100 text-amber-800', 'bg-orange-100 text-orange-800', 'bg-red-100 text-red-700'];
