@@ -24,7 +24,7 @@ async def test_store_merges_repeats_drops_old_and_persists(tmp_path):
     store.add("truenas", [_sample("a1", NOW - 300, 250)], now=NOW)
     rows = store.get("truenas", "a1", now=NOW)
     assert [(r["ts"], r["metrics"]["write_ops"]) for r in rows] == [(NOW - 600, 100), (NOW - 300, 250)]
-    assert store.get("truenas", "a1", days=0.005, now=NOW) == rows[1:]
+    assert store.get("truenas", "a1", start=NOW - 400, now=NOW) == rows[1:]
     for t in list(store._file._tasks):
         t.cancel()
     await store.flush_now()

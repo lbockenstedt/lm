@@ -1,9 +1,12 @@
 """7 days of 5-minute storage performance averages, per device.
 
-Storage spokes average their own samples and push them as
-``STORAGE_PERF_SAMPLE`` ``{module, samples: [{device_id, ts, samples, metrics}]}``.
-This keeps them in memory, keyed ``<module>:<device_id>``, and persists them to
-``<cache_dir>/storage_perf.json``. Not tied to Zabbix or to any one array type.
+Storage spokes average their own samples, keep 7 days on their own disk, and
+push each average as ``STORAGE_PERF_SAMPLE``
+``{module, samples: [{device_id, ts, samples, metrics}]}``. The hub keeps this
+copy (keyed ``<module>:<device_id>``, persisted to
+``<cache_dir>/storage_perf.json``) so the default 7-day chart loads instantly
+and survives the spoke being offline; other ranges are read from the spoke.
+Not tied to Zabbix or to any one array type.
 
 A leaf: stdlib + cache_core only.
 """
@@ -61,8 +64,12 @@ class StoragePerfStore:
             self._file.schedule_save()
         return sum(len(rows) for rows in new.values())
 
-    def get(self, module: str, device_id: str, days: float = 7, now: float = None) -> List[Dict[str, Any]]:
-        """The device's averages from the last ``days`` days, oldest first."""
+    def get(self, module: str, device_id: str, start: float = None, end: float = None,
+            now: float = None) -> List[Dict[str, Any]]:
+        """The device's averages with ``start <= ts <= end`` (default: the
+        last 7 days), oldest first."""
         now = time.time() if now is None else now
-        since = now - min(max(days, 0), 7) * 86400
-        return [r for r in self.series.get(f"{module}:{device_id}", []) if r["ts"] >= since]
+        start = now - KEEP_S if start is None else start
+        end = now if end is None else end
+        return [r for r in self.series.get(f"{module}:{device_id}", [])
+                if start <= r["ts"] <= end]
