@@ -3413,7 +3413,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 if not mine:
                     mine = [a for a in appliances if isinstance(a, dict) and not a.get("spoke_id")]
                 # Build the payload with deep copies, the shared tenant and default poll interval.
-                config = {"appliances": [_copy.deepcopy(a) for a in mine],
+                import instance_vault as _instance_vault
+                config = {"appliances": await _instance_vault.overlay_many(
+                              self, [_copy.deepcopy(a) for a in mine], "truenas_appliances"),
                           "shared_tenant_id": _access.shared_tenant_id() or "",
                           "default_poll_interval":
                               self.state.get_global_config().get("truenas_poll_default_interval")}

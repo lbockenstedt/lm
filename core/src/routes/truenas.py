@@ -13,6 +13,7 @@ from api import (
 )
 import time
 
+import instance_vault
 from warm_cache import ALL_SCOPE, CacheJob
 
 
@@ -74,8 +75,11 @@ def register(app, hub, ctx):
         if not spoke_id or hub._primary_key(spoke_id) not in hub.active_connections:
             return False
         # Payload: this spoke's appliances, the shared tenant id, and the default poll interval.
-        payload = {"appliances": _project_truenas_appliances_for_push(
-                        _truenas_appliances_for_spoke(hub, spoke_id)),
+        # Vault-backed API keys are resolved onto copies here, never stored.
+        payload = {"appliances": await instance_vault.overlay_many(
+                        hub, _project_truenas_appliances_for_push(
+                            _truenas_appliances_for_spoke(hub, spoke_id)),
+                        "truenas_appliances"),
                    "shared_tenant_id": access.shared_tenant_id() or "",
                    "default_poll_interval":
                        (hub.state.system_state.get("global_config", {}) or {})
@@ -526,9 +530,8 @@ def register(app, hub, ctx):
             if not isinstance(a, dict):
                 continue
             aa = dict(a)
-            if "api_key" in aa:
-                aa["api_key_set"] = bool(aa.get("api_key"))
-                del aa["api_key"]
+            aa["api_key_set"] = bool(aa.get("api_key")) or instance_vault.has_vault_ref(aa)
+            aa.pop("api_key", None)
             out.append(aa)
         return {"truenas_appliances": out}
 
@@ -585,6 +588,12 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=400, detail="Missing appliance name or host")
             # Check the spoke binding and stamp the record's tenant.
             _enforce_tenant_bind(request, new_app, "TrueNAS appliance")
+            # With the Credential Vault on, the API key must come from it; the
+            # inline key is never persisted once a reference is set.
+            sess = _session_user(request)
+            await instance_vault.validate_ref(
+                hub, new_app, sess, is_admin=_is_admin(sess), storage_key="truenas_appliances")
+            instance_vault.strip_inline_secrets(new_app, "truenas_appliances")
             # Give it an id if none was supplied, and mark its object type.
             if "id" not in new_app:
                 new_app["id"] = str(uuid.uuid4())
@@ -631,6 +640,10 @@ def register(app, hub, ctx):
                 update_data["api_key"] = appliances[idx].get("api_key", "")
             # Apply the changes and mark state for saving.
             appliances[idx].update(update_data)
+            sess = _session_user(request)
+            await instance_vault.validate_ref(
+                hub, appliances[idx], sess, is_admin=_is_admin(sess), storage_key="truenas_appliances")
+            instance_vault.strip_inline_secrets(appliances[idx], "truenas_appliances")
             hub.state.system_state["global_config"] = global_config
             hub.state._mark_dirty()
             # Push to the bound spoke; "partial_success" means saved but not pushed.

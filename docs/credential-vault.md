@@ -151,7 +151,8 @@ value.
   (`nw_devices`) → `password` / `enable_secret` / `api_token` / `snmp_community`;
   **NetBox/IPAM** (`ipam_instances`) → `api_token`; **firewalls**
   (`firewalls`) → `api_key` / `api_secret` (an "API key + secret" secret,
-  or a "Login" secret whose `username`/`password` alias onto them). On save the inline secret is stripped and the ref
+  or a "Login" secret whose `username`/`password` alias onto them); **TrueNAS**
+  (`truenas_appliances`) → `api_key`. On save the inline secret is stripped and the ref
   validated; at push time `instance_vault.overlay()` fills the field(s) the
   resolved secret carries before the config reaches the spoke — this covers the
   add/update routes (`routes/firewall.py`, `routes/tenant_devices.py`) AND the
