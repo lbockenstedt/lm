@@ -42,12 +42,14 @@ def _clean_ip(value: Any) -> str:
         return ""
 
 
-def monitor_type(host: Dict[str, Any], default: str) -> str:
+def monitor_type(host: Dict[str, Any], default: str, use_object_type: bool = True) -> str:
     """Monitoring type of an SNMP host: picks its Zabbix template. Appliances
     the scanner does not manage are recognised from their sysDescr."""
     descr = str((host.get("profile") or {}).get("sys_descr") or "").lower()
     if descr.startswith(("truenas", "freenas")):
         return "truenas"
+    if not use_object_type:
+        return default
     return str(host.get("object_type") or default)
 
 
