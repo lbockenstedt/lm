@@ -299,5 +299,5 @@ def test_is_a_stdlib_leaf():
             imported.update(a.name.split(".")[0] for a in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
             imported.add(node.module.split(".")[0])
-    assert imported <= {"asyncio", "hashlib", "json", "logging", "os", "re",
+    assert imported <= {"asyncio", "glob", "hashlib", "json", "logging", "os", "re",
                         "time", "typing", "zlib", "__future__"}, f"non-stdlib import: {imported}"
