@@ -143,6 +143,31 @@ def nw_hardware_primaries(devices: List[Dict[str, Any]],
     return out
 
 
+# Interface names of a switch's out-of-band management port (Aruba CX "mgmt",
+# AOS-S "oobm", Cisco "mgmt0"/"Management", Juniper "fxp0"/"me0").
+_OOBM_IFACE_RE = re.compile(r"^(mgmt\d*|oobm\d*|management\d*|me0|fxp0|em0)$", re.I)
+
+
+def nw_oobm_address(device: Dict[str, Any], interfaces: Any) -> str:
+    """The device address that sits on its out-of-band management port, or "".
+    A box found at several addresses (SVIs, loopbacks, OOBM) is monitored over the
+    OOBM one when polled interface data shows which address that is; ``interfaces``
+    is the cached interface rows ({name, ip}) or the envelope holding them."""
+    if isinstance(interfaces, dict):
+        interfaces = interfaces.get("data", interfaces)
+        if isinstance(interfaces, dict):
+            interfaces = interfaces.get("interfaces") or interfaces.get("rows")
+    mine = {str(a or "").split("/")[0].strip()
+            for a in [device.get("address")] + list(device.get("alt_addresses") or [])} - {""}
+    for r in interfaces or []:
+        if not isinstance(r, dict) or not _OOBM_IFACE_RE.match(str(r.get("name") or "").strip()):
+            continue
+        ip = str(r.get("ip") or "").split("/")[0].strip()
+        if ip in mine:
+            return ip
+    return ""
+
+
 class NwDiscoverySyncMixin:
     """Pulls the ARP table from every device on every connected nw spoke,
     attributes each IP↔MAC record to a tenant by prefix containment, and pushes

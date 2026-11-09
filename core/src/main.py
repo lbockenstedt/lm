@@ -53,6 +53,7 @@ import time
 # sys and psutil for process and host resource info.
 import sys
 import psutil
+import perf_telemetry as _perf_telemetry
 # os, socket, ipaddress, ssl: environment, networking, IP checks and TLS.
 import os
 import socket
@@ -1975,6 +1976,17 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
 
     async def request_response(self, spoke_id: str, command_type: str, data: Dict[str, Any], timeout: Optional[float] = None, signing_secret: Optional[str] = None) -> Dict[str, Any]:
+        """Timed wrapper: feeds per-command latency to the health report."""
+        t0 = time.time()
+        try:
+            return await LabManagerHub._request_response_impl(self, spoke_id, command_type, data, timeout, signing_secret)
+        finally:
+            try:
+                _perf_telemetry.TELEMETRY.record_command(self._spoke_label(spoke_id), command_type, time.time() - t0)
+            except Exception:  # noqa: BLE001 - telemetry must never affect the request
+                pass
+
+    async def _request_response_impl(self, spoke_id: str, command_type: str, data: Dict[str, Any], timeout: Optional[float] = None, signing_secret: Optional[str] = None) -> Dict[str, Any]:
         """
         Sends a command to a spoke and waits for its acknowledgement.
 
@@ -8721,6 +8733,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # Return all logs.
             if req_type == "GET_LOGS":
                 return await asyncio.to_thread(self.collect_all_logs)
+
+            # Slow routes/commands, timeouts and host load for AppBuilder's health check.
+            if req_type == "GET_HEALTH_REPORT":
+                return await asyncio.to_thread(_perf_telemetry.build_report, self)
 
             # Return only error lines.
             if req_type == "GET_ERROR_LOGS":
