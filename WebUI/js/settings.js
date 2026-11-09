@@ -2230,6 +2230,35 @@ function _elevIcon(dev) {
     return `<svg class="shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${_ELEV_ICONS[_elevIconKind(dev)]}</svg>`;
 }
 
+// Front-panel artwork per device kind (ports, drive bays, outlets), tiled one U
+// high so it scales with the rack like a real elevation drawing.
+const _ELEV_PLATES = {
+    switch: ['0 0 60 20', '<rect width="60" height="20" fill="#3a404a"/>' + [0, 1].map(r => Array.from({ length: 12 }, (_, i) =>
+        `<rect x="${3 + i * 4.6}" y="${r ? 11 : 4}" width="3.4" height="5" fill="#cfd4da"/><rect x="${3.7 + i * 4.6}" y="${r ? 12 : 5}" width="2" height="2.5" fill="#15181d"/>`).join('')).join('')
+        + '<circle cx="58" cy="6" r="1" fill="#4ade80"/><circle cx="58" cy="14" r="1" fill="#fbbf24"/>'],
+    gateway: ['0 0 60 20', '<rect width="60" height="20" fill="#3a404a"/>' + Array.from({ length: 8 }, (_, i) =>
+        `<rect x="${4 + i * 6}" y="6" width="4.5" height="8" fill="#cfd4da"/><rect x="${4.8 + i * 6}" y="7.5" width="2.9" height="4" fill="#15181d"/><circle cx="${6.2 + i * 6}" cy="3.6" r=".8" fill="#4ade80"/>`).join('')],
+    firewall: ['0 0 60 20', '<rect width="60" height="20" fill="#3a404a"/>' + Array.from({ length: 6 }, (_, i) =>
+        `<rect x="${4 + i * 7}" y="6" width="5" height="8" fill="#cfd4da"/><rect x="${5 + i * 7}" y="7.5" width="3" height="4" fill="#15181d"/>`).join('')
+        + '<circle cx="50" cy="6" r="1.2" fill="#4ade80"/><circle cx="54" cy="6" r="1.2" fill="#f87171"/><path d="M47 13h10M47 16h10" stroke="#6b7280" stroke-width="1"/>'],
+    server: ['0 0 48 20', '<rect width="48" height="20" fill="#2f343c"/>' + Array.from({ length: 4 }, (_, i) =>
+        `<rect x="${2 + i * 11.2}" y="3" width="10" height="14" rx="1" fill="#4b5260" stroke="#11141a" stroke-width=".6"/><rect x="${3 + i * 11.2}" y="14" width="8" height="1.5" fill="#cfd4da"/><circle cx="${9.5 + i * 11.2}" cy="5.5" r=".8" fill="#4ade80"/>`).join('')],
+    storage: ['0 0 40 20', '<rect width="40" height="20" fill="#2f343c"/>' + Array.from({ length: 5 }, (_, i) =>
+        `<rect x="${1.5 + i * 7.5}" y="2.5" width="6.5" height="15" rx="1" fill="#4b5260" stroke="#11141a" stroke-width=".6"/><rect x="${2.5 + i * 7.5}" y="13" width="4.5" height="1.5" fill="#cfd4da"/><circle cx="${6 + i * 7.5}" cy="5" r=".7" fill="#38bdf8"/>`).join('')],
+    patch: ['0 0 60 20', '<rect width="60" height="20" fill="#3a404a"/>' + Array.from({ length: 12 }, (_, i) =>
+        `<rect x="${3 + i * 4.6}" y="6" width="3.6" height="8" rx=".6" fill="#8b929c"/><rect x="${3.8 + i * 4.6}" y="8" width="2" height="4" fill="#15181d"/>`).join('')],
+    power: ['0 0 40 20', '<rect width="40" height="20" fill="#3a404a"/>' + Array.from({ length: 6 }, (_, i) =>
+        `<rect x="${2 + i * 6.2}" y="5" width="5" height="10" rx="1" fill="#e5e7eb"/><path d="M${3.4 + i * 6.2} 8.5v3M${5.6 + i * 6.2} 8.5v3" stroke="#15181d" stroke-width=".9"/>`).join('')],
+    bmc: ['0 0 40 20', '<rect width="40" height="20" fill="#2f343c"/><rect x="4" y="5" width="12" height="10" fill="#4b5260"/><circle cx="26" cy="10" r="2" fill="#4ade80"/><circle cx="32" cy="10" r="2" fill="#6b7280"/>'],
+    wireless: ['0 0 40 20', '<rect width="40" height="20" fill="#3a404a"/><circle cx="20" cy="10" r="4" fill="none" stroke="#cfd4da" stroke-width="1"/><circle cx="20" cy="10" r="1.3" fill="#4ade80"/>'],
+    generic: ['0 0 40 20', '<rect width="40" height="20" fill="#3a404a"/><circle cx="6" cy="10" r="1.2" fill="#4ade80"/><path d="M12 10h24" stroke="#6b7280" stroke-width="1"/>'],
+};
+function _elevPlate(dev) {
+    const [vb, body] = _ELEV_PLATES[_elevIconKind(dev)] || _ELEV_PLATES.generic;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${vb}" preserveAspectRatio="none">${body}</svg>`;
+    return `background-image:url("data:image/svg+xml,${encodeURIComponent(svg)}");background-size:auto var(--elev-uh,20px);background-repeat:repeat;`;
+}
+
 function _elevFaceTable(units, faceLabel, uHeight) {
     // NetBox-style elevation: dark rails carrying the U numbers on both sides,
     // light slots between them, and each device drawn as ONE block anchored at
@@ -2279,11 +2308,15 @@ function _elevFaceTable(units, faceLabel, uHeight) {
             ? `<div class="truncate opacity-90 leading-tight" style="font-size:10px">${escapeHtml(dev.model || '')}${dev.role ? ' · ' + escapeHtml(dev.role) : ''}</div>`
               + (dev.primary_ip && h >= 3 ? `<div class="font-mono truncate opacity-90 leading-tight" style="font-size:10px">${escapeHtml(dev.primary_ip)}</div>` : '')
             : '';
-        return `<div class="absolute overflow-hidden rounded-sm px-1.5 flex items-center gap-1.5 shadow-sm cursor-pointer hover:brightness-110" title="${escapeHtml(tip)} (click for details)"
+        return `<div class="absolute overflow-hidden rounded-sm flex items-stretch shadow-md cursor-pointer hover:brightness-125" title="${escapeHtml(tip)} (click for details)"
             data-elev-dev="${Number(dev.id)}"
-            style="${lx}top:calc(${uh} * ${top} + 1px);height:calc(${uh} * ${h} - 2px);background:#${color};color:${fg};border:1px ${inactive ? 'dashed' : 'solid'} rgba(0,0,0,.35);${inactive ? 'opacity:.6;' : ''}">
-            ${_elevIcon(dev)}
-            <div class="min-w-0 flex-1"><div class="font-semibold truncate leading-tight" style="font-size:11px">${escapeHtml(dev.name || '')}</div>${detail}</div>
+            style="${lx}top:calc(${uh} * ${top} + 1px);height:calc(${uh} * ${h} - 2px);background:#2a2f38;border:1px ${inactive ? 'dashed' : 'solid'} #0b0d10;${inactive ? 'opacity:.55;' : ''}">
+            <div class="w-1.5 shrink-0" style="background:#${color}"></div>
+            <div class="absolute inset-y-0 right-0" style="left:42%;${_elevPlate(dev)}opacity:.92"></div>
+            <div class="relative min-w-0 px-1.5 flex items-center gap-1.5 text-white" style="max-width:62%;background:linear-gradient(90deg,rgba(20,23,28,.92) 75%,rgba(20,23,28,0))">
+                ${_elevIcon(dev)}
+                <div class="min-w-0 flex-1"><div class="font-semibold truncate leading-tight" style="font-size:11px;text-shadow:0 1px 1px #000">${escapeHtml(dev.name || '')}</div>${detail}</div>
+            </div>
         </div>`;
     }).join('');
     return `<div class="elev-face flex-1 min-w-0">
