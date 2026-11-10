@@ -108,3 +108,24 @@ def test_servers_with_client_sim_off_are_hidden_but_keep_their_pool():
     saved = [p for _s, cmd, p in hub.calls if cmd == "CS_SET_PXMX_SITE_MAP"]
     assert saved and saved[0]["pxmx_site_map"] == {"pxmx-cs-svr-06": "Tenant-Wide Pool",
                                                    "pxmx-cs-svr-01": "FOO"}
+
+
+class _SpokeBridge:
+    """cs-a's only server has Client-Sim off; cs-b's server is active."""
+
+    def status_snapshot(self):
+        """One disabled and one active agent row, each on its own cs spoke."""
+        return {"agents": [
+            {"hostname": "pxmx-cs-svr-01", "host_spoke": "cs-a",
+             "decision": "SKIP not-enabled — client_simulation.enabled not set"},
+            {"hostname": "pxmx-cs-svr-04", "host_spoke": "cs-b", "decision": "ACTIVE — tenant=10"}]}
+
+
+def test_fleet_reclone_skips_spokes_whose_servers_have_client_sim_off():
+    hub = _Hub()
+    hub.cs_bridge = _SpokeBridge()
+    r = _client(hub).post("/sim/api/10/fleet-reclone?tenant_id=10", json={})
+    assert r.status_code == 200, r.text
+    assert r.json()["servers"] == 1
+    queued = [sid for sid, cmd, _p in hub.calls if cmd == "CS_QUEUE_COMMAND"]
+    assert queued == ["cs-b"]
