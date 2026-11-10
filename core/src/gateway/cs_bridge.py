@@ -52,6 +52,8 @@ import os
 import time
 from typing import Any, Dict, Optional
 
+from access import same_tenant
+
 # Module logger.
 logger = logging.getLogger("CSBridge")
 
@@ -269,6 +271,8 @@ class CSBridgePoller:
         agent_spokes = list(dict.fromkeys(
             hub.get_all_spokes_by_type("hypervisor") + hub.get_all_spokes_by_type("simulation")
         ))
+        cs_spokes = set(hub.get_all_spokes_by_type("Client-Sim")
+                        + hub.get_all_spokes_by_type("simulation"))
         # Counters for the cycle summary.
         now = time.time()
         n_agents = n_active = 0
@@ -326,6 +330,15 @@ class CSBridgePoller:
 
                 # Deliver queued commands to the agent.
                 await self._relay_inbox(host_spoke, cs_spoke, aid, hostname)
+                # Fleet-wide commands (Fleet Reclone, Clear USB quarantine) go to
+                # EVERY cs spoke of the tenant, and each spoke files its copy
+                # under the agents connected to it. Draining only the tenant's
+                # broker spoke left the copies for hosts on the other cs spokes
+                # sitting there until they expired, so also drain the agent's
+                # own cs spoke when it belongs to the same tenant.
+                if (host_spoke != cs_spoke and host_spoke in cs_spokes
+                        and same_tenant(self._spoke_tenant(host_spoke), tenant_id)):
+                    await self._relay_inbox(host_spoke, host_spoke, aid, hostname)
 
                 # Sync USB config when forced or when the interval has passed.
                 if (self._usb_resync_forced(tenant_id, now)
