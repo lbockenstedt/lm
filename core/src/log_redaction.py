@@ -352,3 +352,23 @@ def _fit_log_payload(all_logs: list, max_bytes: int) -> list:
         # Serialisation failure: fall back to the newest 1000 entries.
         logger.warning(f"_fit_log_payload size-cap failed: {e}")
         return all_logs[-1000:]  # safe fallback
+
+
+# Loggers whose lines never leave the hub for AppBuilder. Their lines name the
+# threat monitor's decoy paths, tripwires and blocked IPs. AB files issues in
+# PUBLIC GitHub repos from what it is sent, so these lines must not reach it:
+# that would show attackers the decoys exist and what they look like (the decoy
+# set is kept in a private repo for the same reason; see repo_policy.py). Security
+# events are already handled by the threat monitor (auto-block, Security page).
+_AB_HIDDEN_LOGGERS = (" - Security - ", " - ThreatMonitor - ")
+
+
+def is_security_line(line) -> bool:
+    """True if ``line`` comes from a security logger and must not be sent to AB."""
+    text = line.get("log", "") if isinstance(line, dict) else str(line or "")
+    return any(tag in text for tag in _AB_HIDDEN_LOGGERS)
+
+
+def drop_security_lines(lines: list) -> list:
+    """``lines`` without security-logger lines (plain strings or {"log": …} entries)."""
+    return [ln for ln in lines if not is_security_line(ln)]
