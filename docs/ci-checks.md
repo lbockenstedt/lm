@@ -5,15 +5,33 @@ session, or a hand-made push.
 
 | Workflow | Where | When | Blocks? |
 |---|---|---|---|
-| `ci.yml` | every repo | push to dev, every PR | yes: the required check on qa/main PRs |
-| `fleet-rules.yml` → lm `fleet-rules-reusable.yml` | every repo | push/PR to dev | errors only |
+| `ci.yml`: `checks` job → lm `fleet-rules-reusable.yml` | every repo | push/PR to dev | errors only |
+| `ci.yml`: `test` job (nw: `lint-python`, `lint-shell`, `test-unit`) | every repo | push to dev, every PR | yes: the required check on qa/main PRs |
 | `spoke-dispatch.yml` | lm | lm `core/**` push to dev | no (report only) |
-| `promote.yml`, `backmerge.yml`, `branch-flow.yml` | every repo | see the files | promotion pipeline |
+| `promote.yml`, `backmerge.yml` → lm `promote-reusable.yml`, `backmerge-reusable.yml` | every repo | see the files | promotion pipeline |
+| `branch-flow.yml` | every repo | PRs into qa/main | yes: `check-direction` |
+
+## Order of operations in `ci.yml`
+
+Cheap checks run first so a bad change is rejected in seconds, not minutes:
+
+1. **`checks`** (about 20 s): the fleet rules below. Dev pushes and PRs into
+   dev only; promotion PRs into qa/main carry commits that already passed.
+2. **`test`** waits for `checks`. If `checks` failed, `test` fails in its first
+   step without installing anything. It still *runs* rather than being
+   skipped, because a skipped required check counts as passing on qa/main.
+   On qa/main PRs `checks` is skipped and `test` runs on its own.
+
+Every `ci.yml` also cancels an older run when a newer push lands on the same
+branch or PR, and caches pip downloads where the repo has requirements files.
+lm caches the Playwright Chromium download and runs the promotion tests
+(`.github/tests`, `.github/scripts/promotion_selftest.sh`) before the browser
+install.
 
 ## Fleet rules (`fleet-rules-reusable.yml`)
 
-Runs on pushes and PRs to `dev` only. Promotion PRs carry commits that already
-passed here.
+Called by the `checks` job of every repo's `ci.yml`. lm calls its local copy,
+so a change is exercised on lm dev before the other repos pick it up from main.
 
 - **Fleet code rules**: `ab/fleet_checks.py --base <sha>`, the same
   deterministic rules AB gates its own changes with. Covers secrets and the
@@ -50,6 +68,16 @@ own pushes. On each lm `core/**` push to dev, lm sends `repository_dispatch`
 then tests its `dev` against that exact lm commit. Look for runs with event
 `repository_dispatch` in each spoke's Actions tab. Needs `WORKFLOW_TOKEN` in lm
 with repo scope on the spokes.
+
+## Promotion and back-merge (`*-reusable.yml`)
+
+Each repo's `promote.yml` and `backmerge.yml` is a thin caller generated from
+`.github/workflow-templates-fleet/`: it owns only the triggers and token
+permissions, and passes `WORKFLOW_TOKEN` by name. The logic lives once, in
+lm's `promote-reusable.yml` and `backmerge-reusable.yml`; lm calls its local
+copies. ab adds the `target` input (dev → main override) and the weekday
+schedule; kvm promotes on dispatch only. To change promotion, edit the
+reusable in lm.
 
 ## Promoting several repos
 
