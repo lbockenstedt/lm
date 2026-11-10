@@ -15,14 +15,29 @@
 #                    them, then its pytest command. Stops at the first failing
 #                    test (-x); --all drops -x to list every failure.
 # Needs the ab and lm checkouts as siblings of this repo.
+#
+# AppBuilder runs this same script in its sandbox before it pushes a fix
+# (ab fix_engine.verify_fix), where there are no sibling checkouts and no
+# credentials, using:
+#   --no-fleet-rules   AB runs fleet_checks.gate on the change in-process
+#   --no-fetch         the sandbox has no git credentials
+#   --setup-only       build the venv only (AB's install phase), then exit
+#   SMOKE_HELPERS=dir  lm's .github (scripts/, twins.json); default ../lm/.github
+#   SMOKE_VENV=dir     the venv to build and use; default ../.smoke-venvs/<repo>
 set -uo pipefail
 
 base="origin/dev"
 all=0
+fleet_rules=1
+fetch=1
+setup_only=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --all) all=1 ;;
     --base) base="$2"; shift ;;
+    --no-fleet-rules) fleet_rules=0 ;;
+    --no-fetch) fetch=0 ;;
+    --setup-only) setup_only=1 ;;
     --install-hook)
       hook="$(git rev-parse --git-path hooks)/pre-push"
       # shellcheck disable=SC2016 # the hook expands it at push time
@@ -30,7 +45,7 @@ while [ $# -gt 0 ]; do
       chmod +x "$hook"
       echo "pre-push hook installed: $hook"
       exit 0 ;;
-    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -40,13 +55,15 @@ root="$(git rev-parse --show-toplevel)" || exit 2
 cd "$root" || exit 2
 name="$(basename "$root")"
 fleet="$(dirname "$root")"
-helpers="$fleet/lm/.github"
+helpers="${SMOKE_HELPERS:-$fleet/lm/.github}"
 ci=".github/workflows/ci.yml"
 
 step() { printf '\n== %s\n' "$1"; }
 fail() { printf '\nSMOKE FAILED at: %s\n' "$1"; exit 1; }
 
-for need in "$fleet/ab/fleet_checks.py" "$helpers/scripts/ruff_new.py"; do
+needs="$helpers/scripts/ruff_new.py"
+[ $fleet_rules = 0 ] || needs="$fleet/ab/fleet_checks.py $needs"
+for need in $needs; do
   [ -f "$need" ] || { echo "missing $need (clone ab and lm next to $name)"; exit 2; }
 done
 
@@ -62,9 +79,9 @@ elif [ -f requirements.txt ] || [ -n "$(find . -name 'requirements*.txt' -not -p
     command -v "$cand" >/dev/null && { base_py="$cand"; break; }
   done
   [ -n "$base_py" ] || { echo "no python3 found"; exit 2; }
-  venv="$fleet/.smoke-venvs/$name"
+  venv="${SMOKE_VENV:-$fleet/.smoke-venvs/$name}"
   py="$venv/bin/python"
-  reqs="$(find . -name 'requirements*.txt' -not -path './_lm/*' -not -path '*/venv/*' \
+  reqs="$(find . -name 'requirements*.txt' -not -path './_lm/*' -not -path './.ab-*' -not -path '*/venv/*' \
             -not -path '*/.venv/*' -not -path '*/node_modules/*' | sort)"
   # Test-job packages from ci.yml. Not playwright (the browser test is CI-only)
   # nor nw's advisory bandit/pip-audit; ruff is added for step 2.
@@ -72,7 +89,7 @@ elif [ -f requirements.txt ] || [ -n "$(find . -name 'requirements*.txt' -not -p
             | tr ' ' '\n' | grep -vE '^(-|playwright|bandit|pip-audit|$)' | sort -u | tr '\n' ' ')"
   pkgs="$pkgs ruff"
   # shellcheck disable=SC2086
-  want="$( { "$base_py" --version; echo "$pkgs"; [ -z "$reqs" ] || cat $reqs; } 2>&1 | shasum | cut -d' ' -f1)"
+  want="$( { "$base_py" --version; echo "$pkgs"; [ -z "$reqs" ] || cat $reqs; } 2>&1 | cksum | cut -d' ' -f1)"
   if [ "$(cat "$venv/.smoke-stamp" 2>/dev/null)" != "$want" ]; then
     step "python env ($venv, $("$base_py" --version 2>&1); CI uses 3.11)"
     [ -x "$py" ] || "$base_py" -m venv "$venv" || fail "venv"
@@ -90,11 +107,16 @@ elif [ -f requirements.txt ] || [ -n "$(find . -name 'requirements*.txt' -not -p
 else
   py="python3"
 fi
-git fetch -q origin 2>/dev/null || echo "warning: git fetch failed; comparing against the local $base"
+[ $setup_only = 0 ] || { echo "setup done"; exit 0; }
+if [ $fetch = 1 ]; then
+  git fetch -q origin 2>/dev/null || echo "warning: git fetch failed; comparing against the local $base"
+fi
 
 # 1. Fleet rules: error-level findings fail, exactly as in the checks job.
-step "fleet rules (vs $base)"
-"$py" "$fleet/ab/fleet_checks.py" --base "$base" --repo "lbockenstedt/$name" || fail "fleet rules"
+if [ $fleet_rules = 1 ]; then
+  step "fleet rules (vs $base)"
+  "$py" "$fleet/ab/fleet_checks.py" --base "$base" --repo "lbockenstedt/$name" || fail "fleet rules"
+fi
 
 # 2. Ruff, new errors only.
 step "ruff (new errors only)"
@@ -143,9 +165,13 @@ fi
 # The cheap pre-test steps some ci.yml files have.
 if grep -q 'py_compile' "$ci"; then
   step "compile check"
-  find src scripts -name '*.py' -exec "$py" -m py_compile {} + 2>/dev/null || fail "compile check"
+  for d in src scripts; do
+    [ ! -d "$d" ] || find "$d" -name '*.py' -exec "$py" -m py_compile {} + || fail "compile check"
+  done
 fi
-if grep -q 'node --check' "$ci" && [ -d WebUI ]; then
+if grep -q 'node --check' "$ci" && [ -d WebUI ] && ! command -v node >/dev/null; then
+  echo "note: node not installed; WebUI JavaScript syntax check skipped"
+elif grep -q 'node --check' "$ci" && [ -d WebUI ]; then
   step "WebUI JavaScript syntax check"
   find WebUI -name '*.js' -not -path 'WebUI/assets/*' -not -path '*/node_modules/*' \
        -not -name '*.min.js' -print0 | xargs -0 -n1 node --check || fail "WebUI JS syntax"

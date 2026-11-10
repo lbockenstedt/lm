@@ -208,7 +208,7 @@ from log_redaction import (_redact, _REDACT_COMMANDS, _REDACT_FIELDS,
                            _FULLY_REDACT_SUBSTRINGS, _SECRET_SUBSTRINGS,
                            _is_secret_field, _scrub_secret_fields,
                            _project_nw_devices, TokenBucket, _fit_log_payload,
-                           _tail_lines, _request_subject)
+                           _tail_lines, _request_subject, drop_security_lines)
 
 # H4 sentinel: ``_decrypt_inbound_payload`` returns this (instead of a secret)
 # to signal "drop this frame" — an encrypted payload that won't AEAD-decrypt
@@ -8830,9 +8830,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     "message": "not authorized for HUB_REQUEST (AppBuilder role required)"}
         # Dispatch by request type.
         try:
-            # Return all logs.
+            # Return all logs, minus security lines (AB files public GitHub issues).
             if req_type == "GET_LOGS":
-                return await asyncio.to_thread(self.collect_all_logs)
+                out = await asyncio.to_thread(self.collect_all_logs)
+                return {"logs": drop_security_lines(out.get("logs", []))}
 
             # Slow routes/commands, timeouts and host load for AppBuilder's health check.
             if req_type == "GET_HEALTH_REPORT":
@@ -8841,9 +8842,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 report["fleet"] = await self._fleet_health_snapshot()
                 return report
 
-            # Return only error lines.
+            # Return only error lines, minus security lines.
             if req_type == "GET_ERROR_LOGS":
-                return await asyncio.to_thread(self.collect_error_logs)
+                out = await asyncio.to_thread(self.collect_error_logs)
+                return {"logs": drop_security_lines(out.get("logs", []))}
 
             # Trigger a hub update.
             if req_type == "TRIGGER_UPDATE":
@@ -10926,15 +10928,17 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 for module in self._sentinel_modules():
                     try:
                         # Only the last interval-minutes of logs — send the LLM recent
-                        # activity, not the whole tail.
-                        lines = self._window_log_lines(self._gather_module_log_lines(module), interval_min)
+                        # activity, not the whole tail. Security lines never go to AB:
+                        # the threat monitor handles them, and AB files public issues.
+                        lines = drop_security_lines(self._window_log_lines(
+                            self._gather_module_log_lines(module), interval_min))
                         # Error lines, plus volume lines if enabled.
                         errs = self._error_lines(lines)
                         if gc.get("log_volume_triage", False):
                             # Off by default; see _sentinel_volume_lines.
                             errs += _sentinel_volume_lines(
-                                self._window_log_lines(
-                                    self._gather_module_log_lines(module, n=5000), interval_min),
+                                drop_security_lines(self._window_log_lines(
+                                    self._gather_module_log_lines(module, n=5000), interval_min)),
                                 int(gc.get("log_volume_threshold", 50) or 50), interval_min)
                         # Fingerprint the NORMALIZED errors, not the raw tail: every
                         # log line carries its own timestamp, so hashing raw text made
