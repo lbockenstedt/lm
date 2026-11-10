@@ -166,10 +166,26 @@ def test_handle_hub_request_allows_pinned_ab_get_logs_to_proceed():
     handler (it needs every tenant's logs to find problems). collect_all_logs is
     stubbed so the handler runs to completion and returns its result."""
     h = _hub({"ab_cert_identities": ["ab.lm.io"]},
-             extra={"collect_all_logs": lambda: {"logs": {"ab": ["line1"]}}})
+             extra={"collect_all_logs": lambda: {"logs": [{"module": "ab", "log": "line1"}]}})
     r = asyncio.run(
         h.handle_hub_request("ab", {"type": "GET_LOGS"},
                              ("ab.lm.io",)))
-    assert r == {"logs": {"ab": ["line1"]}}
+    assert r == {"logs": [{"module": "ab", "log": "line1"}]}
     # No denial event for the authorized caller.
     assert all(ev[1] != "hub_request_denied" for ev in h.events)
+
+
+def test_get_logs_and_error_logs_never_send_security_lines_to_ab():
+    """AB files issues in public GitHub repos from the logs it is sent, so the
+    threat monitor's lines (decoy paths, tripwires, blocked IPs) must stay on the
+    hub. Both GET_LOGS and GET_ERROR_LOGS drop them; other lines pass through."""
+    sec = "2026-11-10 17:53:36 - Security - ERROR - SECURITY ANOMALY x [critical] — GET /y"
+    tm = "2026-11-10 17:53:36 - ThreatMonitor - WARNING - blocked 1.2.3.4"
+    ok = "2026-11-10 17:54:17 - Hub - ERROR - Request Timeout: [NETBOX_GET_DEVICES]"
+    h = _hub({"ab_cert_identities": ["ab.lm.io"]}, extra={
+        "collect_all_logs": lambda: {"logs": [{"module": "hub", "log": s} for s in (sec, tm, ok)]},
+        "collect_error_logs": lambda: {"logs": [f"[hub] {s}" for s in (sec, tm, ok)]}})
+    r = asyncio.run(h.handle_hub_request("ab", {"type": "GET_LOGS"}, ("ab.lm.io",)))
+    assert r == {"logs": [{"module": "hub", "log": ok}]}
+    r = asyncio.run(h.handle_hub_request("ab", {"type": "GET_ERROR_LOGS"}, ("ab.lm.io",)))
+    assert r == {"logs": [f"[hub] {ok}"]}
