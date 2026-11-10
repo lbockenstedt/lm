@@ -2404,7 +2404,7 @@ window.csDemoClear = async function (btn) {
 // Alphabetical so the sim knobs + the Simulation facet dropdown list in order.
 const CS_CONTROL_FLAGS = ['assoc_fail', 'auth_fail', 'client_offline', 'dhcp_fail', 'dns_fail',
     'dns_latency', 'download', 'iperf', 'kill_switch', 'mac_auth_fail', 'ping_test', 'port_flap',
-    'ssidpw_fail', 'www_traffic'];
+    'ssidpw_fail', 'www_discover', 'www_traffic'];
 
 
 
@@ -4232,7 +4232,7 @@ const CS_ONOFF_KEYS = new Set([
     'client_offline', 'kill_switch', 'rapid_update', 'github_repo', 'smb_repo', 'site_based_ssid',
     'ssidpw_fail', 'auth_fail', 'mac_auth_fail', 'syslog', 'web_server',
     'dhcp_fail', 'dns_fail', 'dns_latency', 'assoc_fail', 'port_flap', 'ping_test',
-    'download', 'www_traffic', 'iperf',
+    'download', 'www_traffic', 'www_discover', 'iperf',
 ]);
 
 // Choices shared by the structured editor and the Pool & SSID matrix.
@@ -4304,7 +4304,7 @@ const CS_SIM_BUCKET_FIELDS = [
     ['dhcp_fail', 'Dhcp Fail'], ['dns_fail', 'Dns Fail'], ['dns_latency', 'Dns Latency'],
     ['assoc_fail', 'Assoc Fail'], ['port_flap', 'Port Flap'],
     ['ping_test', 'Ping Test'], ['download', 'Download'],
-    ['www_traffic', 'Www Traffic'], ['iperf', 'Iperf'],
+    ['www_traffic', 'Www Traffic'], ['www_discover', 'WWW Discover - Network Diagnostics'], ['iperf', 'Iperf'],
     ['sim_phy', 'Sim Phy'], ['l1', 'L1'],
 ];
 const CS_SIM_BUCKETS = ['s0', 's1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 's9'];
@@ -4589,7 +4589,7 @@ async function csRenderConfigSimQuotas() {
         window._csPoolCfg = {
             site_source: (cfg && cfg.site_source) || 'pxmx',
             randomizable_sims: Array.isArray(cfg && cfg.randomizable_sims) ? cfg.randomizable_sims.slice()
-                : ['ping_test', 'download', 'www_traffic', 'iperf'],
+                : ['ping_test', 'download', 'www_traffic', 'www_discover', 'iperf'],
             random_pool: (cfg && cfg.random_pool && typeof cfg.random_pool === 'object') ? { ...cfg.random_pool } : {},
             ssid_matrix: Array.isArray(cfg && cfg.ssid_matrix) ? cfg.ssid_matrix.map(c => ({ ...c })) : [],
             ssid_placement: (cfg && cfg.ssid_placement && typeof cfg.ssid_placement === 'object') ? JSON.parse(JSON.stringify(cfg.ssid_placement)) : {},

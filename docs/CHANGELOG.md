@@ -12,6 +12,16 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ## Week of 2026-11-09
 
+### Simulations
+
+- **WWW Discover - Network Diagnostics** (`www_discover`) adds a separate,
+  default-off Linux/Windows web-traffic flag to the client controls and bucket
+  editor. Each run opens one uniformly random Teams, Zoom, Okta, Google, or
+  LinkedIn URL in headless Firefox with a 60-second limit, using its own
+  `www_discover_websites.txt`; `www_traffic` and `websites.txt` are unchanged.
+  Requires the companion cs client update. See
+  [cs.md](cs.md#www-discover---network-diagnostics).
+
 ### OS Updates
 
 - **Proxmox hosts drain before a reboot.** Every Proxmox host (clustered or standalone) goes into maintenance mode first: HA guests migrate, other running guests live-migrate where possible and are otherwise shut down gracefully, then the host reboots, maintenance clears, and the guests that were shut down are started again. Hosts reboot one at a time.
