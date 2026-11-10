@@ -72,7 +72,8 @@ def nb_cache_job(hub, module_key: str, scope: dict, slice_query: dict = None) ->
     # Namespace "nb_devices" etc. (module key without its "netbox_" prefix).
     ns = "nb_" + module_key[len("netbox_"):] if module_key.startswith("netbox_") else f"nb_{module_key}"
     # Slice-filtered reads are "detail" jobs; full lists are the regular feed.
-    return CacheJob(ns, key, fetch, tenants, lane="netbox", detail=bool(slice_sig))
+    return CacheJob(ns, key, fetch, tenants, lane="netbox", detail=bool(slice_sig),
+                    refresh_s=NB_LIST_REFRESH_S)
 
 
 def filter_autorack_report(res: dict, scope: dict) -> dict:
@@ -92,6 +93,10 @@ def filter_autorack_report(res: dict, scope: dict) -> dict:
             "summary": {"conflicts": len(conflicts), "cannot": len(cannot),
                         "racked": None if scoped else res.get("racked"),
                         "named": None if scoped else res.get("named")}}
+
+
+# NetBox lists are big paged pulls; background refresh no faster than 5 min.
+NB_LIST_REFRESH_S = 300.0
 
 
 def nb_cache_feed(hub):
