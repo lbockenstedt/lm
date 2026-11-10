@@ -77,3 +77,15 @@ def test_fleet_health_snapshot_summarises_netbox_and_dhcp():
     assert out["autorack"]["conflicts"] == 1 and out["autorack"]["sample"][0]["name"] == "srv-N31-R44"
     assert out["netbox_duplicates"]["groups"] == 1
     assert out["dhcp_declines"] == [{"subnet": "10.0.0.0/24", "declined": 7, "total": 200}]
+
+
+def test_snapshot_reports_read_command_rates():
+    import perf_telemetry as pt
+    t = pt.PerfTelemetry()
+    t.started -= 3600
+    for _ in range(10):
+        t.record_command("sp", "NETBOX_GET_IPS", 0.1)
+    t.record_command("sp", "NETBOX_ADD_RACK", 0.1)
+    snap = t.snapshot()
+    assert [r["key"] for r in snap["command_rates"]] == ["NETBOX_GET_IPS"]
+    assert 9 <= snap["command_rates"][0]["per_hour"] <= 11 and snap["uptime_s"] >= 3600

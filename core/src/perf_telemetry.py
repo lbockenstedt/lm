@@ -49,6 +49,7 @@ class PerfTelemetry:
         self._routes: Dict[str, _Stat] = {}
         self._commands: Dict[Tuple[str, str], _Stat] = {}
         self._last_log: Dict[str, float] = {}
+        self.started = time.time()
 
     def _stat(self, table: Dict, key: Any) -> _Stat:
         st = table.get(key)
@@ -83,7 +84,15 @@ class PerfTelemetry:
             routes = [s.row(k) for k, s in self._routes.items()]
             cmds = [dict(s.row(k[1]), spoke=k[0]) for k, s in self._commands.items()]
         by_slow = lambda r: (r["slow"], r["max_s"])  # noqa: E731
+        up = max(time.time() - self.started, 1.0)
+        # Busiest read commands (calls per hour since start): a cached or
+        # background-refreshed read should not appear here.
+        rates = sorted(({"spoke": c["spoke"], "key": c["key"], "count": c["count"],
+                         "per_hour": round(c["count"] * 3600.0 / up, 1)}
+                        for c in cmds if "_GET_" in c["key"] or "_LIST_" in c["key"]),
+                       key=lambda r: r["per_hour"], reverse=True)[:top]
         return {"slow_route_s": SLOW_ROUTE_S, "slow_command_s": SLOW_COMMAND_S,
+                "uptime_s": int(up), "command_rates": rates,
                 "routes": sorted(routes, key=by_slow, reverse=True)[:top],
                 "commands": sorted(cmds, key=by_slow, reverse=True)[:top]}
 
