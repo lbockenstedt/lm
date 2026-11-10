@@ -1065,12 +1065,33 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # Return the data, wrapping non-dict results.
         return data if isinstance(data, dict) else {"status": "SUCCESS", "result": data}
 
+    def _cs_spokes_all_disabled() -> set:
+        """cs spokes whose every pxmx agent has Client-Sim switched off (the CS
+        bridge reports them all ``SKIP not-enabled``). A spoke the bridge hasn't
+        seen an agent on is NOT included — unknown is never treated as off."""
+        bridge = getattr(hub, "cs_bridge", None)
+        if bridge is None or not hasattr(bridge, "status_snapshot"):
+            return set()
+        try:
+            rows = (bridge.status_snapshot() or {}).get("agents") or []
+        except Exception:  # noqa: BLE001 — a diag read never blocks an action
+            return set()
+        off: dict = {}
+        for row in rows:
+            sid = row.get("host_spoke") if isinstance(row, dict) else None
+            if sid:
+                disabled = str(row.get("decision") or "").startswith("SKIP not-enabled")
+                off[sid] = off.get(sid, True) and disabled
+        return {sid for sid, all_off in off.items() if all_off}
+
     async def _cs_forward_all(tenant_id: str, cmd_type: str, payload: dict,
-                              timeout: float = 15.0) -> list:
+                              timeout: float = 15.0, skip_disabled: bool = False) -> list:
         """Forward a CS_* command to EVERY Client-Sim spoke bound to the tenant,
         concurrently. Returns ``[(spoke_id, data|None)]`` — a failed/absent spoke
         yields None so callers merge what they got (tenant-wide aggregation for a
-        multi-spoke tenant, e.g. cs-svr-02/03/04). Empty list = no spokes."""
+        multi-spoke tenant, e.g. cs-svr-02/03/04). Empty list = no spokes.
+        ``skip_disabled`` leaves out spokes whose servers all have Client-Sim
+        off, so fleet commands aren't queued for servers that will never run them."""
         # Prefer the plural spoke lookup.
         sids: list = []
         get_spokes = getattr(hub, "get_client_sim_spokes", None)
@@ -1083,6 +1104,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if not sids:
             sid = hub.get_client_sim_spoke(tenant_id) if hasattr(hub, "get_client_sim_spoke") else None
             sids = [sid] if sid else []
+        if skip_disabled:
+            off = _cs_spokes_all_disabled()
+            sids = [s for s in sids if s not in off]
 
         async def _one(sid: str):
             """Send the command to one spoke; return (sid, data) or (sid, None) on failure."""
@@ -5604,7 +5628,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # bound spoke, so a 3-server tenant reclonled one host at a time). Each
         # agent then runs `concurrency` reclones in parallel internally, so the
         # fleet does concurrency×servers at once.
-        results = await _cs_forward_all(tenant_id, "CS_QUEUE_COMMAND", payload, timeout=15.0)
+        results = await _cs_forward_all(tenant_id, "CS_QUEUE_COMMAND", payload,
+                                        timeout=15.0, skip_disabled=True)
         # Report how many servers got it.
         return {"queued": True, "servers": len(results),
                 "dispatched": sum(1 for _s, d in results if d is not None)}
@@ -5619,7 +5644,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         payload = {"target": "proxmox", "action": "proxmox_reclone_stop",
                    "type": "proxmox_reclone_stop", "args": {}}
         # Send to every server and count those that stopped.
-        results = await _cs_forward_all(tenant_id, "CS_QUEUE_COMMAND", payload, timeout=10.0)
+        results = await _cs_forward_all(tenant_id, "CS_QUEUE_COMMAND", payload,
+                                        timeout=10.0, skip_disabled=True)
         return {"stopped": sum(1 for _s, d in results
                                if isinstance(d, dict) and d.get("stopped")),
                 "servers": len(results)}
@@ -5638,7 +5664,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         payload = {"target": "proxmox", "action": "proxmox_reclone_clear",
                    "type": "proxmox_reclone_clear", "args": {}}
         # Send to every server and count those that cleared.
-        results = await _cs_forward_all(tenant_id, "CS_QUEUE_COMMAND", payload, timeout=10.0)
+        results = await _cs_forward_all(tenant_id, "CS_QUEUE_COMMAND", payload,
+                                        timeout=10.0, skip_disabled=True)
         cleared = sum(1 for _s, d in results if isinstance(d, dict) and d.get("cleared"))
         # Report cleared versus refused.
         return {"cleared": cleared, "servers": len(results),
