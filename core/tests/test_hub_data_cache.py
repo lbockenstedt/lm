@@ -546,3 +546,10 @@ def test_tenant_filters_return_copies_and_never_modify_the_input():
     rules = {"rows": [{"source_net": "10.0.0.0/24"}, {"source_net": "8.8.8.0/24"}]}
     tf.filter_firewall_rules(rules, ["10.0.0.0/8"])
     assert len(rules["rows"]) == 2
+
+
+def test_job_refresh_floor_slows_active_refresh():
+    hub = _Hub()
+    job = CacheJob("ns", "k", _Fetch(), ("tA",), refresh_s=300.0)
+    assert hub._cache_interval(job, {"tA"}) == 300.0
+    assert hub._cache_interval(job, set()) == wc.IDLE_INTERVAL_S

@@ -104,6 +104,9 @@ class CacheJob:
     lane: str = ""
     from_feed: bool = False
     detail: bool = False
+    # Slow-moving, expensive sources set this so a viewer being logged in
+    # doesn't refresh them faster than every ``refresh_s`` seconds.
+    refresh_s: float = 0.0
     _jitter: float = field(default=0.0, repr=False)
 
 
@@ -523,7 +526,8 @@ class WarmCacheMixin:
 
     def _cache_interval(self, job: CacheJob, scopes: Optional[set] = None) -> float:
         """Return the job's refresh interval: active or idle."""
-        return ACTIVE_INTERVAL_S if self._cache_is_active(job.tenants, scopes) else IDLE_INTERVAL_S
+        base = ACTIVE_INTERVAL_S if self._cache_is_active(job.tenants, scopes) else IDLE_INTERVAL_S
+        return max(base, job.refresh_s)
 
     def cache_kick_tenant(self, tenant_id: Optional[str]) -> None:
         """Login hook: refresh everything this tenant (None → admin) can see on
@@ -597,7 +601,7 @@ class WarmCacheMixin:
         if not fetched and not (entry or {}).get("error_at"):
             return True
         # Otherwise due once the interval plus jitter has passed since the last attempt.
-        interval = ACTIVE_INTERVAL_S if active else IDLE_INTERVAL_S
+        interval = max(ACTIVE_INTERVAL_S if active else IDLE_INTERVAL_S, job.refresh_s)
         last_try = max(fetched, (entry or {}).get("error_at") or 0)
         return now - last_try >= interval + job._jitter
 
