@@ -89,6 +89,14 @@ the hook once with `git push --no-verify`. CI-only, not run locally: lm's
 browser smoke test (skips when `CI` is unset) and nw's advisory
 ruff/bandit/pip-audit/ShellCheck reports, which never fail a build.
 
+AppBuilder runs the same script in its sandbox before it pushes a fix (ab
+`fix_engine.verify_fix`, with `qa_enabled` on). There are no sibling checkouts
+or credentials there, so it passes `--no-fleet-rules` (AB already gates the
+change on them in-process) and `--no-fetch`, points `SMOKE_HELPERS` at a
+sparse clone of lm's `.github` and `SMOKE_VENV` at its sandbox venv, and runs
+`--setup-only` during its install phase. Exit 1 is a failing check or test;
+exit 2 is the script's own setup problem.
+
 ## lm JavaScript syntax
 
 lm `ci.yml` runs `node --check` on every WebUI script (except vendored
