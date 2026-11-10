@@ -83,3 +83,28 @@ def test_delete_purges_on_every_tenant_spoke():
     purged = sorted(sid for sid, cmd, p in hub.calls
                     if cmd == "CS_PURGE_HOST" and p == {"hostname": "pxmx-cs-svr-06"})
     assert purged == ["cs-a", "cs-b"]
+
+
+class _Bridge:
+    """CS bridge snapshot: svr-06 has Client-Sim switched off."""
+
+    def status_snapshot(self):
+        """Return one ACTIVE and one disabled host row."""
+        return {"agents": [
+            {"hostname": "pxmx-cs-svr-01", "decision": "ACTIVE — tenant=10"},
+            {"hostname": "pxmx-cs-svr-06", "decision": "SKIP not-enabled — client_simulation.enabled not set"}]}
+
+
+def test_servers_with_client_sim_off_are_hidden_but_keep_their_pool():
+    hub = _Hub()
+    hub.cs_bridge = _Bridge()
+    client = _client(hub)
+    body = client.get("/sim/api/10/pxmx-site-map?tenant_id=10").json()
+    assert "pxmx-cs-svr-06" not in body["pxmx_site_map"]
+    assert body["pxmx_site_map"]["pxmx-cs-svr-01"] == "BAR"
+    # Saving the visible rows must not wipe the hidden server's pool.
+    client.post("/sim/api/10/pxmx-site-map?tenant_id=10",
+                json={"pxmx_site_map": {"pxmx-cs-svr-01": "FOO"}})
+    saved = [p for _s, cmd, p in hub.calls if cmd == "CS_SET_PXMX_SITE_MAP"]
+    assert saved and saved[0]["pxmx_site_map"] == {"pxmx-cs-svr-06": "Tenant-Wide Pool",
+                                                   "pxmx-cs-svr-01": "FOO"}
