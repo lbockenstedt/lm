@@ -714,6 +714,19 @@ class NwDiscoverySyncMixin:
         # enriched with an IP keeps its switch/port.
         # Walk every raw sighting and merge it into a per-tenant MAC/IP key.
         merged: Dict[str, Dict[str, str]] = {}
+        # A MAC is learned on every switch along its path (uplinks, peer links),
+        # and fetch completion order is random, so "first sighting wins" made the
+        # recorded switch flap. Order sightings so the access port (fewest MACs
+        # learned on it) wins, ties broken by switch name/port: stable per run.
+        port_macs: Dict[Tuple[str, str], set] = {}
+        for rec in raw:
+            if rec.get("mac") and rec.get("source_switch_port"):
+                port_macs.setdefault((rec.get("source_switch_name", ""),
+                                      rec["source_switch_port"]), set()).add(rec["mac"])
+        raw.sort(key=lambda r: (
+            len(port_macs.get((r.get("source_switch_name", ""),
+                               r.get("source_switch_port", "")), ())) or 10 ** 9,
+            r.get("source_switch_name", ""), r.get("source_switch_port", "")))
         for rec in raw:
             mac, ip = rec.get("mac", ""), rec.get("ip", "")
             # Key by MAC when known, else by IP; rows with neither are skipped.
