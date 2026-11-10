@@ -13,11 +13,18 @@ These tests drive the real ``send_to_agent`` wait loop + the real
 so a late response still succeeds, (2) without progress the base timeout is
 honored, (3) the hard ceiling still bounds a genuinely-hung agent, and (4) the
 receive branch bumps the tracked deadline.
+
+The timing tests run on a virtual clock (``_run_virtual``): sleeps and
+``wait_for`` timeouts advance simulated time instantly, and the module's
+``time.time()`` reads that same clock, so scheduler jitter on a busy CI runner
+can't make the keepalive margins flaky.
 """
 import asyncio
 import os
+import selectors
 import sys
 import time
+import types
 
 _LM_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _LM_ROOT not in sys.path:
@@ -25,6 +32,7 @@ if _LM_ROOT not in sys.path:
 
 from core.src.messaging.agent_hosting import AgentHostingControlPlane  # noqa: E402
 from core.src.security.signer import MessageSigner, encode_frame       # noqa: E402
+import core.src.messaging.agent_hosting as _agent_hosting                # noqa: E402
 
 SECRET = "test-agent-secret-1234567890"
 
@@ -93,6 +101,51 @@ def _run(coro):
     return asyncio.new_event_loop().run_until_complete(coro)
 
 
+class _VirtualSelector(selectors.SelectSelector):
+    """Never blocks: when nothing is ready, jump the loop's clock forward by
+    the timeout the loop would have slept for (i.e. to the next timer)."""
+
+    def __init__(self, clock):
+        super().__init__()
+        self._clock = clock
+
+    def select(self, timeout=None):
+        ready = super().select(0)
+        if not ready:
+            if timeout is None:
+                raise RuntimeError("virtual clock deadlock: no timers pending")
+            self._clock[0] += timeout
+        return ready
+
+
+class _VirtualClockLoop(asyncio.SelectorEventLoop):
+    def __init__(self):
+        self._clock = [1_000_000.0]
+        super().__init__(selector=_VirtualSelector(self._clock))
+
+    def time(self):
+        return self._clock[0]
+
+
+def _run_virtual(coro_fn):
+    """Run ``coro_fn()`` on a virtual-clock loop with agent_hosting's
+    ``time.time()`` bound to that clock. Returns (result, virtual_elapsed)."""
+    loop = _VirtualClockLoop()
+    real_time = _agent_hosting.time
+    _agent_hosting.time = types.SimpleNamespace(time=loop.time)
+    try:
+        start = loop.time()
+        res = loop.run_until_complete(coro_fn())
+        return res, loop.time() - start
+    finally:
+        _agent_hosting.time = real_time
+        loop.close()
+
+
+def _now():
+    return asyncio.get_running_loop().time()
+
+
 def test_progress_extends_deadline_so_late_response_succeeds():
     """Base timeout 0.2s; the response arrives ~0.5s in. Without keepalive that
     would time out — but simulated AGENT_PROGRESS frames keep pushing the soft
@@ -108,7 +161,7 @@ def test_progress_extends_deadline_so_late_response_succeeds():
             await asyncio.sleep(0.12)
             pd = host.pending_progress.get(corr)
             assert pd is not None
-            pd["soft"] = min(time.time() + pd["grace"], pd["hard"])
+            pd["soft"] = min(_now() + pd["grace"], pd["hard"])
         fut = host.pending_responses.get(corr)
         if fut and not fut.done():
             fut.set_result({"status": "SUCCESS", "vms": ["v1", "v2"]})
@@ -119,8 +172,10 @@ def test_progress_extends_deadline_so_late_response_succeeds():
             driver())
         return res
 
-    res = _run(scenario())
+    res, elapsed = _run_virtual(scenario)
     assert res.get("status") == "SUCCESS" and res.get("vms") == ["v1", "v2"]
+    # Answered at ~0.38s — well past the 0.2s base window.
+    assert 0.3 < elapsed < 0.5
 
 
 def test_no_progress_times_out_at_base_window():
@@ -129,13 +184,12 @@ def test_no_progress_times_out_at_base_window():
     host = _Host(SECRET)
     host.connected_agents = {"a1": {"ws": _CaptureWS()}}
 
-    start = time.time()
-    res = _run(host.send_to_agent("RUN_COMMAND", {}, agent_id="a1", timeout=0.3))
-    elapsed = time.time() - start
+    res, elapsed = _run_virtual(
+        lambda: host.send_to_agent("RUN_COMMAND", {}, agent_id="a1", timeout=0.3))
 
     assert res.get("status") == "ERROR" and "timeout" in res.get("message", "").lower()
-    # Timed out near the base window, NOT the hard ceiling (0.3 * 6 = 1.8s).
-    assert elapsed < 1.0
+    # Timed out at the base window, NOT the hard ceiling (0.3 * 6 = 1.8s).
+    assert abs(elapsed - 0.3) < 0.01
 
 
 def test_hard_ceiling_bounds_a_hung_agent_even_with_progress():
@@ -151,20 +205,19 @@ def test_hard_ceiling_bounds_a_hung_agent_even_with_progress():
         while corr in host.pending_progress:
             pd = host.pending_progress.get(corr)
             if pd:
-                pd["soft"] = min(time.time() + pd["grace"], pd["hard"])
+                pd["soft"] = min(_now() + pd["grace"], pd["hard"])
             await asyncio.sleep(0.05)
 
     async def scenario():
-        start = time.time()
         res, _ = await asyncio.gather(
             host.send_to_agent("RUN_COMMAND", {}, agent_id="a1", timeout=0.2),
             spammer())
-        return res, time.time() - start
+        return res
 
-    res, elapsed = _run(scenario())
+    res, elapsed = _run_virtual(scenario)
     assert res.get("status") == "ERROR"
-    # Failed at ~ the hard ceiling (0.2 * 3 = 0.6s), not extended forever.
-    assert 0.4 < elapsed < 1.5
+    # Failed at the hard ceiling (0.2 * 3 = 0.6s), not extended forever.
+    assert 0.55 < elapsed < 0.7
 
 
 def test_agent_progress_frame_bumps_tracked_deadline():
