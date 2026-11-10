@@ -10,14 +10,42 @@ on:
   pull_request:
     branches: [ main, qa, dev ]
 
+# A newer push to the same branch or PR makes the older run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # Cheap checks first (about 20 s): fleet rules, new ruff errors, twin files.
+  # `test` waits for them, so a rule violation fails the run before the
+  # expensive install and test steps start. Dev only: promotion PRs into
+  # qa/main carry commits that already passed here, so `test` runs alone.
+  checks:
+    if: (github.event_name == 'push' && github.ref_name == 'dev') || github.base_ref == 'dev'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/fleet-rules-reusable.yml
+
   test:
+    needs: checks
+    # Run when checks passed or were skipped (qa/main PRs). A failed `checks`
+    # still starts `test` so it can FAIL in the first step: a skipped required
+    # check would count as passing on a protected branch.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - name: Stop early when the fast checks failed
+        if: needs.checks.result == 'failure'
+        run: |
+          echo "::error::Fleet checks failed; see the 'checks' job. Tests not run."
+          exit 1
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: '3.11' }
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: '**/requirements*.txt'
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -44,10 +72,23 @@ jobs:
           find WebUI -name '*.js' -not -path 'WebUI/assets/*' \
                -not -path '*/node_modules/*' -not -name '*.min.js' -print0 |
             xargs -0 -n1 node --check
+      - name: Workflow and promotion script tests
+        # Cheap, so they run before the browser install: the promotion docs
+        # test and the VERSION-pinning self-test for .github/scripts/promote.sh.
+        run: |
+          pytest -q .github/tests
+          bash .github/scripts/promotion_selftest.sh
+      - name: Cache the Chromium download
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-1.64.1-${{ runner.os }}
       - name: Install browser for the WebUI smoke test
         # CI only -- the fleet never installs this. core/tests/
         # test_webui_browser_smoke.py walks every WebUI view in headless
         # Chromium and must run here (it only skips when CI is unset).
+        # The browser comes from the cache when it hits; the system libraries
+        # it needs are always installed.
         run: |
           pip install playwright==1.64.1
           python -m playwright install --with-deps chromium
