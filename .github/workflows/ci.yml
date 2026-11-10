@@ -76,7 +76,7 @@ jobs:
         # Cheap, so they run before the browser install: the promotion docs
         # test and the VERSION-pinning self-test for .github/scripts/promote.sh.
         run: |
-          pytest -q .github/tests
+          pytest -x -q .github/tests
           bash .github/scripts/promotion_selftest.sh
       - name: Cache the Chromium download
         uses: actions/cache@v4
@@ -113,7 +113,7 @@ jobs:
           failed=""
           for c in agent console core dhcp dns henet proxy; do
             echo "::group::$c"
-            pytest --timeout=300 --timeout-method=thread -q "$c/tests" || failed="$failed $c"
+            pytest -x --timeout=300 --timeout-method=thread -q "$c/tests" || failed="$failed $c"
             echo "::endgroup::"
           done
           if [ -n "$failed" ]; then
