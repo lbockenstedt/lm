@@ -21,6 +21,12 @@ Cheap checks run first so a bad change is rejected in seconds, not minutes:
    step without installing anything. It still *runs* rather than being
    skipped, because a skipped required check counts as passing on qa/main.
    On qa/main PRs `checks` is skipped and `test` runs on its own.
+3. **`pytest -x`**: inside `test`, the suite stops at the first failing test,
+   so a broken change fails in about the time it takes to reach that test
+   instead of after the whole suite (lm's full run is about 6 minutes). The
+   cost is that later failures are hidden until the first one is fixed; run
+   `pytest` without `-x` locally to see them all. lm's per-component loop
+   still runs every component and lists each one that failed.
 
 Every `ci.yml` also cancels an older run when a newer push lands on the same
 branch or PR, and caches pip downloads where the repo has requirements files.
