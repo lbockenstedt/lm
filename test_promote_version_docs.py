@@ -18,12 +18,10 @@ import pathlib
 import re
 import unittest
 
-# The promotion logic lives in lm's reusable workflows; every repo's
-# promote.yml / backmerge.yml is a thin caller of them.
-GITHUB_DIR = pathlib.Path(__file__).resolve().parent.parent
-PROMOTE_YML = GITHUB_DIR / "workflows" / "promote-reusable.yml"
-BACKMERGE_YML = GITHUB_DIR / "workflows" / "backmerge-reusable.yml"
-PROMOTE_SH = GITHUB_DIR / "scripts" / "promote.sh"
+HERE = pathlib.Path(__file__).parent
+PROMOTE_YML = HERE / ".github" / "workflows" / "promote.yml"
+BACKMERGE_YML = HERE / ".github" / "workflows" / "backmerge.yml"
+PROMOTE_SH = HERE / ".github" / "scripts" / "promote.sh"
 
 # The behaviour the docs must not omit, however it happens to be worded.
 _ADVANCE = re.compile(r"advanc\w*\s+(?:the\s+\S+\s+)?(?:own\s+)?(?:counter\s+)?one step"

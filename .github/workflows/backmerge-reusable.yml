@@ -5,7 +5,7 @@ name: backmerge (reusable)
 # REUSABLE. This is the single fleet copy of backmerge.yml's logic. Each repo
 # keeps a thin `.github/workflows/backmerge.yml` that owns the trigger
 # (`on: push: branches: [main, qa]`) and the token `permissions`, and calls
-# this, passing WORKFLOW_TOKEN by name (template:
+# this with `secrets: inherit` (template:
 # .github/workflow-templates-fleet/backmerge.yml). In a called workflow
 # `github.ref_name`, `github.repository` and the checked-out repo are the
 # CALLER's, so the per-push pair filtering below works exactly as it did inline.

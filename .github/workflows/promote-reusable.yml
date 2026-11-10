@@ -29,7 +29,7 @@ name: promote (reusable)
 #
 # REUSABLE. This is the single fleet copy of promote.yml's logic. Each repo
 # keeps a thin `.github/workflows/promote.yml` that owns the TRIGGERS and the
-# token `permissions`, and passes `WORKFLOW_TOKEN` to this (template:
+# token `permissions`, and calls this with `secrets: inherit` (template:
 # .github/workflow-templates-fleet/promote.yml). It used to be 17 hand-synced
 # copies that an automated fixer patched independently until no two matched;
 # every genuine fix from those copies is folded in here. In a called workflow

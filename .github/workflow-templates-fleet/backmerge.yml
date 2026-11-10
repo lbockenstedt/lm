@@ -24,7 +24,4 @@ permissions:
 jobs:
   backmerge:
     uses: lbockenstedt/lm/.github/workflows/backmerge-reusable.yml@main
-    # Named rather than `inherit`: the only secret the reusable reads, and a
-    # named pass works across repos whatever the account type.
-    secrets:
-      WORKFLOW_TOKEN: ${{ secrets.WORKFLOW_TOKEN }}
+    secrets: inherit

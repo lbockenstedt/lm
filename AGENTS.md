@@ -11,7 +11,7 @@ canonical documentation set for all 16 Lab Manager repos.
 
 A modular, containerized, **multitenant** "private cloud orchestrator" for lab resources.
 Users declare intent; LM implements it across the hardware pool. See
-[`docs/PROJECT_DESCRIPTION.md`](docs/PROJECT_DESCRIPTION.md).
+[`PROJECT_DESCRIPTION.md`](PROJECT_DESCRIPTION.md).
 
 One hub, many spokes. Each spoke is its **own repo** wrapping one external system (Proxmox,
 OPNsense, NetBox, ClearPass, LDAP, Kea, Unbound, switches, TrueNAS, certbot) and dialling
@@ -51,8 +51,8 @@ OPNsense, NetBox, ClearPass, LDAP, Kea, Unbound, switches, TrueNAS, certbot) and
 - **The hub is a relay, not a brain.** Resist adding module logic here. The canonical example: Client-Sim auto-provisioning lives in the *pxmx agent*, not the hub, not the cs spoke.
 - **Changing a message type is a fleet-wide contract change.** Spokes deploy independently — stay backward-compatible.
 - `docs/` pages are copied verbatim into each module repo's own `docs/`. Update here first.
-- `state_cache.json` is runtime state the hub writes; it is git-ignored.
-- See `docs/UNIMPLEMENTED_ROUTES.md` and `docs/CODE_DIAGNOSABILITY_REVIEW.md` for known gaps.
+- `state_cache.json` is a committed runtime artifact, not source.
+- See `UNIMPLEMENTED_ROUTES.md` and `CODE_DIAGNOSABILITY_REVIEW.md` for known gaps.
 
 <!-- fleet-rules:begin (synced from lm/.github/fleet-rules.md -- edit there) -->
 
@@ -429,10 +429,10 @@ reviewers and the AB panel.
 
 | Check | Where | Rules |
 | :--- | :--- | :--- |
-| `fleet_checks.py` (vault wiring, storage format, new deps, hard-coded hosts, VERSION, docstrings and comments, SSRF, tenant scope and first-site fallbacks, JS syntax, WebUI ratchet, UUIDs, secret logging, blocking async, copies and dead code, docs) | `checks` job in `ci.yml` (runs before `test`) on every PR and dev push; AB on every fix and review | 2.2, 3.7, 4.1, 5.1–5.3, 6.1, 6.4, 7.1, 7.3, 8.2–8.4, 8.6, 9.2 |
-| `ruff_new.py` (new lint findings only) | `checks` job in `ci.yml` | 8.1, 8.4 |
-| `check_twins.py` (twin pairs, fleet-owned copies) | `checks` job in `ci.yml` | 8.5, 2.7 |
-| `pip-audit` (when requirements change; advisory) | `checks` job in `ci.yml` | 8.3 |
+| `fleet_checks.py` (vault wiring, storage format, new deps, hard-coded hosts, VERSION, docstrings and comments, SSRF, tenant scope and first-site fallbacks, JS syntax, WebUI ratchet, UUIDs, secret logging, blocking async, copies and dead code, docs) | `fleet-rules` workflow on every PR and dev push; AB on every fix and review | 2.2, 3.7, 4.1, 5.1–5.3, 6.1, 6.4, 7.1, 7.3, 8.2–8.4, 8.6, 9.2 |
+| `ruff_new.py` (new lint findings only) | `fleet-rules` workflow | 8.1, 8.4 |
+| `check_twins.py` (twin pairs, fleet-owned copies) | `fleet-rules` workflow | 8.5, 2.7 |
+| `pip-audit` (when requirements change; advisory) | `fleet-rules` workflow | 8.3 |
 | WebUI ratchet, secret hygiene and JS syntax tests | lm `ci.yml` | 7.1, 5.2 |
 | `check-direction` (branch flow), VERSION guard | `branch-flow` / `promote.yml` | 2.1, 2.2 |
 | PR intent statement | AB review panel | 2.4 |

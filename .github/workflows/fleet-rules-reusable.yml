@@ -1,8 +1,8 @@
 name: Fleet rules (reusable)
 
 # The deterministic checks AB and the Copilot sessions apply to every change,
-# run in CI so a hand-made push gets them too. Each fleet repo calls this as
-# the `checks` job of its ci.yml, before `test`, on pushes and PRs to dev only:
+# run in CI so a hand-made push gets them too. Each fleet repo calls this from
+# a thin .github/workflows/fleet-rules.yml on pushes and PRs to dev only:
 # promotion PRs into qa/main carry commits that already passed here.
 #
 #   fleet rules  ab/fleet_checks.py -- secrets/vault, WebUI ratchet, UUIDs in

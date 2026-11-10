@@ -23,22 +23,6 @@ Lab Manager (LM) is a unified "single pane of glass" datacenter and laboratory i
 | **`qa`** | `qa` | Fleet integration testing, scenario filters, and audit engine | [`docs/qa.md`](docs/qa.md) |
 | **`ab`** | `agent` | AppBuilder autonomous defect remediation and dual-panel PR audit | [`docs/appbuilder.md`](docs/appbuilder.md) |
 
-## Repository layout
-
-| Path | What it holds |
-| :--- | :--- |
-| `core/` | The hub: control plane, REST API, auth, caching (`core/src`) and its tests (`core/tests`). |
-| `WebUI/` | The browser UI the hub serves (plain JavaScript, no build). |
-| `agent/`, `console/`, `client_sim/`, `henet/`, `proxy/`, `statuspage/`, `dhcp/`, `dns/` | Components that run as their own processes: generic agent, serial console, client simulation, HE.NET DNS, edge proxy, status page, Kea DHCP, DNS. Each has `src/`, `tests/` where present, and its installer. |
-| `collab_sink/`, `clearpass/`, `qa/` | Small helpers: collaboration pcap sink, ClearPass context-server actions, QA mock spoke. |
-| `provisioning_repos/` | Installers for lab services the hub provisions (Kea, Graylog, iperf, ...). |
-| `scripts/` | Operator and maintenance scripts (watchdog, Tailwind build, code scans). |
-| `docs/` | Canonical fleet documentation (copied into each module repo). |
-| `.github/workflows/` | CI (`ci.yml`), branch flow, and the fleet's shared `*-reusable.yml` workflows. |
-| `.github/scripts/`, `.github/tests/` | Promotion and fleet-sync scripts, and their tests. |
-| `.github/agents/`, `.claude/skills/`, `.github/fleet-rules.md` | Fleet-owned agents, skills and rules, synced to every repo. |
-| `install_*.sh`, `uninstall*.sh`, `start_all.sh` | Hub installers at the root, because install instructions fetch them by that path. |
-
 ## Core REST API Route Reference
 
 The Hub exposes a comprehensive, fully-authenticated REST API:

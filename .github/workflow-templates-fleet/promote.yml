@@ -50,7 +50,4 @@ jobs:
       source: ${{ inputs.source }}
       # ab only:
       # target: ${{ inputs.target }}
-    # Named rather than `inherit`: the only secret the reusable reads, and a
-    # named pass works across repos whatever the account type.
-    secrets:
-      WORKFLOW_TOKEN: ${{ secrets.WORKFLOW_TOKEN }}
+    secrets: inherit
