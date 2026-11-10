@@ -6574,6 +6574,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         return {"status": "SUCCESS", "spokes": spokes,
                 "warning": "" if results else "No Client-Sim spoke connected."}
 
+    # Per tenant: {host: pool} of servers the site-map GET hid (Client-Sim off).
+    _pxmx_site_map_hidden: dict = {}
+
     def _pxmx_hosts_owned_elsewhere(tenant_id: str, fresh_s: float = 3600.0) -> set:
         """Lower-cased pxmx hostnames that a cs spoke bound to a DIFFERENT tenant
         is relaying live (last_seen within ``fresh_s``). An unbound/orphaned
@@ -6657,6 +6660,15 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             agents = [a for a in agents
                       if str(a.get("agent_id") or a.get("hostname") or "").strip().lower()
                       not in foreign]
+        # Hide servers with Client-Sim switched off: the CS bridge never relays
+        # to them, so they host no sims and a pool assignment would do nothing.
+        # Their saved pool is remembered and written back on save (the save
+        # replaces the whole map), so re-enabling a server restores it.
+        agents = [a for a in agents
+                  if not _bridge_undeliverable([a.get("agent_id") or a.get("hostname")])]
+        hidden = {h: s for h, s in merged_map.items() if _bridge_undeliverable([h])}
+        _pxmx_site_map_hidden[tenant_id] = hidden
+        merged_map = {h: s for h, s in merged_map.items() if h not in hidden}
         # Cache and return.
         out = {"status": "SUCCESS", "pxmx_site_map": merged_map, "agents": agents}
         _pxmx_site_map_cache[tenant_id] = (now + _PXMX_SITE_MAP_TTL_S, out)
@@ -6675,6 +6687,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         payload = body if isinstance(body, dict) else {}
         if "pxmx_site_map" not in payload and isinstance(body, dict):
             payload = {"pxmx_site_map": body}
+        # Keep the pools of servers hidden because Client-Sim is off.
+        if isinstance(payload.get("pxmx_site_map"), dict):
+            payload["pxmx_site_map"] = {**_pxmx_site_map_hidden.get(tenant_id, {}),
+                                        **payload["pxmx_site_map"]}
         # Fan the FULL map out to every cs spoke — each keeps only its own agents'
         # entries but a shared map is harmless (a spoke ignores hosts it doesn't
         # host). Returns the merged saved map.
