@@ -5126,7 +5126,7 @@ window.csAmbientControlToggle = function () {
     csRenderSimQuotaEditor();
 };
 
-const CS_SSID_AUTH_TYPES = [['1x', '1X'], ['psk', 'PSK'], ['mpsk', 'MPSK']];
+const CS_SSID_AUTH_TYPES = [['1x', '1X'], ['psk', 'PSK'], ['mpsk', 'MPSK'], ['open', 'Open']];
 
 // A cell's auth type. Cells saved before `auth` existed encoded it in the SSID
 // itself (ssid "1X" = 802.1X, anything else PSK).
@@ -5145,7 +5145,8 @@ const CS_DOT1X_ACCOUNT_LOCATIONS = [
     ['clearpass', 'ClearPass (local user)'],
 ];
 
-// Switching auth swaps the 4th column (password ↔ 1X account location) — re-render.
+// Switching auth swaps the 4th column (password ↔ 1X account location ↔ none
+// for open) — re-render.
 window.csPoolCellAuthChange = function () {
     csSimQuotaSyncFromDom(); csPoolSyncFromDom();
     csRenderSimQuotaEditor();
@@ -5165,7 +5166,7 @@ function csPoolConfigCardHtml() {
     const simChecks = flags.map(f =>
         `<label class="flex items-center gap-1 text-xs"><input type="checkbox" data-cs-rand="${esc(f)}" ${rsims.indexOf(f) >= 0 ? 'checked' : ''}> ${esc(f)}</label>`).join('');
     // SSID matrix = cell DEFINITIONS only: Site, SSID, Auth, then Password
-    // (PSK/MPSK) or the 1X account location (JIT 802.1X).
+    // (PSK/MPSK), the 1X account location (JIT 802.1X) or nothing (Open).
     const matrixRows = matrix.map((c, i) => {
         const auth = csCellAuth(c);
         const authOpts = CS_SSID_AUTH_TYPES.map(([v, lbl]) =>
@@ -5173,6 +5174,8 @@ function csPoolConfigCardHtml() {
         const fourth = auth === '1x'
             ? `<label class="text-xs text-slate-500" title="Where the engine just-in-time creates each client's 802.1X account (username = client username, random password kept in the vault, rotated every 30 days). Manual = use dot1x_password from the Simulation config.">Account location<select data-cs-cell-k="dot1x_account" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1">${CS_DOT1X_ACCOUNT_LOCATIONS.map(([v, lbl]) =>
                  `<option value="${v}" ${(c.dot1x_account || '') === v ? 'selected' : ''}>${esc(lbl)}</option>`).join('')}</select></label>`
+            : auth === 'open'
+            ? `<div class="text-xs text-slate-400 italic pb-2">No password (open)</div>`
             : `<label class="text-xs text-slate-500">${auth === 'mpsk' ? 'MPSK password' : 'PSK password'}<input data-cs-cell-k="ssidpw" value="${esc(c.ssidpw)}" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1"></label>`;
         return `<div class="grid grid-cols-2 sm:grid-cols-5 gap-2 items-end bg-white border border-slate-200 rounded-md p-2" data-cs-cell="${i}">
           <label class="text-xs text-slate-500">Site<select data-cs-cell-k="site" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1">${csLinkSiteOptions(c.site, '— site —')}</select></label>
@@ -5205,8 +5208,8 @@ function csPoolConfigCardHtml() {
             <button onclick="csSavePoolConfig()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-4 py-1.5 rounded-full text-sm font-bold shadow-sm">Save Pool</button>
           </div>
         </div>
-        <p class="text-xs text-slate-500 mb-2"><code>1X</code> auth uses <code>dot1x_eap</code> and <code>dot1x_password</code> from the Simulation config; PEAP falls back to the SSID Ssidpw when the Dot1x Password is empty. Set a 1X cell's <span class="font-semibold">Account location</span> to have the engine create each assigned client's account in Entra ID, the tenant LDAP OU or ClearPass with a random vaulted password (see NAC → My Users).</p>
-        <p class="text-xs text-slate-500 mb-3">The SSID matrix just <span class="font-semibold">defines</span> your SSIDs (site, SSID, auth, password). <span class="font-semibold">Sim Quotas</span> attach an exact (accounted) count of clients to a cell for an alert. The <span class="font-semibold">weighted rules</span> below spread the rest of the pool (random, unaccounted) across a site's SSIDs by weight. Whether a PXMX server is site-bound (RF chamber) or assignable is set in <span class="font-semibold">Config → Sites</span>.</p>
+        <p class="text-xs text-slate-500 mb-2"><code>1X</code> auth uses <code>dot1x_eap</code> and <code>dot1x_password</code> from the Simulation config; PEAP falls back to the SSID Ssidpw when the Dot1x Password is empty. <code>Open</code> auth connects with no password (the SSID Incorrect Password sim is skipped on open SSIDs). Set a 1X cell's <span class="font-semibold">Account location</span> to have the engine create each assigned client's account in Entra ID, the tenant LDAP OU or ClearPass with a random vaulted password (see NAC → My Users).</p>
+        <p class="text-xs text-slate-500 mb-3">The SSID matrix just <span class="font-semibold">defines</span> your SSIDs (site, SSID, auth, password — none for Open). <span class="font-semibold">Sim Quotas</span> attach an exact (accounted) count of clients to a cell for an alert. The <span class="font-semibold">weighted rules</span> below spread the rest of the pool (random, unaccounted) across a site's SSIDs by weight. Whether a PXMX server is site-bound (RF chamber) or assignable is set in <span class="font-semibold">Config → Sites</span>.</p>
         <div class="mb-3">
           <div class="text-xs font-bold text-slate-500 mb-1">Randomizable (ambient) sims</div>
           <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-x-4 gap-y-1">${simChecks}</div>
@@ -5243,7 +5246,8 @@ function csPoolSyncFromDom() {
         if (!site && !ssid) return;
         const auth = get('auth') || csCellAuth(prev);
         // The hidden column keeps its last value so flipping auth back and
-        // forth doesn't lose the PSK password or the 1X account location.
+        // forth (including to Open) doesn't lose the PSK password or the 1X
+        // account location.
         const ssidpw = q('ssidpw') ? get('ssidpw') : (prev.ssidpw || '');
         const dot1xAccount = q('dot1x_account') ? get('dot1x_account') : (prev.dot1x_account || '');
         matrix.push({ name: `${site}-${ssid}`, site, ssid, auth, ssidpw, dot1x_account: dot1xAccount, enabled: true });
