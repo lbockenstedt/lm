@@ -2009,6 +2009,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
           cannot be done (the NetBox spoke's last sweep; cheap to read).
         * ``netbox_duplicates``: duplicate device groups (serial/MAC) from a
           dry-run dedupe, refreshed at most hourly because it reads every device.
+        * ``netbox_churn``: changelog write rate and flapping fields (every 30 min).
         * ``dhcp_declines``: scopes holding DECLINEd addresses.
         Each part is optional; a spoke that is down or slow is left out."""
         import access as _access
@@ -2049,6 +2050,16 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                                 for g in groups[:10]]}
             if cache["data"] is not None:
                 out["netbox_duplicates"] = cache["data"]
+
+            # Write churn from the NetBox changelog (flapping fields, write rate), every 30 min.
+            ch = self.__dict__.setdefault("_hc_churn", {"ts": 0.0, "data": None})
+            if time.time() - ch["ts"] >= 1800:
+                ch["ts"] = time.time()
+                cr = await _ask(ipam, "NETBOX_CHURN_REPORT", {"window_s": 1800}, 60.0)
+                if cr is not None:
+                    ch["data"] = {k: v for k, v in cr.items() if k != "status"}
+            if ch["data"] is not None:
+                out["netbox_churn"] = ch["data"]
 
         # DHCP: scopes with declined addresses (ARP conflicts on the wire).
         dhcp = self.get_spoke_by_type("dhcp")
