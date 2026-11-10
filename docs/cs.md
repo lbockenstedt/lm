@@ -65,6 +65,46 @@ The cs spoke itself owns the simulation "profile" logic, the per-client override
 - webui-spoke legacy: `webui-spoke/server.py`, `lm_relay.py` (`CSBridge`/`LMControlPlane`), `acme.py`.
 - Clients: `clients/linux/agent.sh` + scripts, `clients/windows/*.ps1`, `clients/t3/*`; configs `configs/simulation.conf`, `configs/user-overrides.conf`.
 
+## WWW Discover - Network Diagnostics
+
+`www_discover` is a Linux/Windows steady-traffic simulation cloned from
+`www_traffic`. Enable its on/off flag in the Simulations Config per-bucket
+editor or the per-client control panel. The flag defaults to `off` in every
+`[s0]`–`[s9]` bucket. It generates no alert and consumes no quota.
+
+Each run picks one URL uniformly at random from its own
+`www_discover_websites.txt` and opens it in headless Firefox. The dedicated
+list contains the five requested HTTPS endpoints (no Marvis Minis URL):
+
+- `https://worldaz.tr.teams.microsoft.com`
+- `https://zoom.us`
+- `https://www.okta.com`
+- `https://www.google.com`
+- `https://www.linkedin.com`
+
+The cs repo ships identical lists at `configs/www_discover_websites.txt`,
+`clients/linux/www_discover_websites.txt`, and
+`clients/windows/www_discover_websites.txt`. Linux reads
+`/usr/local/scripts/www_discover_websites.txt`; Windows reads
+`C:\Scripts\www_discover_websites.txt`. The existing `www_traffic` simulation
+and shared `websites.txt` are unchanged.
+
+- **Linux:** `simulation.sh` dispatches `run_simulation "www_discover.sh" 30`
+  when enabled, using its skip-if-running guard. `www_discover.sh` wraps the
+  browser invocation in `timeout 60`, uses `cpulimit -l 10` when available
+  (otherwise plain `firefox-esr --headless`), and logs to
+  `debug-www-discover.log`.
+- **Windows:** `simulation.ps1` dispatches `www_discover.ps1` only when enabled
+  and not already running. It starts Firefox hidden with `--headless <url>`,
+  waits up to 60 seconds, then stops only the Firefox process it launched.
+- **Safe skips:** an empty list or missing Firefox is logged and exits with
+  status 0. There is no DNS-flood logic or self-kill of the simulation process;
+  the orchestrator owns the single-instance guard.
+
+Client scripts, lists, and default config ship through the companion
+[cs change (#239)](https://github.com/lbockenstedt/cs/issues/239); the LM UI
+requires those client updates to generate this traffic.
+
 ## Notable behaviors & gotchas
 
 - **lm-spoke is relay-only for Proxmox** — `proxmox_deploy.py` ingests telemetry + builds `relay_payload` (per-host `provision` diagnostic with `cs_enabled`/`loop_running`/`auto_provision_on`/`reason`/`halt`); the brain is `pxmx/agent/src/usb_provision.py`.
