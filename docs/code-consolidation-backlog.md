@@ -96,7 +96,7 @@ The cs spoke and the hub each run a copy of the Central/Mist telemetry logic. In
 
 ## Tier 4: CI boilerplate. Leave as is.
 
-`bump_version.py` (17 repos) and `test_promote_version_docs.py` (16 repos) are byte-identical and already synced from ab. They are intentional.
+`bump_version.py` (17 repos) is byte-identical and already synced from ab. That is intentional. `test_promote_version_docs.py` now lives once, in `lm/.github/tests`, because the promotion logic lives once in lm's reusable workflows.
 
 ## Smaller within-repo duplicates (opportunistic)
 
