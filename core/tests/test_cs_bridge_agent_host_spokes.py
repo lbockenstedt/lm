@@ -99,6 +99,44 @@ def test_tick_relays_commands_for_cs_hosted_agent_with_no_hypervisor_spoke():
     assert ack_calls and ack_calls[0][2]["status"] == "completed"
 
 
+class _TwoCsSpokeHub(_FakeHub):
+    """Agent dials cs-svr-04 while the tenant's broker is cs-svr-03; the
+    queued command sits only in cs-svr-04's queue (a fleet fan-out copy)."""
+
+    async def request_response(self, spoke_id, cmd_type, data, timeout=5.0):
+        """Serve the agent from cs-svr-04 and the command only from its queue."""
+        if cmd_type == "GET_AGENTS":
+            self.calls.append((spoke_id, cmd_type, data))
+            agents = ([{"agent_id": "pxmx-cs-svr-04", "hostname": "pxmx-cs-svr-04"}]
+                      if spoke_id == "cs-svr-04" else [])
+            return {"payload": {"data": {"status": "SUCCESS", "agents": agents}}}
+        if cmd_type == "CS_POLL_AGENT_INBOX" and spoke_id != "cs-svr-04":
+            self.calls.append((spoke_id, cmd_type, data))
+            return {"payload": {"data": {"status": "SUCCESS", "commands": []}}}
+        return await super().request_response(spoke_id, cmd_type, data, timeout)
+
+
+def test_tick_drains_the_agents_own_cs_spoke_not_just_the_broker():
+    def hub_for(spoke_tenants):
+        """Build the two-cs-spoke hub with the given spoke tenant bindings."""
+        return _TwoCsSpokeHub(
+            spokes_by_type={"simulation": ["cs-svr-03", "cs-svr-04"]},
+            agent_config={"pxmx-cs-svr-04": {"client_simulation": {
+                "enabled": True, "tenant_id": "acme"}}},
+            spoke_tenants=spoke_tenants,
+            tenant_to_cs_spoke={"acme": "cs-svr-03"})
+
+    hub = hub_for({"cs-svr-03": "acme", "cs-svr-04": "acme"})
+    _run(CSBridgePoller(hub)._tick())
+    acks = [c for c in hub.calls if c[1] == "CS_ACK_COMMAND"]
+    assert [a[0] for a in acks] == ["cs-svr-04"], "fan-out copy on the agent's own cs spoke was never relayed"
+
+    # A cs spoke bound to another tenant is never drained for this agent.
+    hub = hub_for({"cs-svr-03": "acme", "cs-svr-04": "other"})
+    _run(CSBridgePoller(hub)._tick())
+    assert not [c for c in hub.calls if c[1] == "SPOKE_RELAY"]
+
+
 def test_tick_is_a_noop_with_no_agent_hosting_spokes_connected():
     hub = _FakeHub(spokes_by_type={})
     poller = CSBridgePoller(hub)
