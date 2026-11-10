@@ -586,3 +586,36 @@ def test_oobm_address_is_the_one_on_the_mgmt_interface():
     assert nw_oobm_address(dev, {"data": rows}) == "10.0.4.2"
     assert nw_oobm_address(dev, [{"name": "vlan10", "ip": "172.21.0.11"}]) == ""
     assert nw_oobm_address(dev, None) == ""
+
+
+@pytest.mark.asyncio
+async def test_pull_prefers_access_port_over_uplink_deterministically():
+    # MAC ee05 is learned on a distribution switch uplink (many MACs) and on
+    # the access switch port; the access port must win whatever the fetch order.
+    def uplink():
+        return {"payload": {"data": {"status": "SUCCESS", "data": [
+            {"mac": f"aa:bb:cc:dd:00:{i:02x}", "interface": "Po1"} for i in range(5)
+        ] + [{"mac": "aa:bb:cc:dd:ee:05", "interface": "Po1"}]}}}
+
+    def access():
+        return {"payload": {"data": {"status": "SUCCESS", "data": [
+            {"mac": "aa:bb:cc:dd:ee:05", "interface": "Gi1/0/5"}]}}}
+
+    for first, second in (("a-dist", "z-acc"), ("z-dist", "a-acc")):
+        h = _hub_with_responses()
+        h.state.system_state["global_config"]["nw_devices"] = [
+            {"id": first, "name": first, "address": "10.0.0.1", "spoke_id": "nw-1"},
+            {"id": second, "name": second, "address": "10.0.0.2", "spoke_id": "nw-1"}]
+        h._responses[("nw-1", "NW_GET_ARP")] = {"payload": {"data": {
+            "status": "SUCCESS", "data": []}}}
+        calls = {}
+
+        async def rr(spoke_id, command, payload, timeout=30.0, _h=h, _c=calls,
+                     _first=first):
+            if command == "NW_GET_MAC_TABLE":
+                return uplink() if payload["device_id"] == _first else access()
+            return _h._responses[(spoke_id, command)]
+        h.request_response = rr
+        records, _ = await h._nw_pull_discovered()
+        r = next(x for x in records if x["mac"] == "aa:bb:cc:dd:ee:05")
+        assert r["source_switch_port"] == "Gi1/0/5"
