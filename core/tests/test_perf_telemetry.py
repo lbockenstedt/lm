@@ -13,6 +13,17 @@ def test_slow_routes_and_commands_are_ranked_and_report_is_built():
     assert snap["commands"][0]["key"] == "NETBOX_GET_DEVICES" and snap["commands"][0]["spoke"] == "netbox-1"
 
 
+def test_bulk_sweeps_are_only_slow_past_the_bulk_threshold():
+    """A 16 s ping sweep is normal; it was flagged as slow on every call."""
+    t = pt.PerfTelemetry()
+    t.record_command("nw-1", "NW_PING_SWEEP", 16.0)
+    t.record_command("nw-1", "NW_PING_SWEEP", 400.0)
+    t.record_command("nw-1", "NW_GET_MAC_TABLE", 16.0)
+    rows = {r["key"]: r for r in t.snapshot()["commands"]}
+    assert rows["NW_PING_SWEEP"]["slow"] == 1
+    assert rows["NW_GET_MAC_TABLE"]["slow"] == 1
+
+
 def test_build_report_tolerates_a_bare_hub():
     class Hub:
         _request_timeouts_total = 3
@@ -44,6 +55,33 @@ def test_spoke_queue_snapshot_collects_stats_and_skips_silent_spokes():
 
     out = asyncio.run(main.LabManagerHub._spoke_queue_snapshot(Hub()))
     assert out == {"spoke-a": {"inflight": 4, "max_inflight": 4, "rejected_full": 9}}
+
+
+def test_spoke_queue_snapshot_does_not_ask_appbuilder():
+    """AB has no command queue; asking it only produced a timeout per health report."""
+    import asyncio
+    import os
+    os.environ.setdefault("LM_FERNET_KEY", __import__("cryptography.fernet",
+                                                      fromlist=["Fernet"]).Fernet.generate_key().decode())
+    import main
+
+    asked = []
+
+    class Hub:
+        active_connections = {"a": 1, "ab": 1}
+
+        def get_spoke_by_type(self, t):
+            return "ab" if t == "ab" else None
+
+        def _spoke_label(self, sid):
+            return sid
+
+        async def request_response(self, sid, cmd, data, timeout=None):
+            asked.append(sid)
+            return {"payload": {"data": {"inflight": 0}}}
+
+    asyncio.run(main.LabManagerHub._spoke_queue_snapshot(Hub()))
+    assert asked == ["a"]
 
 
 def test_fleet_health_snapshot_summarises_netbox_and_dhcp():
