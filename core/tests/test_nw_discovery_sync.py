@@ -673,3 +673,43 @@ async def test_pull_same_named_switches_pick_one_ip_stably():
         records, _ = await h._nw_pull_discovered()
         r = next(x for x in records if x["mac"] == "aa:bb:cc:dd:ee:05")
         assert r["source_switch_ip"] == "10.0.0.1"
+
+
+@pytest.mark.asyncio
+async def test_pull_keeps_last_sighting_until_a_better_one_appears():
+    # Live churn: a MAC seen only on VLAN SVIs moved between switches every
+    # run as their ARP-table sizes shifted. Keep the previous sighting while
+    # it is still reported; switch only when a physical port shows up.
+    def svi(n):
+        return [{"mac": "aa:bb:cc:dd:ee:05", "interface": "vlan10"}] + [
+            {"mac": f"aa:bb:cc:dd:00:{i:02x}", "interface": "vlan10"} for i in range(n)]
+
+    h = _hub_with_responses()
+    h.state.system_state["global_config"]["nw_devices"] = [
+        {"id": n, "name": n, "address": a, "spoke_id": "nw-1"}
+        for n, a in (("a-sw", "10.0.0.1"), ("b-sw", "10.0.0.2"))]
+    h._responses[("nw-1", "NW_GET_ARP")] = {"payload": {"data": {
+        "status": "SUCCESS", "data": []}}}
+    tables = {}
+
+    async def rr(spoke_id, command, payload, timeout=30.0):
+        if command == "NW_GET_MAC_TABLE":
+            return {"payload": {"data": {"status": "SUCCESS",
+                                         "data": tables[payload["device_id"]]}}}
+        return h._responses[(spoke_id, command)]
+    h.request_response = rr
+
+    async def winner():
+        records, _ = await h._nw_pull_discovered()
+        r = next(x for x in records if x["mac"] == "aa:bb:cc:dd:ee:05")
+        return r["source_switch_name"], r["source_switch_port"]
+
+    tables.update({"a-sw": svi(1), "b-sw": svi(5)})
+    assert await winner() == ("a-sw", "vlan10")
+    tables.update({"a-sw": svi(5), "b-sw": svi(1)})   # counts swap
+    assert await winner() == ("a-sw", "vlan10")
+    tables["b-sw"] = [{"mac": "aa:bb:cc:dd:ee:05", "interface": "1/1/7"}]
+    assert await winner() == ("b-sw", "1/1/7")
+    tables["a-sw"] = []                                  # old sighting gone
+    tables["b-sw"] = svi(3)
+    assert await winner() == ("b-sw", "vlan10")
