@@ -70,6 +70,12 @@ logger = logging.getLogger("Hub")
 # Matches a dotted IPv4 address, used to tell an IP "name" from a real hostname.
 _IP_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
+# Logical interfaces a MAC transits rather than plugs into: LAGs/port-channels,
+# VXLAN/NVE tunnels, VLAN SVIs/IRBs (ARP rows report these).
+_LOGICAL_PORT_RE = re.compile(
+    r"^(lag|po\d|port-channel|trk|ae\d|bond|vxlan|nve|vlan|vl\d|irb|bvi|tunnel)",
+    re.IGNORECASE)
+
 
 def nw_short_name(name: Any) -> str:
     """Hostname used to match the same box across addresses: case-folded with
@@ -716,17 +722,21 @@ class NwDiscoverySyncMixin:
         merged: Dict[str, Dict[str, str]] = {}
         # A MAC is learned on every switch along its path (uplinks, peer links),
         # and fetch completion order is random, so "first sighting wins" made the
-        # recorded switch flap. Order sightings so the access port (fewest MACs
-        # learned on it) wins, ties broken by switch name/port: stable per run.
+        # recorded switch flap. Order sightings so a physical port beats a
+        # logical one (LAG, VXLAN, VLAN SVI: where the MAC transits, not where
+        # it plugs in), then the access port (fewest MACs learned on it) wins,
+        # ties broken by switch name/IP/port: stable across runs.
         port_macs: Dict[Tuple[str, str], set] = {}
         for rec in raw:
             if rec.get("mac") and rec.get("source_switch_port"):
                 port_macs.setdefault((rec.get("source_switch_name", ""),
                                       rec["source_switch_port"]), set()).add(rec["mac"])
         raw.sort(key=lambda r: (
+            bool(_LOGICAL_PORT_RE.match(r.get("source_switch_port", ""))),
             len(port_macs.get((r.get("source_switch_name", ""),
                                r.get("source_switch_port", "")), ())) or 10 ** 9,
-            r.get("source_switch_name", ""), r.get("source_switch_port", "")))
+            r.get("source_switch_name", ""), r.get("source_switch_ip", ""),
+            r.get("source_switch_port", "")))
         for rec in raw:
             mac, ip = rec.get("mac", ""), rec.get("ip", "")
             # Key by MAC when known, else by IP; rows with neither are skipped.
