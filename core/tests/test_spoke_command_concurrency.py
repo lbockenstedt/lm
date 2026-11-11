@@ -224,3 +224,29 @@ async def test_background_commands_leave_slots_for_reads(monkeypatch):
         ws, "FAST_CMD", {}, "read", send_lock, sem)))
     await asyncio.gather(*tasks)
     assert [f["corr"] for f in ws.sent][0] == "read"
+
+
+async def test_one_tenant_cannot_take_every_background_slot(monkeypatch):
+    """Tenant A queues three slow feeds, then tenant B one. With one feed per
+    tenant, B's feed runs before A's second instead of waiting behind A's
+    backlog, and the per-tenant counters show who waited."""
+    monkeypatch.setenv("LM_SPOKE_MAX_BACKGROUND_PER_TENANT", "1")
+    spoke = _build()
+    mod = spoke.modules["test"]
+    mod.BACKGROUND_COMMANDS = frozenset({"SLOW_CMD"})
+    ws = _Ws()
+    send_lock = asyncio.Lock()
+    sem = asyncio.Semaphore(spoke._max_concurrent_commands())
+    jobs = [("a1", "A"), ("a2", "A"), ("a3", "A"), ("b1", "B")]
+    tasks = []
+    for corr, tenant in jobs:
+        tasks.append(asyncio.create_task(spoke._handle_one_command(
+            ws, "SLOW_CMD", {"tenant_id": tenant}, corr, send_lock, sem)))
+        await asyncio.sleep(0)
+    await asyncio.gather(*tasks)
+    order = [f["corr"] for f in ws.sent]
+    assert order.index("b1") < order.index("a2"), order
+    lanes = spoke._command_queue_stats()["background_by_tenant"]
+    assert lanes["A"]["done"] == 3 and lanes["B"]["done"] == 1
+    assert lanes["A"]["waiting"] == lanes["A"]["running"] == 0
+    assert lanes["A"]["wait_s"] > 0

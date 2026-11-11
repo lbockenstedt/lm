@@ -2199,18 +2199,54 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         except Exception:
             return 64
 
-    def _background_slot(self, cmd_type):
-        """The extra slot a module's background feed command (one it lists in
-        BACKGROUND_COMMANDS) must hold, or a no-op for any other command.
-        Background feeds get at most half the command slots, so user reads
-        never queue behind long syncs and sweeps."""
+    def _max_background_per_tenant(self) -> int:
+        """Max background feeds one tenant may run at once (env-overridable, default 2)."""
+        # Read the env override, never below 1; fall back to the default.
+        try:
+            return max(1, int(os.environ.get("LM_SPOKE_MAX_BACKGROUND_PER_TENANT", "2")))
+        except Exception:
+            return 2
+
+    @contextlib.asynccontextmanager
+    async def _background_slot(self, cmd_type, data=None):
+        """Slots a module's background feed command (one it lists in
+        BACKGROUND_COMMANDS) must hold; a no-op for any other command.
+
+        Background feeds share at most half the command slots, so live UI
+        queries always find a free one. Each tenant (``tenant_id``; feeds with
+        none share the "fleet" lane) may hold only a few of those, so one big
+        scan can't starve other tenants: a tenant's extra feeds wait in its own
+        queue, not in the shared one."""
         name = str(cmd_type or "").upper()
         if not any(name in getattr(m, "BACKGROUND_COMMANDS", ())
                    for m in self.modules.values()):
-            return contextlib.AsyncExitStack()
+            yield
+            return
         if getattr(self, "_bg_cmd_sem", None) is None:
             self._bg_cmd_sem = asyncio.Semaphore(max(1, self._max_concurrent_commands() // 2))
-        return self._bg_cmd_sem
+        tenant = str((data or {}).get("tenant_id") or "") or "fleet"
+        tenant_sems = self.__dict__.setdefault("_bg_tenant_sems", {})
+        if tenant not in tenant_sems:
+            tenant_sems[tenant] = asyncio.Semaphore(self._max_background_per_tenant())
+        stats = self._cmd_stats.setdefault("by_tenant", {}).setdefault(
+            tenant, {"waiting": 0, "running": 0, "done": 0, "wait_s": 0.0})
+        stats["waiting"] += 1
+        started = time.monotonic()
+        try:
+            async with tenant_sems[tenant], self._bg_cmd_sem:
+                stats["waiting"] -= 1
+                stats["wait_s"] += time.monotonic() - started
+                started = None
+                stats["running"] += 1
+                try:
+                    yield
+                finally:
+                    stats["running"] -= 1
+                    stats["done"] += 1
+        finally:
+            # Cancelled while still queued.
+            if started is not None:
+                stats["waiting"] -= 1
 
     def _cmd_type_stats(self, cmd_type: str) -> Dict[str, Any]:
         """Per-command-type counters, created on first use."""
@@ -2244,6 +2280,10 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             "last_rejected_at": self._cmd_stats["last_rejected_at"],
             "backpressure_level": getattr(self, "_bp_level", 0),
             "by_type": by_type,
+            # Background feed lanes per tenant: who holds and waits for slots.
+            "background_by_tenant": {
+                t: dict(s, wait_s=round(s["wait_s"], 1))
+                for t, s in self._cmd_stats.get("by_tenant", {}).items()},
         }
 
     async def _send_cmd_result(self, websocket, corr_id, result, send_lock) -> None:
@@ -2317,7 +2357,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         queued_at = time.monotonic()
         # Hold a concurrency slot for the whole handler (background feeds also
         # need one of their own, so they can't take every slot).
-        async with self._background_slot(cmd_type), sem:
+        async with self._background_slot(cmd_type, data), sem:
             # The hub stops waiting after max_wait_s (its request timeout). A
             # command that sat queued that long has no one to answer, so skip
             # it instead of spending a slot on it — a backlog of these is what
