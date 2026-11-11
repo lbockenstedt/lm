@@ -596,7 +596,7 @@ class NwDiscoverySyncMixin:
         return mine
 
     def _nw_discovery_concurrency(self) -> int:
-        """Max tenants pushed in parallel per cycle. Clamp 1..8; default 4."""
+        """Max parallel nw-spoke fetches per cycle. Clamp 1..8; default 4."""
         # Read the configured concurrency, defaulting to 4 on bad values.
         try:
             n = int(self._nw_discovery_cfg().get("concurrency", 4))
@@ -1115,7 +1115,7 @@ class NwDiscoverySyncMixin:
         # Send to NetBox and read back its counters; any exception is reported as an error.
         try:
             rr = await self.request_response(netbox, self._NW_DISCOVERY_PUSH_COMMAND,
-                                             payload, timeout=120.0)
+                                             payload, timeout=600.0)
             # Unwrap the reply and coerce each counter to an int.
             rd = unwrap_spoke(rr) if isinstance(rr, dict) else {}
             rstatus = str((rd or {}).get("status") or "").upper()
@@ -1185,7 +1185,7 @@ class NwDiscoverySyncMixin:
         # Send to NetBox and read back its counters; any exception is reported as an error.
         try:
             rr = await self.request_response(netbox, self._NW_DISCOVERY_PUSH_COMMAND,
-                                             payload, timeout=120.0)
+                                             payload, timeout=600.0)
             # Unwrap the reply and coerce each counter to an int.
             rd = unwrap_spoke(rr) if isinstance(rr, dict) else {}
             rstatus = str((rd or {}).get("status") or "").upper()
@@ -1668,8 +1668,8 @@ class NwDiscoverySyncMixin:
         return status
 
     async def run_nw_discovery_sync_all(self) -> Dict[str, Any]:
-        """Full cycle: pull → attribute → push every attributed tenant
-        concurrently (bounded). Returns ``{"results": [...],
+        """Full cycle: pull → attribute → push every attributed tenant, one at a
+        time (the NetBox spoke paces background syncs itself). Returns ``{"results": [...],
         "dropped_unattributed": N, "discovered_total": M}``."""
         # Pull all sightings across every nw spoke.
         records, pull = await self._nw_pull_discovered()
@@ -1689,21 +1689,17 @@ class NwDiscoverySyncMixin:
                         "%d dropped unattributed", len(records), dropped)
             return {"results": [], "dropped_unattributed": dropped,
                     "discovered_total": len(records), "mac_only_total": 0}
-        # Limit how many tenants are pushed at once.
-        sem = asyncio.Semaphore(self._nw_discovery_concurrency())
-
-        async def _one(tid: str):
-            """Push one tenant's bucket under the semaphore; errors return None."""
-            async with sem:
-                try:
-                    return await self._nw_push_tenant(tid, buckets.get(tid, []))
-                except Exception as e:  # _nw_push_tenant swallows; never kill the gather
-                    logger.debug("nw discovery gather tenant=%s: %s", tid, e)
-                    return None
-
-        # Push all tenants concurrently and keep the non-empty results.
-        results = await asyncio.gather(*(_one(tid) for tid in tids))
-        out = [r for r in results if r]
+        # Push one tenant at a time: NetBox is a single shared server, and this is
+        # background work that must not crowd out users or other modules.
+        out = []
+        for tid in tids:
+            try:
+                r = await self._nw_push_tenant(tid, buckets.get(tid, []))
+            except Exception as e:  # _nw_push_tenant swallows; never kill the cycle
+                logger.debug("nw discovery push tenant=%s: %s", tid, e)
+                r = None
+            if r:
+                out.append(r)
         # Totals across tenants for the cycle log.
         pushed = sum(int(r.get("pushed", 0)) for r in out)
         errs = sum(int(r.get("errors", 0)) for r in out)
@@ -1849,7 +1845,7 @@ class NwDiscoverySyncMixin:
             try:
                 res = unwrap_spoke(await self.request_response(
                     netbox, "NETBOX_SYNC_LLDP",
-                    {"links": links, "tenant_slug": slug}, timeout=180.0)) or {}
+                    {"links": links, "tenant_slug": slug}, timeout=600.0)) or {}
                 logger.info("nw lldp->netbox tenant=%s: %d links: %s", key, len(links),
                             res.get("message") or res.get("status"))
                 if res.get("errors") and res.get("details"):
