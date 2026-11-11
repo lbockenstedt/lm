@@ -72,6 +72,7 @@ class _Spoke:
         self.signer = MessageSigner("test-spoke-secret-1234567890")
         self.secret = "test-spoke-secret-1234567890"
         self._handle_one_command = BaseControlPlane._handle_one_command.__get__(self)
+        self._background_slot = BaseControlPlane._background_slot.__get__(self)
         self._emit_spoke_progress = BaseControlPlane._emit_spoke_progress.__get__(self)
         self._send_cmd_result = BaseControlPlane._send_cmd_result.__get__(self)
         self._encode_frame = BaseControlPlane._encode_frame.__get__(self)
