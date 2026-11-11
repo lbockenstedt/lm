@@ -294,6 +294,21 @@ Signal levels: `0` resume · `1` this spoke is the offender · `2` fleet-wide
 > and does **not** yet consult `_bp_send_interval` — so it does not slow under
 > `LM_BACKPRESSURE`. Worth wiring for parity (follow-up).
 
+### Live UI first: background feed lanes
+
+A spoke runs at most `LM_SPOKE_MAX_CONCURRENT_COMMANDS` (default 8) hub commands
+at once. Commands a module lists in `BACKGROUND_COMMANDS` (e.g. the NetBox
+spoke's syncs and sweeps) also need a background slot (`_background_slot`):
+
+- Background feeds share at most **half** the slots, so a live UI query from
+  any tenant always finds a free one.
+- Each tenant (the payload's `tenant_id`; feeds without one share the `fleet`
+  lane) may run at most `LM_SPOKE_MAX_BACKGROUND_PER_TENANT` (default 2) feeds
+  at once. Its extra feeds wait in its own queue, so one large scan can't
+  starve other tenants.
+- `_command_queue_stats()["background_by_tenant"]` shows, per tenant, feeds
+  waiting / running / done and total queue wait.
+
 ---
 
 ## 7. Sig-verify-over-raw-bytes — raising the ceiling (the flag-day)
