@@ -116,7 +116,7 @@ import vm_snapshots
 # Hardware-serial stitching of management controllers to their host OS.
 import hw_serial_links
 from hub_mtls_enforcement import HubMtlsEnforcementMixin
-from update_pipeline import UpdatePipelineMixin
+from update_pipeline import UpdatePipelineMixin, _parse_nn
 from endpoint_sync import EndpointSyncMixin
 # 802.1X just-in-time helpers.
 import dot1x_jit
@@ -4976,6 +4976,24 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Refresh the cached known-module list.
         self.known_modules = self.state.system_state["known_modules"]
 
+    async def _refresh_spoke_version(self, spoke_id: str) -> None:
+        """Ask a just-connected spoke for its version (best-effort).
+
+        The COMMAND_RESULT handler records the reply in spoke_versions.
+        """
+        # Wait up to 10 s for the spoke to accept commands.
+        for _ in range(20):
+            if self.spoke_can_accept_commands(spoke_id)[0]:
+                break
+            await asyncio.sleep(0.5)
+        else:
+            return
+        # Older spokes may not answer GET_VERSION; that is fine.
+        try:
+            await self.request_response(spoke_id, "GET_VERSION", {}, timeout=15.0)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("GET_VERSION on connect for %s failed: %s", spoke_id, e)
+
     async def _readopt_agent_roles(self, agent_spoke_id: str) -> None:
         """Re-push ``LOAD_ROLE`` for every role the hub has on record for this
         base agent whose role sub-spoke is not currently connected.
@@ -7200,6 +7218,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         if module_type == "agent":
             asyncio.create_task(self._readopt_agent_roles(spoke_id))
 
+        # A reconnect usually follows an update, so refresh the cached version;
+        # otherwise the spoke shows out of date and gets re-pushed updates.
+        asyncio.create_task(self._refresh_spoke_version(spoke_id))
+
         # Fleet mTLS: deliver a Hub-Local-CA clientAuth client cert so the
         # spoke can present a VERIFIED mTLS identity (public CAs no longer
         # issue clientAuth). Idempotent — skips when a current cert exists.
@@ -7588,9 +7610,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
         # A get_version reply: remember the spoke's version + commit.
         if payload.get("type") == "COMMAND_RESULT":
-            # Record the version and commit SHA when present.
+            # Record the version and commit SHA when present. Only a release
+            # version counts: other replies (DNS_LIST, DHCP cluster status) carry
+            # a desired-state counter in "version", which made the spoke look
+            # out of date.
             data = payload.get("data", {})
-            if isinstance(data, dict) and "version" in data:
+            if isinstance(data, dict) and _parse_nn(data.get("version")) is not None:
                 self.spoke_versions[pk] = data["version"]
             if isinstance(data, dict) and data.get("commit_sha"):
                 self.spoke_commits[pk] = data["commit_sha"]

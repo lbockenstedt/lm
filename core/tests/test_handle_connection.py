@@ -365,6 +365,26 @@ def test_cs_reconnect_push_is_deferred_until_after_mailbox():
     assert run.hub._cs_connect_defer == {}
 
 
+def test_connect_refreshes_spoke_version():
+    # Without this the hub kept the pre-update version and showed the spoke
+    # out of date until something else happened to ask.
+    run = connect()
+    assert "_refresh_spoke_version" in names(run)
+
+
+def test_refresh_spoke_version_sends_get_version():
+    import asyncio, types
+    from main import LabManagerHub
+    sent = []
+
+    async def rr(sid, cmd, data, timeout):
+        sent.append((sid, cmd))
+    hub = types.SimpleNamespace(spoke_can_accept_commands=lambda sid: (True, ""),
+                                request_response=rr)
+    asyncio.run(LabManagerHub._refresh_spoke_version(hub, "spk"))
+    assert sent == [("spk", "GET_VERSION")]
+
+
 def test_agent_gets_role_readopt_and_mtls_provision_tasks():
     run = connect(auth={**AUTH, "module_type": "agent"})
     tasks = [c[1][0] for c in called(run, "create_task")]
@@ -421,14 +441,23 @@ def test_heartbeat_persists_last_seen_and_clears_absent_clock():
 
 def test_replies_are_never_rate_limited():
     # Replies route before the limiter (4fe0916e).
-    frames = [signed(msg("COMMAND_RESULT", {"version": "9"}, correlation_id="c1")),
+    frames = [signed(msg("COMMAND_RESULT", {"version": "2.42"}, correlation_id="c1")),
               signed(msg("CS_TELEMETRY", {"x": 1}))]
     run = connect(frames=frames, **{"bucket.consume": False, "bucket.tokens": 0},
                   pre=lambda hub: hub._outstanding_requests.update({"c1": "w"}))
     assert run.hub.response_cache["c1"]["correlation_id"] == "c1"
-    assert run.hub.spoke_versions["spk"] == "9"
+    assert run.hub.spoke_versions["spk"] == "2.42"
     assert "_handle_cs_telemetry" not in names(run)
     assert run.hub._rl_harddrops["spk"] == 1 and "spk" in run.hub._rl_breached
+
+
+def test_desired_state_version_in_reply_is_not_a_spoke_version():
+    # DNS_LIST and DHCP cluster replies carry a desired-state counter in
+    # "version"; recording it flagged the spoke as out of date.
+    run = connect(frames=[signed(msg("COMMAND_RESULT", {"version": 7}, correlation_id="c1"))],
+                  pre=lambda hub: (hub._outstanding_requests.update({"c1": "w"}),
+                                   hub.spoke_versions.update({"spk": "2.42"})))
+    assert run.hub.spoke_versions["spk"] == "2.42"
 
 
 def test_protect_mode_sheds_only_offenders():
