@@ -14,6 +14,7 @@ real ``access.attribute_by_prefix`` runs through it (needs
 ``get_spoke_by_type('ipam')`` + ``state.get_tenant`` + a ``NETBOX_GET_PREFIXES``
 canned response).
 """
+import asyncio
 import logging
 
 import pytest
@@ -713,3 +714,32 @@ async def test_pull_keeps_last_sighting_until_a_better_one_appears():
     tables["a-sw"] = []                                  # old sighting gone
     tables["b-sw"] = svi(3)
     assert await winner() == ("b-sw", "vlan10")
+
+
+class _BusyNetboxHub(_OverlapHub):
+    """NetBox takes 50 ms per sync push; records how many pushes overlap."""
+
+    def __init__(self):
+        super().__init__()
+        self.inflight = 0
+        self.max_inflight = 0
+
+    async def request_response(self, spoke_id, command, payload, timeout=30.0):
+        if command != "NETBOX_SYNC_DEVICES":
+            return await super().request_response(spoke_id, command, payload, timeout)
+        self.inflight += 1
+        self.max_inflight = max(self.max_inflight, self.inflight)
+        try:
+            await asyncio.sleep(0.05)
+            return await super().request_response(spoke_id, command, payload, timeout)
+        finally:
+            self.inflight -= 1
+
+
+@pytest.mark.asyncio
+async def test_netbox_pushes_are_one_tenant_at_a_time():
+    """The background sync must not stack tenant pushes on NetBox at once."""
+    h = _BusyNetboxHub()
+    await h.run_nw_discovery_sync_all()
+    assert len(h.sync_payloads) >= 2
+    assert h.max_inflight == 1

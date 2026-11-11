@@ -148,7 +148,7 @@ class StalenessSweepMixin:
         # Ask the spoke to sweep; any failure becomes an error status.
         try:
             rr = await self.request_response(
-                ipam, self._STALENESS_PUSH_COMMAND, thresholds, timeout=180.0)
+                ipam, self._STALENESS_PUSH_COMMAND, thresholds, timeout=600.0)
             # Unwrap the reply and read its counters.
             rd = unwrap_spoke(rr) if isinstance(rr, dict) else {}
             rstatus = str((rd or {}).get("status") or "").upper()
