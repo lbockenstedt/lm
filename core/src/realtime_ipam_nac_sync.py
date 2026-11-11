@@ -286,7 +286,7 @@ class RealtimeIpamNacSyncMixin:
         # Push, then read the sink's counters.
         try:
             rr = await self.request_response(netbox, self._RT_NAC_PUSH_COMMAND,
-                                             payload, timeout=120.0)
+                                             payload, timeout=600.0)
             rd = unwrap_spoke(rr) if isinstance(rr, dict) else {}
             rstatus = str((rd or {}).get("status") or "").upper()
             pushed = int((rd or {}).get("pushed", 0) or 0)
