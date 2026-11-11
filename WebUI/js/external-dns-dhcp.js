@@ -833,7 +833,9 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
         }
         // ── Overview: Kea pool utilization + packet counters (OPNsense-grade) ─
         if (subMenu === 'Overview') {
-            const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/stats' + _tenantQS());
+            const statsRange = timeWindowChoice('dhcp_stats');
+            const rangeLabel = TIME_WINDOWS[statsRange];
+            const { ok, data: d, detail } = await _spokeFetch(timeWindowQS('/api/dhcp/stats' + _tenantQS(), statsRange));
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP spoke not connected'); return; }
             if (d.status && d.status !== 'SUCCESS') {
                 container.innerHTML = _spokeErrorBanner(d.message, 'Kea statistics unavailable'); return;
@@ -848,12 +850,16 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
             const idleNote = (d.kea_running === false && d.note)
                 ? `<div class="mb-4 p-3 rounded-lg bg-slate-50 border border-slate-200 text-sm text-slate-500">${escapeHtml(d.note)}</div>` : '';
             const syncLine = await _ddSyncStatusLine('dhcp');
+            // Packet counters follow the time window; pool and lease numbers are current.
+            const windowLine = timeWindowNote(d.window || null, statsRange, 'DHCP server', 'Kea');
+            const rangePicker = timeWindowPicker('dhcp-stats-range', statsRange,
+                'Window for the DHCP packet counters (pool and lease numbers are always current)');
             const tiles = [
                 _ddTile('Pool Utilization', `${g.utilization_pct || 0}%`, `${(g.assigned_addresses || 0).toLocaleString()} / ${(g.total_addresses || 0).toLocaleString()} addresses`,
                         (g.utilization_pct || 0) >= 90 ? 'text-red-600' : (g.utilization_pct || 0) >= 70 ? 'text-amber-600' : 'text-emerald-600'),
                 _ddTile('Assigned Leases', (g.assigned_addresses || 0).toLocaleString(), `${(g.declined_addresses || 0).toLocaleString()} declined`),
-                _ddTile('DISCOVER / REQUEST', `${(g.pkt4_discover || 0).toLocaleString()} / ${(g.pkt4_request || 0).toLocaleString()}`, `${(g.pkt4_received || 0).toLocaleString()} received`),
-                _ddTile('OFFER / ACK / NAK', `${(g.pkt4_offer_sent || 0).toLocaleString()} / ${(g.pkt4_ack_sent || 0).toLocaleString()} / ${(g.pkt4_nak_sent || 0).toLocaleString()}`),
+                _ddTile('DISCOVER / REQUEST', `${(g.pkt4_discover || 0).toLocaleString()} / ${(g.pkt4_request || 0).toLocaleString()}`, `${(g.pkt4_received || 0).toLocaleString()} received · ${rangeLabel}`),
+                _ddTile('OFFER / ACK / NAK', `${(g.pkt4_offer_sent || 0).toLocaleString()} / ${(g.pkt4_ack_sent || 0).toLocaleString()} / ${(g.pkt4_nak_sent || 0).toLocaleString()}`, rangeLabel),
             ].join('');
             const subnetRows = subnets.map(s => {
                 // A subnet with no NetBox-sourced CIDR/description is not a
@@ -874,12 +880,15 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
             }).join('');
             container.innerHTML = `
                 ${idleNote}
+                ${rangePicker}
+                ${windowLine}
                 <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">${tiles}</div>
                 <div class="bg-white border border-slate-200 rounded-lg p-4">
                     <div class="text-sm font-semibold text-slate-700 mb-2">Scope Utilization</div>
                     ${subnetRows || '<p class="text-slate-500 italic text-sm">No subnets configured.</p>'}
                 </div>
                 ${syncLine}`;
+            timeWindowBind('dhcp-stats-range', 'dhcp_stats', () => loadDHCPData('Overview', true));
             return;
         }
 

@@ -28,7 +28,7 @@ except ImportError:
     from core.src.base_spoke import BaseSpoke
 
 # Local Kea Control Agent client.
-from kea_manager import KeaManager, set_hold_declined
+from kea_manager import KeaManager, counter_window, set_hold_declined
 # Packet-trace helpers and limits.
 from kea_packet_trace import VERDICT_RANK, clamp_int, MAX_CAPTURE_SECONDS, MAX_LOOKBACK_MINUTES
 
@@ -909,10 +909,13 @@ class DHCPSpoke(BaseSpoke):
         out["members"] = members
         return out
 
-    async def _ha_stats(self) -> Dict[str, Any]:
-        """Per-node Kea statistics plus summed pool/packet totals."""
+    async def _ha_stats(self, range_seconds: int = None) -> Dict[str, Any]:
+        """Per-node Kea statistics plus summed pool/packet totals. With
+        ``range_seconds`` each node's packet counters are that window's
+        increase; the combined ``window`` is partial if any node's is."""
         # Ask every node for stats and set up the summed totals.
-        fan = await self._transport.fanout("KEAW_STATS", {}, timeout=20.0)
+        payload = {"range_seconds": range_seconds} if range_seconds else {}
+        fan = await self._transport.fanout("KEAW_STATS", payload, timeout=20.0)
         per_member: Dict[str, Any] = {}
         totals = {"total_addresses": 0, "assigned_addresses": 0,
                   "declined_addresses": 0, "pkt4_received": 0,
@@ -966,8 +969,13 @@ class DHCPSpoke(BaseSpoke):
         totals["utilization_pct"] = (
             round(totals["assigned_addresses"] / totals["total_addresses"] * 100, 1)
             if totals["total_addresses"] else 0.0)
-        return {"status": "SUCCESS", "global": totals, "subnets": subnets,
-                "cluster": True, "members": per_member}
+        out = {"status": "SUCCESS", "global": totals, "subnets": subnets,
+               "cluster": True, "members": per_member}
+        # With a time window, report how much of it the nodes covered.
+        if range_seconds:
+            out["window"] = counter_window.merge_member_windows(
+                per_member.values(), int(range_seconds))
+        return out
 
     async def _ha_list(self, command: str, payload: Dict[str, Any],
                        list_key: str) -> Dict[str, Any]:
@@ -1285,7 +1293,7 @@ class DHCPSpoke(BaseSpoke):
             if cmd == "DHCP_PACKET_TRACE":
                 return await self._ha_packet_trace(data)
             if cmd == "DHCP_STATS":
-                return await self._ha_stats()
+                return await self._ha_stats((data or {}).get("range_seconds"))
             if cmd == "DHCP_DNS_HOOK_CONFIG":
                 return await self._ha_dns_hook_config(data)
             if cmd == "DHCP_DNS_HOOK_STATUS":
@@ -1437,7 +1445,8 @@ class DHCPSpoke(BaseSpoke):
                                            args["minutes"], args["capture_seconds"])
 
         if cmd == "DHCP_STATS":
-            return await asyncio.to_thread(self.mgr.get_stats)
+            return await asyncio.to_thread(self.mgr.get_stats,
+                                           (data or {}).get("range_seconds"))
 
         if cmd == "DHCP_DNS_HOOK_CONFIG":
             settings = data.get("settings")
