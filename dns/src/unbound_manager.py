@@ -14,8 +14,6 @@ import ipaddress
 import socket
 import struct
 # JSON, threads and timing.
-import json
-import threading
 import time
 # Bounded event queue.
 from collections import deque
@@ -99,18 +97,15 @@ CLIENT_QUERY_LIMIT = 1000
 RANGE_DAYS = {"day": 1, "week": 7, "month": 30}
 MAX_RETENTION_DAYS = 30
 
-# Windowed headline stats (hour/day/week/month). Unbound's counters are
-# lifetime totals since it last started, so the worker snapshots them every
-# STATS_SAMPLE_INTERVAL_S and a window is the delta between snapshots. Samples
-# older than STATS_FINE_RETENTION_S are thinned to one per STATS_COARSE_STEP_S;
-# nothing older than STATS_HISTORY_MAX_S is kept.
-STATS_SAMPLE_INTERVAL_S = 300
-# Minimum gap between samples; how often history is saved to disk.
-STATS_MIN_SAMPLE_GAP_S = 60
-STATS_FINE_RETENTION_S = 26 * 3600
-STATS_COARSE_STEP_S = 3600
-STATS_HISTORY_MAX_S = 31 * 86400
-STATS_PERSIST_INTERVAL_S = 300
+# Windowed headline stats (hour/day/week/month): Unbound's counters are
+# lifetime totals, so the shared counter_window history snapshots them and a
+# window is the increase between snapshots. Retention constants live there.
+try:
+    import counter_window
+except ImportError:
+    from core.src import counter_window
+STATS_SAMPLE_INTERVAL_S = counter_window.SAMPLE_INTERVAL_S
+STATS_FINE_RETENTION_S = counter_window.FINE_RETENTION_S
 # Short keys for the Unbound counters kept in each snapshot.
 _STATS_COUNTERS = {
     "q": "total.num.queries",
@@ -139,11 +134,7 @@ class UnboundManager:
         self.conf_path = conf_path
         # Counter snapshots for windowed stats: [{"t","up","c":{...},"types":{...}}]
         self.stats_history_path = stats_history_path
-        # Stats lock, last save time and sampler thread handle.
-        self._stats_history = self._load_stats_history()
-        self._stats_lock = threading.Lock()
-        self._stats_persisted_at = 0.0
-        self._stats_sampler = None
+        self._stats = counter_window.CounterHistory(stats_history_path, _STATS_COUNTERS, "dns")
         # Forwarder and override files next to the records file.
         self.forwarders_path = os.path.join(
             os.path.dirname(self.conf_path), "lm-forwarders.conf")
@@ -1292,52 +1283,24 @@ class UnboundManager:
 
     # ── Windowed counter history ───────────────────────────────────────────
 
-    def _load_stats_history(self) -> list:
-        """Load saved counter snapshots.
+    @property
+    def _stats_history(self) -> list:
+        """The saved counter snapshots."""
+        return self._stats.samples
 
-        Returns:
-            Valid snapshot dicts, or [] if no path, no file or unreadable.
-        """
-        # No path configured: no history.
-        path = self.stats_history_path
-        if not path:
-            return []
-        # Read the JSON and keep well-formed samples.
-        try:
-            with open(path) as f:
-                data = json.load(f)
-            samples = data.get("samples") if isinstance(data, dict) else None
-            return [s for s in samples or [] if isinstance(s, dict) and "t" in s and "c" in s]
-        # No file yet.
-        except FileNotFoundError:
-            return []
-        # Unreadable: log and start fresh.
-        except Exception as e:
-            logger.warning("DNS stats history %s unreadable, starting fresh: %s", path, e)
-            return []
+    @property
+    def _stats_sampler(self):
+        """The sampler thread, or None when not sampling."""
+        return self._stats.sampler
+
+    @_stats_sampler.setter
+    def _stats_sampler(self, value):
+        """Replace the sampler thread (tests reset it to None)."""
+        self._stats.sampler = value
 
     def _persist_stats_history(self, now: float, force: bool = False) -> None:
-        """Save the counter history to disk, at most every STATS_PERSIST_INTERVAL_S.
-
-        Args:
-            now: Current epoch time.
-            force: Save even if the interval has not passed.
-        """
-        # Skip without a path or when saved recently.
-        path = self.stats_history_path
-        if not path or (not force and now - self._stats_persisted_at < STATS_PERSIST_INTERVAL_S):
-            return
-        # Write to a temp file and atomically replace.
-        try:
-            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            tmp = path + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump({"samples": self._stats_history}, f, separators=(",", ":"))
-            os.replace(tmp, path)
-            self._stats_persisted_at = now
-        # Save failures are logged only.
-        except Exception as e:
-            logger.warning("DNS stats history persist to %s failed: %s", path, e)
+        """Save the counter history to disk (see CounterHistory.persist)."""
+        self._stats.persist(now, force=force)
 
     @staticmethod
     def _counter_snapshot(raw: dict, query_types: dict, now: float) -> dict:
@@ -1365,109 +1328,12 @@ class UnboundManager:
                 "types": {k: int(v) for k, v in (query_types or {}).items()}}
 
     def _record_sample(self, snap: dict, force: bool = False) -> None:
-        """Add a snapshot to history and thin out old samples.
-
-        Args:
-            snap: Snapshot from _counter_snapshot.
-            force: Record even if the last sample is very recent.
-        """
-        # Under the lock, skip samples too close to the last one.
-        with self._stats_lock:
-            hist = self._stats_history
-            if not force and hist and snap["t"] - hist[-1]["t"] < STATS_MIN_SAMPLE_GAP_S:
-                return
-            # Append it.
-            hist.append(snap)
-            now = snap["t"]
-            # Drop samples past the max age; keep one per coarse step past fine retention.
-            kept, last_coarse = [], None
-            for s in hist:
-                age = now - s["t"]
-                if age > STATS_HISTORY_MAX_S:
-                    continue
-                if age > STATS_FINE_RETENTION_S:
-                    slot = int(s["t"] // STATS_COARSE_STEP_S)
-                    if slot == last_coarse:
-                        continue
-                    last_coarse = slot
-                kept.append(s)
-            # Store the thinned history and save it if due.
-            self._stats_history = kept
-            self._persist_stats_history(now)
-
-    @staticmethod
-    def _counter_delta(prev: dict, cur: dict) -> dict:
-        """Per-counter increase from ``prev`` to ``cur``. Unbound zeroes its
-        counters on restart, so a restart (uptime went backwards, or any
-        counter dropped) counts ``cur`` itself as the increase."""
-        # Detect a restart: uptime went back or any counter dropped.
-        restarted = cur.get("up", 0) < prev.get("up", 0) or any(
-            cur["c"].get(k, 0) < prev["c"].get(k, 0) for k in _STATS_COUNTERS)
-        # Delta for each counter and the recursion-time total.
-        out = {"c": {}, "types": {}}
-        for k in (*_STATS_COUNTERS, "rt"):
-            a, b = prev["c"].get(k, 0), cur["c"].get(k, 0)
-            out["c"][k] = b if restarted else max(0, b - a)
-        # Delta for each query type, keeping non-zero ones.
-        for t in set(prev.get("types") or {}) | set(cur.get("types") or {}):
-            a, b = (prev.get("types") or {}).get(t, 0), (cur.get("types") or {}).get(t, 0)
-            d = b if restarted else max(0, b - a)
-            if d:
-                out["types"][t] = d
-        return out
+        """Add a snapshot to the history (thinned and saved by CounterHistory)."""
+        self._stats.record(snap, force=force)
 
     def _window_totals(self, current: dict, window_s: int) -> dict:
-        """Counter increases over the trailing ``window_s`` ending at
-        ``current`` (a live snapshot). Baseline is the newest sample at or
-        before the window start; if history doesn't reach that far but Unbound
-        itself started inside the window, its lifetime counters ARE the window.
-        Otherwise the window is ``partial`` (only ``covered_seconds`` known)."""
-        # Window start and history before now.
-        now = current["t"]
-        start = now - window_s
-        with self._stats_lock:
-            hist = [s for s in self._stats_history if s["t"] < now]
-        # Newest sample at or before the window start.
-        base_idx = None
-        for i, s in enumerate(hist):
-            if s["t"] <= start:
-                base_idx = i
-        # Choose the chain of samples to sum across.
-        zero = {"t": start, "up": 0, "c": {}, "types": {}}
-        partial = False
-        # History covers the window.
-        if base_idx is not None:
-            chain = hist[base_idx:]
-            covered = window_s
-        # Unbound started inside the window: count from zero.
-        elif now - current.get("up", 0) >= start and (
-                not hist or hist[0]["t"] >= now - current.get("up", 0)):
-            chain = [zero] + hist
-            covered = window_s
-        # History is shorter than the window: partial.
-        elif hist:
-            chain = hist
-            covered = int(now - hist[0]["t"])
-            partial = True
-        # No history at all.
-        else:
-            chain = [zero]
-            covered = min(window_s, int(current.get("up", 0)))
-            partial = covered < window_s
-            # No history at all: lifetime counters are the best available.
-        # Sum deltas between consecutive samples, ending at the live snapshot.
-        chain = chain + [current]
-        tot = {"c": {k: 0 for k in (*_STATS_COUNTERS, "rt")}, "types": {}}
-        for a, b in zip(chain, chain[1:]):
-            d = self._counter_delta(a, b)
-            for k, v in d["c"].items():
-                tot["c"][k] += v
-            for t, v in d["types"].items():
-                tot["types"][t] = tot["types"].get(t, 0) + v
-        # Note coverage.
-        tot["covered_seconds"] = covered
-        tot["partial"] = partial
-        return tot
+        """Counter increases over the trailing ``window_s`` (see CounterHistory.window)."""
+        return self._stats.window(current, window_s)
 
     def _read_counters(self):
         """``(raw, error)`` from ``unbound-control stats_noreset``."""
@@ -1529,29 +1395,10 @@ class UnboundManager:
         return True
 
     def start_stats_sampler(self, interval: int = STATS_SAMPLE_INTERVAL_S):
-        """Background daemon thread snapshotting counters every ``interval``
-        seconds so hour/day/week/month windows have baselines even when
-        nobody is viewing the DNS page. Idempotent."""
-        # Already running.
-        if self._stats_sampler and self._stats_sampler.is_alive():
-            return self._stats_sampler
-
-        def run():
-            """Sample counters forever, sleeping between passes."""
-            # Never let one failed pass stop the loop.
-            while True:
-                try:
-                    self.sample_stats()
-                except Exception as e:  # noqa: BLE001 — never let the sampler die
-                    logger.warning("DNS stats sampler pass failed: %s", e)
-                time.sleep(interval)
-
-        # Start the daemon thread.
-        self._stats_sampler = threading.Thread(target=run, name="dns-stats-sampler", daemon=True)
-        self._stats_sampler.start()
-        logger.info("DNS stats sampler started (every %ss, history=%s, %d samples loaded)",
-                    interval, self.stats_history_path or "memory", len(self._stats_history))
-        return self._stats_sampler
+        """Snapshot counters every ``interval`` seconds on a background thread
+        so hour/day/week/month windows have baselines even when nobody is
+        viewing the DNS page. Idempotent."""
+        return self._stats.start_sampler(self.sample_stats, interval)
 
     def get_stats(self, search: str = None, source_prefixes: list = None,
                   range_days: int = None, range_seconds: int = None) -> dict:

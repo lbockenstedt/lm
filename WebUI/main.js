@@ -43,6 +43,7 @@
 //          roles (loadApprovedSpokes, fetchLoadedRoles, showLoadRoleModal,
 //          loadRole), OPNsense management (loadOpnsenseManagement)
 //   js/nw.js, js/pxmx-console.js (loadPxmxData), js/netbox.js (loadNetboxData)
+//   js/time-window.js: shared Overview "Time window" picker (DNS, DHCP)
 //   js/dns-dhcp-cluster.js: DNS (loadDNSData), clustered DNS / HA DHCP panels
 //   js/certificates.js: certificate management (le), DNS record modals
 //   js/external-dns-dhcp.js: DHCP (loadDHCPData + reservation modal), external DNS
