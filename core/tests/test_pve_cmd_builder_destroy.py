@@ -77,3 +77,10 @@ def test_snapshot_cmd_fails_when_task_fails(tmp_path):
 def test_delete_snapshot_cmd_uses_node_when_known():
     assert pve_cmd_builder.delete_snapshot_cmd(5, "qemu", "s") == "qm delsnapshot 5 s"
     assert "pvesh delete /nodes/n1/qemu/5/snapshot/s" in pve_cmd_builder.delete_snapshot_cmd(5, "qemu", "s", "n1")
+
+
+def test_vm_entry_carries_configured_memory():
+    # The NetBox VM sync needs maxmem (configured), not mem (live usage).
+    e = pve_cmd_builder._vm_entry({"mem": 3_000_000_000, "maxmem": 4294967296},
+                                  "n1", "qemu", 100, "A", {})
+    assert e["maxmem_bytes"] == 4294967296
