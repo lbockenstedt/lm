@@ -23,6 +23,7 @@ import pwd
 import shutil
 import subprocess
 # CRC32 for stable subnet ids.
+import time
 import zlib
 
 # Packet-trace helpers; the import path differs between layouts.
@@ -35,8 +36,26 @@ try:
 except ImportError:  # loaded as a package (src.X)
     from src import kea_dns_hook  # type: ignore
 
+# Shared hour/day/week/month windowing for lifetime counters.
+try:
+    import counter_window
+except ImportError:
+    from core.src import counter_window
+
 # Module logger.
 logger = logging.getLogger("KeaManager")
+
+# Kea's cumulative DHCPv4 packet counters (reset when Kea restarts), by the
+# key the Overview page uses. These are windowed; pool sizes and lease counts
+# are current values and are not.
+_PKT4_STATS = {
+    "pkt4_received":   "pkt4-received",
+    "pkt4_discover":   "pkt4-discover-received",
+    "pkt4_request":    "pkt4-request-received",
+    "pkt4_offer_sent": "pkt4-offer-sent",
+    "pkt4_ack_sent":   "pkt4-ack-sent",
+    "pkt4_nak_sent":   "pkt4-nak-sent",
+}
 
 
 def worker_code_version() -> dict:
@@ -676,14 +695,17 @@ class KeaManager:
     Default CA port is 8001 (we use 8001 to avoid conflict with the LM hub on 8000).
     """
 
-    def __init__(self, ca_url: str = "http://localhost:8001"):
+    def __init__(self, ca_url: str = "http://localhost:8001", stats_history_path: str = None):
         """Create a manager for one Kea Control Agent.
 
         Args:
             ca_url: Control Agent URL.
+            stats_history_path: Optional JSON file for packet-counter snapshots.
         """
         # Store the URL without a trailing slash.
         self.ca_url = ca_url.rstrip("/")
+        # Packet-counter snapshots for windowed stats.
+        self._stats = counter_window.CounterHistory(stats_history_path, _PKT4_STATS, "dhcp")
 
     # ── Kea Control Agent RPC ─────────────────────────────────────────
 
@@ -1416,7 +1438,33 @@ class KeaManager:
 
     # ── Statistics ────────────────────────────────────────────────────
 
-    def get_stats(self) -> dict:
+    @staticmethod
+    def _packet_snapshot(raw: dict, now: float) -> dict:
+        """Snapshot of the packet counters from a ``statistic-get-all`` reply."""
+        c = {}
+        for key, stat in _PKT4_STATS.items():
+            # Samples are [value, timestamp] lists, newest first.
+            v = raw.get(stat)
+            v = v[0][0] if isinstance(v, list) and v and isinstance(v[0], list) and v[0] else 0
+            c[key] = int(v) if isinstance(v, (int, float)) else 0
+        return {"t": round(now, 1), "c": c}
+
+    def sample_stats(self) -> bool:
+        """Record one packet-counter snapshot for the windowed stats."""
+        try:
+            raw = self._rpc("dhcp4", "statistic-get-all", {})
+        except Exception as e:
+            logger.debug("DHCP stats sample skipped: %s", e)
+            return False
+        self._stats.record(self._packet_snapshot(raw, time.time()))
+        return True
+
+    def start_stats_sampler(self, interval: int = counter_window.SAMPLE_INTERVAL_S):
+        """Snapshot packet counters in the background so hour/day/week/month
+        windows have baselines even when nobody views the page. Idempotent."""
+        return self._stats.start_sampler(self.sample_stats, interval)
+
+    def get_stats(self, range_seconds: int = None) -> dict:
         """Kea DHCP4 statistics via ``statistic-get-all``, normalized for the UI.
 
         Kea returns each statistic as a list of ``[value, timestamp]`` samples
@@ -1424,6 +1472,10 @@ class KeaManager:
         ``subnet[<id>].<name>``. We pull the latest sample of the pool-size /
         assignment counters and derive a utilization percentage per subnet and
         overall, and surface the headline packet counters.
+
+        With ``range_seconds`` the packet counters are the increase over that
+        trailing window instead of Kea's lifetime totals; ``window`` reports
+        how much of it the history covers and ``lifetime`` keeps the totals.
         """
         # Fetch all statistics.
         try:
@@ -1560,7 +1612,22 @@ class KeaManager:
             "pkt4_ack_sent":      num("pkt4-ack-sent"),
             "pkt4_nak_sent":      num("pkt4-nak-sent"),
         }
-        return {"status": "SUCCESS", "global": global_stats, "subnets": subnets}
+        response = {"status": "SUCCESS", "global": global_stats, "subnets": subnets}
+        # With a window, swap the packet counters for the window's increase.
+        snap = self._packet_snapshot(raw, time.time())
+        try:
+            window_s = int(range_seconds) if range_seconds else None
+        except (TypeError, ValueError):
+            window_s = None
+        if window_s:
+            win = self._stats.window(snap, window_s)
+            response["lifetime"] = dict(snap["c"])
+            global_stats.update({k: int(win["c"].get(k, 0)) for k in _PKT4_STATS})
+            response["window"] = {"seconds": window_s,
+                                  "covered_seconds": win["covered_seconds"],
+                                  "partial": win["partial"]}
+        self._stats.record(snap)
+        return response
 
     def status(self) -> dict:
         """Check whether Kea answers on the Control Agent.
