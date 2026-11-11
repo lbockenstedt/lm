@@ -93,3 +93,24 @@ def test_migrate_moves_inline_secrets(monkeypatch):
         "kv:sim-central-on-prem-t1-access-token"
     assert vault.secrets == {"sim-central-t1-client-secret": "a",
                              "sim-central-on-prem-t1-access-token": "b"}
+
+
+def test_resolve_reuses_a_recent_vault_read(monkeypatch):
+    """Each Central poll resolved its secrets from Key Vault (~110 reads/hour);
+    a value read in the last 15 minutes is reused instead."""
+    vault = _patch_vault(monkeypatch)
+    vault.secrets["sim-central-t1-client-secret"] = "s3cret"
+    reads = []
+    orig = vault.resolve_ref
+
+    async def counting(hub, ref):
+        reads.append(ref)
+        return await orig(hub, ref)
+    monkeypatch.setattr(cloud_vault, "resolve_ref", counting)
+    cfg = {"client_secret": "kv:sim-central-t1-client-secret"}
+    for _ in range(3):
+        assert asyncio.run(central_secrets.resolve(_hub(True), cfg))["client_secret"] == "s3cret"
+    assert len(reads) == 1
+    monkeypatch.setattr(central_secrets, "_CACHE_S", 0)
+    asyncio.run(central_secrets.resolve(_hub(True), cfg))
+    assert len(reads) == 2
