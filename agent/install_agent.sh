@@ -604,6 +604,17 @@ systemctl daemon-reload
 # (re)created between then and now — idempotent.
 retire_legacy_agent
 
+# Last step before start: update EVERY role repo under $INSTALL_DIR, including
+# ones not named in this run (left by an earlier install or a template image),
+# so no role ever starts on stale code. Best-effort: offline keeps what's there.
+for _git in "$INSTALL_DIR"/*/.git; do
+    [[ -d "$_git" ]] || continue
+    _repo="$(dirname "$_git")"
+    echo "Updating role repo '$(basename "$_repo")'…"
+    git -C "$_repo" pull --rebase --autostash -q 2>/dev/null \
+        || echo "⚠️  could not update $_repo — it updates on the next SPOKE_UPDATE"
+done
+
 # Enable so a CLONED disk auto-starts on first boot and onboards under its own
 # hostname (carryover: retains the template's PSK so it can be approved without
 # admin re-approval). Clone-only STOPs the service here so the template box does
