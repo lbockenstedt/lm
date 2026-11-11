@@ -76,6 +76,13 @@ _LOGICAL_PORT_RE = re.compile(
     r"^(lag|po\d|port-channel|trk|ae\d|bond|vxlan|nve|vlan|vl\d|irb|bvi|tunnel)",
     re.IGNORECASE)
 
+_SIGHTING_KEYS = ("source_switch_name", "source_switch_ip", "source_switch_port")
+
+
+def _sighting(rec: Dict[str, str]) -> Tuple[str, str, str]:
+    """(switch name, switch IP, port) a record was seen on."""
+    return tuple(rec.get(k, "") for k in _SIGHTING_KEYS)
+
 
 def nw_short_name(name: Any) -> str:
     """Hostname used to match the same box across addresses: case-folded with
@@ -737,6 +744,8 @@ class NwDiscoverySyncMixin:
                                r.get("source_switch_port", "")), ())) or 10 ** 9,
             r.get("source_switch_name", ""), r.get("source_switch_ip", ""),
             r.get("source_switch_port", "")))
+        # Every switch sighting per key (value: is it a logical interface).
+        sightings: Dict[str, Dict[Tuple[str, str, str], bool]] = {}
         for rec in raw:
             mac, ip = rec.get("mac", ""), rec.get("ip", "")
             # Key by MAC when known, else by IP; rows with neither are skipped.
@@ -746,6 +755,9 @@ class NwDiscoverySyncMixin:
             # Prefix the key with the discovering tenant so overlapping address space stays
             # separate.
             key = f"{rec.get('source_tenant_id', '')}|{key}"
+            if rec.get("source_switch_name"):
+                sightings.setdefault(key, {})[_sighting(rec)] = bool(
+                    _LOGICAL_PORT_RE.match(rec.get("source_switch_port", "")))
             # First sighting for this key is stored as-is.
             ex = merged.get(key)
             if ex is None:
@@ -760,6 +772,19 @@ class NwDiscoverySyncMixin:
                           "source_switch_port", "owner_tenant_id"):
                     if not ex.get(k) and rec.get(k):
                         ex[k] = rec[k]
+        # MAC counts on logical interfaces (SVIs, LAGs) shift run to run, so
+        # the winner above can too. Keep last run's sighting while the switch
+        # still reports it and nothing better (a physical port) won.
+        last = getattr(self, "_nw_last_sighting", {})
+        for key, ex in merged.items():
+            cur, old = _sighting(ex), last.get(key)
+            seen = sightings.get(key, {})
+            if old and old != cur and old in seen and seen[old] <= seen.get(cur, True):
+                ex.update(zip(_SIGHTING_KEYS, old))
+                cur = old
+            if cur[0]:
+                last[key] = cur
+        self._nw_last_sighting = last
         # Merged, deduplicated records.
         records = list(merged.values())
         # ARP/MAC tables carry no hostname: cross-reference LM's DHCP + DNS
