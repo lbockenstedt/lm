@@ -276,7 +276,7 @@ class TruenasDiscoverySyncMixin:
         # Push it; any exception becomes an error status.
         try:
             rr = await self.request_response(netbox, self._TRUENAS_DISCOVERY_PUSH_COMMAND,
-                                             payload, timeout=120.0)
+                                             payload, timeout=600.0)
             # Unwrap the reply and read its counters.
             rd = unwrap_spoke(rr) if isinstance(rr, dict) else {}
             rstatus = str((rd or {}).get("status") or "").upper()
