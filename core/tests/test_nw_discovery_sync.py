@@ -619,3 +619,57 @@ async def test_pull_prefers_access_port_over_uplink_deterministically():
         records, _ = await h._nw_pull_discovered()
         r = next(x for x in records if x["mac"] == "aa:bb:cc:dd:ee:05")
         assert r["source_switch_port"] == "Gi1/0/5"
+
+
+@pytest.mark.asyncio
+async def test_pull_prefers_physical_port_over_logical_interface():
+    # Live churn: a firewall MAC seen on a peer switch's lag255 / a VTEP's
+    # vxlan1 (one MAC each) beat the physical port it plugs into (two MACs),
+    # and which logical sighting won changed run to run. A physical port must
+    # win over any LAG/VXLAN/SVI regardless of MAC counts or fetch order.
+    tables = {
+        "a-peer": [{"mac": "aa:bb:cc:dd:ee:05", "interface": "lag255"}],
+        "b-vtep": [{"mac": "aa:bb:cc:dd:ee:05", "interface": "vxlan1(10.0.0.5)"}],
+        "z-edge": [{"mac": "aa:bb:cc:dd:ee:05", "interface": "1/1/14"},
+                   {"mac": "aa:bb:cc:dd:ee:06", "interface": "1/1/14"}],
+    }
+    for order in (["a-peer", "b-vtep", "z-edge"], ["z-edge", "b-vtep", "a-peer"]):
+        h = _hub_with_responses()
+        h.state.system_state["global_config"]["nw_devices"] = [
+            {"id": n, "name": n, "address": f"10.0.0.{i}", "spoke_id": "nw-1"}
+            for i, n in enumerate(order, 1)]
+        h._responses[("nw-1", "NW_GET_ARP")] = {"payload": {"data": {
+            "status": "SUCCESS", "data": []}}}
+
+        async def rr(spoke_id, command, payload, timeout=30.0, _h=h):
+            if command == "NW_GET_MAC_TABLE":
+                return {"payload": {"data": {"status": "SUCCESS",
+                                             "data": tables[payload["device_id"]]}}}
+            return _h._responses[(spoke_id, command)]
+        h.request_response = rr
+        records, _ = await h._nw_pull_discovered()
+        r = next(x for x in records if x["mac"] == "aa:bb:cc:dd:ee:05")
+        assert (r["source_switch_name"], r["source_switch_port"]) == ("z-edge", "1/1/14")
+
+
+@pytest.mark.asyncio
+async def test_pull_same_named_switches_pick_one_ip_stably():
+    # Two fleet entries share a switch name (different mgmt IPs); the winner's
+    # switch_ip must not depend on fetch order.
+    for addrs in (("10.0.0.2", "10.0.0.1"), ("10.0.0.1", "10.0.0.2")):
+        h = _hub_with_responses()
+        h.state.system_state["global_config"]["nw_devices"] = [
+            {"id": f"d{i}", "name": "SPSW-1", "address": a, "spoke_id": "nw-1"}
+            for i, a in enumerate(addrs)]
+        h._responses[("nw-1", "NW_GET_ARP")] = {"payload": {"data": {
+            "status": "SUCCESS", "data": []}}}
+
+        async def rr(spoke_id, command, payload, timeout=30.0, _h=h):
+            if command == "NW_GET_MAC_TABLE":
+                return {"payload": {"data": {"status": "SUCCESS", "data": [
+                    {"mac": "aa:bb:cc:dd:ee:05", "interface": "1/1/1"}]}}}
+            return _h._responses[(spoke_id, command)]
+        h.request_response = rr
+        records, _ = await h._nw_pull_discovered()
+        r = next(x for x in records if x["mac"] == "aa:bb:cc:dd:ee:05")
+        assert r["source_switch_ip"] == "10.0.0.1"

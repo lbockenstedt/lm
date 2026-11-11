@@ -101,7 +101,7 @@ class VmSyncMixin:
     # The spoke contract for <list_command>: request {<request_filter_key>:
     # <scope>}; response {"status":"SUCCESS", <response_key>: [{unique_id,
     # cluster, node, vmid, type, name, status, vcpus, disk_gb, mem_bytes,
-    # ips, tags}, ...]} — each product's spoke normalizes its own fields into
+    # maxmem_bytes, ips, tags}, ...]} — each product's spoke normalizes its own fields into
     # that shape, so the hub extraction is source-agnostic.
     #
     # The netbox spoke (module_type "ipam") is the VM-record writer today. It is
@@ -359,8 +359,9 @@ class VmSyncMixin:
                     s = str(ip or "").split("/")[0].strip()
                 if s:
                     ip_list.append(s)
-            # Memory in bytes.
-            mem_bytes = int(vm.get("mem_bytes") or 0)
+            # Configured memory in bytes. mem_bytes is live usage on a running
+            # VM, so it changed NetBox's memory field on every sync.
+            mem_bytes = int(vm.get("maxmem_bytes") or vm.get("mem_bytes") or 0)
             # Per-interface network records from the pxmx agent (QGA/LXC
             # hardware-address + guest IPs, with a qm/pct config MAC fallback).
             # Relayed so the netbox spoke builds vminterfaces with MACs + all
