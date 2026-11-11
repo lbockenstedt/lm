@@ -205,3 +205,22 @@ async def test_command_queue_stats_track_inflight_and_timing():
     assert stats["inflight"] == 0
     assert stats["by_type"]["SLOW_CMD"]["done"] == 1
     assert stats["by_type"]["SLOW_CMD"]["inflight"] == 0
+
+
+async def test_background_commands_leave_slots_for_reads(monkeypatch):
+    """Background feeds (a module's BACKGROUND_COMMANDS) may hold at most half
+    the slots. With 2 slots and two slow syncs queued, a read still runs at
+    once instead of waiting behind them (the IPAM rack view timeout)."""
+    monkeypatch.setenv("LM_SPOKE_MAX_CONCURRENT_COMMANDS", "2")
+    spoke = _build()
+    spoke.modules["test"].BACKGROUND_COMMANDS = frozenset({"SLOW_CMD"})
+    ws = _Ws()
+    send_lock = asyncio.Lock()
+    sem = asyncio.Semaphore(spoke._max_concurrent_commands())
+    tasks = [asyncio.create_task(spoke._handle_one_command(
+        ws, "SLOW_CMD", {}, "sync%d" % i, send_lock, sem)) for i in range(2)]
+    await asyncio.sleep(0)
+    tasks.append(asyncio.create_task(spoke._handle_one_command(
+        ws, "FAST_CMD", {}, "read", send_lock, sem)))
+    await asyncio.gather(*tasks)
+    assert [f["corr"] for f in ws.sent][0] == "read"

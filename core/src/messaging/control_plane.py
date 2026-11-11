@@ -2199,6 +2199,19 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         except Exception:
             return 64
 
+    def _background_slot(self, cmd_type):
+        """The extra slot a module's background feed command (one it lists in
+        BACKGROUND_COMMANDS) must hold, or a no-op for any other command.
+        Background feeds get at most half the command slots, so user reads
+        never queue behind long syncs and sweeps."""
+        name = str(cmd_type or "").upper()
+        if not any(name in getattr(m, "BACKGROUND_COMMANDS", ())
+                   for m in self.modules.values()):
+            return contextlib.AsyncExitStack()
+        if getattr(self, "_bg_cmd_sem", None) is None:
+            self._bg_cmd_sem = asyncio.Semaphore(max(1, self._max_concurrent_commands() // 2))
+        return self._bg_cmd_sem
+
     def _cmd_type_stats(self, cmd_type: str) -> Dict[str, Any]:
         """Per-command-type counters, created on first use."""
         return self._cmd_stats["by_type"].setdefault(
@@ -2302,8 +2315,9 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         ``*_GET_STATUS`` get_status() fallback.
         """
         queued_at = time.monotonic()
-        # Hold a concurrency slot for the whole handler.
-        async with sem:
+        # Hold a concurrency slot for the whole handler (background feeds also
+        # need one of their own, so they can't take every slot).
+        async with self._background_slot(cmd_type), sem:
             # The hub stops waiting after max_wait_s (its request timeout). A
             # command that sat queued that long has no one to answer, so skip
             # it instead of spending a slot on it — a backlog of these is what
