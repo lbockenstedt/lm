@@ -110,8 +110,12 @@ def test_fleet_health_snapshot_summarises_netbox_and_dhcp():
         async def request_response(self, sid, cmd, data, timeout=None):
             return {"payload": {"data": replies[cmd]}}
 
+        def _stale_spoke_versions(self, now):
+            return [{"spoke": "dns-1", "version": "7", "latest": "2.42", "stale_s": 4000}]
+
     h = Hub()
     out = asyncio.run(main.LabManagerHub._fleet_health_snapshot(h))
+    assert out["stale_versions"][0]["spoke"] == "dns-1"
     assert out["autorack"]["conflicts"] == 1 and out["autorack"]["sample"][0]["name"] == "srv-N31-R44"
     assert out["netbox_duplicates"]["groups"] == 1
     assert out["dhcp_declines"] == [{"subnet": "10.0.0.0/24", "declined": 7, "total": 200}]
@@ -157,3 +161,50 @@ def test_snapshot_reports_read_command_rates():
     snap = t.snapshot()
     assert [r["key"] for r in snap["command_rates"]] == ["NETBOX_GET_IPS"]
     assert 9 <= snap["command_rates"][0]["per_hour"] <= 11 and snap["uptime_s"] >= 3600
+
+
+def _stale_hub(versions, latest="2.42"):
+    """A hub with connected spokes reporting ``versions``."""
+    import os
+    os.environ.setdefault("LM_FERNET_KEY", __import__("cryptography.fernet",
+                                                      fromlist=["Fernet"]).Fernet.generate_key().decode())
+    import main
+    from types import SimpleNamespace
+
+    class Hub:
+        active_connections = {k: 1 for k in versions}
+        spoke_versions = dict(versions)
+        spoke_module_types = {k: "dns" for k in versions}
+        state = SimpleNamespace(get_module_name=lambda pk: "name-" + pk)
+
+        def latest_version_for_module(self, module_type):
+            return latest
+
+    return main, Hub()
+
+
+def test_spoke_behind_is_reported_only_after_the_stuck_period():
+    """A rollout clears in minutes; a spoke still behind an hour later is stuck."""
+    main, h = _stale_hub({"old": "2.40", "ok": "2.42"})
+    stale = main.LabManagerHub._stale_spoke_versions
+    assert stale(h, 1000.0) == []
+    assert stale(h, 1000.0 + main._UPDATE_STUCK_S) == [
+        {"spoke": "name-old", "version": "2.40", "latest": "2.42",
+         "stale_s": int(main._UPDATE_STUCK_S)}]
+
+
+def test_unreadable_version_counts_as_out_of_date():
+    """The hub once stored a desired-state counter ("9") as a spoke's version."""
+    main, h = _stale_hub({"dns": "9"})
+    main.LabManagerHub._stale_spoke_versions(h, 0.0)
+    assert main.LabManagerHub._stale_spoke_versions(h, main._UPDATE_STUCK_S)[0]["version"] == "9"
+
+
+def test_spoke_that_catches_up_starts_the_clock_again():
+    main, h = _stale_hub({"s": "2.40"})
+    stale = main.LabManagerHub._stale_spoke_versions
+    stale(h, 0.0)
+    h.spoke_versions["s"] = "2.42"
+    assert stale(h, 10.0) == []
+    h.spoke_versions["s"] = "2.40"
+    assert stale(h, main._UPDATE_STUCK_S + 20.0) == []
