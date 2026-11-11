@@ -2002,6 +2002,24 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 out[label] = stats
         return out
 
+    def _cached_fleet_health(self) -> Dict[str, Any]:
+        """The last fleet snapshot; starts a background refresh if none is running.
+
+        The snapshot asks slow spokes one after another (minutes in the worst case),
+        far longer than AppBuilder waits for GET_HEALTH_REPORT (30 s), so the report
+        never waits for it. The first report after a hub start has an empty fleet."""
+        cache = self.__dict__.setdefault("_hc_fleet", {"data": {}, "task": None})
+
+        async def _refresh():
+            try:
+                cache["data"] = await self._fleet_health_snapshot()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Fleet health snapshot failed: %s", e)
+
+        if cache["task"] is None or cache["task"].done():
+            cache["task"] = asyncio.create_task(_refresh())
+        return cache["data"]
+
     async def _fleet_health_snapshot(self) -> Dict[str, Any]:
         """Data-quality signals for AppBuilder's health check.
 
@@ -8839,7 +8857,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             if req_type == "GET_HEALTH_REPORT":
                 report = await asyncio.to_thread(_perf_telemetry.build_report, self)
                 report["spoke_queues"] = await self._spoke_queue_snapshot()
-                report["fleet"] = await self._fleet_health_snapshot()
+                report["fleet"] = self._cached_fleet_health()
                 return report
 
             # Return only error lines, minus security lines.
