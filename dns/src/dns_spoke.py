@@ -26,7 +26,7 @@ except ImportError:
     from core.src.base_spoke import BaseSpoke
 
 # Unbound config manager.
-from unbound_manager import UnboundManager
+from unbound_manager import UnboundManager, counter_window
 
 # Record-set cluster coordination.
 from dns_cluster import (
@@ -692,19 +692,7 @@ class DNSSpoke(BaseSpoke):
         # With a time window, report how much of it the workers actually covered.
         window_s = range_seconds or (int(range_days) * 86400 if range_days else None)
         if window_s:
-            # Successful replies, and the ones that include window info.
-            ok = [r for r in per_member.values()
-                  if isinstance(r, dict) and r.get("status") == "SUCCESS"]
-            wins = [r["window"] for r in ok if isinstance(r.get("window"), dict)]
-            # A pre-windowing worker returns lifetime totals: flag it so the
-            # page does not present those as the selected window.
-            out["window"] = {
-                "seconds": window_s,
-                "covered_seconds": min((int(w.get("covered_seconds") or 0) for w in wins),
-                                       default=0),
-                "partial": len(wins) < len(ok) or any(w.get("partial") for w in wins),
-                "unsupported_members": len(ok) - len(wins),
-            }
+            out["window"] = counter_window.merge_member_windows(per_member.values(), window_s)
         # Return the combined stats.
         return out
 

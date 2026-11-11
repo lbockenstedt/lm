@@ -1017,21 +1017,6 @@ async function _ddSyncStatusLine(side) {
     } catch (_e) { return ''; }
 }
 
-// DNS Overview time window: applies to the headline tiles, query types and
-// destinations. Remembered per browser.
-const _DNS_STATS_RANGES = { hour: 'last hour', day: 'last day', week: 'last week', month: 'last month' };
-function _dnsStatsRange() {
-    let v = '';
-    try { v = localStorage.getItem('lm_dns_stats_range') || ''; } catch (_) { /* private mode */ }
-    return Object.prototype.hasOwnProperty.call(_DNS_STATS_RANGES, v) ? v : 'day';
-}
-function _ddDuration(seconds) {
-    const s = Math.max(0, Number(seconds) || 0);
-    if (s >= 86400) return `${Math.round(s / 86400 * 10) / 10} days`;
-    if (s >= 3600) return `${Math.round(s / 3600 * 10) / 10} hours`;
-    return `${Math.max(1, Math.round(s / 60))} minutes`;
-}
-
 async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
     const container = document.getElementById('dns-content');
     if (!container) return;
@@ -1124,9 +1109,9 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
         }
         // ── Overview: Unbound query telemetry (OPNsense-grade) ────────────
         if (subMenu === 'Overview') {
-            const statsRange = _dnsStatsRange();
-            const rangeLabel = _DNS_STATS_RANGES[statsRange];
-            const { ok, data: d, detail } = await _spokeFetch('/api/dns/stats' + _tenantQS() + (_tenantQS() ? '&' : '?') + 'range=' + statsRange);
+            const statsRange = timeWindowChoice('dns_stats');
+            const rangeLabel = TIME_WINDOWS[statsRange];
+            const { ok, data: d, detail } = await _spokeFetch(timeWindowQS('/api/dns/stats' + _tenantQS(), statsRange));
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DNS spoke not connected'); return; }
             if (d.status && d.status !== 'SUCCESS') {
                 container.innerHTML = _spokeErrorBanner(d.message, 'unbound-control stats unavailable'); return;
@@ -1148,11 +1133,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
             const resolverWide = scoped && d.resolver_counters ? ' (whole resolver)' : '';
             const scopeLine = scoped ? `<div class="text-xs text-slate-500 mb-3">Showing only queries from this tenant's subnets. ${d.resolver_counters ? 'Cache and recursion counters cover the whole resolver.' : 'Cache and recursion counters are server-wide and hidden on a shared resolver.'}</div>` : '';
             const win = d.window || null;
-            const windowLine = !win
-                ? `<div class="text-xs text-amber-600 mb-3">This resolver does not support time windows yet — counters below are totals since Unbound last started.</div>`
-                : (win.partial
-                    ? `<div class="text-xs text-amber-600 mb-3">Counter history covers only the last ${_ddDuration(win.covered_seconds)}${win.unsupported_members ? ` (${win.unsupported_members} resolver(s) on an older version report totals since start)` : ''} — the ${rangeLabel} view fills in as snapshots accumulate.</div>`
-                    : '');
+            const windowLine = timeWindowNote(win, statsRange, 'resolver', 'Unbound');
             const statErrorBanner = statErrors.length
                 ? `<div class="mb-3 p-3 rounded-md bg-amber-50 border border-amber-200 text-xs text-amber-800">
                     <span class="font-semibold">${statErrors.length} resolver(s) did not report statistics</span>
@@ -1174,13 +1155,8 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                     ? _ddTile('Recursive Replies', (g.num_recursive || 0).toLocaleString(), `avg ${g.recursion_time_avg || 0}s${resolverWide}`)
                     : _ddTile('Recursive Replies', '—', 'server-wide only'),
             ].join('');
-            const rangePicker = `<div class="flex items-center justify-end gap-2 mb-3">
-                    <label for="dns-stats-range" class="text-xs text-slate-500">Time window</label>
-                    <select id="dns-stats-range" title="Window for the totals, cache/recursion counters, query types and destinations below"
-                            class="text-xs border border-slate-300 rounded-md px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-400">
-                        ${Object.entries(_DNS_STATS_RANGES).map(([v, l]) => `<option value="${v}"${v === statsRange ? ' selected' : ''}>${l.replace('last', 'Last')}</option>`).join('')}
-                    </select>
-                </div>`;
+            const rangePicker = timeWindowPicker('dns-stats-range', statsRange,
+                'Window for the totals, cache/recursion counters, query types and destinations below');
             // Per-type query breakdown as proportion-of-total bars.
             const typeTotal = Object.values(qt).reduce((a, b) => a + b, 0) || 1;
             const typeRows = Object.entries(qt).sort((a, b) => b[1] - a[1]).map(([t, c]) => `
@@ -1251,13 +1227,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
             }
             const searchInput = document.getElementById('dns-query-name-search');
             const hostInput = document.getElementById('dns-query-host-search');
-            const rangeSelect = document.getElementById('dns-stats-range');
-            if (rangeSelect) {
-                rangeSelect.addEventListener('change', () => {
-                    try { localStorage.setItem('lm_dns_stats_range', rangeSelect.value); } catch (_) { /* private mode */ }
-                    loadDNSData('Overview', true);
-                });
-            }
+            timeWindowBind('dns-stats-range', 'dns_stats', () => loadDNSData('Overview', true));
             if (searchInput || hostInput) {
                 let debounce;
                 const runSearch = () => {
