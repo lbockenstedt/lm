@@ -93,3 +93,13 @@ def test_dedupe_keeps_rows_without_cluster_or_vmid():
     assert len(out) == 2
     assert {"unique_id": "x", "name": "x"} in out
     assert any(v.get("node") == "m" for v in out)
+
+
+def test_memory_is_the_configured_size_not_live_usage():
+    # mem_bytes is live usage on a running VM; sending it made NetBox's memory
+    # field change on every sync (seen live: ~2.6k VM updates a day).
+    vm = dict(_vm("A", "n1", 100, "a1"), mem_bytes=3_000_000_000,
+              maxmem_bytes=4 * 1024 ** 3)
+    hub = _Hub({"pxmx-a": [vm]})
+    _run(hub)
+    assert hub.pushed["vms"][0]["mem_mb"] == 4096
