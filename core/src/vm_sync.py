@@ -407,7 +407,7 @@ class VmSyncMixin:
         # Push to NetBox; an exception returns an error.
         try:
             rr = await self.request_response(netbox, self._VM_SYNC_PUSH_COMMAND,
-                                             payload, timeout=180.0)
+                                             payload, timeout=600.0)
             # Unwrap the reply and read its counters.
             rd = unwrap_spoke(rr) if isinstance(rr, dict) else {}
             rstatus = str((rd or {}).get("status") or "").upper()
