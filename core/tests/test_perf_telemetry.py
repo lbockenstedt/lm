@@ -79,6 +79,36 @@ def test_fleet_health_snapshot_summarises_netbox_and_dhcp():
     assert out["dhcp_declines"] == [{"subnet": "10.0.0.0/24", "declined": 7, "total": 200}]
 
 
+def test_cached_fleet_health_never_waits_for_a_slow_snapshot():
+    """GET_HEALTH_REPORT must answer inside AppBuilder's 30 s even when spokes are slow."""
+    import asyncio
+    import os
+    os.environ.setdefault("LM_FERNET_KEY", __import__("cryptography.fernet",
+                                                      fromlist=["Fernet"]).Fernet.generate_key().decode())
+    import main
+
+    class Hub:
+        calls = 0
+
+        async def _fleet_health_snapshot(self):
+            Hub.calls += 1
+            await asyncio.sleep(0.2)
+            return {"autorack": {"named": 1}}
+
+    async def run():
+        h = Hub()
+        first = main.LabManagerHub._cached_fleet_health(h)
+        again = main.LabManagerHub._cached_fleet_health(h)  # refresh already running
+        await asyncio.sleep(0.3)
+        later = main.LabManagerHub._cached_fleet_health(h)
+        return first, again, later
+
+    first, again, later = asyncio.run(run())
+    assert first == {} and again == {}
+    assert later == {"autorack": {"named": 1}}
+    assert Hub.calls == 2  # one refresh at a time, a new one once it finished
+
+
 def test_snapshot_reports_read_command_rates():
     import perf_telemetry as pt
     t = pt.PerfTelemetry()
