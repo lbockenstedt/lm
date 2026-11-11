@@ -232,6 +232,29 @@ def test_install_role_skips_clone_when_repo_present(tmp_path, monkeypatch):
     assert not [c for c in calls if c[:2] == ["git", "clone"]], "should not re-clone"
 
 
+def test_install_role_updates_an_existing_stale_checkout(tmp_path, monkeypatch):
+    """A checkout left by a template image must be pulled, not reused as-is."""
+    (tmp_path / "netbox").mkdir()
+    calls = []
+    _fake_subprocess_run(monkeypatch, calls)
+    agent = _agent_with_tmp_root(tmp_path, monkeypatch)
+    res = asyncio.run(agent._install_role("netbox"))
+    assert res["status"] == "SUCCESS"
+    assert ["git", "-C", str(tmp_path / "netbox"), "pull", "--rebase",
+            "--autostash", "-q"] in calls
+
+
+def test_install_role_still_loads_when_the_update_fails(tmp_path, monkeypatch):
+    import subprocess
+    (tmp_path / "netbox").mkdir()
+
+    def _run(cmd, *args, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1 if "pull" in cmd else 0, "", "offline")
+    monkeypatch.setattr(agent_spoke.subprocess, "run", _run)
+    agent = _agent_with_tmp_root(tmp_path, monkeypatch)
+    assert asyncio.run(agent._install_role("netbox"))["status"] == "SUCCESS"
+
+
 def test_install_role_no_clone_for_inrepo_role(tmp_path, monkeypatch):
     """dns ships in LM and is management-only: no clone or local Unbound."""
     (tmp_path / "dns").mkdir()

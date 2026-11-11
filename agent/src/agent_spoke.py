@@ -1231,7 +1231,18 @@ class GenericAgent(BaseSpoke):
                     return {"status": "ERROR",
                             "message": f"git clone for role '{role_name}' failed: {e}"}
             else:
-                logger.debug("Role repo already present at %s; skipping clone.", clone_dir)
+                # A checkout left by an earlier install or a template image can
+                # be months old; update it so the role never starts on stale
+                # code. Best-effort: if offline, load the code already there.
+                logger.info("Updating role repo '%s' at %s…", role_name, clone_dir)
+                pull = await asyncio.to_thread(
+                    subprocess.run,
+                    ["git", "-C", str(clone_dir), "pull", "--rebase", "--autostash", "-q"],
+                    capture_output=True, text=True, timeout=300,
+                )
+                if pull.returncode != 0:
+                    logger.warning("Could not update role repo %s (rc=%s): %s",
+                                   clone_dir, pull.returncode, (pull.stderr or "").strip())
 
         # 2. System packages. Management-only roles such as dns/dhcp do not
         # install the services they coordinate; those belong to the separate
