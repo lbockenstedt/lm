@@ -116,7 +116,7 @@ import vm_snapshots
 # Hardware-serial stitching of management controllers to their host OS.
 import hw_serial_links
 from hub_mtls_enforcement import HubMtlsEnforcementMixin
-from update_pipeline import UpdatePipelineMixin, _parse_nn
+from update_pipeline import UpdatePipelineMixin, _parse_nn, _version_behind
 from endpoint_sync import EndpointSyncMixin
 # 802.1X just-in-time helpers.
 import dot1x_jit
@@ -2031,6 +2031,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
           dry-run dedupe, refreshed at most hourly because it reads every device.
         * ``netbox_churn``: changelog write rate and flapping fields (every 30 min).
         * ``dhcp_declines``: scopes holding DECLINEd addresses.
+        * ``stale_versions``: spokes still out of date long after an update.
         Each part is optional; a spoke that is down or slow is left out."""
         import access as _access
         out: Dict[str, Any] = {}
@@ -2091,7 +2092,40 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                      "total": int(s.get("total_addresses") or 0)}
                     for s in st.get("subnets") or []
                     if isinstance(s, dict) and int(s.get("declined_addresses") or 0) > 0]
+
+        # Spokes the update pipeline has not managed to bring up to date.
+        out["stale_versions"] = self._stale_spoke_versions(time.time())
         return out
+
+    def _stale_spoke_versions(self, now: float) -> List[Dict[str, Any]]:
+        """Connected spokes that have looked out of date for _UPDATE_STUCK_S (1 h).
+
+        Out of date means older than the latest build of the spoke's repo, or a
+        version the hub can't read (not .NN / MAJOR.MINOR). A normal rollout
+        clears within minutes, so only a spoke still stuck after the grace
+        period is reported; AppBuilder files an issue for it. That catches both
+        a spoke that won't update and a hub that keeps a wrong version."""
+        since = self.__dict__.setdefault("_hc_behind_since", {})
+        stale, seen = [], set()
+        for pk in list(self.active_connections):
+            # Compare what the spoke reported with the latest for its repo.
+            version = self.spoke_versions.get(pk)
+            latest = self.latest_version_for_module(self.spoke_module_types.get(pk, ""))
+            unreadable = version not in (None, "", "unknown") and _parse_nn(version) is None
+            if not (unreadable or _version_behind(version, latest)):
+                continue
+            # Report it once it has stayed out of date past the grace period.
+            seen.add(pk)
+            first = since.setdefault(pk, now)
+            if now - first >= _UPDATE_STUCK_S:
+                stale.append({"spoke": (self.state.get_module_name(pk)
+                                        or self.spoke_module_types.get(pk) or "unnamed spoke"),
+                              "version": version, "latest": latest,
+                              "stale_s": int(now - first)})
+        # Forget spokes that caught up or went away.
+        for pk in [k for k in since if k not in seen]:
+            since.pop(pk)
+        return stale
 
     async def request_response(self, spoke_id: str, command_type: str, data: Dict[str, Any], timeout: Optional[float] = None, signing_secret: Optional[str] = None) -> Dict[str, Any]:
         """Timed wrapper: feeds per-command latency to the health report."""
