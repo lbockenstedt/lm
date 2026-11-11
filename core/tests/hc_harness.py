@@ -239,6 +239,7 @@ HUB_STUBS = {
     "_mtls_begin_enrollment": [None],
     "push_config_to_spoke": [False, True],
     "_readopt_agent_roles": [None],
+    "_refresh_spoke_version": [None],
     "_provision_spoke_mtls_cert_safe": [None],
     "send_to_spoke": [None, None, None, RAISE],
     "_maybe_redeliver_session_key": [None],
