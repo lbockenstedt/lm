@@ -50,6 +50,8 @@ _HOOK_PACKAGES = ("kea-common",)
 
 # Coordinator agent port reserved for the DHCP role.
 DEFAULT_COORDINATOR_PORT = 8770
+# Packet-counter snapshots for the Overview's hour/day/week/month windows.
+STATS_HISTORY_PATH = "/var/lib/lm-dhcp-worker/stats_history.json"
 
 
 class DhcpWorkerOps:
@@ -1106,9 +1108,10 @@ class DhcpWorkerOps:
         return self.mgr.packet_trace(data.get("mac") or "", data.get("minutes", 30),
                                      data.get("capture_seconds", 0))
 
-    def stats(self, _data: Dict[str, Any]) -> Dict[str, Any]:
-        """``KEAW_STATS`` — return local Kea statistics."""
-        return self.mgr.get_stats()
+    def stats(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """``KEAW_STATS`` — return local Kea statistics, packet counters
+        windowed to ``range_seconds`` when given."""
+        return self.mgr.get_stats(range_seconds=(data or {}).get("range_seconds"))
 
     def dns_hook_config(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """``KEAW_DNS_HOOK_CONFIG`` — enable/update/disable the real-time
@@ -1175,8 +1178,12 @@ def build_worker(member_id: str, coordinator_url: str, secret: str,
     # Flat layout: core/src is on sys.path directly.
     except ImportError:
         from messaging.service_cluster import ServiceWorkerClient  # type: ignore
-    # Build the operation table on a Kea manager pointed at the Control Agent URL.
-    ops = DhcpWorkerOps(KeaManager(ca_url=ca_url))
+    # Kea manager pointed at the Control Agent URL, sampling packet counters
+    # in the background for the Overview's time windows.
+    mgr = KeaManager(ca_url=ca_url, stats_history_path=STATS_HISTORY_PATH)
+    mgr.start_stats_sampler()
+    # Build the operation table on top of the manager.
+    ops = DhcpWorkerOps(mgr)
     # default_port drives the URL normalization, which REJECTS a plaintext
     # ws:// to a remote coordinator (the PSK rides in the handshake).
     return ServiceWorkerClient(member_id, coordinator_url, secret,

@@ -82,7 +82,7 @@ class FakeMgr:
         self._tid()
         return {"running": True, "subnet_count": 2, "ca_url": "http://localhost:8001"}
 
-    def get_stats(self):
+    def get_stats(self, range_seconds=None):
         self.calls.append(("get_stats",))
         self._tid()
         return {"status": "SUCCESS", "global": {"total_addresses": 254}}

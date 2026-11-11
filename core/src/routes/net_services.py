@@ -6,6 +6,7 @@ import inspect
 import ipaddress
 import json
 import time
+import counter_window
 from display_names import node_name  # sibling leaf
 from cache_core import FRESH, REFRESH, STALE
 from api import (
@@ -1353,8 +1354,6 @@ def register(app, hub, ctx):
     # MAX_RETENTION_DAYS), so "month" is also the retention ceiling, not just
     # the widest selectable window.
     _DNS_STATS_RANGE_DAYS = {"day": 1, "week": 7, "month": 30}
-    _DNS_STATS_RANGE_SECONDS = {"hour": 3600, "day": 86400,
-                                "week": 7 * 86400, "month": 30 * 86400}
 
     def _dns_resolver_counters(request: Request, tenant: str = None):
         """Why resolver-wide cache/recursion counters may be shown in a
@@ -1442,7 +1441,7 @@ def register(app, hub, ctx):
             payload["search"] = search
         # Pass the time window, if it is a known range.
         rng = (range or "").strip().lower()
-        range_seconds = _DNS_STATS_RANGE_SECONDS.get(rng)
+        range_seconds = counter_window.range_seconds(rng)
         if range_seconds:
             payload["range_seconds"] = range_seconds
             # Pre-windowing resolvers only understand whole days.
@@ -5387,7 +5386,7 @@ def register(app, hub, ctx):
         return result
 
     @app.get("/api/dhcp/stats")
-    async def dhcp_stats(request: Request, tenant: str = None):
+    async def dhcp_stats(request: Request, tenant: str = None, range: str = None):
         """Kea DHCP4 statistics — global + per-subnet pool utilization and the
         headline packet counters for the DHCP analytics panel.
 
@@ -5401,10 +5400,20 @@ def register(app, hub, ctx):
 
         ``_dhcp_rescope_stats`` then re-derives the pool tiles from the visible
         scopes and drops the raw per-HA-node ``members`` replies, which embed a
-        second, unfiltered copy of every subnet."""
+        second, unfiltered copy of every subnet.
+
+        ``range`` ("hour"/"day"/"week"/"month") turns the packet counters into
+        the increase over that trailing window (``window`` reports coverage),
+        the same as /api/dns/stats. Omitted or unknown keeps Kea's lifetime
+        totals."""
         logger.debug("relay GET /api/dhcp/stats")
+        # Pass the time window, if it is a known range. No range keeps payload
+        # None so the warm-cache feed (_FEED_DHCP) still matches.
+        window_s = counter_window.range_seconds(range)
+        payload = {"range_seconds": window_s} if window_s else None
         # Fetch the stats (cached), filter by tenant, then fix the totals.
-        data = await _cached_relay(_spoke_ref("dhcp", request, tenant), "DHCP_STATS", log_name="dhcp_stats")
+        data = await _cached_relay(_spoke_ref("dhcp", request, tenant), "DHCP_STATS",
+                                   payload, log_name="dhcp_stats")
         filtered = await _filter_tenant(request, data, "dhcp", ["subnet"], tenant,
                                     shared_source=_dhcp_shared(request, tenant),
                                     spoke_id=_dhcp_list_spoke(request, tenant))

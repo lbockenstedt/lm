@@ -110,8 +110,7 @@ def test_build_subnet4_carves_exclusions_out_of_explicit_pools():
 
 
 def test_get_stats_surfaces_subnet_description_from_user_context():
-    mgr = kea_manager.KeaManager.__new__(kea_manager.KeaManager)
-    mgr.ca_url = "http://localhost:8001"
+    mgr = kea_manager.KeaManager("http://localhost:8001")
 
     def fake_rpc(service, command, args=None):
         if command == "statistic-get-all":
@@ -136,8 +135,7 @@ def test_get_stats_surfaces_subnet_description_from_user_context():
 
 
 def test_get_stats_empty_description_when_no_user_context():
-    mgr = kea_manager.KeaManager.__new__(kea_manager.KeaManager)
-    mgr.ca_url = "http://localhost:8001"
+    mgr = kea_manager.KeaManager("http://localhost:8001")
 
     def fake_rpc(service, command, args=None):
         if command == "statistic-get-all":
@@ -197,8 +195,7 @@ def test_get_stats_drops_orphaned_subnet_ids_not_in_live_config():
     (removed/reassigned NetBox-side) — it must be dropped, not rendered as
     an "Unknown scope" placeholder.
     """
-    mgr = kea_manager.KeaManager.__new__(kea_manager.KeaManager)
-    mgr.ca_url = "http://localhost:8001"
+    mgr = kea_manager.KeaManager("http://localhost:8001")
 
     def fake_rpc(service, command, args=None):
         if command == "statistic-get-all":
@@ -233,8 +230,7 @@ def test_get_stats_assigned_addresses_reflects_live_leases_not_stale_stat():
     tab (``lease4-get-all``) showed nothing. Overview must count live leases
     itself so the two tabs can never disagree.
     """
-    mgr = kea_manager.KeaManager.__new__(kea_manager.KeaManager)
-    mgr.ca_url = "http://localhost:8001"
+    mgr = kea_manager.KeaManager("http://localhost:8001")
 
     def fake_rpc(service, command, args=None):
         if command == "statistic-get-all":
@@ -261,8 +257,7 @@ def test_get_stats_assigned_addresses_reflects_live_leases_not_stale_stat():
 
 
 def test_get_stats_assigned_addresses_counts_only_active_leases():
-    mgr = kea_manager.KeaManager.__new__(kea_manager.KeaManager)
-    mgr.ca_url = "http://localhost:8001"
+    mgr = kea_manager.KeaManager("http://localhost:8001")
 
     def fake_rpc(service, command, args=None):
         if command == "statistic-get-all":

@@ -193,3 +193,25 @@ def test_admin_with_no_tenant_still_sees_every_scope():
 
     assert [s["subnet"] for s in body["subnets"]] == ["10.10.0.0/24", "10.20.0.0/24"]
     assert body["global"]["total_addresses"] == 1000
+
+
+# ── time window ─────────────────────────────────────────────────────────────
+
+def test_range_is_sent_to_the_spoke_as_window_seconds():
+    hub = _hub()
+    client = _build_with_real_filter(_admin(), hub, "10.10.0.0/24", [])
+
+    client.get("/api/dhcp/stats?range=week")
+
+    assert hub.forwarded[-1][1:] == ("DHCP_STATS", {"range_seconds": 604800})
+
+
+def test_no_or_unknown_range_sends_no_payload():
+    # No payload keeps the cache key equal to the background warm feed's.
+    hub = _hub()
+    client = _build_with_real_filter(_admin(), hub, "10.10.0.0/24", [])
+
+    client.get("/api/dhcp/stats?range=decade")
+
+    _sid, cmd, payload = hub.forwarded[-1]
+    assert cmd == "DHCP_STATS" and not payload
