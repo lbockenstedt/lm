@@ -95,3 +95,22 @@ async def test_console_probe_sends_the_identified_device_class_as_role():
         "identity": {"hostname": "fw-01", "model": "SRX345", "type": "Firewall"}})
     rec = hub.request_response.call_args[0][2]["devices"][0]
     assert rec["model"] == "SRX345" and rec["role"] == "firewall"
+
+
+@pytest.mark.asyncio
+async def test_console_probe_skips_repeat_push_of_unchanged_device():
+    # Console spokes re-probe the same port all day; each push is a paced
+    # NetBox feed, so an identical record already synced is not sent again.
+    hub = _probe_hub()
+    probe = {"vendor": "cisco", "identity": {"ip": "10.0.0.5", "hostname": "sw-1",
+                                             "serial": "S1"}}
+    await hub._handle_console_probe("spoke-1", probe)
+    await hub._handle_console_probe("spoke-1", probe)
+    assert hub.request_response.call_count == 1
+    assert hub.request_response.call_args.kwargs["timeout"] == 600.0
+
+    # A changed record (new IP) is pushed.
+    await hub._handle_console_probe("spoke-1", {
+        "vendor": "cisco", "identity": {"ip": "10.0.0.6", "hostname": "sw-1",
+                                        "serial": "S1"}})
+    assert hub.request_response.call_count == 2

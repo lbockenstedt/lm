@@ -5,6 +5,8 @@ from __future__ import annotations
 
 # asyncio provides session frame queues and background refresh tasks.
 import asyncio
+# json keys the console-sync dedupe.
+import json
 # logging reports console refresh and sync problems.
 import logging
 # re validates that a string looks like a real hostname.
@@ -19,6 +21,9 @@ from device_specs import get_spec as get_device_spec
 
 # Named logger shared by all console-related messages.
 logger = logging.getLogger("Console")
+
+# How long an identical console-probe NetBox push is skipped after a success.
+_CONSOLE_RESYNC_S = 3600.0
 
 # Words a console prompt parser can mistake for a hostname.
 _NOT_HOSTNAMES = {"hostname", "password", "login", "username", "standby",
@@ -593,9 +598,22 @@ class HubVncConsoleMixin:
             "devices": [device_rec],
             "defaults": cfg.get("defaults", {}) or {},
         }
-        # Send it to NetBox and record the outcome for the status card.
+        # Console spokes re-probe the same ports all day. A device already
+        # synced with this exact record is skipped for an hour: each push is a
+        # paced background feed on the NetBox spoke, and repeats only crowd it.
+        key = json.dumps(payload, sort_keys=True, default=str)
+        recent = self.__dict__.setdefault("_console_synced", {})
+        now = time.monotonic()
+        for k in [k for k, at in recent.items() if now - at > _CONSOLE_RESYNC_S]:
+            recent.pop(k, None)
+        if key in recent:
+            return
+        # Send it to NetBox and record the outcome for the status card. The
+        # NetBox spoke queues background feeds behind live UI reads, so give it
+        # the same long wait as the other discovery feeds.
         try:
-            await self.request_response(netbox, "NETBOX_SYNC_DEVICES", payload, timeout=60.0)
+            await self.request_response(netbox, "NETBOX_SYNC_DEVICES", payload, timeout=600.0)
+            recent[key] = now
             logger.info("console probe: synced %s to NetBox (tenant %s)",
                         hostname or serial or mac or ip, tenant_id)
             self._record_console_sync_status(
