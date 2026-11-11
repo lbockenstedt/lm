@@ -1981,7 +1981,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         Asked in parallel with a short timeout (spokes answer inline even when
         their queue is full); a spoke that does not answer is left out."""
         # Ask each connected spoke for SPOKE_GET_QUEUE_STATS at once.
-        sids = list((getattr(self, "active_connections", {}) or {}).keys())
+        # AppBuilder runs its own agent, which has no command queue and never answers.
+        ab = self.get_spoke_by_type("ab") if hasattr(self, "get_spoke_by_type") else None
+        sids = [s for s in (getattr(self, "active_connections", {}) or {}) if s != ab]
 
         async def _one(sid):
             try:
