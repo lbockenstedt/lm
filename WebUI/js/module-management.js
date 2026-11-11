@@ -228,10 +228,10 @@ const INSTANCE_PRODUCTS = {
         endpoint: '/setup/nac-instances',
         listId: 'nac-instances-list',
         moduleType: 'nac',
-        // A bare, not-yet-role-loaded base agent (module_type 'agent') is also
-        // selectable — binding an instance to one auto-loads the matching
-        // coordinator role as part of the save, instead of requiring a
-        // separate manual "Load Role" step first (see routes/role_pool.py).
+        // A bare base agent (module_type 'agent') may join the failover pool —
+        // failover loads the role onto it (see routes/role_pool.py). The
+        // Associated Spoke dropdown only offers spokes already running the
+        // role (_productSpokes).
         alsoBareAgent: true,
         // LOAD_ROLE/UNLOAD_ROLE role name (routes/role_pool.py's PRODUCT_ROLE) —
         // used to derive a sub-spoke's base agent id for the failover pool
@@ -380,9 +380,8 @@ const DEVICE_TYPES = {
               options: [['','Inherit module default'],['0','Off (manual Poll Now only)'],['60','Every 1 minute'],['300','Every 5 minutes'],['900','Every 15 minutes'],['1800','Every 30 minutes'],['3600','Every hour'],['21600','Every 6 hours'],['86400','Every day']] },
         ],
     },
-    // nac/ipam/ldap inherit `alsoBareAgent: true` from INSTANCE_PRODUCTS above
-    // — a not-yet-role-loaded base agent is selectable, and binding an
-    // instance to one auto-loads the matching coordinator role on save.
+    // nac/ipam/ldap: the spoke dropdown lists only spokes running the role
+    // (_productSpokes); load the role on an agent first to bind to it.
     nac:   Object.assign({}, INSTANCE_PRODUCTS.nac,   { badgeLabel: 'NAC',  payloadKey: 'instance', responseKey: 'instances' }),
     ipam:  Object.assign({}, INSTANCE_PRODUCTS.ipam,  { badgeLabel: 'IPAM', payloadKey: 'instance', responseKey: 'instances' }),
     ldap:  Object.assign({}, INSTANCE_PRODUCTS.ldap,  { badgeLabel: 'LDAP', payloadKey: 'instance', responseKey: 'instances' }),
@@ -460,6 +459,17 @@ async function loadInstances(productKey) {
 // box (a bare base agent and its own already-loaded role sub-spoke, e.g.
 // 'spokeA' and 'spokeA-cppm', are the same candidate; store/display by the
 // base agent id, matching what instance_relocate.py expects in spoke_pool).
+// Spokes the "Associated Spoke" dropdown offers for a product: only spokes
+// already running its code (module_type === moduleType), never a bare agent
+// that hasn't loaded the role. The currently bound spoke always stays listed
+// so an edit can't silently unbind it.
+function _productSpokes(p, spokes, currentId) {
+    return spokes.filter(s => (currentId && s.spoke_id === currentId)
+        || ((!p.moduleType || s.module_type === p.moduleType)
+            && (!p.spokeFilter || p.spokeFilter(s))
+            && _spokeBindable(s)));
+}
+
 function _instancePoolCandidates(p, matched) {
     const byBase = new Map();
     matched.forEach(s => {
@@ -549,9 +559,7 @@ ${schemaBtnHtml}
     loadApprovedSpokes().then(spokes => {
         const selector = document.getElementById('inst-spoke');
         if (!selector) return;
-        const matched = spokes.filter(s => (s.module_type === p.moduleType
-                                            || (p.alsoBareAgent && s.module_type === 'agent'))
-                                           && _spokeBindable(s));
+        const matched = _productSpokes(p, spokes, editItem && editItem.spoke_id);
         selector.innerHTML = matched.length > 0
             ? '<option value="">— select spoke —</option>' + matched.map(s => `<option value="${s.spoke_id}" title="${escapeHtml(s.spoke_id)}">${escapeHtml(_spokeName(s))}</option>`).join('')
             : `<option value="">No ${p.moduleType} spokes found</option>`;
@@ -561,7 +569,10 @@ ${schemaBtnHtml}
             const poolEl = document.getElementById('inst-spoke-pool');
             const activeEl = document.getElementById('inst-active-spoke');
             if (poolEl) {
-                const candidates = _instancePoolCandidates(p, matched);
+                const poolSpokes = spokes.filter(s => (s.module_type === p.moduleType
+                                                       || (p.alsoBareAgent && s.module_type === 'agent'))
+                                                      && _spokeBindable(s));
+                const candidates = _instancePoolCandidates(p, poolSpokes);
                 const checked = new Set((editItem && editItem.spoke_pool) || []);
                 poolEl.innerHTML = candidates.length > 0
                     ? candidates.map(c => `<label class="flex items-center gap-2 text-sm text-slate-600">
@@ -634,13 +645,6 @@ async function saveInstance(productKey) {
         const vc = _collectVaultCred('inst-vaultcred');
         if (vc !== undefined) config.vault_credential = vc;
     }
-    // nac/ipam/ldap: binding to a spoke that hasn't loaded the matching
-    // coordinator role yet now auto-loads it as part of this save (see
-    // routes/role_pool.py) — that can take up to ~2 minutes the first time
-    // (a sibling-repo git clone + pip install), so set expectations instead
-    // of leaving the operator staring at a stuck Save button.
-    if (p.alsoBareAgent) showToast('Saving — if this spoke hasn\'t run this role before, '
-        + 'loading it can take up to a couple of minutes…', 'info');
     try {
         const method = id ? 'PUT' : 'POST';
         const url = id ? `${p.endpoint}/${id}` : p.endpoint;
@@ -967,12 +971,8 @@ function _renderDeviceModalFields(typeKey, values) {
     loadApprovedSpokes().then(spokes => {
         const selector = document.getElementById('dev-spoke');
         if (!selector) return;
-        const matched = spokes.filter(s => t.moduleType
-                                  ? (s.module_type === t.moduleType || (t.alsoBareAgent && s.module_type === 'agent'))
-                                  : true)
-                              .filter(s => t.spokeFilter ? t.spokeFilter(s) : true)
-                              .filter(_spokeBindable);
         const current = values ? values.spoke_id : '';
+        const matched = _productSpokes(t, spokes, current);
         selector.innerHTML = matched.length > 0
             ? '<option value="">— select spoke —</option>' + matched.map(s => `<option value="${s.spoke_id}"${s.spoke_id === current ? ' selected' : ''} title="${escapeHtml(s.spoke_id)}">${escapeHtml(_spokeName(s))}</option>`).join('')
             : `<option value="">No ${t.moduleType || ''} spokes found</option>`;
