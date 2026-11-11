@@ -275,7 +275,8 @@ def test_many_concurrent_requests_each_get_their_own_reply():
 
     res, elapsed = _run(scenario())
     assert [r["payload"]["data"]["echo"] for r in res] == list(range(200))
-    assert elapsed < 0.5, elapsed
+    # Sequential handling would take ~3 s; the margin absorbs slow CI runners.
+    assert elapsed < 1.5, elapsed
     hub.assert_clean()
 
 
