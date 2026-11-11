@@ -14,6 +14,11 @@ logger = logging.getLogger("hub.perf")
 
 SLOW_ROUTE_S = float(os.getenv("LM_SLOW_ROUTE_S", "3"))
 SLOW_COMMAND_S = float(os.getenv("LM_SLOW_COMMAND_S", "5"))
+# Bulk sweeps/syncs walk a whole subnet or inventory and take 15 s to minutes by
+# design; they only count as slow past BULK_COMMAND_S (timeouts still count).
+BULK_COMMAND_S = 300.0
+BULK_COMMANDS = {"NW_PING_SWEEP", "NETBOX_SYNC_DEVICES", "NETBOX_SYNC_LLDP", "NETBOX_DEDUPE_DEVICES",
+                 "NETBOX_AUTORACK_SWEEP", "NETBOX_STALENESS_SWEEP", "CPPM_SYNC_ENDPOINTS"}
 _MAX_KEYS = 400
 _LOG_EVERY_S = 60.0
 
@@ -74,7 +79,8 @@ class PerfTelemetry:
 
     def record_command(self, spoke: str, command: str, secs: float, ok: bool = True) -> None:
         with self._lock:
-            slow = self._stat(self._commands, (spoke, command)).add(secs, SLOW_COMMAND_S)
+            slow_at = BULK_COMMAND_S if command in BULK_COMMANDS else SLOW_COMMAND_S
+            slow = self._stat(self._commands, (spoke, command)).add(secs, slow_at)
         if slow:
             self._maybe_log(f"{spoke}:{command}",
                             f"[perf] SLOW COMMAND {command} to {spoke} took {secs:.1f}s")
