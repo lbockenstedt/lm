@@ -9,6 +9,8 @@ simulations store, exactly as before.
 import logging
 # Regular expressions, used to sanitise generated vault secret names.
 import re
+# Clock for the cache age below.
+import time
 # Type hints only; they document the config dictionaries passed around.
 from typing import Any, Dict
 
@@ -26,6 +28,10 @@ _SLOT_LABELS = {"central_config": "central", "central_on_prem_config": "central-
 # ref -> secret value. Avoids a vault round trip on every poll/browse, and keeps
 # Central working through a brief vault outage. Filled on write and on read.
 _resolved: Dict[str, str] = {}
+# ref -> when it was last read from (or written to) the vault. A cached value
+# younger than _CACHE_S is used without asking the vault again.
+_fetched: Dict[str, float] = {}
+_CACHE_S = 900
 
 
 def _vault_on(hub) -> bool:
@@ -67,6 +73,7 @@ async def to_vault(hub, slot: str, tenant_id: str, cfg: Dict[str, Any]) -> Dict[
         # Cache the value under its reference and replace the inline secret with the reference.
         ref = "kv:" + name
         _resolved[ref] = value
+        _fetched[ref] = time.time()
         out[field] = ref
     return out
 
@@ -83,11 +90,16 @@ async def resolve(hub, cfg: Dict[str, Any]) -> Dict[str, Any]:
         # Inline values (no "kv:" prefix) are already the real secret; leave them alone.
         if not ref.startswith("kv:"):
             continue
+        # Recently read: use the cached value instead of another vault round trip.
+        if _resolved.get(ref) and time.time() - _fetched.get(ref, 0.0) < _CACHE_S:
+            out[field] = _resolved[ref]
+            continue
         # Ask the vault for the real value behind the reference.
         value = await cloud_vault.resolve_ref(hub, ref)
         # Success: remember it so later reads survive a short vault outage.
         if value:
             _resolved[ref] = value
+            _fetched[ref] = time.time()
         # Vault read failed: fall back to the last cached value (or empty) and warn.
         else:
             value = _resolved.get(ref, "")
