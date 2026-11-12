@@ -114,3 +114,18 @@ def test_resolve_reuses_a_recent_vault_read(monkeypatch):
     monkeypatch.setattr(central_secrets, "_CACHE_S", 0)
     asyncio.run(central_secrets.resolve(_hub(True), cfg))
     assert len(reads) == 2
+
+
+def test_cache_age_ignores_wall_clock_changes(monkeypatch):
+    """A wall clock stepped back an hour must not keep a cached secret past 15 minutes."""
+    vault = _patch_vault(monkeypatch)
+    vault.secrets["sim-central-t1-client-secret"] = "s3cret"
+    clock = SimpleNamespace(wall=10_000.0, mono=0.0)
+    monkeypatch.setattr(central_secrets, "time",
+                        SimpleNamespace(time=lambda: clock.wall, monotonic=lambda: clock.mono))
+    cfg = {"client_secret": "kv:sim-central-t1-client-secret"}
+    asyncio.run(central_secrets.resolve(_hub(True), cfg))
+    vault.secrets["sim-central-t1-client-secret"] = "rotated"
+    clock.wall -= 3600
+    clock.mono += 16 * 60
+    assert asyncio.run(central_secrets.resolve(_hub(True), cfg))["client_secret"] == "rotated"
