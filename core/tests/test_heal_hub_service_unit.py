@@ -58,6 +58,7 @@ CURRENT = (
     "[Unit]\nDescription=Lab Manager Orchestrator\n\n[Service]\n"
     "# The old\n# Type=oneshot + `ExecStart=start_all.sh` left MainPID=0.\n"
     "Type=exec\nUser=svc_lm\nWorkingDirectory=/opt/lm\n"
+    "CPUAffinity=0\nEnvironment=PYTHON_CPU_COUNT=1\n"
     "ExecStart=/opt/lm/core/venv/bin/python3 /opt/lm/core/src/main.py\n"
     "StandardOutput=append:/var/log/lm/hub.log\n"
     "StandardError=append:/var/log/lm/hub.log\n"
@@ -95,3 +96,22 @@ def test_legacy_heal_does_not_duplicate_existing_std_lines(tmp_path):
     assert u.heal_hub_service_unit(str(p)) is True
     out = p.read_text()
     assert out.count("StandardOutput=") == 1 and out.count("StandardError=") == 1
+
+
+def test_unpinned_hub_is_pinned_to_cpu0_once(tmp_path):
+    """Multi-CPU VMs: the hub must still run on CPU0 only."""
+    p = tmp_path / "lm.service"
+    p.write_text(CURRENT.replace("CPUAffinity=0\nEnvironment=PYTHON_CPU_COUNT=1\n", ""))
+    assert u.heal_hub_service_unit(str(p)) is True
+    out = p.read_text()
+    assert "CPUAffinity=0\nEnvironment=PYTHON_CPU_COUNT=1\nExecStart=" in out
+    assert u.heal_hub_service_unit(str(p)) is False   # already pinned
+    assert p.read_text() == out
+
+
+def test_legacy_unit_is_migrated_and_pinned(tmp_path):
+    p = tmp_path / "lm.service"
+    p.write_text(LEGACY)
+    assert u.heal_hub_service_unit(str(p)) is True
+    out = p.read_text()
+    assert out.count("CPUAffinity=0") == 1 and "Type=exec" in out

@@ -699,7 +699,46 @@ def _dedupe_unit_std_lines(unit_path: str, unit: str) -> bool:
     return True
 
 
+_CPU_PIN_LINES = "CPUAffinity=0\nEnvironment=PYTHON_CPU_COUNT=1\n"
+
+
+def _pin_unit_to_cpu0(unit_path: str) -> bool:
+    """Add ``CPUAffinity=0`` (+ ``PYTHON_CPU_COUNT=1``) before ``ExecStart=`` so
+    the hub runs on CPU0 only, whatever the VM's core count. Returns True only
+    if it rewrote the file. Best-effort; never raises."""
+    import re
+    try:
+        with open(unit_path) as f:
+            unit = f.read()
+    except Exception:  # noqa: BLE001
+        return False
+    if re.search(r"(?m)^CPUAffinity=", unit) or not re.search(r"(?m)^ExecStart=", unit):
+        return False
+    s = re.sub(r"(?m)^ExecStart=", lambda m: _CPU_PIN_LINES + m.group(0), unit, count=1)
+    try:
+        tmp = unit_path + ".heal.tmp"
+        with open(tmp, "w") as f:
+            f.write(s)
+        os.replace(tmp, unit_path)
+    except Exception:  # noqa: BLE001 — not root / read-only: leave it
+        return False
+    try:
+        subprocess.run(["systemctl", "daemon-reload"], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:  # noqa: BLE001
+        pass
+    logger.info("Healed lm.service: pinned the hub to CPU0 (effective on the next restart).")
+    return True
+
+
 def heal_hub_service_unit(unit_path: str = _LM_UNIT_PATH) -> bool:
+    """Run every lm.service heal; True if any of them rewrote the unit."""
+    migrated = _migrate_oneshot_unit(unit_path)
+    pinned = _pin_unit_to_cpu0(unit_path)
+    return migrated or pinned
+
+
+def _migrate_oneshot_unit(unit_path: str) -> bool:
     """Idempotently migrate lm.service from the legacy ``Type=oneshot`` +
     ``start_all.sh`` form (which nohup-detached the hub → ``MainPID=0``, no
     Restart/watchdog, and ``systemctl restart`` couldn't cleanly cycle it) to
