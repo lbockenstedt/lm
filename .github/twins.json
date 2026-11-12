@@ -22,8 +22,6 @@
      "files": ["lm:core/src/simulations/sim_quota.py", "cs:lm-spoke/src/sim_quota.py"]},
     {"name": "QUOTA_TIERS", "kind": "keys", "symbol": "QUOTA_TIERS",
      "files": ["lm:core/src/simulations/sim_quota.py", "cs:lm-spoke/src/sim_quota.py"]},
-    {"name": "SIM_META", "kind": "keys", "symbol": "SIM_META",
-     "files": ["lm:core/src/simulations/sim_quota.py", "cs:lm-spoke/src/sim_quota.py"]},
     {"name": "CS_CONTROL_FLAGS", "kind": "keys", "symbol": "CS_CONTROL_FLAGS",
      "files": ["lm:WebUI/sim-views.js", "cs:lm-spoke/static/sim-views.js"]},
     {"name": "CS_OVERRIDE_KEYS", "kind": "keys", "symbol": "CS_OVERRIDE_KEYS",
