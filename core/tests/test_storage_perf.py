@@ -126,3 +126,80 @@ def test_history_falls_back_to_the_hub_copy_when_the_spoke_is_offline(monkeypatc
     body = client.get("/api/truenas/a1/performance/history").json()
     assert body["source"] == "hub" and body["data"][0]["metrics"]["write_ops"] == 7
     assert hub.calls == []
+
+
+# ── firewall (opnsense) performance: same store, module "opnsense" ──────────
+
+def test_handler_keeps_firewall_samples_of_this_spoke_and_ignores_other_modules(tmp_path):
+    hub = types.SimpleNamespace(
+        storage_perf=StoragePerfStore(lambda: str(tmp_path)),
+        state=types.SimpleNamespace(system_state={"global_config": {"firewalls": [
+            {"id": "fw-1", "spoke_id": "opn-1"}, {"id": "fw-2", "spoke_id": "opn-2"}]}}),
+        _primary_key=lambda s: s)
+    conn = types.SimpleNamespace(spoke_id="opn-1")
+    ts = (int(__import__("time").time()) // 300) * 300
+
+    async def _go(module, samples):
+        payload = {"data": {"module": module, "samples": samples}}
+        await main.LabManagerHub._spoke_msg_storage_perf_sample(hub, conn, {}, payload, None)
+        for t in list(hub.storage_perf._file._tasks):
+            t.cancel()
+    loop = asyncio.new_event_loop()
+    loop.run_until_complete(_go("opnsense", [_sample("fw-1", ts, 1), _sample("fw-2", ts, 2),
+                                             _sample("ghost", ts, 3)]))
+    loop.run_until_complete(_go("some-future-module", [_sample("fw-1", ts, 4)]))
+    assert sorted(hub.storage_perf.series) == ["opnsense:fw-1"]
+
+
+def _fw_route_app(monkeypatch, reply):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import access
+    import tempfile
+    from routes import firewall
+    monkeypatch.setattr(access, "read_scope", lambda sess, tid: "full")
+
+    class _Hub:
+        def __init__(self):
+            self.storage_perf = StoragePerfStore(lambda: tempfile.mkdtemp())
+            self.state = types.SimpleNamespace(system_state={"global_config": {
+                "firewalls": [{"id": "fw-1", "spoke_id": "opn-1"}]}})
+            self.active_connections = {"opn-1": object()}
+            self.calls = []
+
+        def _primary_key(self, s):
+            return s
+
+        async def request_response(self, sid, cmd, payload, timeout=0):
+            self.calls.append((cmd, payload))
+            return {"payload": {"data": reply}}
+
+    app = FastAPI()
+    hub = _Hub()
+    app.state.hub = hub
+    firewall.register(app, hub, types.SimpleNamespace(
+        _session_user=lambda r: {"user": {"role": "admin"}}, _is_admin=lambda s: True,
+        _is_tenant_admin=lambda s: True, _filter_fw=None))
+    ts = (int(__import__("time").time()) // 300) * 300 - 300
+    hub.storage_perf.add("opnsense", [_sample("fw-1", ts, 7)])
+    for t in list(hub.storage_perf._file._tasks):
+        t.cancel()
+    return TestClient(app), hub
+
+
+def test_firewall_history_default_is_the_hub_copy_and_ranges_ask_the_spoke(monkeypatch):
+    client, hub = _fw_route_app(monkeypatch, {"status": "SUCCESS", "data": [{"ts": 1}]})
+    body = client.get("/api/firewall/fw-1/performance/history").json()
+    assert body["source"] == "hub" and body["data"][0]["metrics"]["write_ops"] == 7
+    assert hub.calls == []
+    body = client.get("/api/firewall/fw-1/performance/history?start=100&end=200").json()
+    assert body["source"] == "spoke" and body["data"] == [{"ts": 1}]
+    assert hub.calls == [("OPNSENSE_GET_PERF_HISTORY", {"start": 100, "end": 200})]
+    assert client.get("/api/firewall/nope/performance/history").status_code == 404
+
+
+def test_firewall_history_falls_back_when_the_spoke_lacks_the_command(monkeypatch):
+    client, hub = _fw_route_app(monkeypatch, {"status": "ERROR", "message": "Unknown command"})
+    now = int(__import__("time").time())
+    body = client.get(f"/api/firewall/fw-1/performance/history?start={now - 3600}&end={now}").json()
+    assert body["source"] == "hub" and len(body["data"]) == 1
