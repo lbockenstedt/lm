@@ -1584,6 +1584,26 @@ def register(app, hub, ctx):
                 "spoke_queue": reply.get("data", reply),
                 "hub_timeouts": dict(hub._request_timeouts_by_spoke.get(target, {}))}
 
+    @app.post("/admin/ops/spoke-memory")
+    async def admin_ops_spoke_memory(request: Request):
+        """What a spoke process holds in memory (RSS, top object types, largest
+        containers). Answered inline by the spoke, so it works under load.
+
+        Body: ``{"target": "<spoke_id>"}``."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        target = str((body or {}).get("target") or "").strip()
+        if not target:
+            raise HTTPException(status_code=400, detail="target required")
+        if hub._primary_key(target) not in (getattr(hub, "active_connections", {}) or {}):
+            raise HTTPException(status_code=404, detail=f"spoke '{target}' not connected")
+        resp = await hub.request_response(target, "SPOKE_GET_MEMORY_REPORT", {}, timeout=60.0)
+        reply = ((resp or {}).get("payload", {}) or {}).get("data", resp) or {}
+        return {"status": "ok", "target": target, "memory": reply.get("data", reply)}
+
     # Tail the log lines a spoke has relayed to the hub (SPOKE_LOG buffer).
     @app.post("/admin/ops/spoke-logs")
     async def admin_ops_spoke_logs(request: Request):
