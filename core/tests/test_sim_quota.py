@@ -623,3 +623,10 @@ def test_available_sims_from_ini_offers_client_script_sims():
     # and collab were missing, so the quota dropdown could not offer them.
     ids = {s["sim_id"] for s in sim_quota.available_sims_from_ini("")}
     assert {"www_discover", "collab"} <= ids
+
+
+def test_sim_meta_is_the_sims_json_list():
+    # sims.json is the one sim list; the hub must not keep its own copy.
+    import json
+    path = SRC / "simulations" / "sims.json"
+    assert sim_quota.SIM_META == json.loads(path.read_text(encoding="utf-8"))

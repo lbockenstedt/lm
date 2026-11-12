@@ -1,0 +1,16 @@
+{
+  "dns_fail": {"category": "failure", "multi_capable": false, "media": "any"},
+  "dns_latency": {"category": "failure", "multi_capable": false, "media": "any"},
+  "dhcp_fail": {"category": "failure", "multi_capable": false, "media": "any"},
+  "assoc_fail": {"category": "failure", "multi_capable": false, "media": "wireless"},
+  "auth_fail": {"category": "failure", "multi_capable": false, "media": "any"},
+  "ssidpw_fail": {"category": "failure", "multi_capable": false, "media": "wireless"},
+  "mac_auth_fail": {"category": "failure", "multi_capable": false, "media": "any"},
+  "port_flap": {"category": "failure", "multi_capable": false, "media": "wired"},
+  "ping_test": {"category": "traffic", "multi_capable": true, "media": "any"},
+  "download": {"category": "traffic", "multi_capable": true, "media": "any"},
+  "www_traffic": {"category": "traffic", "multi_capable": true, "media": "any"},
+  "iperf": {"category": "traffic", "multi_capable": true, "media": "any"},
+  "collab": {"category": "traffic", "multi_capable": true, "media": "any"},
+  "www_discover": {"category": "traffic", "multi_capable": true, "media": "any"}
+}
