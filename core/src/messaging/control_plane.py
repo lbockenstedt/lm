@@ -38,6 +38,7 @@ import contextlib
 # Thread-pool futures, used to wait on work handed to the event loop.
 import concurrent.futures
 from typing import Dict, Any, List, Optional
+import gc
 # Frame signing and encryption helpers (package or bare-module layout).
 try:
     from ..security.signer import MessageSigner, encode_frame, split_frame
@@ -205,6 +206,58 @@ def _hub_wait_s(msg) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return ttl if ttl > 0 else None
+
+
+def memory_report(top: int = 25) -> Dict[str, Any]:
+    """What this process holds in memory, for SPOKE_GET_MEMORY_REPORT: RSS,
+    the object types with the most instances and the most (shallow) bytes,
+    and the largest lists/dicts/sets with a few sample keys so the owning
+    cache can be recognised. Stdlib only; takes a second or two."""
+    try:
+        with open("/proc/self/statm") as f:
+            rss_mb = round(int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") / 1e6, 1)
+    except (OSError, ValueError, IndexError):
+        rss_mb = None
+    counts: Dict[str, int] = {}
+    sizes: Dict[str, int] = {}
+    big = []
+    objs = gc.get_objects()
+    for o in objs:
+        t = type(o)
+        name = f"{t.__module__}.{t.__qualname__}"
+        counts[name] = counts.get(name, 0) + 1
+        try:
+            sizes[name] = sizes.get(name, 0) + sys.getsizeof(o)
+        except Exception:  # noqa: BLE001 — some C objects refuse getsizeof
+            pass
+        if isinstance(o, (list, dict, set)) and len(o) >= 1000:
+            big.append(o)
+    # Dicts/sets of plain strings and numbers are not gc-tracked, so find
+    # large ones through the tracked objects that hold them.
+    seen = {id(o) for o in big}
+    for o in objs:
+        for r in gc.get_referents(o):
+            if (isinstance(r, (list, dict, set)) and len(r) >= 1000
+                    and not gc.is_tracked(r) and id(r) not in seen):
+                seen.add(id(r))
+                big.append(r)
+    del objs
+    big.sort(key=len, reverse=True)
+    largest = []
+    for o in big[:15]:
+        sample = list(o)[:3] if isinstance(o, (dict, set)) else o[:1]
+        largest.append({"type": type(o).__name__, "len": len(o),
+                        "sample": [repr(x)[:60] for x in sample]})
+    del big
+    return {
+        "rss_mb": rss_mb,
+        "threads": threading.active_count(),
+        "gc_tracked": sum(counts.values()),
+        "by_count": sorted(counts.items(), key=lambda kv: -kv[1])[:top],
+        "by_bytes": sorted(((k, round(v / 1e6, 1)) for k, v in sizes.items()),
+                           key=lambda kv: -kv[1])[:top],
+        "largest_containers": largest,
+    }
 
 class _SpokeLogRelayHandler(logging.Handler):
     """Captures ALL log records (INFO+) into a queue for async relay to the Hub.
@@ -1998,6 +2051,12 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                     await self._send_cmd_result(
                         websocket, corr_id,
                         {"status": "SUCCESS", "data": self._command_queue_stats()},
+                        cmd_send_lock)
+                    continue
+                if cmd_type == "SPOKE_GET_MEMORY_REPORT":
+                    await self._send_cmd_result(
+                        websocket, corr_id,
+                        {"status": "SUCCESS", "data": memory_report()},
                         cmd_send_lock)
                     continue
                 if len(cmd_tasks) >= self._max_inflight_commands():
