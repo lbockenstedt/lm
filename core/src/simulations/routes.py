@@ -1185,9 +1185,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     # read-only. Replaces the hidden per-client registry layer; the legacy
     # registry override is cleared on write so nothing double-applies.
     # The sim flag keys a per-user override can set.
-    _CS_SIM_FLAGS = {'assoc_fail', 'auth_fail', 'mac_auth_fail', 'dhcp_fail', 'dns_fail', 'download',
-                     'iperf', 'kill_switch', 'ping_test', 'port_flap', 'ssidpw_fail',
-                     'www_traffic'}
+    _CS_SIM_FLAGS = set(sim_quota.SIM_META) | {'kill_switch'}
 
     def _username_for(hostname: str) -> str:
         """Mirror sim_config.username_for: hostname minus the trailing '-N'."""

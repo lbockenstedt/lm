@@ -127,6 +127,8 @@ SIM_META: Dict[str, Dict[str, object]] = {
     "download":    {"category": "traffic", "multi_capable": True},
     "www_traffic": {"category": "traffic", "multi_capable": True},
     "iperf":       {"category": "traffic", "multi_capable": True},
+    "collab":      {"category": "traffic", "multi_capable": True},
+    "www_discover": {"category": "traffic", "multi_capable": True},
 }
 
 # Suggested sim for well-known Central alert types.

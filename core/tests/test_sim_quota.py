@@ -616,3 +616,10 @@ def test_consumer_target_never_reduced_by_producing():
     after = sim_quota.adaptive_step(st, q, firing=True, now=10_000, producing=6)
     assert after["target"] == 10
     assert after.get("floor") is None
+
+
+def test_available_sims_from_ini_offers_client_script_sims():
+    # The hub catalog must match the cs SIM_META (twins.json): www_discover
+    # and collab were missing, so the quota dropdown could not offer them.
+    ids = {s["sim_id"] for s in sim_quota.available_sims_from_ini("")}
+    assert {"www_discover", "collab"} <= ids
