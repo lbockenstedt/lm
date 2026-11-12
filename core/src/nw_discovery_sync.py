@@ -40,6 +40,7 @@ from __future__ import annotations
 # timestamps in reports; logging for progress; re for the IPv4 matcher; time for epochs.
 import asyncio
 import datetime as _dt
+import json
 import logging
 import re
 import time
@@ -179,6 +180,16 @@ def nw_oobm_address(device: Dict[str, Any], interfaces: Any) -> str:
         if ip in mine:
             return ip
     return ""
+
+
+def _nw_stub_login(device: Dict[str, Any], spoke_id: str) -> tuple:
+    """How ``device`` logs in to a stub IP: the agent it probes from, its driver
+    and its vault credential. Devices with the same login get the same answer
+    from the IP. A device without a vault reference keeps its own login."""
+    ref = device.get("vault_credential")
+    cred = json.dumps(ref, sort_keys=True) if ref else f"device:{device.get('id')}"
+    return (spoke_id, str(device.get("object_type") or ""), str(device.get("transport") or ""),
+            str(device.get("username") or ""), cred)
 
 
 class NwDiscoverySyncMixin:
@@ -1375,7 +1386,13 @@ class NwDiscoverySyncMixin:
         the nw spoke to read device info from the stub's IP using THIS device's
         credentials; when the IP answers with this device's serial it is the same
         box, and NetBox merges the stub into the polled device (keeping its
-        history). Each (stub, device) pair is tried at most once a day. Never raises."""
+        history). Never raises.
+
+        A stub IP gives the same answer to every device that logs in to it the
+        same way (see ``_nw_stub_login``), so each stub is probed at most once a
+        day per login and the serial it answered with is reused: a fleet of 100
+        devices sharing one credential no longer probes every stub 100 times,
+        each a 3-15 s SSH/SNMP timeout when the stub is not a network device."""
         merged = 0
         try:
             import ipaddress
@@ -1401,18 +1418,21 @@ class NwDiscoverySyncMixin:
                     inside = ipaddress.ip_address(ip) in net
                 except ValueError:
                     continue
-                key = (st.get("id"), device_cfg.get("id"))
-                if not inside or ip == addr or now - cache.get(key, 0) < self._NW_STUB_PROBE_TTL_S:
+                if not inside or ip == addr:
                     continue
-                if probes >= self._NW_STUB_PROBE_MAX:
-                    break
-                probes += 1
-                cache[key] = now
-                info = unwrap_spoke(await self.request_response(
-                    spoke_id, "NW_GET_DEVICE_INFO",
-                    {"device_id": device_cfg.get("id"), "address": ip}, timeout=60.0)) or {}
-                got = str((info.get("data") or {}).get("serial") or "").strip() \
-                    if isinstance(info.get("data"), dict) else ""
+                # Reuse a recent answer for this stub and login; otherwise probe it.
+                key = (st.get("id"), _nw_stub_login(device_cfg, spoke_id))
+                ts, got = cache.get(key, (0.0, ""))
+                if now - ts >= self._NW_STUB_PROBE_TTL_S:
+                    if probes >= self._NW_STUB_PROBE_MAX:
+                        break
+                    probes += 1
+                    info = unwrap_spoke(await self.request_response(
+                        spoke_id, "NW_GET_DEVICE_INFO",
+                        {"device_id": device_cfg.get("id"), "address": ip}, timeout=60.0)) or {}
+                    got = str((info.get("data") or {}).get("serial") or "").strip() \
+                        if isinstance(info.get("data"), dict) else ""
+                    cache[key] = (now, got)
                 if not got or got.casefold() != serial.casefold():
                     continue
                 res = unwrap_spoke(await self.request_response(
