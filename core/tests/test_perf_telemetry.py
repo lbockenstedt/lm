@@ -24,6 +24,15 @@ def test_bulk_sweeps_are_only_slow_past_the_bulk_threshold():
     assert rows["NW_GET_MAC_TABLE"]["slow"] == 1
 
 
+def test_scans_vm_sync_and_log_analysis_are_long_by_design():
+    """A full NW scan, the NetBox VM sync and the LLM log analysis take tens of
+    seconds to minutes every time; they filled the AB Health page as slow."""
+    t = pt.PerfTelemetry()
+    for cmd in ("NW_SCAN", "NETBOX_SYNC_VMS", "ANALYZE_LOGS"):
+        t.record_command("s", cmd, 60.0)
+    assert all(r["slow"] == 0 for r in t.snapshot()["commands"])
+
+
 def test_build_report_tolerates_a_bare_hub():
     class Hub:
         _request_timeouts_total = 3
