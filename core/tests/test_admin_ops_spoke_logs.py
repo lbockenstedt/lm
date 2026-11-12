@@ -47,3 +47,21 @@ def test_filters_by_name_alias_and_text():
 def test_lines_caps_to_most_recent():
     out = _run({"target": "sid-1", "lines": 1})
     assert out["lines"] == ["t - BaseControlPlane - INFO - heartbeat"]
+
+
+def test_spoke_memory_report_names_the_large_containers():
+    # There was no way to see what a spoke process holds (LM-AGENT grew
+    # ~190 MB in 30 min and was OOM-killed). The report lists top types and
+    # the largest containers with sample keys so the owning cache is visible.
+    from messaging.control_plane import memory_report
+
+    class Engine:
+        pass
+    eng = Engine()
+    # A str->int dict is not gc-tracked; it is found through its owner.
+    eng.cache = {f"device-{i}": i for i in range(5000)}
+    rep = memory_report()
+    assert rep["gc_tracked"] > 0 and rep["by_count"] and rep["by_bytes"]
+    hit = [c for c in rep["largest_containers"] if c["len"] == 5000 and c["type"] == "dict"]
+    assert hit and hit[0]["sample"][0] == "'device-0'"
+    del eng
