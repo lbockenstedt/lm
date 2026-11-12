@@ -49,8 +49,12 @@ from __future__ import annotations
 import asyncio
 # datetime builds the UTC "last synced" timestamp.
 import datetime as _dt
+# json keys the unchanged-push check.
+import json
 # Standard-library logging for per-cycle and per-tenant results.
 import logging
+# time ages the unchanged-push check.
+import time
 # Type hints only.
 from typing import Any, Dict, List, Tuple
 
@@ -67,6 +71,12 @@ from sync_loop import next_schedule_delay, run_sync_loop  # sibling leaf
 
 # Use the hub's main logger so sync lines (incl. [sync-error]) land in the hub log.
 logger = logging.getLogger("Hub")
+
+# A tenant+source push identical to the last successful one is skipped for this
+# long. Each push makes the NetBox spoke page every device and look up each
+# record, and the feed rarely changes between 10-minute cycles; the hourly
+# resend still reconciles hand edits made in NetBox.
+_FW_RESEND_S = 3600.0
 
 
 class FwDiscoverySyncMixin:
@@ -475,6 +485,13 @@ class FwDiscoverySyncMixin:
                    "source": source_label,
                    "replace": True, "devices": devices, "defaults": defaults,
                    "source_of_truth": sot}
+        # Same payload as the last successful push, within the hour: skip it.
+        key = json.dumps(payload, sort_keys=True, default=str)
+        pushed_before = self.__dict__.setdefault("_fw_last_push", {})
+        prior = pushed_before.get((tenant_id, source_label))
+        if prior and prior[0] == key and time.monotonic() - prior[1] < _FW_RESEND_S:
+            return {**prior[2], "last_sync_ts": now,
+                    "message": "unchanged since the last push; not resent"}
         # Push to NetBox and read the result counters.
         try:
             rr = await self.request_response(netbox, self._FW_DISCOVERY_PUSH_COMMAND,
@@ -512,6 +529,8 @@ class FwDiscoverySyncMixin:
                       "deleted": deleted,
                       "message": message or (f"{len(devices)} device(s) sent"
                                               if rstatus != "ERROR" else "NetBox error")}
+            if rstate == "success":
+                pushed_before[(tenant_id, source_label)] = (key, time.monotonic(), status)
         # Network/timeout/unexpected errors become an error status.
         except Exception as e:
             logger.warning("[sync-error] fw-discovery tenant=%s source=%s push failed: %s",
