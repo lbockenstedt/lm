@@ -12,6 +12,16 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ## Week of 2026-11-09
 
+### Firewalls
+
+- **Firewall performance history.** Firewalls → Overview now has History
+  charts per firewall: throughput (bits/s), packets/s with interface errors,
+  CPU and memory, and pf states, for all interfaces or one picked interface.
+  It uses the same time selector as Storage → Performance (1h to 7d or a
+  custom range; 7 days is the default). The firewall spoke keeps 7 days of
+  5-minute averages and pushes them to the hub. Needs the opnsense spoke
+  update. See [opnsense.md](opnsense.md#how-to-use-it).
+
 ### Simulations
 
 - **WWW Discover - Network Diagnostics** (`www_discover`) adds a separate,

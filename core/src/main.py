@@ -126,7 +126,7 @@ from nw_discovery_sync import NwDiscoverySyncMixin
 from truenas_discovery_sync import TruenasDiscoverySyncMixin
 from nw_cache import NwCacheMixin
 from truenas_cache import TruenasCacheMixin
-from storage_perf import StoragePerfStore
+from storage_perf import PERF_DEVICE_LISTS, StoragePerfStore
 from le_cache import LeCacheMixin
 from warm_cache import WarmCacheMixin
 from dns_dhcp_sync import DnsDhcpSyncMixin
@@ -7989,22 +7989,25 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 _tn_aid, {"data": _tn_pdata, "errors": _td.get("errors") or []}))
 
     async def _spoke_msg_storage_perf_sample(self, conn, msg_data, payload, dec_secret):
-        """5-minute performance averages from a storage spoke. Only kept for
-        appliances that exist and aren't bound to a different spoke."""
+        """5-minute performance averages from a spoke (storage appliances,
+        firewalls). Only kept for devices that exist and aren't bound to a
+        different spoke."""
         data = payload.get("data", {}) or {}
-        if data.get("module") != "truenas":
+        module = data.get("module")
+        if module not in PERF_DEVICE_LISTS:
             return
-        appliances = {a.get("id"): a for a in
-                      (self.state.system_state.get("global_config", {}) or {})
-                      .get("truenas_appliances", []) or [] if isinstance(a, dict)}
+        devices = {a.get("id"): a for a in
+                   (self.state.system_state.get("global_config", {}) or {})
+                   .get(PERF_DEVICE_LISTS[module], []) or [] if isinstance(a, dict)}
         me = self._primary_key(conn.spoke_id)
 
         def _mine(s):
-            a = appliances.get(s.get("device_id")) if isinstance(s, dict) else None
+            """True if the sample's device exists and isn't another spoke's."""
+            a = devices.get(s.get("device_id")) if isinstance(s, dict) else None
             return a is not None and (not a.get("spoke_id")
                                       or self._primary_key(a["spoke_id"]) == me)
         samples = [s for s in data.get("samples") or [] if _mine(s)]
-        self.storage_perf.add("truenas", samples)
+        self.storage_perf.add(module, samples)
 
     async def _spoke_msg_le_cert_renewed(self, conn, msg_data, payload, dec_secret):
         """LE cert renewed → re-push the material to its targets now.

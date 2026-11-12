@@ -17,7 +17,7 @@ def _count(pattern, flags=0):
 
 
 def test_escape_html_calls_only_go_down():
-    assert _count(r"\bescapeHtml\(") <= 1118
+    assert _count(r"\bescapeHtml\(") <= 1116
 
 
 def test_inline_event_handlers_only_go_down():

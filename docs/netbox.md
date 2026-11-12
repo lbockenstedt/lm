@@ -209,8 +209,11 @@ keeps its history; the stub's few changelog entries are lost).
    those in the same /16 as the device, probes each stub IP through the device's
    own nw spoke (`NW_GET_DEVICE_INFO` with an `address` override, so the
    device's credentials are tried against that IP) and, when the returned serial
-   equals the device's, sends `NETBOX_MERGE_STUB`. Limits: one probe per
-   stub/device pair per 24 h and 5 probes per call. A stub that has since gained
+   equals the device's, sends `NETBOX_MERGE_STUB`. Limits: one probe per stub
+   per login (agent, driver, vault credential, username) per 24 h, whose answered
+   serial is reused by every device with that login; a failed probe (timeout,
+   login refused, spoke offline) is retried after 1 h. At most 5 probes per call;
+   stubs over that budget wait for the next call. A stub that has since gained
    a different serial is never merged.
 
 ## Rack elevation view
