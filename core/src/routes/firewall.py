@@ -1,6 +1,7 @@
 """Firewall (OPNsense) data + rule/alias/NAT/DNS CRUD routes."""
 # asyncio for background/parallel work; access for tenant checks; instance_vault for stored secrets.
 import asyncio
+import time
 import access
 import instance_vault
 # Shared Hub helpers: errors, request, firewall timeouts and module list, messages, logger, uuid.
@@ -262,6 +263,38 @@ def register(app, hub, ctx):
         return {"results": results,
                 "ok": sum(1 for r in results if r.get("ok")),
                 "total": len(results)}
+
+    # Performance history (5-minute averages kept by the spoke, copied to the hub).
+    @app.get("/api/firewall/{firewall_id}/performance/history")
+    async def firewall_performance_history(request: Request, firewall_id: str,
+                                           start: float = None, end: float = None):
+        """The firewall's 5-minute performance averages (throughput, packets,
+        CPU, memory, states). No range = the last 7 days from the hub's copy
+        (instant, and works with the spoke offline). A ``start``/``end`` range
+        (epoch seconds) is read from the spoke with ``OPNSENSE_GET_PERF_HISTORY``;
+        the hub's copy is used if the spoke is offline, fails or is too old to
+        know the command. No data yet is an empty list, not an error."""
+        hub = app.state.hub
+        fw, _scope = _authz_firewall(request, firewall_id)
+        if start is None:
+            return {"status": "SUCCESS", "interval": 300, "source": "hub",
+                    "data": hub.storage_perf.get("opnsense", firewall_id)}
+        end = time.time() if end is None else end
+        spoke_id = fw.get("spoke_id")
+        if spoke_id and hub._primary_key(spoke_id) in hub.active_connections:
+            try:
+                res = access.unwrap_spoke(await hub.request_response(
+                    spoke_id, "OPNSENSE_GET_PERF_HISTORY", {"start": start, "end": end},
+                    timeout=20.0))
+                if isinstance(res, dict) and res.get("status") == "SUCCESS":
+                    return {"status": "SUCCESS", "interval": 300, "source": "spoke",
+                            "data": res.get("data") or []}
+                logger.info("firewall perf history %s from spoke: %s", firewall_id,
+                            res.get("message") if isinstance(res, dict) else res)
+            except Exception as e:  # noqa: BLE001 - fall back to the hub copy
+                logger.warning("firewall perf history %s from spoke failed: %s", firewall_id, e)
+        return {"status": "SUCCESS", "interval": 300, "source": "hub",
+                "data": hub.storage_perf.get("opnsense", firewall_id, start, end)}
 
     # Read one kind of firewall data.
     @app.get("/api/firewall/{firewall_id}/{endpoint}")

@@ -1,12 +1,12 @@
-"""7 days of 5-minute storage performance averages, per device.
+"""7 days of 5-minute performance averages, per device, for any module.
 
-Storage spokes average their own samples, keep 7 days on their own disk, and
-push each average as ``STORAGE_PERF_SAMPLE``
+Storage (truenas) and firewall (opnsense) spokes average their own samples,
+keep 7 days on their own disk, and push each average as ``STORAGE_PERF_SAMPLE``
 ``{module, samples: [{device_id, ts, samples, metrics}]}``. The hub keeps this
 copy (keyed ``<module>:<device_id>``, persisted to
 ``<cache_dir>/storage_perf.json``) so the default 7-day chart loads instantly
 and survives the spoke being offline; other ranges are read from the spoke.
-Not tied to Zabbix or to any one array type.
+Not tied to Zabbix or to any one device type.
 
 A leaf: stdlib + cache_core only.
 """
@@ -19,6 +19,10 @@ from typing import Any, Dict, List
 from cache_core import JsonCacheFile
 
 KEEP_S = 7 * 86400
+
+# Modules that push STORAGE_PERF_SAMPLE -> the global_config list holding their
+# devices. The hub ignores samples from any other module.
+PERF_DEVICE_LISTS = {"truenas": "truenas_appliances", "opnsense": "firewalls"}
 
 
 class StoragePerfStore:
