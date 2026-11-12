@@ -54,6 +54,19 @@ async def test_automation_cache_hits_and_invalidation(hub):
         assert len(res4) == 0
 
 @pytest.mark.asyncio
+async def test_automation_cache_outlives_the_readers_poll_interval(hub):
+    """Readers come back every 5-10 min; a 60 s cache sent each one to Key Vault."""
+    cred_vault._AUTOMATION_CACHE.clear()
+    cred_vault._meta(hub)["secrets"] = {"b": {"s": {"type": "console", "mode": "hub", "kv_name": "kv",
+                                                    "updated_at": 1, "store": "local"}}}
+    with patch('cred_vault._fetch_and_decrypt', new_callable=AsyncMock) as mock_fetch:
+        mock_fetch.return_value = {"username": "u"}
+        await cred_vault.automation_list_by_type(hub, "console")
+        with patch('cred_vault.time.time', return_value=time.time() + 600):
+            await cred_vault.automation_list_by_type(hub, "console")
+        assert mock_fetch.call_count == 1
+
+@pytest.mark.asyncio
 async def test_automation_list_by_type_concurrent(hub):
     cred_vault._AUTOMATION_CACHE.clear()
     cv = cred_vault._meta(hub)

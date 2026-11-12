@@ -85,9 +85,11 @@ from security import sentinel
 logger = logging.getLogger("CredVault")
 
 # Short-lived cache of decrypted automation secrets, keyed by (bucket, name, updated_at),
-# so repeated scans do not hit the cloud vault every time.
+# so repeated scans do not hit the cloud vault every time. Readers come back every
+# 5-10 min, so a 60 s TTL missed almost every time (~150 Key Vault GETs/hour).
+# Edits through LM change updated_at or invalidate, so a longer TTL is not stale.
 _AUTOMATION_CACHE: Dict[Tuple[str, str, str], Tuple[float, Any]] = {}
-_AUTOMATION_CACHE_TTL: float = 60.0  # seconds
+_AUTOMATION_CACHE_TTL: float = 900.0  # seconds
 
 def _cache_key(bucket: str, name: str, updated_at: str) -> Tuple[str, str, str]:
     """Return the automation-cache key; including updated_at makes edits miss the old entry."""
@@ -96,7 +98,7 @@ def _cache_key(bucket: str, name: str, updated_at: str) -> Tuple[str, str, str]:
 def _cache_get(key: Tuple[str, str, str]) -> Optional[Any]:
     """Return a copy of the cached value, never the stored object itself —
     callers may freely mutate what they get back without poisoning the shared
-    60s-TTL cache entry for every other reader in that window."""
+    TTL cache entry for every other reader in that window."""
     # Use the entry only while it is younger than the TTL.
     entry = _AUTOMATION_CACHE.get(key)
     if entry is not None and (time.time() - entry[0]) < _AUTOMATION_CACHE_TTL:
@@ -690,7 +692,7 @@ async def automation_get(hub, bucket: str, name: str) -> Dict[str, Any]:
     if sm.get("mode") != _MODE_HUB:
         sentinel.guard("vault.automation_get", detail=f"{bucket}/{name}")
         raise CredVaultError(f"secret '{name}' is pass-phrase-only and cannot be read unattended")
-    # Serve repeat reads from the 60s cache (edits change updated_at and miss it).
+    # Serve repeat reads from the cache (edits change updated_at and miss it).
     # Only real cloud-vault reads count toward the sentinel's rate baseline; the
     # canary is always guarded so a cached honeytoken read still trips it.
     key = _cache_key(bucket, name, sm.get("updated_at", ""))
