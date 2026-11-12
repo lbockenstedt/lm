@@ -580,6 +580,40 @@ async def test_stub_merged_only_when_live_poll_of_its_ip_returns_the_same_serial
     assert len([1 for _, c, _p in h.request_log[n:] if c == "NW_GET_DEVICE_INFO"]) == 0
 
 
+
+@pytest.mark.asyncio
+async def test_devices_sharing_a_login_reuse_a_stub_probe_answer():
+    h = _SyncHub(responses={
+        ("netbox-1", "NETBOX_LIST_STUBS"): {"payload": {"data": {"stubs": [
+            {"id": 8, "name": "SVI-OF-B", "ip": "172.21.2.2"},
+            {"id": 9, "name": "LAPTOP", "ip": "172.21.2.9"}]}}},
+        ("netbox-1", "NETBOX_MERGE_STUB"): {"payload": {"data": {"status": "SUCCESS", "merged": True}}},
+    }, global_config=_global_config())
+    serials = {"172.21.2.2": "SN-B", "172.21.2.9": ""}
+    base = h.request_response
+
+    async def rr(spoke_id, command, payload, timeout=30.0):
+        if command == "NW_GET_DEVICE_INFO":
+            h.request_log.append((spoke_id, command, payload))
+            return {"payload": {"data": {"status": "SUCCESS",
+                                         "data": {"serial": serials[payload["address"]]}}}}
+        return await base(spoke_id, command, payload, timeout)
+    h.request_response = rr
+    login = {"spoke_id": "nw-1", "object_type": "cx_switch", "transport": "ssh",
+             "username": "admin", "vault_credential": {"bucket": "b", "name": "sw"}}
+    dev_a = dict(login, id="nwA", name="SW-A", address="172.21.0.11")
+    dev_b = dict(login, id="nwB", name="SW-B", address="172.21.0.12")
+    other = dict(dev_b, id="nwC", vault_credential={"bucket": "b", "name": "other"})
+    probes = lambda: [p for _, c, p in h.request_log if c == "NW_GET_DEVICE_INFO"]  # noqa: E731
+    assert await h.nw_merge_stubs_by_live_poll(dev_a, "SN-A") == 0
+    assert len(probes()) == 2
+    # B logs in the same way: A's answers are reused, so B merges its stub without probing.
+    assert await h.nw_merge_stubs_by_live_poll(dev_b, "SN-B") == 1
+    assert len(probes()) == 2
+    # A device with another credential still probes for itself.
+    await h.nw_merge_stubs_by_live_poll(other, "SN-B")
+    assert len(probes()) == 4
+
 def test_oobm_address_is_the_one_on_the_mgmt_interface():
     from nw_discovery_sync import nw_oobm_address
     dev = {"address": "172.21.0.11", "alt_addresses": ["10.0.4.2", "1.1.1.1"]}
