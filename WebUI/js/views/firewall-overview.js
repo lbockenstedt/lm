@@ -2,7 +2,10 @@
 // OPNsense lobby dashboard — CPU, memory, uptime, gateway (WAN) status and
 // live interface throughput from GET /api/firewall/{id}/overview. Opened by
 // loadOpnsenseManagement through lmViews.fwoverview(container, firewalls).
-import { safeHtml } from '../core/safe-html.js';
+// Below the cards: performance history (5-minute averages kept 7 days by the
+// spoke) from GET /api/firewall/{id}/performance/history, drawn with the
+// shared charts and History range selector in js/perf-trends.js.
+import { safeHtml, rawHtml } from '../core/safe-html.js';
 
 function bits(bps) {
     const units = ['bps', 'Kbps', 'Mbps', 'Gbps'];
@@ -83,6 +86,102 @@ async function fetchOverview(fw) {
     throw new Error(body.detail || `${r.status} ${r.statusText}`);
 }
 
+// ── Performance history ─────────────────────────────────────────────────────
+// The default range (7 days) is served by the hub from its own copy; any other
+// range is read from the spoke. perfRows[i] holds firewall i's rows so picking
+// an interface redraws without fetching again.
+const PERF_DEFAULT = 604800;
+let perfRange = { preset: PERF_DEFAULT };
+let perfFirewalls = [];
+let perfRows = [];
+const perfInterface = {};
+
+// Interface names found in the rows' "if:<name>:in_bps" metrics.
+function interfaceNames(rows) {
+    const names = new Set();
+    rows.forEach(r => Object.keys(r.metrics).forEach(k => {
+        const m = /^if:(.*):in_bps$/.exec(k);
+        if (m) names.add(m[1]);
+    }));
+    return [...names].sort();
+}
+
+// Draw firewall i's charts for the selected interface ('' = all interfaces).
+function drawPerf(i, t0, t1) {
+    const box = document.getElementById(`fw-trends-${i}`);
+    if (!box) return;
+    const rows = perfRows[i] || [];
+    const iface = perfInterface[perfFirewalls[i].id] || '';
+    const key = metric => (iface ? `if:${iface}:${metric}` : metric);
+    const pps = v => `${Math.round(v).toLocaleString()} pps`;
+    const pct = v => `${v.toFixed(1)}%`;
+    const packets = [{ key: key('in_pps'), label: 'In', color: '#0ea5e9' }, { key: key('out_pps'), label: 'Out', color: '#f97316' }];
+    if (!iface) packets.push({ key: 'errps', label: 'Errors', color: '#ef4444' });
+    box.innerHTML = [
+        perfTrendChart(`fw-bps-${i}`, 'Throughput', rows, [{ key: key('in_bps'), label: 'In', color: '#0ea5e9' }, { key: key('out_bps'), label: 'Out', color: '#f97316' }], bits, t0, t1),
+        perfTrendChart(`fw-pps-${i}`, 'Packets', rows, packets, pps, t0, t1),
+        perfTrendChart(`fw-sys-${i}`, 'CPU and memory', rows, [{ key: 'cpu', label: 'CPU', color: '#64748b' }, { key: 'mem', label: 'Memory', color: '#8b5cf6' }], pct, t0, t1),
+        perfTrendChart(`fw-states-${i}`, 'Firewall states', rows, [{ key: 'states', label: 'States', color: '#10b981' }], v => Math.round(v).toLocaleString(), t0, t1),
+    ].join('');
+    perfTrendWire(box);
+}
+
+// Fetch every firewall's history for the selected range and draw it.
+async function loadPerf() {
+    const { t0, t1, qs } = perfRangeWindow('fw', perfRange, PERF_DEFAULT);
+    await Promise.all(perfFirewalls.map(async (fw, i) => {
+        const box = document.getElementById(`fw-trends-${i}`);
+        if (!box) return;
+        box.innerHTML = safeHtml`<div class="text-xs text-slate-400 animate-pulse py-4">Loading history…</div>`.toString();
+        let rows = [];
+        try {
+            const r = await fetch(`/api/firewall/${encodeURIComponent(fw.id)}/performance/history${qs}`);
+            const j = r.ok ? await r.json() : null;
+            rows = (j && Array.isArray(j.data)) ? j.data : [];
+        } catch (e) { /* empty chart */ }
+        perfRows[i] = rows;
+        // Offer the interfaces seen in this range.
+        const select = document.querySelector(`[data-fw-iface="${i}"]`);
+        if (select) {
+            const names = interfaceNames(rows);
+            if (!names.includes(perfInterface[fw.id])) perfInterface[fw.id] = '';
+            const chosen = perfInterface[fw.id];
+            select.innerHTML = safeHtml`<option value="">All interfaces</option>${names.map(n =>
+                safeHtml`<option value="${n}" ${n === chosen ? 'selected' : ''}>${n}</option>`)}`.toString();
+        }
+        drawPerf(i, t0, t1);
+    }));
+}
+
+// The history section: range selector, then a title, interface picker and charts per firewall.
+function perfSection(firewalls) {
+    return safeHtml`<div class="space-y-6 mt-6">
+        ${rawHtml(perfRangeBar('fw', perfRange))}
+        ${firewalls.map((fw, i) => safeHtml`<div>
+            <div class="flex items-center gap-3 mb-2">
+                <h3 class="font-semibold text-slate-700">${fw.name || fw.id}</h3>
+                <select data-fw-iface="${i}" class="text-xs border border-slate-300 rounded px-1 py-0.5"><option value="">All interfaces</option></select>
+            </div>
+            <div id="fw-trends-${i}" class="grid grid-cols-1 xl:grid-cols-2 gap-3"></div>
+        </div>`)}
+        <div class="text-xs text-slate-500">Charts are 5-minute averages, kept 7 days by the firewall spoke. "All interfaces" adds up every interface, so routed traffic is counted on the way in and on the way out.</div>
+    </div>`;
+}
+
+// Wire the range selector and interface pickers, then load the charts.
+function wirePerf(container, firewalls) {
+    perfFirewalls = firewalls;
+    perfRows = [];
+    perfRangeWire(container, 'fw', range => { perfRange = range; loadPerf(); });
+    container.querySelectorAll('[data-fw-iface]').forEach(select => select.addEventListener('change', () => {
+        const i = Number(select.dataset.fwIface);
+        perfInterface[firewalls[i].id] = select.value;
+        const { t0, t1 } = perfRangeWindow('fw', perfRange, PERF_DEFAULT);
+        drawPerf(i, t0, t1);
+    }));
+    loadPerf();
+}
+
 async function renderFirewallOverview(container, firewalls) {
     const results = await Promise.allSettled(firewalls.map(fetchOverview));
     if (currentView !== 'opnsense' || currentSubView !== 'Overview') return;
@@ -92,7 +191,8 @@ async function renderFirewallOverview(container, firewalls) {
         return res.status === 'fulfilled'
             ? firewallCard(name, res.value)
             : errorCard(name, String((res.reason && res.reason.message) || res.reason));
-    })}</div>`;
+    })}</div>${perfSection(firewalls)}`;
+    wirePerf(container, firewalls);
 }
 
 lmViews.fwoverview = renderFirewallOverview;
