@@ -682,3 +682,31 @@ def test_combine_statuses_merges_counters_and_escalates_status():
     assert "OPNsense: 2 device(s) sent" in combined["message"]
     assert "Kea (LM DHCP): NetBox spoke not connected" in combined["message"]
     assert combined["sources"] == [s1, s2]
+
+
+@pytest.mark.asyncio
+async def test_unchanged_push_is_not_resent_within_the_hour(monkeypatch):
+    # Every push makes the NetBox spoke page all devices; the feed rarely
+    # changes between cycles, so an identical push is skipped for an hour.
+    import fw_discovery_sync as fw
+    h = _hub_with_full_responses()
+
+    def pushes():
+        return sum(cmd == "NETBOX_SYNC_DEVICES" for _, cmd, _ in h.request_log)
+
+    await h.sync_tenant_devices("acme")
+    status = await h.sync_tenant_devices("acme")
+    assert pushes() == 1
+    assert status["status"] == "success"
+
+    # A changed feed is pushed at once.
+    h._responses[("opn-fw1", "OPNSENSE_GET_ARP_TABLE")]["payload"]["data"]["data"].append(
+        {"ip": "10.20.0.51", "mac": "aa:bb:cc:dd:ee:51", "hostname": "new", "interface": "lan"})
+    await h.sync_tenant_devices("acme")
+    assert pushes() == 2
+
+    # After the hour an unchanged feed is resent (reconciles NetBox edits).
+    now = fw.time.monotonic()
+    monkeypatch.setattr(fw.time, "monotonic", lambda: now + fw._FW_RESEND_S + 1)
+    await h.sync_tenant_devices("acme")
+    assert pushes() == 3
