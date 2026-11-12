@@ -1465,6 +1465,11 @@ RestrictSUIDSGID=yes
 ProtectKernelModules=yes
 RestrictRealtime=yes
 LockPersonality=yes
+# The hub has misbehaved when run multi-threaded across several CPUs, so pin it
+# (and every thread/child it starts) to CPU0 whatever the VM size, and make
+# Python report one CPU so no pool sizes itself from the core count.
+CPUAffinity=0
+Environment=PYTHON_CPU_COUNT=1
 ExecStart=$BASE_DIR/core/venv/bin/python3 $BASE_DIR/core/src/main.py
 StandardOutput=append:$LOG_DIR/hub.log
 StandardError=append:$LOG_DIR/hub.log
