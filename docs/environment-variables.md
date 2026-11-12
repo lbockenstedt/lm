@@ -145,6 +145,7 @@ Consolidated reference for every environment variable read across the LM system.
 |---|---|---|---|
 | `SPOKE_ID`, `SPOKE_SECRET`, `HUB_SECRET`, `HUB_URL` | Spoke identity | — | `.env` |
 | `LM_OPNSENSE_VERIFY_TLS` | `1` disables engine TLS verify off→on | off | `opnsense_engine.py` |
+| `LM_OPNSENSE_DATA_DIR` | Where `perf.json` (7 days of 5-minute performance averages) is kept | `/var/lib/lm-opnsense` | `perf_store.py` |
 
 > Connection config (`opn_host`/`opn_port`/`api_key`/`api_secret`/`refresh_interval`) is **not** env-read — hub pushes via `UPDATE_CONFIG`.
 
