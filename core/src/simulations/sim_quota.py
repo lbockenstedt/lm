@@ -1,6 +1,7 @@
 """Sim-Quota config foundation — hub twin of ``cs/lm-spoke/src/sim_quota.py``.
 
-Same schema / validation / resolution + ``SIM_META`` + ``SUGGESTED_ALERT_SIM``.
+Same schema / validation / resolution + ``SUGGESTED_ALERT_SIM``. ``SIM_META``
+comes from ``sim_catalog`` (``sims.json``), the one sim list both sides import.
 The hub holds the per-tenant ``central_sites_config`` (with ``sim_quotas``) and
 serves the catalog to the WebUI. In **centralized** mode it parses the tenant's
 ``sim_conf_content`` (raw INI text in the store); in **distributed** mode the
@@ -21,6 +22,9 @@ import configparser
 import logging
 # Type hints only.
 from typing import Any, Dict, List, Optional, Tuple
+
+# Per-sim defaults (category, multi_capable, media): the one sim list.
+from .sim_catalog import SIM_META
 
 # Logger for sim-quota parsing and validation.
 logger = logging.getLogger("SimQuota")
@@ -111,25 +115,6 @@ def prefixed_alert_id(source: str, bare_id: str) -> str:
         return bid
     # Add the product prefix (empty ids stay empty).
     return f"{SOURCE_PREFIXES[src]}:{bid}" if bid else bid
-
-# Per-sim defaults: whether it is a failure or traffic sim, and if one client may run it alongside
-# others.
-SIM_META: Dict[str, Dict[str, object]] = {
-    "dns_fail":    {"category": "failure", "multi_capable": False},
-    "dns_latency": {"category": "failure", "multi_capable": False},
-    "dhcp_fail":   {"category": "failure", "multi_capable": False},
-    "assoc_fail":  {"category": "failure", "multi_capable": False},
-    "auth_fail":   {"category": "failure", "multi_capable": False},
-    "ssidpw_fail": {"category": "failure", "multi_capable": False},
-    "mac_auth_fail": {"category": "failure", "multi_capable": False},
-    "port_flap":   {"category": "failure", "multi_capable": False},
-    "ping_test":   {"category": "traffic", "multi_capable": True},
-    "download":    {"category": "traffic", "multi_capable": True},
-    "www_traffic": {"category": "traffic", "multi_capable": True},
-    "iperf":       {"category": "traffic", "multi_capable": True},
-    "collab":      {"category": "traffic", "multi_capable": True},
-    "www_discover": {"category": "traffic", "multi_capable": True},
-}
 
 # Suggested sim for well-known Central alert types.
 SUGGESTED_ALERT_SIM: Dict[str, str] = {
