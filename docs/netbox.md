@@ -211,7 +211,9 @@ keeps its history; the stub's few changelog entries are lost).
    device's credentials are tried against that IP) and, when the returned serial
    equals the device's, sends `NETBOX_MERGE_STUB`. Limits: one probe per stub
    per login (agent, driver, vault credential, username) per 24 h, whose answered
-   serial is reused by every device with that login, and 5 probes per call. A stub that has since gained
+   serial is reused by every device with that login; a failed probe (timeout,
+   login refused, spoke offline) is retried after 1 h. At most 5 probes per call;
+   stubs over that budget wait for the next call. A stub that has since gained
    a different serial is never merged.
 
 ## Rack elevation view

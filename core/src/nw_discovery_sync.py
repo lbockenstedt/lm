@@ -1376,6 +1376,9 @@ class NwDiscoverySyncMixin:
             return {"status": "ERROR", "message": str(e)}, errors, tenant_slug
 
     _NW_STUB_PROBE_TTL_S = 86400
+    # A failed probe (timeout, spoke offline, login refused, old spoke) is
+    # retried after an hour, not a day: it may only have been a hiccup.
+    _NW_STUB_PROBE_RETRY_S = 3600
     _NW_STUB_PROBE_MAX = 5
 
     async def nw_merge_stubs_by_live_poll(self, device_cfg: Dict[str, Any], serial: str) -> int:
@@ -1392,7 +1395,8 @@ class NwDiscoverySyncMixin:
         same way (see ``_nw_stub_login``), so each stub is probed at most once a
         day per login and the serial it answered with is reused: a fleet of 100
         devices sharing one credential no longer probes every stub 100 times,
-        each a 3-15 s SSH/SNMP timeout when the stub is not a network device."""
+        each a 3-15 s SSH/SNMP timeout when the stub is not a network device.
+        A probe that failed is reused for an hour only."""
         merged = 0
         try:
             import ipaddress
@@ -1422,17 +1426,20 @@ class NwDiscoverySyncMixin:
                     continue
                 # Reuse a recent answer for this stub and login; otherwise probe it.
                 key = (st.get("id"), _nw_stub_login(device_cfg, spoke_id))
-                ts, got = cache.get(key, (0.0, ""))
-                if now - ts >= self._NW_STUB_PROBE_TTL_S:
+                expires, got = cache.get(key, (0.0, ""))
+                if now >= expires:
+                    # Over budget: skip it, but keep going for stubs with a cached answer.
                     if probes >= self._NW_STUB_PROBE_MAX:
-                        break
+                        continue
                     probes += 1
                     info = unwrap_spoke(await self.request_response(
                         spoke_id, "NW_GET_DEVICE_INFO",
                         {"device_id": device_cfg.get("id"), "address": ip}, timeout=60.0)) or {}
-                    got = str((info.get("data") or {}).get("serial") or "").strip() \
-                        if isinstance(info.get("data"), dict) else ""
-                    cache[key] = (now, got)
+                    data = info.get("data") if isinstance(info, dict) else None
+                    answered = isinstance(data, dict) and info.get("status") == "SUCCESS"
+                    got = str(data.get("serial") or "").strip() if answered else ""
+                    ttl = self._NW_STUB_PROBE_TTL_S if answered else self._NW_STUB_PROBE_RETRY_S
+                    cache[key] = (now + ttl, got)
                 if not got or got.casefold() != serial.casefold():
                     continue
                 res = unwrap_spoke(await self.request_response(
