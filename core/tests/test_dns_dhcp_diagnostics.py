@@ -35,7 +35,7 @@ def _result(ok=True, output="", error=""):
 def test_dns_diagnostics_detects_resolved_only_port_53(monkeypatch, tmp_path):
     mgr = dns_manager.UnboundManager(str(tmp_path / "records.conf"))
 
-    def run(cmd, timeout=5):
+    def run(cmd, timeout=5, **_k):
         if cmd[0] == "ss":
             return _result(output=(
                 "udp UNCONN 0 0 127.0.0.53%lo:53 0.0.0.0:* "
@@ -68,7 +68,7 @@ def test_dns_diagnostics_self_heals_failed_unbound_unit(monkeypatch, tmp_path):
     mgr = dns_manager.UnboundManager(str(tmp_path / "records.conf"))
     restarts = []
 
-    def run(cmd, timeout=5):
+    def run(cmd, timeout=5, **_k):
         if cmd == ["systemctl", "is-active", "unbound"]:
             return _result(ok=False, error="failed")
         if cmd[:2] == ["systemctl", "show"]:
@@ -99,7 +99,7 @@ def test_dns_diagnostics_does_not_restart_healthy_unbound(monkeypatch, tmp_path)
     mgr = dns_manager.UnboundManager(str(tmp_path / "records.conf"))
     restarts = []
 
-    def run(cmd, timeout=5):
+    def run(cmd, timeout=5, **_k):
         if cmd[:2] == ["systemctl", "show"]:
             return _result(output=(
                 "LoadState=loaded\nActiveState=active\nSubState=running\n"
@@ -126,7 +126,7 @@ def test_dns_diagnostics_reports_healthy_lan_probe(monkeypatch, tmp_path):
     mgr = dns_manager.UnboundManager(str(tmp_path / "records.conf"))
 
 
-    def run(cmd, timeout=5):
+    def run(cmd, timeout=5, **_k):
         if cmd[0] == "ss":
             return _result(output="udp UNCONN 0 0 0.0.0.0:53 0.0.0.0:*")
         return _result(output="active")
@@ -473,7 +473,7 @@ def test_dhcp_diagnostics_matches_kea_health_contract(monkeypatch):
         "NRestarts": "0", "ExecMainStatus": "0", "error": "",
     })
 
-    def run(cmd, timeout=5):
+    def run(cmd, timeout=5, **_k):
         if cmd[0] == "ss":
             return _result(output=(
                 "udp UNCONN 0 0 10.0.0.5:67 0.0.0.0:*\n"
@@ -511,7 +511,7 @@ def test_dhcp_diagnostics_is_unhealthy_when_config_retrieval_fails(monkeypatch):
         "ActiveState": "active", "SubState": "running",
         "NRestarts": "0", "ExecMainStatus": "0", "error": "",
     })
-    monkeypatch.setattr(mgr, "_run_diag", lambda cmd, timeout=5: _result(
+    monkeypatch.setattr(mgr, "_run_diag", lambda cmd, timeout=5, **_k: _result(
         output="udp UNCONN 0 0 10.0.0.5:67 0.0.0.0:*"
         if cmd[0] == "ss" else "configuration check successful"))
 
@@ -548,7 +548,7 @@ def test_dhcp_diagnostics_self_heals_empty_interfaces_config(monkeypatch):
 
     restarted = []
 
-    def run(cmd, timeout=5):
+    def run(cmd, timeout=5, **_k):
         if cmd[0] == "systemctl" and cmd[1] == "restart":
             restarted.append(cmd[2])
             return _result(output="")
@@ -602,7 +602,7 @@ def test_dhcp_diagnostics_does_not_touch_interfaces_when_already_set(monkeypatch
         "NRestarts": "0", "ExecMainStatus": "0", "error": "",
     })
 
-    def run(cmd, timeout=5):
+    def run(cmd, timeout=5, **_k):
         if cmd[0] == "ss":
             return _result(output="udp UNCONN 0 0 10.0.0.5:67 0.0.0.0:*")
         return _result(output="configuration check successful")
@@ -647,7 +647,7 @@ def test_dhcp_diagnostics_self_heals_blank_placeholder_interfaces_entry(
 
     restarted = []
 
-    def run(cmd, timeout=5):
+    def run(cmd, timeout=5, **_k):
         if cmd[0] == "systemctl" and cmd[1] == "restart":
             restarted.append(cmd[2])
             return _result(output="")
@@ -726,7 +726,7 @@ def _own_env(monkeypatch, uids, restart_ok=True, after=None):
 
     monkeypatch.setattr(dhcp_manager.os, "stat", fake_stat)
 
-    def run(cmd, timeout=5):
+    def run(cmd, timeout=5, **_k):
         if cmd[:2] == ["systemctl", "restart"]:
             if restart_ok:
                 state["restarted"].append(cmd[2])

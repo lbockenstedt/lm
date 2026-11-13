@@ -45,6 +45,10 @@ except ImportError:
 # Module logger.
 logger = logging.getLogger("KeaManager")
 
+# A Kea journal line worth reporting: Kea's own WARN/ERROR/FATAL severity, or a
+# systemd unit failure.
+_KEA_WARNING_RE = re.compile(r"\b(WARN|ERROR|FATAL)\b|[Ff]ailed")
+
 # Kea's cumulative DHCPv4 packet counters (reset when Kea restarts), by the
 # key the Overview page uses. These are windowed; pool sizes and lease counts
 # are current values and are not.
@@ -2034,15 +2038,18 @@ class KeaManager:
             "exists": bool(lease_file and os.path.exists(lease_file)),
             "leases": len(leases) if leases is not None else None,
         }
-        # Recent warnings from both Kea units.
+        # Recent warnings from both Kea units: the last 300 lines, filtered here.
+        # journalctl's own "-p warning" filter scans the whole journal (seconds on
+        # a multi-GB journal), and Kea logs to stdout with its severity in the text.
         recent = self._run_diag([
             "journalctl", "-u", "kea-dhcp4-server", "-u", "kea-ctrl-agent",
-            "-p", "warning", "-n", "20", "--since", "7 days ago", "--no-pager",
-        ])
+            "-n", "300", "--no-pager", "-o", "short-iso",
+        ], limit=None)
+        # A failed journalctl prints its own error, which is not a Kea warning.
         recent_errors = [
             line for line in recent["output"].splitlines()
-            if line.strip() and "-- No entries --" not in line
-        ][-20:]
+            if _KEA_WARNING_RE.search(line)
+        ][-20:] if recent["ok"] else []
         # kea-ctrl-agent's OWN tail, unfiltered by priority. When the CA unit
         # itself never came up (crash-looped, port already bound, bad JSON in
         # kea-ctrl-agent.conf), the failure is usually logged at "info"/"err"
@@ -2056,7 +2063,7 @@ class KeaManager:
         ca_recent_errors = [
             line for line in ca_recent["output"].splitlines()
             if line.strip() and "-- No entries --" not in line
-        ][-20:]
+        ][-20:] if ca_recent["ok"] else []
 
         # Build recommendations, starting with any repairs made.
         recommendations = []
@@ -2148,6 +2155,10 @@ class KeaManager:
                 "error": sockets["error"],
             },
             "last_errors": recent_errors,
+            # Each journal read reports its own failure, so a failed
+            # control-agent tail never hides a good Kea journal (or vice versa).
+            "journal_error": recent["error"],
+            "ca_journal_error": ca_recent["error"],
             "recommendations": recommendations,
         }
 
@@ -2260,21 +2271,22 @@ class KeaManager:
         return result
 
     @staticmethod
-    def _run_diag(cmd, timeout=5):
+    def _run_diag(cmd, timeout=5, limit=4000):
         """Run a diagnostic command and capture its outcome.
 
         Args:
             cmd: Command and arguments.
             timeout: Seconds before giving up.
+            limit: Characters of output to keep (None keeps all of it).
 
         Returns:
-            Dict with ok, exit_code, output (trimmed to 4000 chars) and error.
+            Dict with ok, exit_code, output (trimmed to ``limit`` chars) and error.
         """
         # Run it and keep stdout (or stderr), trimmed.
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=timeout)
-            output = (result.stdout or result.stderr or "").strip()[:4000]
+            output = (result.stdout or result.stderr or "").strip()[:limit]
             return {
                 "ok": result.returncode == 0,
                 "exit_code": result.returncode,
