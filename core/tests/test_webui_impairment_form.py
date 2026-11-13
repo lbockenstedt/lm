@@ -162,6 +162,9 @@ def test_impairment_list_shows_schedule_and_toggles(hub_url_and_session):  # noq
             failed = page.evaluate("""() => { const it = %s; _impairRow(it); return it.state; }"""
                                    % json.dumps({**row, "error": "toggle failed"}))
             assert failed == "error: toggle failed"
+            both = page.evaluate("""() => { const it = %s; _impairRow(it); return it.state; }"""
+                                 % json.dumps({**row, "error": "toggle failed", "complete": False}))
+            assert both == "error: toggle failed (incomplete)"
             page.evaluate("""() => { const b = document.createElement('button'); document.body.appendChild(b);
                 return _impairToggle({...%s, _fwId: 'fw-1'}, b); }""" % json.dumps(row))
             assert len(puts) == 1 and puts[0][0].split("?")[0].endswith("/api/firewall/fw-1/impair/i1")

@@ -3822,8 +3822,9 @@ function _impairRow(it) {
     it.next_change = !s || !it.enabled ? '-'
         : it.active ? (it.next_off ? `off ${at(it.next_off)}` : '-')
         : (it.next_on ? `on ${at(it.next_on)}${it.next_target ? ' (' + it.next_target + ')' : ''}` : '-');
-    if (!it.complete) it.state = 'incomplete';
-    else if (it.error) it.state = `error: ${it.error}`;
+    // The scheduler's error first: it stays stored while the rules are incomplete too.
+    if (it.error) it.state = `error: ${it.error}${it.complete ? '' : ' (incomplete)'}`;
+    else if (!it.complete) it.state = 'incomplete';
     else if (!it.enabled) it.state = 'disabled';
     else if (!s) it.state = 'active';
     else it.state = it.active ? `impairing ${it.active_target || ''}`.trim() : 'waiting';
