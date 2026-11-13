@@ -83,7 +83,7 @@ In this mode, the Hub and Spokes are installed on separate machines.
 | System | Purpose |
 |--------|---------|
 | **Proxmox** | Virtualization platform management |
-| **GrayLog** | Log aggregation and analysis |
+| **Syslog** | Per-tenant syslog collectors (rsyslog, 24 h local store) with an optional long-term archive (LM-installed Graylog or an external server); see `docs/syslog.md` |
 | **Zabbix** | Network monitoring and alerting |
 | **OPNSense Firewall** | Network security and firewall management |
 | **NetBox** | IPAM and DCIM (Data Center Infrastructure Management) |

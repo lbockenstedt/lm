@@ -55,6 +55,7 @@ _UPDATE_SOURCE_MODULE_KEY = {
     "hypervisor": "pxmx", "firewall": "opnsense", "nac": "cppm",
     "directory": "ldap", "ipam": "netbox", "simulation": "cs", "nw": "nw",
     "certificates": "le", "storage": "truenas", "monitoring": "zabbix",
+    "logging": "syslog",
 }
 
 # spoke_id substring → update_sources config key. "opn" → "opnsense" (the
@@ -164,6 +165,7 @@ _MODULE_REPO_DIR = {
     "certificates": "le", "le": "le",
     "storage": "truenas", "truenas": "truenas",
     "monitoring": "zabbix", "zabbix": "zabbix",
+    "logging": "syslog", "syslog": "syslog",
 }
 
 

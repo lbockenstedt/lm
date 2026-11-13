@@ -1086,6 +1086,7 @@ DEFAULTS = {
     "ldap": "https://github.com/lbockenstedt/ldap.git",
     "nw": "https://github.com/lbockenstedt/nw.git",
     "le": "https://github.com/lbockenstedt/le.git",
+    "syslog": "https://github.com/lbockenstedt/syslog.git",
 }
 
 state_paths = [

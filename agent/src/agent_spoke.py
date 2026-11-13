@@ -212,6 +212,7 @@ _ROLE_MAP = {
     "proxy":      ("proxy/src/proxy_spoke.py",      "ProxySpoke", "proxy",       None),
     "truenas":    ("truenas/src/truenas_spoke.py",  "TruenasSpoke", "storage",   "https://github.com/lbockenstedt/truenas.git"),
     "zabbix":     ("zabbix/src/zabbix_spoke.py",    "ZabbixSpoke",  "monitoring", "https://github.com/lbockenstedt/zabbix.git"),
+    "syslog":     ("syslog/src/syslog_spoke.py",    "SyslogSpoke",  "logging",    "https://github.com/lbockenstedt/syslog.git"),
 }
 
 # Logger-name prefixes each role emits under. Used by the multi-role agent's
@@ -255,6 +256,7 @@ _ROLE_LOG_PREFIXES: Dict[str, tuple] = {
     "proxy":      ("ProxySpoke",),
     "truenas":    ("Truenas",),
     "zabbix":     ("Zabbix",),
+    "syslog":     ("Syslog",),
 }
 
 # Deploy roles: instead of morphing the agent into a service, these run an
@@ -281,6 +283,8 @@ _ZBX_PROXY_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/zabbi
 _ZBX_AGENT_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/zabbix/main/install_zbxagent.sh"
 _DNS_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/lm/main/dns/install_dns.sh"
 _DHCP_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/lm/main/dhcp/install_dhcp.sh"
+_SYSLOG_COLLECTOR_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/syslog/main/install_syslog_collector.sh"
+_SYSLOG_GRAYLOG_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/syslog/main/install_syslog_graylog.sh"
 
 # Deploy roles: install command and module type per role.
 _DEPLOY_ROLES: Dict[str, Dict[str, Any]] = {
@@ -351,10 +355,21 @@ _DEPLOY_ROLES: Dict[str, Dict[str, Any]] = {
         "cmd": _infra_install_cmd(_ZBX_AGENT_INSTALLER_URL),
         "module_type": "agent",
     },
+    # SYSLOG: the tenant's rsyslog collector (the "syslog" spoke role is loaded
+    # on top of it by the hub) and the optional Graylog long-term archive.
+    # Config -> flags in _syslog_install_args.
+    "syslog-collector": {
+        "cmd": _infra_install_cmd(_SYSLOG_COLLECTOR_INSTALLER_URL),
+        "module_type": "agent",
+    },
+    "syslog-graylog": {
+        "cmd": _infra_install_cmd(_SYSLOG_GRAYLOG_INSTALLER_URL),
+        "module_type": "agent",
+    },
 }
 
 # Command flags whose values are secrets.
-_SECRET_FLAGS = ("--db-pass", "--admin-password", "--tls-key", "--password")
+_SECRET_FLAGS = ("--db-pass", "--admin-password", "--reader-password", "--tls-key", "--password")
 
 
 def _redact_cmd(cmd: list) -> str:
@@ -433,6 +448,9 @@ _DEPLOY_ROLE_MARKERS = {
     "zbxproxy": "/usr/sbin/zabbix_proxy",
     # The proxy install also lays down zabbix-agent2, so key off the LM drop-in.
     "zbxagent": "/etc/zabbix/zabbix_agent2.d/lm-agent.conf",
+    # rsyslog is a base package, so key off the LM include file.
+    "syslog-collector": "/etc/rsyslog.d/40-lm-syslog.conf",
+    "syslog-graylog": "/usr/share/graylog-server/graylog.jar",
 }
 
 # The service binary alone is ambiguous for dhcp-server: the simulation role's
@@ -498,6 +516,8 @@ _DEPLOY_ROLE_UNITS = {
     "zabbix-server": ("zabbix-server",),
     "zbxproxy": ("zabbix-proxy",),
     "zbxagent": ("zabbix-agent2",),
+    "syslog-collector": ("rsyslog",),
+    "syslog-graylog": ("graylog-server", "opensearch", "mongod"),
 }
 
 # Units a cluster deploy ALSO leaves behind. They are stopped on unload but are
@@ -561,6 +581,21 @@ _DEPLOY_ROLE_PURGE = {
         "packages": ("zabbix-agent2",),
         "unit_files": (),
         "paths": ("/etc/zabbix/zabbix_agent2.d/lm-agent.conf",),
+    },
+    # rsyslog is a base package and is never purged; only LM's config and the
+    # local 24 h store go. The rendered drop/archive includes live in /etc/lm-syslog.
+    "syslog-collector": {
+        "packages": (),
+        "unit_files": (),
+        "paths": ("/etc/rsyslog.d/40-lm-syslog.conf", "/etc/rsyslog.d/30-lm-syslog-drop.conf",
+                  "/etc/rsyslog.d/50-lm-syslog-archive.conf", "/etc/lm-syslog",
+                  "/var/lib/lm/syslog"),
+    },
+    # The archive data (/var/lib/opensearch, mongo) is deliberately left in place.
+    "syslog-graylog": {
+        "packages": ("graylog-server",),
+        "unit_files": (),
+        "paths": ("/etc/graylog", "/etc/lm-syslog"),
     },
 }
 
@@ -1465,24 +1500,55 @@ class GenericAgent(BaseSpoke):
             extra = self._zabbix_install_args(role_name, config or {})
             if extra and cmd and cmd[-1].rstrip().endswith("--infra-only"):
                 cmd[-1] = cmd[-1] + extra
+        elif role_name in ("syslog-collector", "syslog-graylog"):
+            extra = self._syslog_install_args(role_name, config or {})
+            if extra and cmd and cmd[-1].rstrip().endswith("--infra-only"):
+                cmd[-1] = cmd[-1] + extra
         return cmd
 
     @staticmethod
-    # Make the TLS files and use their paths.
     def _write_zabbix_tls(config: dict) -> dict:
         """Persist hub-issued PEMs under /etc/zabbix/tls (so the key never appears
         on a command line) and point the installer flags at the files."""
+        return GenericAgent._write_tls_pems(config, "/etc/zabbix/tls")
+
+    @staticmethod
+    def _write_tls_pems(config: dict, directory: str) -> dict:
+        """Write hub-issued PEMs (``tls_*_pem``) to ``directory`` as
+        lm-{ca,cert,key}.pem and replace them in ``config`` with the file paths,
+        so the private key never appears on a command line."""
         pems = {"tls_ca": config.pop("tls_ca_pem", None), "tls_cert": config.pop("tls_cert_pem", None),
                 "tls_key": config.pop("tls_key_pem", None)}
         if not all(pems.values()):
             return config
         # Write each PEM; the key is private.
-        d = Path("/etc/zabbix/tls")
+        d = Path(directory)
         d.mkdir(parents=True, exist_ok=True)
         for key, pem in pems.items():
             path = d / f"lm-{key[4:]}.pem"
             path.write_text(pem)
             path.chmod(0o600 if key == "tls_key" else 0o644)
+            config[key] = str(path)
+        return config
+
+    @staticmethod
+    def _write_secret_files(config: dict, keys, directory: str) -> dict:
+        """Write each set ``config[key]`` to ``directory/<key>`` (0600, in a 0700
+        directory) and replace the value with the file path, so the secret
+        never appears on an installer command line."""
+        keys = [k for k in keys if config.get(k)]
+        if not keys:
+            return config
+        d = Path(directory)
+        d.mkdir(parents=True, exist_ok=True)
+        d.chmod(0o700)
+        for key in keys:
+            path = d / key
+            # Create it 0600 before the secret is written.
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(str(config[key]))
+            os.chmod(path, 0o600)
             config[key] = str(path)
         return config
 
@@ -1507,6 +1573,29 @@ class GenericAgent(BaseSpoke):
             logger.error("zbxproxy: LOAD_ROLE config has no 'server'; the hub should supply it "
                          "from the Monitoring page setting")
         # Build the flags from set values.
+        return "".join(" --" + flag + " " + shlex.quote(str(config[key]))
+                       for key, flag in flags if config.get(key))
+
+    @staticmethod
+    def _syslog_install_args(role_name: str, config: dict) -> str:
+        """Project LOAD_ROLE config into syslog installer flags (shlex-quoted).
+
+        The hub supplies the tenant slug (collector), the generated Graylog
+        passwords (graylog) and the hub-issued TLS PEMs (both). The PEMs and
+        the passwords are written to files first (passwords 0600 under
+        /etc/lm-syslog/secrets; the installer reads and deletes them), so only
+        file paths reach the flags: a command line is visible to every local
+        user in the process list."""
+        # Config key to installer flag, per role.
+        tls = (("tls_ca", "tls-ca"), ("tls_cert", "tls-cert"), ("tls_key", "tls-key"))
+        flags = {"syslog-collector": (("tenant", "tenant"),) + tls,
+                 "syslog-graylog": (("admin_password", "admin-password-file"),
+                                    ("reader_password", "reader-password-file")) + tls}[role_name]
+        # Write TLS files and password files, then build the flags from set values.
+        config = GenericAgent._write_tls_pems(dict(config), "/etc/lm-syslog/tls")
+        if role_name == "syslog-graylog":
+            config = GenericAgent._write_secret_files(
+                config, ("admin_password", "reader_password"), "/etc/lm-syslog/secrets")
         return "".join(" --" + flag + " " + shlex.quote(str(config[key]))
                        for key, flag in flags if config.get(key))
 

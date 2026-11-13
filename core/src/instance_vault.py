@@ -41,6 +41,11 @@ logger = logging.getLogger(__name__)
 # client_id, url, user, address, port, …) always stay inline on the record and
 # are never sourced from the vault. Keyed by the ``global_config`` list name.
 SECRET_FIELDS = {
+    # External syslog archive (Syslog -> Settings -> Archive): the read-only
+    # API password for an external Graylog. One record per tenant.
+    "syslog_archive": {
+        "password": ("password", "secret", "token"),
+    },
     "nac_instances": {
         # A ClearPass connection authenticates EITHER as an OAuth2 API client
         # (client_id + client_secret, grant_type=client_credentials) OR with a

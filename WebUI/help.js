@@ -59,6 +59,8 @@
         webui: 'webui',
         ab: 'ab',
         console: 'console',
+        syslog: 'syslog',
+        logging: 'syslog',
         agent: 'generic-agent',
         'generic-agent': 'generic-agent',
     };
