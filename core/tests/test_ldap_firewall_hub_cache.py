@@ -272,6 +272,96 @@ def test_impairment_on_shared_firewall_must_be_inside_tenant_subnet():
     assert [cmd for _, cmd, _ in hub.calls] == ["OPNSENSE_ADD_IMPAIRMENT"]
 
 
+def test_impairment_targets_on_shared_firewall_all_inside_and_no_alias():
+    """Every target of a multi-target (or device) impairment must be inside the
+    tenant's subnets on shared infrastructure, and aliases are refused there."""
+    import access
+    hub, _ = _fw_hub()
+    hub.replies[("sp-1", "OPNSENSE_ADD_IMPAIRMENT")] = lambda p: {"status": "SUCCESS", "uuid": "i2"}
+    hub.replies[("sp-1", "OPNSENSE_EDIT_IMPAIRMENT")] = lambda p: {"status": "SUCCESS", "uuid": "i3"}
+    saved = (access.write_scope, access.resolve_owned_prefixes, access.fw_rule_in_tenant_scope)
+
+    async def owned(hub_, sess):
+        return ["192.0.2.0/24"]
+
+    async def overlaps(*a):
+        return True
+    access.write_scope = lambda sess, tid: "constrained"
+    access.resolve_owned_prefixes = owned
+    access.fw_rule_in_tenant_scope = overlaps
+    try:
+        c = _fw_client(hub, {"user": {"tenant_id": "t1"}})
+        mixed = {"target_type": "ip", "targets": ["192.0.2.5", "198.51.100.5"], "delay": 50}
+        assert c.post("/api/firewall/fw-1/impair", json=mixed).status_code == 403
+        assert c.put("/api/firewall/fw-1/impair/i1", json=mixed).status_code == 403
+        alias = {"target_type": "alias", "targets": ["web_servers"], "delay": 50}
+        assert c.post("/api/firewall/fw-1/impair", json=alias).status_code == 403
+        assert c.post("/api/firewall/fw-1/impair", json={"targets": "192.0.2.5"}).status_code == 400
+        inside = {"target_type": "device", "targets": ["192.0.2.5", "192.0.2.6"], "labels": ["a", "b"],
+                  "schedule": {"every_hours": 3, "for_minutes": 15, "start": 0}, "delay": 50}
+        assert c.post("/api/firewall/fw-1/impair", json=inside).status_code == 200
+    finally:
+        access.write_scope, access.resolve_owned_prefixes, access.fw_rule_in_tenant_scope = saved
+    writes = [(cmd, p) for _, cmd, p in hub.calls if cmd != "OPNSENSE_GET_IMPAIRMENTS"]
+    assert [cmd for cmd, _ in writes] == ["OPNSENSE_ADD_IMPAIRMENT"]
+    assert writes[0][1]["schedule"]["every_hours"] == 3
+
+
+def test_shared_firewall_tenant_sees_and_changes_only_impairments_wholly_inside():
+    """The generic filter keeps a record when ANY address matches; an
+    impairment that also names another tenant's address (or an alias) must be
+    neither listed for nor changeable by the tenant."""
+    import asyncio
+    import access
+    saved = (access.resolve_owned_prefixes, access._owned_spoke_writable)
+
+    async def owned(hub_, sess):
+        return ["192.0.2.0/24"]
+    access.resolve_owned_prefixes = owned
+    access._owned_spoke_writable = lambda *a, **k: None
+    rows = [{"uuid": "mine", "target_type": "ip", "targets": ["192.0.2.5", "192.0.2.0/25"]},
+            {"uuid": "mixed", "target_type": "device", "targets": ["192.0.2.5", "198.51.100.5"]},
+            {"uuid": "alias", "target_type": "alias", "targets": ["web"], "alias_members": ["192.0.2.5"]},
+            {"uuid": "legacy", "target": "192.0.2.9"}]
+    try:
+        allowed = [r["uuid"] for r in rows if asyncio.run(
+            access.fw_rule_in_tenant_scope(None, {"user": {}}, "impair", "fw-1", r))]
+    finally:
+        access.resolve_owned_prefixes, access._owned_spoke_writable = saved
+    assert allowed == ["mine", "legacy"]
+    shown = access._filter_impairments({"status": "SUCCESS", "data": rows}, ["192.0.2.0/24"])
+    assert [r["uuid"] for r in shown["data"]] == ["mine", "legacy"]
+    assert len(rows) == 4  # the cached list is not changed
+
+
+def test_impairment_writes_need_firewall_write_access():
+    hub, _ = _fw_hub()
+    body = {"target_type": "ip", "targets": ["192.0.2.5"], "delay": 50}
+    assert _fw_client(hub, None).post("/api/firewall/fw-1/impair", json=body).status_code == 403
+    other = _fw_client(hub, {"user": {"tenant_id": "t9"}})
+    assert other.post("/api/firewall/fw-1/impair", json=body).status_code in (403, 404)
+    assert other.delete("/api/firewall/fw-1/impair/i1").status_code in (403, 404)
+    assert hub.calls == []
+
+
+def test_impairment_bandwidth_above_4_gbit_is_refused_before_the_spoke():
+    """OPNsense refuses shaper pipes above 4 Gbit/s; units are compared in bits/s."""
+    hub, _ = _fw_hub()
+    hub.replies[("sp-1", "OPNSENSE_ADD_IMPAIRMENT")] = lambda p: {"status": "SUCCESS", "uuid": "i1"}
+    hub.replies[("sp-1", "OPNSENSE_EDIT_IMPAIRMENT")] = lambda p: {"status": "SUCCESS", "uuid": "i2"}
+    c = _fw_client(hub, _ADMIN)
+    base = {"target": "192.0.2.5", "delay": 50}
+    for bw, unit in (("5", "Gbit"), ("4001", "Mbit")):
+        r = c.post("/api/firewall/fw-1/impair", json={**base, "bandwidth": bw, "bandwidth_unit": unit})
+        assert r.status_code == 400 and "limited to 4 Gbit/s" in r.json()["detail"]
+        r = c.put("/api/firewall/fw-1/impair/i1", json={**base, "bandwidth": bw, "bandwidth_unit": unit})
+        assert r.status_code == 400
+    assert c.post("/api/firewall/fw-1/impair", json={**base, "bandwidth": "abc"}).status_code == 400
+    assert hub.calls == []
+    assert c.post("/api/firewall/fw-1/impair", json={**base, "bandwidth": "4", "bandwidth_unit": "Gbit"}).status_code == 200
+    assert c.post("/api/firewall/fw-1/impair", json=base).status_code == 200
+
+
 def test_two_firewalls_on_one_spoke_each_name_their_firewall():
     """Both boxes of an HA pair share one spoke; every command must carry its
     firewall_id or the spoke runs it on the first box."""
