@@ -42,7 +42,7 @@ from simulations.tenant_filter import (filter_items_by_prefixes,
                                        filter_firewall_rules, filter_record_by_prefixes,
                                        filter_hypervisor_vms,
                                        build_alias_map, _find_list_slot,
-                                       _replace_slot, extract_addrs)
+                                       _replace_slot, extract_addrs, _nets)
 
 if TYPE_CHECKING:  # annotations only — never evaluated at runtime
     from fastapi import Request
@@ -86,7 +86,7 @@ _FW_FILTER_SPEC = {
     "interfaces": ("fields", ["ip", "ipaddr"]),
     "dhcp":       ("fields", ["ip", "address"]),
     "aliases":    ("fields", ["content"]),
-    "impair":     ("fields", ["target"]),
+    "impair":     ("fields", ["target", "targets"]),
 }
 
 # OPNsense endpoints that participate in category-based tenant attribution.
@@ -2510,9 +2510,43 @@ async def filter_fw(hub, sessions: dict, request: "Request", data, endpoint: str
     drop_no_ip = endpoint != "nat"
     out = filter_items_by_prefixes(data, prefixes, fields,
                                    drop_no_ip=drop_no_ip, tenant_category=tenant_cat)
+    if endpoint == "impair":
+        out = _filter_impairments(out, prefixes)
     logger.debug("DIAG filter_fw[%s] filtered %d -> %d drop_no_ip=%s",
                    endpoint, before, _list_len(out), drop_no_ip)
     return out
+
+
+def impairment_inside(item, prefixes) -> bool:
+    """True when EVERY target of an impairment record lies inside one of
+    ``prefixes``. The generic field filter keeps a record when ANY address
+    matches, which would show (and let a tenant change) an impairment that also
+    names another tenant's addresses. Alias targets are never inside: the hub
+    cannot see what an alias holds."""
+    if not isinstance(item, dict) or item.get("target_type") == "alias":
+        return False
+    targets = item.get("targets")
+    if not isinstance(targets, list):
+        targets = [item.get("target")]
+    nets = _nets(prefixes)
+    for text in targets:
+        try:
+            target = ipaddress.ip_network(str(text or "").strip(), strict=False)
+        except ValueError:
+            return False
+        if not any(target.version == n.version and target.subnet_of(n) for n in nets):
+            return False
+    return bool(targets)
+
+
+def _filter_impairments(data, prefixes):
+    """``data`` with only the impairments wholly inside ``prefixes`` (a copy)."""
+    container, key = _find_list_slot(data)
+    if container is None:
+        return data
+    rows = container if key is None else container[key]
+    kept = [r for r in rows if impairment_inside(r, prefixes)]
+    return kept if key is None else _replace_slot(data, container, key, kept)
 
 
 async def fw_rule_in_tenant_scope(hub, sess, endpoint: str, firewall_id, payload,
@@ -2555,6 +2589,8 @@ async def fw_rule_in_tenant_scope(hub, sess, endpoint: str, firewall_id, payload
     else:
         out = filter_items_by_prefixes([payload], prefixes, fields,
                                        drop_no_ip=True, tenant_category=None)
+        if endpoint == "impair":
+            out = _filter_impairments(out, prefixes)
     return _list_len(out) > 0
 
 

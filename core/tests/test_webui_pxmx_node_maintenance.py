@@ -1,8 +1,11 @@
-"""Hypervisors → Nodes "Maintenance" button in headless Chromium against the
-real app: a node in HA maintenance shows the wrench icon, the button's tooltip
-names the action (Enter/Exit), clicking it asks for confirmation and POSTs
-{node, cluster, enable} to /api/pxmx/server/maintenance, and an error from the
-hub shows as a toast."""
+"""Hypervisors → Nodes "Maintenance" switch and "Reboot" button in headless
+Chromium against the real app. The switch (role=switch) shows the reported
+state ON/OFF; clicking asks a plain confirm (no command text) and POSTs
+{node, cluster, enable}; until telemetry confirms, the switch keeps the old
+state, disabled, reading "Entering…". Reboot shows only while the node is
+reported in maintenance; after a confirmed reboot request the row reads
+"Rebooting…" until the node is back online with a reset uptime. Errors from the hub
+show as a toast."""
 import json
 import os
 
@@ -16,15 +19,24 @@ else:
     sync_api = pytest.importorskip("playwright.sync_api")
 
 NODES = [
-    {"node": "pve1", "cluster": "lab", "status": "online", "agent_id": "ag-1", "maintenance": True},
+    {"node": "pve1", "cluster": "lab", "status": "online", "agent_id": "ag-1", "maintenance": True,
+     "uptime": 900000},
     {"node": "pve2", "cluster": "lab", "status": "online", "agent_id": "ag-1", "maintenance": False},
-    # No button: state unknown (agent too old) or node offline.
+    # No switch: state unknown (agent too old) or node offline.
     {"node": "pve3", "cluster": "lab", "status": "online", "agent_id": "ag-1"},
     {"node": "pve4", "cluster": "lab", "status": "offline", "agent_id": "ag-1", "maintenance": False},
 ]
 
+# Apply a telemetry update to the cached node list, settle pending ops, redraw.
+TELEMETRY = """([name, patch]) => {
+    const n = window._pxmxNodes.find(x => x.node === name);
+    Object.assign(n, patch);
+    pxmxReconcileNodeOps(window._pxmxNodes);
+    renderPxmxNodes();
+}"""
 
-def test_maintenance_button_and_wrench(hub_url_and_session):  # noqa: F811
+
+def test_maintenance_switch_and_reboot(hub_url_and_session):  # noqa: F811
     base, token = hub_url_and_session
     with sync_api.sync_playwright() as p:
         browser = p.chromium.launch()
@@ -38,16 +50,22 @@ def test_maintenance_button_and_wrench(hub_url_and_session):  # noqa: F811
 
             def maint(route):
                 body = json.loads(route.request.post_data or "{}")
-                posted.append(body)
-                if body.get("node") == "pve1":
+                posted.append(("maintenance", body))
+                if body.get("enable") is False:
                     route.fulfill(status=502, content_type="application/json",
-                                  body=json.dumps({"detail": "ha-manager failed: no quorum"}))
+                                  body=json.dumps({"detail": "maintenance failed: no quorum"}))
                 else:
                     route.fulfill(content_type="application/json", body=json.dumps(
                         {"status": "ok", "node": body["node"], "maintenance": True,
-                         "message": "pve2: entering maintenance mode"}))
+                         "message": "entering maintenance mode"}))
+
+            def reboot(route):
+                posted.append(("reboot", json.loads(route.request.post_data or "{}")))
+                route.fulfill(content_type="application/json", body=json.dumps(
+                    {"status": "ok", "message": "pve1: reboot requested"}))
 
             page.route("**/api/pxmx/server/maintenance*", maint)
+            page.route("**/api/pxmx/server/reboot*", reboot)
             page.goto(base + "/")
             page.wait_for_function("window._lmClickFeedbackInstalled === true")
             # Render the Nodes table into a host element from a known node list.
@@ -57,33 +75,105 @@ def test_maintenance_button_and_wrench(hub_url_and_session):  # noqa: F811
                 window._pxmxNodes = nodes;
                 renderPxmxNodes();
             }""", NODES)
+            toasts = page.locator("#lm-toast-region")
 
-            rows = page.locator("#pxmx-nodes-wrap tbody tr")
-            assert rows.nth(0).locator("[data-pxmx-maint-icon] svg").count() == 1
-            assert rows.nth(1).locator("[data-pxmx-maint-icon]").count() == 0
-            btn1 = rows.nth(0).get_by_role("button", name="Maintenance")
-            btn2 = rows.nth(1).get_by_role("button", name="Maintenance")
-            assert btn1.get_attribute("title").startswith("Exit maintenance")
-            assert btn2.get_attribute("title").startswith("Enter maintenance")
+            def clear_toasts():
+                # Toasts sit over the table in a small viewport.
+                page.evaluate("document.getElementById('lm-toast-region').replaceChildren()")
+
+            def row(i):
+                return page.locator("#pxmx-nodes-wrap tbody tr").nth(i)
+
+            # The switch reflects the reported state; Reboot only when in maintenance.
+            sw1 = row(0).get_by_role("switch", name="Maintenance")
+            sw2 = row(1).get_by_role("switch", name="Maintenance")
+            assert sw1.get_attribute("aria-checked") == "true"
+            assert sw2.get_attribute("aria-checked") == "false"
+            assert row(0).locator("[data-pxmx-maint-state]").inner_text() == "ON"
+            assert row(1).locator("[data-pxmx-maint-state]").inner_text() == "OFF"
+            assert "ha-manager" not in (sw1.get_attribute("title") + sw2.get_attribute("title"))
+            assert row(0).locator("[data-pxmx-maint-icon] svg").count() == 1
+            assert row(1).locator("[data-pxmx-maint-icon]").count() == 0
+            assert row(0).get_by_role("button", name="Reboot").count() == 1
+            for i in (1, 2, 3):
+                assert row(i).get_by_role("button", name="Reboot").count() == 0
             for i in (2, 3):
-                assert rows.nth(i).get_by_role("button", name="Maintenance").count() == 0
+                assert row(i).get_by_role("switch").count() == 0
 
-            # Enter maintenance on pve2: confirm, POST, then the wrench appears.
-            page.evaluate("document.getElementById('lm-toast-region').replaceChildren()")
-            btn2.click()
+            # Enable on pve2: plain confirm, POST, then "Entering…" without flipping.
+            clear_toasts()
+            sw2.click()
+            assert "Enable maintenance mode on pve2?" in toasts.inner_text()
+            assert "ha-manager" not in toasts.inner_text()
             page.get_by_role("button", name="Confirm").click()
-            page.wait_for_function(
-                "document.querySelectorAll('#pxmx-nodes-wrap tbody tr')[1]"
-                ".querySelector('[data-pxmx-maint-icon]') !== null")
-            assert posted[-1] == {"node": "pve2", "cluster": "lab", "enable": True}
+            row(1).locator("[data-pxmx-maint-state]").get_by_text("Entering…").wait_for()
+            assert posted[-1] == ("maintenance", {"node": "pve2", "cluster": "lab", "enable": True})
+            assert sw2.get_attribute("aria-checked") == "false" and sw2.is_disabled()
+            assert row(1).get_by_role("button", name="Reboot").count() == 0
+            # Telemetry confirms it: ON, enabled, wrench and Reboot appear.
+            page.evaluate(TELEMETRY, ["pve2", {"maintenance": True}])
+            assert sw2.get_attribute("aria-checked") == "true" and not sw2.is_disabled()
+            assert row(1).locator("[data-pxmx-maint-icon]").count() == 1
+            assert row(1).get_by_role("button", name="Reboot").count() == 1
 
-            # Exit on pve1 fails on the hub: the error shows as a toast.
-            # Clear earlier toasts first; they sit over the table in a small viewport.
-            page.evaluate("document.getElementById('lm-toast-region').replaceChildren()")
-            rows.nth(0).get_by_role("button", name="Maintenance").click()
+            # Reboot pve1: plain confirm, POST, "Rebooting…" until it goes down and back up.
+            clear_toasts()
+            row(0).get_by_role("button", name="Reboot").click()
+            assert "Reboot pve1? It is in maintenance mode." in toasts.inner_text()
             page.get_by_role("button", name="Confirm").click()
-            page.get_by_text("ha-manager failed: no quorum").wait_for()
-            assert posted[-1] == {"node": "pve1", "cluster": "lab", "enable": False}
+            row(0).get_by_text("Rebooting…").wait_for()
+            assert posted[-1] == ("reboot", {"node": "pve1", "cluster": "lab"})
+            assert row(0).get_by_role("switch").count() == 0
+            # A failed, stale or disconnected node read never counts as "went down".
+            assert page.evaluate("""() => [null, {nodes: []}, {nodes: [], stale: true},
+                {nodes: [], spoke_connected: false}].map(pxmxNodeListIsLive)""") == [
+                False, True, False, False]
+            # While down, the hub may rebuild the row from the offline roster without
+            # its cluster; it still reads "Rebooting…".
+            page.evaluate("""() => {
+                const i = window._pxmxNodes.findIndex(x => x.node === 'pve1');
+                window._pxmxNodes.splice(i, 1, {node: 'pve1', cluster: '', status: 'offline',
+                                                offline: true, agent_id: 'ag-1'});
+                pxmxReconcileNodeOps(window._pxmxNodes);
+                renderPxmxNodes();
+            }""")
+            assert page.locator("#pxmx-nodes-wrap").get_by_text("Rebooting…").count() == 1
+            page.evaluate("""() => {
+                const i = window._pxmxNodes.findIndex(x => x.node === 'pve1');
+                window._pxmxNodes.splice(i, 1, {node: 'pve1', cluster: 'lab', status: 'online',
+                                                agent_id: 'ag-1', maintenance: true, uptime: 900030});
+            }""")
+            # Back online but with the old uptime (a read that missed the node, or
+            # the reboot not started yet): still rebooting.
+            page.evaluate(TELEMETRY, ["pve1", {}])
+            assert row(0).get_by_text("Rebooting…").count() == 1
+            # Uptime reset: it booted again.
+            page.evaluate(TELEMETRY, ["pve1", {"uptime": 95}])
+            assert row(0).get_by_text("Rebooting…").count() == 0
+            assert row(0).get_by_role("switch").get_attribute("aria-checked") == "true"
+            assert row(0).get_by_role("button", name="Reboot").count() == 1
+
+            # Disable on pve1 fails on the hub: the error shows as a toast.
+            clear_toasts()
+            row(0).get_by_role("switch").click()
+            assert "Disable maintenance mode on pve1?" in toasts.inner_text()
+            page.get_by_role("button", name="Confirm").click()
+            page.get_by_text("maintenance failed: no quorum").wait_for()
+            assert posted[-1] == ("maintenance", {"node": "pve1", "cluster": "lab", "enable": False})
+            assert row(0).get_by_role("switch").get_attribute("aria-checked") == "true"
+
+            # A pending change that never confirms times out, even with no node reads.
+            clear_toasts()
+            row(0).get_by_role("button", name="Reboot").click()
+            page.get_by_role("button", name="Confirm").click()
+            row(0).get_by_text("Rebooting…").wait_for()
+            page.evaluate("""() => {
+                for (const e of _pxmxNodeOps.values()) e.ts -= 3600000;
+                pxmxExpireNodeOps();
+                renderPxmxNodes();
+            }""")
+            assert row(0).get_by_text("Rebooting…").count() == 0
+            assert "no confirmation from the node yet" in toasts.inner_text()
             assert errors == []
         finally:
             browser.close()
