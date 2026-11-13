@@ -82,6 +82,9 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ### DNS
 
+- **DNS Overview loads fast after a quiet spell.** Each resolver now reads its
+  query log every 5 minutes, not only when someone opens the page, so the first
+  view no longer parses hours of log (one took 14.8s). See [dns.md](dns.md).
 - **Time-window picker on the DNS Overview.** Choose the last hour, day,
   week or month. Total Queries, Cache Hit Ratio, Recursive Replies, Queries by
   Type and Queries by Destination now cover that window instead of counting
