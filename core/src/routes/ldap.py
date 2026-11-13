@@ -14,6 +14,7 @@ right (or admin); writes require the tenant-admin tier (``_can_edit_shared``).
 This module adds the per-tenant slug injection + guard on top.
 """
 import asyncio
+import re
 import time
 
 # Shared Hub helpers: HTTP error type, request, session invalidation, tenant access, logger.
@@ -26,12 +27,43 @@ from access import all_tenant_ids
 # Hub data-cache job description.
 from warm_cache import CacheJob
 
-# The list commands whose results are cached (users and groups).
-LDAP_LIST_CMDS = ("LDAP_LIST_USERS", "LDAP_LIST_GROUPS")
+# The list commands whose results are cached (users, groups and OUs).
+LDAP_LIST_CMDS = ("LDAP_LIST_USERS", "LDAP_LIST_GROUPS", "LDAP_LIST_OUS")
+
+# Shown when a directory spoke predates a command (it answers "Unknown command").
+_OLD_SPOKE_DETAIL = ("The directory spoke does not support this yet; "
+                     "update the directory spoke and try again.")
 
 # Directory health check: reuse a result this long (s); give the spoke this long.
 HEALTH_TTL_S = 15
 HEALTH_TIMEOUT_S = 15
+
+def ou_path_arg(value, field: str) -> list:
+    """An OU path from a request body as a list of OU names, outermost first.
+
+    Accepts ``["Engineering", "Lab"]`` or ``"Engineering/Lab"``; missing or
+    empty means the tenant's top level. Any other shape is a 400, so a bad
+    value is never sent on as "the top level"."""
+    # Missing or empty: the top level.
+    if value is None or value == "":
+        return []
+    # "A/B" string, or a list of names; a blank segment ("/", "A//B") is
+    # malformed, never dropped.
+    if isinstance(value, str):
+        value = value.split("/")
+    if isinstance(value, list) and all(isinstance(p, str) and p.strip() for p in value):
+        return [p.strip() for p in value]
+    raise HTTPException(status_code=400,
+                        detail=f"{field} must be a list of OU names or an 'A/B' string")
+
+
+def created_at_top_level(dn) -> bool:
+    """True when a new user's DN sits directly under ``ou=users`` (the RDN
+    after ``uid=...`` is ``ou=users``), i.e. not inside a sub-OU."""
+    # Skip the first RDN (escaped commas stay inside it), then look at the next.
+    m = re.match(r"(?:[^,\\]|\\.)*,", str(dn or ""))
+    return bool(m) and str(dn)[m.end():].lower().startswith("ou=users,")
+
 
 # Server URL used when none is set.
 _DEFAULT_LDAP_SERVER_URL = "ldap://localhost:389"
@@ -241,8 +273,12 @@ def register(app, hub, ctx):
         if not isinstance(body, dict):
             return body
         if str(body.get("status", "")).upper() == "ERROR":
+            message = str(body.get("message") or "")
+            # An older spoke without this command: say so, not "LDAP failed".
+            if message.startswith("Unknown command"):
+                raise HTTPException(status_code=501, detail=_OLD_SPOKE_DETAIL)
             raise HTTPException(status_code=502,
-                                detail=body.get("message") or f"{cmd} failed on the LDAP server")
+                                detail=message or f"{cmd} failed on the LDAP server")
         data = body.get("data")
         # `is not None`: an empty-but-real payload ({}, []) is data.
         return data if data is not None else body
@@ -415,12 +451,22 @@ def register(app, hub, ctx):
                     raise HTTPException(status_code=400,
                                         detail="upn is required for an Entra-backed user")
                 payload["upn"] = upn
-            else:
+            # Optional OU inside the tenant (top level when omitted).
+            ou_path = ou_path_arg(data.get("ou_path"), "ou_path")
+            if ou_path:
+                payload["ou_path"] = ou_path
+            if auth_mode != "entra":
                 # Local: optional password (spoke auto-generates + returns one when blank).
                 if data.get("password"):
                     payload["password"] = data.get("password")
             # Send it to the directory spoke.
-            return await _relay("LDAP_CREATE_USER", payload, _directory_spoke(tid))
+            result = await _relay("LDAP_CREATE_USER", payload, _directory_spoke(tid))
+            # An older spoke ignores ou_path and creates the user at the top
+            # level: still a success, but say where the user really is.
+            if ou_path and isinstance(result, dict) and created_at_top_level(result.get("dn")):
+                result = {**result, "warning": "Created at the top level: the directory "
+                          "spoke does not support OUs yet. Update it, then move the user."}
+            return result
         # Pass HTTP errors through; anything else is logged and a 500.
         except HTTPException:
             raise
@@ -604,6 +650,85 @@ def register(app, hub, ctx):
         except Exception as e:  # noqa: BLE001
             logger.exception("remove_ldap_member failed")
             raise HTTPException(status_code=500, detail=str(e))
+
+    # ── OUs inside the tenant (folders for users) ────────────────────────────
+    # The spoke keeps OUs under the tenant's ou=users; a path is the list of OU
+    # names from the top, e.g. ["Engineering", "Lab"]. Users move only between
+    # OUs of their own tenant: tenant_slug always comes from the session.
+    async def _ou_write(request: Request, build):
+        """Shared body for the OU writes: read the body, resolve the caller's
+        tenant (a write), build ``(cmd, payload)`` with ``build(data)`` and relay
+        it to the tenant's directory spoke."""
+        # Read the body and resolve the tenant (a write).
+        try:
+            data = await request.json()
+        except Exception:  # noqa: BLE001 — empty or non-JSON body
+            raise HTTPException(status_code=400, detail="a JSON body is required")
+        if not isinstance(data, dict):
+            raise HTTPException(status_code=400, detail="a JSON object is required")
+        tid, slug, _ = _directory_resolve(request, data, write=True)
+        # Build the command and send it.
+        cmd, payload = build(data)
+        return await _relay(cmd, {**payload, "tenant_slug": slug}, _directory_spoke(tid))
+
+    def _name_arg(data: dict, field: str) -> str:
+        """A required, non-blank string field from the body (400 otherwise)."""
+        value = data.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise HTTPException(status_code=400, detail=f"{field} is required")
+        return value.strip()
+
+    # List the tenant's OUs (with user counts) from the cache.
+    @app.get("/api/ldap/ous")
+    async def get_ldap_ous(request: Request):
+        """List the OUs inside the caller's tenant, from the hub cache."""
+        tid, slug, _ = _directory_resolve(request)
+        return await _relay_list("LDAP_LIST_OUS", tid, slug)
+
+    # Create an OU.
+    @app.post("/api/ldap/ous")
+    async def create_ldap_ou(request: Request):
+        """Create an OU under ``parent_path`` (top level when omitted) in the
+        caller's tenant (``_ou_write`` resolves the tenant as a write)."""
+        return await _ou_write(request, lambda d: ("LDAP_CREATE_OU", {
+            "name": _name_arg(d, "name"),
+            "parent_path": ou_path_arg(d.get("parent_path"), "parent_path")}))
+
+    # Rename an OU.
+    @app.put("/api/ldap/ous")
+    async def rename_ldap_ou(request: Request):
+        """Rename the OU at ``path`` in the caller's tenant (``_ou_write``
+        resolves the tenant as a write); its users and groups follow it."""
+        def build(d):
+            """Validate the path (not the top level) and the new name."""
+            path = ou_path_arg(d.get("path"), "path")
+            if not path:
+                raise HTTPException(status_code=400, detail="path is required")
+            return "LDAP_RENAME_OU", {"path": path, "new_name": _name_arg(d, "new_name")}
+        return await _ou_write(request, build)
+
+    # Delete an empty OU.
+    @app.delete("/api/ldap/ous")
+    async def delete_ldap_ou(request: Request):
+        """Delete the OU at ``path`` in the caller's tenant (``_ou_write``
+        resolves the tenant as a write); the spoke refuses one that still
+        holds users or OUs."""
+        def build(d):
+            """Validate the path (the top level can't be deleted)."""
+            path = ou_path_arg(d.get("path"), "path")
+            if not path:
+                raise HTTPException(status_code=400, detail="path is required")
+            return "LDAP_DELETE_OU", {"path": path}
+        return await _ou_write(request, build)
+
+    # Move a user to another OU of the same tenant.
+    @app.post("/api/ldap/users/move")
+    async def move_ldap_user(request: Request):
+        """Move a user to ``target_path`` (top level when empty) inside the
+        caller's tenant; group memberships follow the user."""
+        return await _ou_write(request, lambda d: ("LDAP_MOVE_USER", {
+            "uid": _name_arg(d, "uid"),
+            "target_path": ou_path_arg(d.get("target_path"), "target_path")}))
 
     # ── OU provisioning (single tenant; backfill lives in tenants_users) ──────
     # (Re)build the tenant's OU.

@@ -41,6 +41,88 @@ Talks to the LDAP server via `python-ldap` (`ldap.initialize` + `simple_bind_s`)
 
 `GET_VERSION`, `UPDATE_CONFIG` (re-init `LdapManager`), `INSTALL_CERT` (hub-brokered Let's Encrypt cert install — writes leaf/key/CA under `/etc/ldap/tls`, points slapd `cn=config` `olcTLSCertificateFile`/`olcTLSCertificateKeyFile`/`olcTLSCACertificateFile` at them via `ldapmodify -Y EXTERNAL -H ldapi:///`, restarts `slapd`; root only), `LIST_OUS`, `CREATE_OU`, `UPDATE_OU` (modrdn rename), `LIST_USERS`, `CREATE_USER` (`inetOrgPerson`; `secrets.token_urlsafe(16)` random password if none, returned), `UPDATE_USER` (modify cn/sn/givenName/mail + optional uid rename), `LIST_GROUPS` (`groupOfNames` or `posixGroup`), `CREATE_GROUP` (`groupOfNames` requires ≥1 member → seeded with base DN), `UPDATE_GROUP` (cn modrdn), `ADD_USER_TO_GROUP`, `REMOVE_USER_FROM_GROUP`, `SET_PASSWORD` (`passwd_s` with `modify_s` userPassword fallback), `DELETE_ENTITY`, `SEARCH_USERS` (filter on uid/cn/mail/sn/givenName/dNSHostName, escapes `\*()`, tags `source="ldap"`, type `user`/`computer`).
 
+## OUs inside a tenant
+
+Tenant admins organise users into OUs (folders) below the tenant's
+`ou=users` container, for example `ou=Lab,ou=Engineering,ou=users,ou=<tenant>,<base>`.
+The WebUI shows an OU as a path such as `Engineering/Lab`.
+
+- **Commands:** `LDAP_LIST_OUS`, `LDAP_CREATE_OU`, `LDAP_RENAME_OU`,
+  `LDAP_DELETE_OU` and `LDAP_MOVE_USER`. `LDAP_CREATE_USER` takes an optional
+  `ou_path`, and `LDAP_LIST_USERS` returns each user's `ou_path` and `upn`.
+- **Users are found by uid anywhere in the tenant.** A uid is unique across the
+  whole tenant, whatever OU it is in. Update, delete, password, group and
+  lookup commands search for it instead of assuming `uid=X,ou=users,…`.
+- **Moves stay inside the tenant.** A user moves between OUs of its own tenant;
+  every path is built from the tenant slug, so a user can never be moved into
+  another tenant.
+- **Group memberships follow.** Groups are `groupOfNames` and store member DNs,
+  so moving a user or renaming an OU rewrites those member values in the
+  tenant's groups. The spoke does this itself, so no `refint` overlay is needed
+  (it may manage a remote server it can't reconfigure).
+- **Delete is safe.** Only an empty OU (no users, no child OUs) can be deleted,
+  and the `ou=users` root can't be renamed or deleted.
+- **Downstream readers must search the subtree.** Anything that reads users
+  (ClearPass, applications) must search `ou=users,ou=<tenant>,…` with subtree
+  scope, or it will miss users in OUs.
+- **A failed move is undone, or reported.** If rewriting group members fails,
+  the spoke undoes the move. If the undo also fails, the reply has
+  `error: PARTIAL_ROLLBACK` and a message listing what is still changed.
+- **A malformed path is an error.** A path that is not a list of names or an
+  `A/B` string is refused; it is never read as the top level.
+
+Hub routes (tenant from the session, as for users and groups; writes need the
+tenant-admin tier):
+
+| Route | Body | Spoke command |
+| :--- | :--- | :--- |
+| `GET /api/ldap/ous` | | `LDAP_LIST_OUS` (hub cache) |
+| `POST /api/ldap/ous` | `name`, `parent_path` | `LDAP_CREATE_OU` |
+| `PUT /api/ldap/ous` | `path`, `new_name` | `LDAP_RENAME_OU` |
+| `DELETE /api/ldap/ous` | `path` | `LDAP_DELETE_OU` |
+| `POST /api/ldap/users/move` | `uid`, `target_path` | `LDAP_MOVE_USER` |
+| `POST /api/ldap/users` | adds optional `ou_path` | `LDAP_CREATE_USER` |
+
+Paths are a list of OU names (`["Engineering", "Lab"]`) or `"Engineering/Lab"`;
+empty means the top level. A spoke too old for these commands gets a 501 that
+says to update it. If an older spoke ignores `ou_path` on create, the reply
+carries a `warning` that the user was created at the top level.
+
+## Active Directory (read-only stub)
+
+`src/ad_directory.py` reads users from an AD domain, so the Directory view can
+later show LDAP, Entra and AD accounts together. It is read-only for now:
+`AD_DISCOVER`, `AD_TEST` and `AD_SEARCH_USERS`. The `ad` block of the spoke
+config holds `domain`, `forest`, `site`, `discover`, `use_global_catalog`,
+`use_ssl`, `dns_servers`, `servers`, `bind_user`, `bind_password`, `base_dn` and
+`timeout`. The hub push, the WebUI form and the Credential Vault wiring for
+`bind_password` are not built yet.
+
+Which server the spoke uses, in order:
+
+1. **DNS SRV discovery** (`discover`, default on). With `use_global_catalog`
+   (the default) it looks up the global catalogs, `_gc._tcp.<site>._sites.<forest>`
+   and then `_gc._tcp.<forest>`, on ports 3268/3269. Otherwise it looks up the
+   domain controllers, `_ldap._tcp.<site>._sites.dc._msdcs.<domain>` and then
+   `_ldap._tcp.dc._msdcs.<domain>`, on ports 389/636. Servers in the spoke's
+   own AD site come first; within one answer, lower priority wins, then higher
+   weight. The lookup uses a small standard-library DNS client (UDP with EDNS,
+   retried over TCP when truncated), so no DNS package is needed.
+   `dns_servers` points it at AD's DNS servers when the spoke's own resolver
+   can't see the AD zones.
+2. **Configured servers** (`servers`): the primary first, then the backup(s).
+   They are always tried after the discovered ones, so AD still works when
+   discovery fails.
+
+Each server gets a short timeout (`timeout`, default 3 s), and the first one
+that binds is used. A down server fails over to the next. A rejected password
+is not retried on other servers, because it would fail the same way and could
+lock the service account. An empty password is refused, since AD treats it as
+an anonymous bind that "succeeds". The password is never sent in clear: LDAPS
+(`use_ssl`, the default) or, with `use_ssl` off, StartTLS on 389/3268; a server
+that can't do TLS is skipped. Either way the spoke must trust the AD
+certificate authority.
+
 ## Key files
 
 `src/main.py`, `src/ldap_spoke.py`, `src/ldap_manager.py` (~315 lines, whole `LdapManager`), `install_ldap.sh`, `base_structure.ldif`, `README.md`, `.env.template`, `requirements.txt`, `VERSION`.

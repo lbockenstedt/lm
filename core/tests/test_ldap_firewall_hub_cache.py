@@ -119,8 +119,8 @@ def test_ldap_feed_covers_tenants_with_a_directory_spoke_only():
     hub.state.tenant_state["tenants"]["c"] = {}     # no directory spoke
     _ldap_client(hub, _ADMIN)
     keys = {(j.ns, j.key) for j in hub._cache_collect_jobs()}
-    assert keys == {("ldap_list_users", "a|a"), ("ldap_list_groups", "a|a"),
-                    ("ldap_list_users", "b|b"), ("ldap_list_groups", "b|b")}
+    assert keys == {(ns, f"{t}|{t}") for t in "ab"
+                    for ns in ("ldap_list_users", "ldap_list_groups", "ldap_list_ous")}
 
 
 def test_two_tenants_with_the_same_ou_slug_never_share_an_entry():
