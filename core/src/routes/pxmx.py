@@ -1,6 +1,8 @@
 """Proxmox agents/nodes/VMs + aggregate + VM-detail + console-create routes."""
 # asyncio for concurrent fan-out to spokes, locks and the fan-out semaphore.
 import asyncio
+# Regex check of Proxmox node names sent by the WebUI.
+import re
 
 # List of every tenant id, used when warming per-tenant caches.
 from access import all_tenant_ids
@@ -10,6 +12,8 @@ from api import (
     HTTPException, Request, access, get_tenant_scoping, logger, secrets,
     spoke_or_503, time, uuid,
 )
+# Spots an older agent's "unknown command" reply.
+from static_ip_reservations import is_unknown_command
 # Background warm-cache job type, and the marker meaning "visible to every admin".
 from warm_cache import ALL_SCOPE, CacheJob
 # iLO <-> hypervisor serial links, for the hardware health on Diagnostics.
@@ -30,6 +34,9 @@ try:
     from messaging.pxmx_node_vm_aggregation import _freshest_by_key
 except ImportError:  # imported as part of the core.src.routes package
     from ..messaging.pxmx_node_vm_aggregation import _freshest_by_key
+
+# A Proxmox node name the hub will relay to an agent (hostname label; no shell metacharacters).
+_NODE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,62}$")
 
 # Module-level cache of the aggregated agents payload: data, when it was built, and whether a
 # refresh is running.
@@ -1655,6 +1662,82 @@ def register(app, hub, ctx):
                 "message": ("Server hidden from the Hypervisors view + cached VMs cleared"
                             + (f"; agent {purged} purged" if purged else "")
                             + ". It re-appears automatically only if the host comes back online.")}
+
+    @app.post("/api/pxmx/server/maintenance")
+    async def pxmx_node_maintenance(request: Request, tenant: str = None):
+        """Put a Proxmox node into (or take it out of) HA maintenance mode —
+        the Hypervisors → Nodes "Maintenance" button. Body: ``{node, enable}``.
+        ``cluster`` (optional) must match the node row's cluster when given.
+        Gated like Delete (Global Admin). The node must be in the caller's
+        tenant-scoped node list, fetched live (never a stale cached copy); its
+        row names the agent that reports it, and
+        that agent runs ``ha-manager crm-command node-maintenance
+        enable|disable <node>`` (PXMX_NODE_MAINTENANCE, relayed by its spoke)."""
+        # Admins only, same as Delete.
+        if not _is_admin(_session_user(request)):
+            raise HTTPException(status_code=403, detail="Admin access required")
+        hub = app.state.hub
+        # Read and validate the body.
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        node = (body or {}).get("node") if isinstance(body, dict) else None
+        enable = (body or {}).get("enable") if isinstance(body, dict) else None
+        cluster = str((body or {}).get("cluster") or "") if isinstance(body, dict) else ""
+        if not isinstance(node, str) or not _NODE_NAME_RE.fullmatch(node):
+            raise HTTPException(status_code=400, detail="Invalid node name")
+        if not isinstance(enable, bool):
+            raise HTTPException(status_code=400, detail="'enable' must be true or false")
+        # Find the node in this scope's node list (the same list the Nodes
+        # table shows), fetched live so a write never trusts an old copy.
+        tid = _resolve_tenant(request, tenant)
+        row = None
+        if pxmx_node_spokes(tid, True) is not None:
+            job = pxmx_nodes_job(tid, True)
+            try:
+                data = await hub.cache_fetch_now(job.ns, job.key, job.fetch,
+                                                 tenants=job.tenants, lane=job.lane)
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(status_code=503, detail=f"Hypervisor nodes unavailable: {e}")
+            nodes = data.get("nodes") if isinstance(data, dict) else None
+            # Operator-hidden (deleted) nodes are not in the table, so not here either.
+            hidden = set(hub.state.system_state.get("pxmx_hidden_nodes") or [])
+            row = next((n for n in (nodes or []) if isinstance(n, dict) and node not in hidden
+                        and n.get("node") == node and n.get("agent_id")
+                        and (not cluster or str(n.get("cluster") or "") == cluster)), None)
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Node {node} not found")
+        # Relay to the agent that reports this node (any member of its cluster can run ha-manager).
+        agent_id = str(row["agent_id"])
+        spoke = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False)
+        if not spoke:
+            raise HTTPException(status_code=503,
+                                detail=f"The Proxmox agent for {node} is not connected")
+        try:
+            res = await hub.request_response(spoke, "SPOKE_RELAY", {
+                "target_agent_id": hub._agent_relay_name(agent_id),
+                "command": "PXMX_NODE_MAINTENANCE",
+                "data": {"node": node, "enable": enable}}, timeout=45.0)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"Maintenance request failed: {e}")
+        res = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
+        res = res if isinstance(res, dict) else {}
+        # Surface the agent's error (HA not configured, no quorum, old agent).
+        if res.get("status") != "SUCCESS":
+            msg = str(res.get("message") or res.get("error") or "no response from agent")
+            if is_unknown_command(res):
+                msg = "The Proxmox agent for this node is too old for maintenance mode; update it"
+            raise HTTPException(status_code=502, detail=msg)
+        # Reflect the request in the cached row (in place, on purpose) until the
+        # next telemetry confirms it.
+        row["maintenance"] = enable
+        logger.warning("Hypervisor node %s: HA maintenance %s requested by %s", node,
+                       "enable" if enable else "disable",
+                       ((_session_user(request) or {}).get("user") or {}).get("username") or "admin")
+        return {"status": "ok", "node": node, "maintenance": enable,
+                "message": f"{node}: {'entering' if enable else 'leaving'} maintenance mode "
+                           "(the status updates within a minute)"}
 
     def pxmx_node_spokes(tid, admin: bool):
         """Agent-hosting spokes whose nodes THIS scope may see, resolved from
