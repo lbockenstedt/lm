@@ -125,6 +125,16 @@ def test_mac_seen_at_two_addresses_is_skipped():
     assert set(_reasons(plan, "skipped").values()) == {"mac seen at several addresses"}
 
 
+def test_a_secondary_address_does_not_block_the_hosts_static_primary():
+    """An agent reports a NIC's secondary/VIP as unknown with the same MAC."""
+    rows = _ips(_ip("10.20.0.50/24", 7), _ip("10.20.0.99/24", 8))
+    cands = [_static("10.20.0.50"),
+             {"ip": "10.20.0.99", "mac": MAC_A, "mode": "unknown", "source": "agent"}]
+    plan = plan_static_reservations(_pfx(), rows, [], cands)
+    assert [r["ip"] for r in plan["reserve"]] == ["10.20.0.50"]
+    assert _reasons(plan, "skipped") == {"10.20.0.99": "not known to be static"}
+
+
 def test_reserved_row_becomes_a_kea_reservation():
     """The written shape is exactly what build_dhcp_payload turns into Kea."""
     row = _ip("10.20.0.50/24", 7, mac_address=MAC_A, dhcp_reservation=True)
@@ -471,7 +481,7 @@ def test_a_failed_agent_poll_holds_back_its_tenants_sweep_hosts():
         hub = _sweep_hub_with_agent_reply(reply, now)
         st = _run(hub, now)
         assert hub.writes() == []
-        assert st["errors"] == [{"tenant": "t-b", "error": "agent poll failed; sweep hosts wait"}]
+        assert st["errors"] == [{"tenant": "t-b", "error": "agent poll failed; tenant waits"}]
         assert st["status"] == "error"
     # An agent too old to know the command is like a host with no agent.
     hub = _sweep_hub_with_agent_reply(
@@ -519,3 +529,26 @@ def test_a_tenant_whose_own_kea_is_offline_is_an_error(monkeypatch):
     monkeypatch.setattr(sir, "tenant_has_own_spoke", lambda h, t, m: False)
     st = _run(_Hub(agent_addresses=_agent_static()))
     assert st["status"] == "ok" and st["errors"] == []
+
+
+def test_a_failed_agent_holds_back_its_tenants_other_agents_too():
+    """Another agent of the tenant might report the same address as dhcp."""
+    class _OneFails(_Hub):
+        async def request_response(self, spoke_id, command, payload, timeout=30.0):
+            if spoke_id == "agent-2" and command == "GET_HOST_ADDRESSING":
+                raise TimeoutError("no reply")
+            return await super().request_response(spoke_id, command, payload, timeout)
+
+    hub = _OneFails(agent_addresses=_agent_static(),
+                    spoke_tenants={"agent-1": "t-a", "agent-2": "t-a"})
+    st = _run(hub)
+    assert hub.writes() == [] and st["reserved"] == []
+    assert st["errors"] == [{"tenant": "t-a", "error": "agent poll failed; tenant waits"}]
+
+
+def test_reservations_over_the_write_cap_are_counted_as_deferred(monkeypatch):
+    import static_ip_reservations as sir
+    monkeypatch.setattr(sir, "_MAX_WRITES_PER_PASS", 0)
+    hub = _Hub(agent_addresses=_agent_static())
+    st = _run(hub)
+    assert hub.writes() == [] and st["deferred"] == 1

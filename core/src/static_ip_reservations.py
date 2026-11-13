@@ -229,8 +229,12 @@ def plan_static_reservations(pfx_data: Dict[str, Any], ips_data: Dict[str, Any],
         m["modes"].add(str(c.get("mode") or "unknown"))
         m["sources"].add(str(c.get("source") or ""))
     # A MAC seen at several candidate IPs (proxy ARP, multi-homed) is ambiguous.
+    # An address an agent calls "unknown" (a secondary or VIP) is never
+    # reserved, so it does not make the host's own static address ambiguous.
     mac_ip_count: Dict[str, int] = {}
     for m in merged.values():
+        if "unknown" in m["modes"]:
+            continue
         for mac in m["macs"]:
             mac_ip_count[mac] = mac_ip_count.get(mac, 0) + 1
 
@@ -371,8 +375,8 @@ async def _agent_candidates(hub) -> Tuple[Dict[str, List[Dict[str, Any]]], set]:
     predates ``GET_HOST_ADDRESSING`` contributes nothing, like a host with no
     agent. An agent that errors or times out puts its tenant in
     ``failed_tids``: it might have said ``dhcp`` or ``unknown`` for an address
-    the sweep also saw, so that tenant's sweep-only hosts wait for a pass
-    where every agent answered.
+    another source saw, so that whole tenant waits for a pass where every
+    agent answered.
     """
     # Connected agents with an owning tenant.
     active = getattr(hub, "active_connections", None)
@@ -483,13 +487,13 @@ async def _run_pass(hub, now: float) -> Dict[str, Any]:
     # Step 1: gather candidates per real (non-shared) tenant.
     by_tid, failed_tids = await _agent_candidates(hub)
     for tid in list((getattr(hub, "_nw_live_arp", None) or {}).keys()):
-        if tid in failed_tids:
-            continue
         by_tid.setdefault(tid, [])
         by_tid[tid].extend(_sweep_candidates(hub, tid, now))
-    by_tid = {t: c for t, c in by_tid.items() if c and t and not tenant_is_shared(t)}
-    totals = {"tenants": 0, "reserved": [], "conflicts": [], "skipped": 0,
-              "errors": [{"tenant": t, "error": "agent poll failed; sweep hosts wait"}
+    # A tenant with an agent that did not answer waits: every source must say static.
+    by_tid = {t: c for t, c in by_tid.items()
+              if c and t and t not in failed_tids and not tenant_is_shared(t)}
+    totals = {"tenants": 0, "reserved": [], "conflicts": [], "skipped": 0, "deferred": 0,
+              "errors": [{"tenant": t, "error": "agent poll failed; tenant waits"}
                          for t in sorted(failed_tids) if not tenant_is_shared(t)]}
     if not by_tid:
         return hub._record_status("static_reservations",
@@ -547,8 +551,10 @@ async def _run_pass(hub, now: float) -> Dict[str, Any]:
             totals["conflicts"].append({"tenant": tid, **c})
         # Step 4: write the reservations, capped per pass.
         for r in plan["reserve"]:
+            # Over the cap: counted, and written by a later pass.
             if writes >= _MAX_WRITES_PER_PASS or not ipam:
-                break
+                totals["deferred"] += 1
+                continue
             if r.get("ip_id") is None:
                 continue
             writes += 1
@@ -591,7 +597,7 @@ def status_for_tenant(status: Dict[str, Any], tid: Optional[str]) -> Dict[str, A
     if not isinstance(status, dict):
         return status
     # Keep only this tenant's rows; drop counters that span tenants.
-    out = {k: v for k, v in status.items() if k not in ("tenants", "skipped")}
+    out = {k: v for k, v in status.items() if k not in ("tenants", "skipped", "deferred")}
     for key in ("reserved", "conflicts", "errors"):
         out[key] = [r for r in status.get(key) or []
                     if isinstance(r, dict) and tid and same_tenant(r.get("tenant"), tid)]
