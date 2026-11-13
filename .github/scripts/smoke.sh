@@ -53,7 +53,11 @@ done
 
 root="$(git rev-parse --show-toplevel)" || exit 2
 cd "$root" || exit 2
-name="$(basename "$root")"
+# The repo name comes from the origin remote, so a git worktree in a directory
+# with another name (e.g. wt-feature) still runs that repo's steps; fall back
+# to the directory name when there is no origin.
+origin="$(git remote get-url origin 2>/dev/null)"
+name="$(basename "${origin:-$root}" .git)"
 fleet="$(dirname "$root")"
 helpers="${SMOKE_HELPERS:-$fleet/lm/.github}"
 ci=".github/workflows/ci.yml"
