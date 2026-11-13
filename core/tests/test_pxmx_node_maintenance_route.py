@@ -1,5 +1,5 @@
-"""POST /api/pxmx/server/maintenance — the Hypervisors → Nodes "Maintenance"
-button (routes/pxmx.py). Gated like Delete (Global Admin); the node must be
+"""POST /api/pxmx/server/maintenance and /reboot — the Hypervisors → Nodes
+"Maintenance" switch and "Reboot" button (routes/pxmx.py). Gated like Delete (Global Admin); the node must be
 in the caller's scoped node list and pass the name regex; the request is
 relayed as PXMX_NODE_MAINTENANCE to the agent that reports the node; agent
 errors (HA not configured, an agent too old for the command) come back as a
@@ -53,8 +53,10 @@ class _Hub(WarmCacheMixin):
         self.calls.append((sid, cmd, payload))
         if cmd == "GET_NODE_STATS":
             return {"payload": {"data": {"nodes": [
-                {"node": "pve1", "status": "online", "cluster": "lab", "agent_id": "ag-1"},
-                {"node": "pve2", "status": "online", "cluster": "lab", "agent_id": "ag-1"}]}}}
+                {"node": "pve1", "status": "online", "cluster": "lab", "agent_id": "ag-1",
+                 "maintenance": True},
+                {"node": "pve2", "status": "online", "cluster": "lab", "agent_id": "ag-1",
+                 "maintenance": False}]}}}
         return {"payload": {"data": self.reply}}
 
 
@@ -152,3 +154,50 @@ def test_hidden_node_is_not_actionable():
                           json={"node": "pve2", "enable": True})
     assert r.status_code == 404
     assert _relays(hub) == []
+
+
+def test_maintenance_request_does_not_fake_the_reported_state():
+    hub = _Hub()
+    c = _client(hub)
+    r = c.post("/api/pxmx/server/maintenance?tenant=acme", json={"node": "pve2", "enable": True})
+    assert r.status_code == 200, r.text
+    # The switch must keep showing the agent-reported state until telemetry confirms.
+    nodes = c.get("/api/pxmx/nodes?tenant=acme").json()["nodes"]
+    assert next(n for n in nodes if n["node"] == "pve2")["maintenance"] is False
+
+
+# ── Reboot (only for a node the agent reports in maintenance) ───────────────
+
+def test_admin_reboot_of_node_in_maintenance_relays_reboot():
+    hub = _Hub(reply={"status": "SUCCESS", "message": "pve1: reboot requested"})
+    r = _client(hub).post("/api/pxmx/server/reboot?tenant=acme", json={"node": "pve1"})
+    assert r.status_code == 200, r.text
+    assert r.json()["message"] == "pve1: reboot requested"
+    assert _relays(hub) == [("pxmx-1", "SPOKE_RELAY", {
+        "target_agent_id": "ag-1", "command": "PXMX_NODE_REBOOT", "data": {"node": "pve1"}})]
+
+
+def test_reboot_refused_when_node_not_in_maintenance():
+    hub = _Hub()
+    r = _client(hub).post("/api/pxmx/server/reboot?tenant=acme", json={"node": "pve2"})
+    assert r.status_code == 409 and "not in maintenance" in r.json()["detail"]
+    assert _relays(hub) == []
+
+
+def test_reboot_is_admin_only_and_scoped():
+    hub = _Hub()
+    r = _client(hub, admin=False).post("/api/pxmx/server/reboot?tenant=acme", json={"node": "pve1"})
+    assert r.status_code == 403 and hub.calls == []
+    c = _client(hub)
+    assert c.post("/api/pxmx/server/reboot?tenant=acme", json={"node": "pve1;id"}).status_code == 400
+    assert c.post("/api/pxmx/server/reboot?tenant=acme", json={"node": "pve9"}).status_code == 404
+    hub.state.system_state["pxmx_hidden_nodes"] = ["pve1"]
+    assert c.post("/api/pxmx/server/reboot?tenant=acme", json={"node": "pve1"}).status_code == 404
+    assert _relays(hub) == []
+
+
+def test_reboot_refusal_from_agent_is_returned():
+    hub = _Hub(reply={"status": "ERROR",
+                      "message": "refusing to reboot: 2 guest(s) still running on pve1 (qemu:101, qemu:102)"})
+    r = _client(hub).post("/api/pxmx/server/reboot?tenant=acme", json={"node": "pve1"})
+    assert r.status_code == 502 and "2 guest(s) still running" in r.json()["detail"]
