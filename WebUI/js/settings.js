@@ -1283,7 +1283,7 @@ function _renderSetupSyncTile(content) {
                 <div class="flex items-center justify-between mb-4">
                     <h3 class="text-sm font-bold text-slate-500">Static hosts → DHCP reservations</h3>
                 </div>
-                <p class="text-xs text-slate-500 mb-3">A host with a static IP inside a DHCP scope holds no lease, so Kea could hand its address to another client. When on, the netbox spoke marks each statically addressed host's existing NetBox IP as a DHCP reservation (MAC + reservation flag) just before a DNS/DHCP sync, and that sync pushes it to Kea. Hosts come from tenant-bound agents and the network sweep; conflicts are reported, never overwritten, and the writes for a tenant are rolled back if its DHCP sync fails. Off by default because it writes to NetBox.</p>
+                <p class="text-xs text-slate-500 mb-3">A host with a static IP inside a DHCP scope holds no lease, so Kea could hand its address to another client. When on, the netbox spoke marks each statically addressed host's existing NetBox IP as a DHCP reservation (MAC + reservation flag) just before a DNS/DHCP sync, and that sync pushes it to Kea. Hosts come from tenant-bound agents and the network sweep; conflicts are reported, never overwritten (except a device replaced at the same IP, below, or with its "Use new MAC" button), and the writes for a tenant are rolled back if its DHCP sync fails. Off by default because it writes to NetBox.</p>
                 <div class="flex flex-wrap items-end gap-4">
                     <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="static-res-enabled" class="w-4 h-4 text-green-600 rounded">Reserve statically addressed hosts</label>
                     <div class="space-y-1">
@@ -1291,7 +1291,10 @@ function _renderSetupSyncTile(content) {
                         <input type="number" id="static-res-interval" min="5" value="15" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
                     </div>
                 </div>
+                <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer mt-3"><input type="checkbox" id="static-res-auto-replace" class="w-4 h-4 text-green-600 rounded" checked>Move a reservation to a replaced device's new MAC (same IP; waits until the old MAC has been gone a day and the new one has shown for 30 minutes)</label>
                 <div id="static-res-status" class="text-xs text-slate-500 mt-3"></div>
+                <div id="static-res-action-msg" class="text-xs mt-2 hidden"></div>
+                <div id="static-res-rows" class="mt-2"></div>
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">

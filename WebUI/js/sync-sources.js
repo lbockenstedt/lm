@@ -620,6 +620,106 @@ function staticResStatusView(cfg, sync) {
     }
 }
 
+// The card's rows below the status line, as [{kind, text, action}]: the
+// viewer's conflicts, replacements waiting and done. A pure function of the
+// /api/dns-dhcp/sync-status body. A "different MAC at this IP" conflict has
+// an action {ip, old_mac, new_mac, disabled} for its "Use new MAC" button;
+// disabled is the reason it cannot be used ('' when it can). Only an IP that
+// NetBox reserves for another MAC qualifies (the spoke refuses the rest).
+const _STATIC_RES_OTHER_MAC = 'reserved for another mac';
+function staticResRowsView(sync) {
+    const p = sync && typeof sync === 'object' && sync.status && typeof sync.status === 'object'
+        ? sync.status.static_reservations : null;
+    if (!p || typeof p !== 'object' || p.visibility_reason !== 'tenant') return [];
+    const list = k => (Array.isArray(p[k]) ? p[k] : []).filter(r => r && typeof r === 'object' && r.ip);
+    const tooOld = p.replace_supported === false ? 'The netbox spoke is too old for this; update it.' : '';
+    const rows = [];
+    for (const c of list('conflicts')) {
+        const known = typeof c.old_mac === 'string' && c.old_mac && typeof c.mac === 'string' && c.mac;
+        const otherMac = c.reason === _STATIC_RES_OTHER_MAC;
+        let text = `${c.ip}: ${c.reason || 'conflict'}`;
+        if (known) text += ` (NetBox ${c.old_mac}, now ${c.mac})`;
+        else if (c.mac) text += ` (${c.mac})`;
+        if (c.replace) text += ` · ${c.replace}`;
+        const action = otherMac && known ? { ip: c.ip, old_mac: c.old_mac, new_mac: c.mac, disabled: tooOld }
+            : (otherMac && tooOld ? { ip: c.ip, old_mac: '', new_mac: '', disabled: tooOld } : null);
+        rows.push({ kind: 'conflict', text, action });
+    }
+    for (const w of list('pending_replace')) {
+        const mins = Math.floor((Number(w.first_seen_age) || 0) / 60);
+        const why = w.old_mac_unconfirmed
+            ? 'no sweep or agent can confirm the old MAC is gone yet; the wait restarts until one can, or use "Use new MAC"'
+            : `new MAC first seen ${mins} min ago`;
+        rows.push({ kind: 'pending', text: `${w.ip}: waiting to move from ${w.old_mac} to ${w.new_mac} (${why})`, action: null });
+    }
+    for (const r of list('replaced')) {
+        rows.push({ kind: 'replaced', text: `${r.ip}: moved from ${r.old_mac} to ${r.new_mac}${r.interface && r.interface.after ? ', with its interface' : ''}`, action: null });
+    }
+    return rows;
+}
+
+// The tenant picker's selection: a global admin's rows and button act in the
+// tenant they switched into (_tenantQS lives in dns-dhcp-cluster.js).
+function _staticResTenantQS() {
+    return typeof _tenantQS === 'function' ? _tenantQS() : '';
+}
+
+const _STATIC_RES_ROW_TONES = { conflict: 'text-amber-700', pending: 'text-slate-600', replaced: 'text-green-700' };
+
+// Draw staticResRowsView into the card (DOM nodes, so no markup from data).
+function _renderStaticResRows(sync) {
+    const box = document.getElementById('static-res-rows');
+    if (!box) return;
+    box.replaceChildren();
+    for (const row of staticResRowsView(sync)) {
+        const line = document.createElement('div');
+        line.className = `flex flex-wrap items-center gap-2 text-xs py-1 ${_STATIC_RES_ROW_TONES[row.kind] || ''}`;
+        const span = document.createElement('span');
+        span.className = 'font-mono';
+        span.textContent = row.text;
+        line.appendChild(span);
+        if (row.action) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.textContent = 'Use new MAC';
+            btn.className = 'px-2 py-0.5 rounded border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed';
+            btn.disabled = !!row.action.disabled;
+            btn.title = row.action.disabled || 'Move this reservation, and its interface MAC in NetBox, to the new MAC now';
+            if (!row.action.disabled) btn.addEventListener('click', () => staticResUseNewMac(row.action, btn));
+            line.appendChild(btn);
+        }
+        box.appendChild(line);
+    }
+}
+
+// Show the button's outcome above the rows (kept across the card refresh).
+function _staticResActionMsg(text, ok) {
+    const el = document.getElementById('static-res-action-msg');
+    if (!el) return;
+    el.textContent = text;
+    el.className = `text-xs mt-2 ${ok ? 'text-green-700' : 'text-red-600'}`;
+}
+
+// "Use new MAC": confirm, ask the hub, show the outcome, refresh the card.
+async function staticResUseNewMac(action, btn) {
+    if (!confirm(`Move the DHCP reservation for ${action.ip} from ${action.old_mac} to ${action.new_mac}?\n\n`
+        + 'NetBox (the IP and its interface MAC) and then Kea will hand this address to the new MAC only. '
+        + 'Only do this if the device at this address was replaced.')) return;
+    if (btn) btn.disabled = true;
+    try {
+        const r = await setupFetch(`/setup/static-reservations/use-new-mac${_staticResTenantQS()}`, {
+            method: 'POST',
+            body: JSON.stringify({ ip: action.ip, old_mac: action.old_mac, new_mac: action.new_mac })
+        });
+        const body = await r.json().catch(() => ({}));
+        if (r.ok) _staticResActionMsg(`${action.ip} now reserved for ${action.new_mac}; Kea follows on the next DNS/DHCP sync.`, true);
+        else _staticResActionMsg(`${action.ip}: ${body.detail || `failed (${r.status})`}`, false);
+    } catch (e) {
+        _staticResActionMsg(`${action.ip}: ${e.message}`, false);
+    }
+    loadStaticResConfig();
+}
+
 // Show staticResStatusView on the card, coloured by its tone.
 function _renderStaticResStatus(cfg, sync) {
     const st = document.getElementById('static-res-status');
@@ -638,31 +738,38 @@ async function loadStaticResConfig() {
     } catch (e) { cfg = 'failed'; }
     const en = document.getElementById('static-res-enabled');
     const iv = document.getElementById('static-res-interval');
+    const ar = document.getElementById('static-res-auto-replace');
     if (cfg !== 'failed') {
         if (en) en.checked = cfg.enabled === true;
         if (iv) iv.value = Math.round((cfg.interval || 900) / 60);
+        // As the hub reads it: missing means on, else its truth value.
+        if (ar) ar.checked = cfg.auto_replace === undefined ? true : !!cfg.auto_replace;
     }
     _renderStaticResStatus(cfg);
+    _renderStaticResRows();
     if (cfg === 'failed' || cfg.enabled !== true) return;
     // Last pass, already cut to the viewer's tenant by the hub.
     let sync;
     try {
-        const s = await _spokeFetch('/api/dns-dhcp/sync-status');
+        const s = await _spokeFetch(`/api/dns-dhcp/sync-status${_staticResTenantQS()}`);
         sync = s && s.ok ? s.data : 'failed';
     } catch (e) { sync = 'failed'; }
     _renderStaticResStatus(cfg, sync);
+    _renderStaticResRows(sync);
 }
 
-// Save the card's on/off switch and interval (minutes → seconds) into global_config.
+// Save the card's on/off switch, interval (minutes → seconds) and the
+// device-replacement switch into global_config.
 async function saveStaticResConfig() {
     const enabled = !!document.getElementById('static-res-enabled')?.checked;
     const minutes = Math.max(5, parseInt(document.getElementById('static-res-interval')?.value, 10) || 15);
+    const autoReplace = document.getElementById('static-res-auto-replace')?.checked !== false;
     try {
         const r0 = await setupFetch('/setup/config');
         const prev = r0.ok ? (((await r0.json()).global_config || {}).static_ip_reservations || {}) : {};
         const r = await setupFetch('/setup/config', {
             method: 'POST',
-            body: JSON.stringify({ config: { static_ip_reservations: { ...prev, enabled, interval: minutes * 60 } } })
+            body: JSON.stringify({ config: { static_ip_reservations: { ...prev, enabled, interval: minutes * 60, auto_replace: autoReplace } } })
         });
         if (r.ok) {
             showToast(`Static host reservations ${enabled ? 'on' : 'off'} — applied on the next sync cycle.`, 'success');

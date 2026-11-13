@@ -1751,6 +1751,22 @@ class NwDiscoverySyncMixin:
         # Attribute IP-bearing records to tenants.
         buckets, dropped = await self._nw_attribute(ip_records)
         self._nw_remember_live_arp(buckets)
+        # Every MAC any device showed: the static reservations' device
+        # replacement waits until an old MAC has gone unseen for a day.
+        try:
+            from static_ip_reservations import note_mac_sightings
+            # Complete only if every configured device was polled: none
+            # errored, and each is one a connected spoke polls (a device
+            # on a disconnected spoke, or unbound next to bound ones, is not).
+            polled = {id(d) for sid in self._nw_spokes() for d in self._nw_devices_for_spoke(sid)}
+            unpolled = any(
+                isinstance(d, dict) and id(d) not in polled
+                for d in (self.state.system_state.get("global_config", {})
+                          .get("nw_devices", []) or []))
+            note_mac_sightings(self, [r.get("mac") for r in records],
+                               not (pull or {}).get("errors") and not unpolled)
+        except Exception as e:  # noqa: BLE001 — never break the cycle
+            logger.debug("static reservations: mac sightings not kept: %s", e)
         tids = list(buckets.keys())
         # Nothing to push: still refresh LLDP topology, log, and return empty results.
         if not tids and not mac_only:
