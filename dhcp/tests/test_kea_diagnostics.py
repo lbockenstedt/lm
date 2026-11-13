@@ -279,3 +279,86 @@ def test_recent_warnings_tail_the_journal_and_filter_here(monkeypatch):
     assert "-p" not in journal and "--since" not in journal
     assert [line.split(": ", 1)[1][:12] for line in result["last_errors"]] == [
         "WARN  [kea-d", "kea-ctrl-age"]
+
+
+def test_a_failed_journal_query_is_not_reported_as_a_kea_warning(monkeypatch):
+    mgr = KeaManager()
+    monkeypatch.setattr(mgr, "_unit_status", lambda unit: {
+        "ActiveState": "active", "SubState": "running",
+        "NRestarts": "0", "ExecMainStatus": "0", "error": "",
+    })
+
+    def run(cmd, timeout=5, limit=4000):
+        if cmd[0] == "journalctl" and "kea-dhcp4-server" in cmd:
+            return _result(ok=False, output="Failed to open journal: Permission denied",
+                           error="Failed to open journal: Permission denied")
+        return _result(output="configuration check successful")
+
+    monkeypatch.setattr(mgr, "_run_diag", run)
+    monkeypatch.setattr(mgr, "_rpc", lambda *a, **k: {})
+    result = mgr.diagnostics()
+    assert result["last_errors"] == []
+    assert result["journal_error"] == "Failed to open journal: Permission denied"
+
+
+def test_a_long_journal_keeps_its_newest_warning(monkeypatch):
+    """journalctl prints oldest first; trimming the output must not drop the newest lines."""
+    mgr = KeaManager()
+    monkeypatch.setattr(mgr, "_unit_status", lambda unit: {
+        "ActiveState": "active", "SubState": "running",
+        "NRestarts": "0", "ExecMainStatus": "0", "error": "",
+    })
+    old = "2026-11-12T10:00:00 kea kea-dhcp4[1]: INFO  [kea-dhcp4.packets] " + "x" * 250
+    newest = "2026-11-12T11:00:00 kea kea-dhcp4[1]: WARN  [kea-dhcp4.dhcpsrv] NEWEST"
+
+    def run(cmd, timeout=5, limit=4000):
+        if cmd[0] == "journalctl" and "kea-dhcp4-server" in cmd:
+            return _result(output="\n".join([old] * 299 + [newest])[:limit])
+        return _result(output="configuration check successful")
+
+    monkeypatch.setattr(mgr, "_run_diag", run)
+    monkeypatch.setattr(mgr, "_rpc", lambda *a, **k: {})
+    assert mgr.diagnostics()["last_errors"][-1].endswith("NEWEST")
+
+
+def test_a_failed_control_agent_journal_is_not_shown_as_its_log(monkeypatch):
+    mgr = KeaManager()
+    monkeypatch.setattr(mgr, "_unit_status", lambda unit: {
+        "ActiveState": "failed" if unit == "kea-ctrl-agent" else "active",
+        "SubState": "failed", "NRestarts": "0", "ExecMainStatus": "1", "error": "",
+    })
+
+    def run(cmd, timeout=5, limit=4000):
+        if cmd[0] == "journalctl":
+            return _result(ok=False, output="Failed to open journal: Permission denied",
+                           error="Failed to open journal: Permission denied")
+        return _result(output="configuration check successful")
+
+    monkeypatch.setattr(mgr, "_run_diag", run)
+    monkeypatch.setattr(mgr, "_rpc", lambda *a, **k: {})
+    result = mgr.diagnostics()
+    assert not [r for r in result["recommendations"] if "recent log" in r]
+    assert result["ca_recent_errors"] == []
+    assert result["journal_error"] == "Failed to open journal: Permission denied"
+    assert result["ca_journal_error"] == "Failed to open journal: Permission denied"
+
+
+def test_a_failed_control_agent_tail_does_not_mark_the_kea_journal_unavailable(monkeypatch):
+    mgr = KeaManager()
+    monkeypatch.setattr(mgr, "_unit_status", lambda unit: {
+        "ActiveState": "active", "SubState": "running",
+        "NRestarts": "0", "ExecMainStatus": "0", "error": "",
+    })
+
+    def run(cmd, timeout=5, limit=4000):
+        # Only the control-agent-only tail (no kea-dhcp4-server unit) fails.
+        if cmd[0] == "journalctl" and "kea-dhcp4-server" not in cmd:
+            return _result(ok=False, output="Failed to open journal: Permission denied",
+                           error="Failed to open journal: Permission denied")
+        return _result(output="configuration check successful")
+
+    monkeypatch.setattr(mgr, "_run_diag", run)
+    monkeypatch.setattr(mgr, "_rpc", lambda *a, **k: {})
+    result = mgr.diagnostics()
+    assert result["journal_error"] == ""
+    assert result["ca_journal_error"] == "Failed to open journal: Permission denied"

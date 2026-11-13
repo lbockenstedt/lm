@@ -467,7 +467,11 @@ def sweep_health(st, enabled, now):
         return "stopped"
     status = st.get("last_status")
     if not st.get("last_run_at"):
-        return "waiting"  # just enabled: the loop has not reached it yet
+        # Just enabled: waiting for the loop, unless it has been waiting too long.
+        since = st.get("waiting_since")
+        if since and now - float(since) >= _NW_SWEEP_STALLED_S:
+            return "stalled"
+        return "waiting"
     # Every tick stamps last_run_at, so an old stamp means the loop is not reaching it.
     age = now - float(st["last_run_at"])
     if age >= _NW_SWEEP_STALLED_S:
@@ -2966,7 +2970,10 @@ def register(app, hub, ctx):
             hub.state._mark_dirty()
             return {"status": "skipped", "reason": "no nw spoke connected"}
         # Run the gateway pass first; it does one batch per tick until finished.
-        gw = await _nw_gateway_sweep_step(tid, spoke_id)
+        try:
+            gw = await _nw_gateway_sweep_step(tid, spoke_id)
+        except Exception as e:
+            gw = {"status": "error", "reason": str(e)}
         if gw.get("status") == "ok":
             # One batch per tick: the host sweep waits until the gateway pass is done.
             st.update(last_status="gateway", last_error="", last_run_at=time.time())
@@ -2992,6 +2999,15 @@ def register(app, hub, ctx):
         # The tenant's prefixes split into leaves and supernets.
         leaves, supers = await _nw_netbox_prefix_split(hub, tid)
         if not leaves and not supers:
+            # A tenant with no NetBox mapping has nothing to sweep. A mapped
+            # tenant with no prefixes can't be told apart from NetBox being
+            # unreachable, so it stays an error.
+            scope = access.netbox_tenant_scope(hub, tid)
+            if not scope.get("tenant") and not scope.get("tenant_group"):
+                st.update(total=0, cursor=0, last_status="no-supernets",
+                          last_error="no NetBox tenant mapping", last_run_at=time.time())
+                hub.state._mark_dirty()
+                return {"status": "no-supernets"}
             raise RuntimeError("no NetBox prefixes for this tenant (NetBox unreachable, or none defined)")
         # The directed (6h) scan already covers its leaf prefixes (including every
         # /24 the gateway pass found) and the tenant's saved scan subnets: never
@@ -3304,7 +3320,12 @@ def register(app, hub, ctx):
         tid = _nw_caller_tenant(sess, tenant or None)
         # A copy of the progress, with the discovered list replaced by a count of hosts not in the
         # fleet.
-        st = dict(_sweep_state(hub, tid))
+        live = _sweep_state(hub, tid)
+        # An enabled sweep the loop has never reached starts its stall clock here.
+        if _sweep_enabled(hub, tid) and not live.get("last_run_at") and not live.get("waiting_since"):
+            live["waiting_since"] = time.time()
+            hub.state._mark_dirty()
+        st = dict(live)
         known = {str((d or {}).get("address", "")).strip()
                  for d in ((hub.state.system_state.get("global_config", {}) or {}).get("nw_devices") or [])
                  if isinstance(d, dict)}
@@ -3342,7 +3363,9 @@ def register(app, hub, ctx):
         if "enabled" in data:
             # A stopped sweep turned back on waits for its first tick, not "stalled".
             if data["enabled"] and not _sweep_enabled(hub, tid):
-                (gc.get("nw_sweep") or {}).get(tid, {}).pop("last_run_at", None)
+                prev = _sweep_state(hub, tid)
+                prev.pop("last_run_at", None)
+                prev["waiting_since"] = time.time()
             tmap = dict(gc.get("nw_tenant_cfg") or {})
             cur = dict(tmap.get(tid) or {})
             cur["sweep"] = {"enabled": bool(data["enabled"])}

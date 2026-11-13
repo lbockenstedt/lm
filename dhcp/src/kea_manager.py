@@ -2044,11 +2044,12 @@ class KeaManager:
         recent = self._run_diag([
             "journalctl", "-u", "kea-dhcp4-server", "-u", "kea-ctrl-agent",
             "-n", "300", "--no-pager", "-o", "short-iso",
-        ], limit=64000)
+        ], limit=None)
+        # A failed journalctl prints its own error, which is not a Kea warning.
         recent_errors = [
             line for line in recent["output"].splitlines()
             if _KEA_WARNING_RE.search(line)
-        ][-20:]
+        ][-20:] if recent["ok"] else []
         # kea-ctrl-agent's OWN tail, unfiltered by priority. When the CA unit
         # itself never came up (crash-looped, port already bound, bad JSON in
         # kea-ctrl-agent.conf), the failure is usually logged at "info"/"err"
@@ -2062,7 +2063,7 @@ class KeaManager:
         ca_recent_errors = [
             line for line in ca_recent["output"].splitlines()
             if line.strip() and "-- No entries --" not in line
-        ][-20:]
+        ][-20:] if ca_recent["ok"] else []
 
         # Build recommendations, starting with any repairs made.
         recommendations = []
@@ -2154,6 +2155,10 @@ class KeaManager:
                 "error": sockets["error"],
             },
             "last_errors": recent_errors,
+            # Each journal read reports its own failure, so a failed
+            # control-agent tail never hides a good Kea journal (or vice versa).
+            "journal_error": recent["error"],
+            "ca_journal_error": ca_recent["error"],
             "recommendations": recommendations,
         }
 
@@ -2272,7 +2277,7 @@ class KeaManager:
         Args:
             cmd: Command and arguments.
             timeout: Seconds before giving up.
-            limit: Characters of output to keep.
+            limit: Characters of output to keep (None keeps all of it).
 
         Returns:
             Dict with ok, exit_code, output (trimmed to ``limit`` chars) and error.

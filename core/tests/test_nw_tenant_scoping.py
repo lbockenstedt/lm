@@ -1046,6 +1046,13 @@ def test_sweep_reports_missing_prefixes_as_an_error_not_idle(monkeypatch, tmp_pa
     assert gc["nw_sweep"]["acme"]["last_status"] == "error"
 
 
+def test_sweep_of_a_tenant_without_a_netbox_mapping_is_idle_not_an_error(monkeypatch, tmp_path):
+    hub, gc = _sweep_hub(monkeypatch, tmp_path, lambda targets: [], prefix_list=())
+    monkeypatch.setattr(access_mod, "netbox_tenant_scope", lambda _hub, _tid: {})
+    asyncio.run(hub.run_nw_sweep_step("acme", force=True))
+    assert gc["nw_sweep"]["acme"]["last_status"] == "no-supernets"
+
+
 def test_sweep_stops_and_reports_a_failed_gateway_ping(monkeypatch, tmp_path):
     # The first ping (the gateway pass) fails; later host pings would answer.
     pings = []
@@ -1071,6 +1078,20 @@ def test_reenabled_sweep_waits_for_its_first_tick_instead_of_stalled(monkeypatch
     assert r.status_code == 200, r.text
     body = _client.get("/api/nw/sweep?tenant=acme", cookies={"lm_session": tok}).json()
     assert body["health"] == "waiting"
+
+
+def test_enabled_sweep_the_loop_never_reaches_turns_stalled(monkeypatch, tmp_path):
+    _client, hub = _build(monkeypatch, tmp_path)
+    gc = hub.state.system_state["global_config"]
+    gc["nw_tenant_cfg"] = {"acme": {"sweep": {"enabled": True}}}
+    tok = _mint(hub, "admin", tenants=[], admin=True)
+
+    def health():
+        return _client.get("/api/nw/sweep?tenant=acme", cookies={"lm_session": tok}).json()["health"]
+    assert health() == "waiting"
+    # Two hours on and the loop still has not ticked it.
+    gc["nw_sweep"]["acme"]["waiting_since"] -= 7200
+    assert health() == "stalled"
 
 
 def test_scheduled_scan_resumes_leaf_hosts_cut_off_by_the_cap(monkeypatch, tmp_path):
@@ -1100,3 +1121,15 @@ def test_scheduled_scan_resumes_leaf_hosts_cut_off_by_the_cap(monkeypatch, tmp_p
     assert scanned() == ["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"]
     # The next scan starts with the two hosts the cap left out.
     assert scanned() == ["10.0.0.5", "10.0.0.6", "10.0.0.1", "10.0.0.2"]
+
+
+def test_sweep_reports_a_gateway_pass_that_raises(monkeypatch, tmp_path):
+    from routes import nw as nw_routes
+    hub, gc = _sweep_hub(monkeypatch, tmp_path, lambda targets: targets, gateway_done=False)
+
+    def corrupt_cursor(*_a, **_k):
+        raise ValueError("bad gateway cursor")
+    monkeypatch.setattr(nw_routes, "gateway_take", corrupt_cursor)
+    asyncio.run(hub.run_nw_sweep_step("acme", force=True))
+    assert gc["nw_sweep"]["acme"]["last_status"] == "error"
+    assert "bad gateway cursor" in gc["nw_sweep"]["acme"]["last_error"]
