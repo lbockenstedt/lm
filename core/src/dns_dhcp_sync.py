@@ -579,6 +579,29 @@ class DnsDhcpSyncMixin:
         # Every spoke failed.
         raise RuntimeError("NetBox fetch failed on every IPAM spoke — " + " | ".join(errors))
 
+    @staticmethod
+    def _filters_key(filters: Dict[str, Any] = None) -> str:
+        """A stable key for a NetBox read's ``filters`` (handoff lookups)."""
+        return json.dumps(filters or {}, sort_keys=True)
+
+    def _hand_over_netbox_reads(self, reads: Dict[str, Any]) -> None:
+        """Keep ``{_filters_key: (pfx, ips)}`` reads for this tick's sync.
+
+        The static-reservation pass runs just before the sync and reads the
+        same tenant scopes; handing its reads over means the scope is read
+        once per tick, not twice (fleet rule 4.8).
+        """
+        self._netbox_read_handoff = (time.time(), reads)
+
+    def _take_netbox_reads(self) -> Dict[str, Any]:
+        """The reads handed over in the last 2 minutes, consumed once."""
+        # Take and clear, so a later tick never reuses them.
+        handoff = getattr(self, "_netbox_read_handoff", None)
+        self._netbox_read_handoff = None
+        if not handoff or time.time() - handoff[0] > 120:
+            return {}
+        return handoff[1]
+
     def _sync_scope(self, spoke_id):
         """NetBox read scope for one DHCP/DNS target spoke (tenant isolation).
 
@@ -790,6 +813,9 @@ class DnsDhcpSyncMixin:
         Hashes are kept per (side, scope); a failed fetch or push never
         latches a hash and never pushes an empty set for that scope.
         """
+        # Reads the static-reservation pass just made (taken first, so they
+        # are never left for a later tick).
+        handed_over = self._take_netbox_reads()
         # Nothing to do without NetBox or any target spoke.
         ipam = self.get_spoke_by_type("ipam")
         if not ipam:
@@ -812,6 +838,10 @@ class DnsDhcpSyncMixin:
         # Fetch NetBox data once per scope.
         fetched, fetch_errors = {}, {}
         for key, filters in scopes.items():
+            reused = handed_over.get(self._filters_key(filters))
+            if reused:
+                fetched[key] = reused
+                continue
             try:
                 fetched[key] = await self._netbox_prefixes_and_ips(filters)
             except Exception as e:  # noqa: BLE001

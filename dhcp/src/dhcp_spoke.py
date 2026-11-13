@@ -994,6 +994,11 @@ class DHCPSpoke(BaseSpoke):
         results = fan.get("results") or {}
         # Strict holds only when asked for and every node honoured it.
         strict = bool(payload.get("strict")) and bool(results)
+        # A configured member with no reply at all is a failed node too.
+        for member_id in getattr(self._transport, "member_ids", lambda: [])() or []:
+            if member_id not in results:
+                errors[member_id] = "no response"
+                strict = False
         # Record failed nodes and skip them.
         for member_id, reply in results.items():
             if not isinstance(reply, dict) or reply.get("status") != "SUCCESS":

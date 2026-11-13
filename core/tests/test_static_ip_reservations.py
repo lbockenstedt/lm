@@ -411,3 +411,15 @@ def test_a_structured_netbox_dhcp_status_is_not_reserved():
     plan = plan_static_reservations(_pfx(), _ips(row), [], [_static("10.20.0.50")])
     assert plan["reserve"] == []
     assert _reasons(plan, "skipped") == {"10.20.0.50": "netbox status is dhcp"}
+
+
+def test_pass_hands_unchanged_reads_to_the_sync_but_not_written_ones():
+    """A tenant the pass wrote to must be re-read by the sync; one it only
+    read is handed over so the sync does not read it again."""
+    key = DnsDhcpSyncMixin._filters_key({"tenant": "tenant-a"})
+    hub = _Hub(agent_addresses=_agent_static(mode="unknown"))
+    _run(hub)
+    assert hub.writes() == [] and key in hub._take_netbox_reads()
+    hub = _Hub(agent_addresses=_agent_static())
+    _run(hub)
+    assert hub.writes() and key not in hub._take_netbox_reads()

@@ -19,6 +19,9 @@ Candidates come from two places, per tenant:
   candidate also needs positive evidence: its IP must lie outside every Kea
   pool of its subnet (a DHCP client always gets a pool address, so a host
   outside the pools cannot be an offline DHCP client whose lease expired).
+  An agent's ``static`` is not pool-checked: a static host inside a pool is
+  the very clash this pass prevents, and a DHCP client of this Kea holds a
+  lease, which vetoes it anyway.
 
 Every candidate goes through ``plan_static_reservations``, which is
 deliberately conservative: it only marks an IP that NetBox already records in
@@ -32,7 +35,9 @@ skips the tenant rather than reading as "no leases").
 Config: ``global_config.static_ip_reservations`` ``{enabled: false,
 interval: 900}``; off until an operator turns it on, since it writes to NetBox
 and so to Kea. Status: ``GET /api/dns-dhcp/sync-status`` →
-``static_reservations``.
+``static_reservations``, cut to the viewer's tenant (``status_for_tenant``).
+NetBox reads for tenants the pass did not write to are handed to the same
+tick's sync (``_hand_over_netbox_reads``), so each scope is read once.
 
 This module is a **leaf**: stdlib plus sibling leaves only.
 
@@ -56,7 +61,7 @@ import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 # Tenant scoping, spoke ownership and MAC normalisation.
-from access import (get_netbox_spoke, netbox_tenant_scope, norm_mac,
+from access import (get_netbox_spoke, netbox_tenant_scope, norm_mac, same_tenant,
                     spoke_owner_tenant, tenant_is_shared,
                     tenant_shared_fallback_blocked, unwrap_spoke)
 # The one rule for "this prefix is a Kea scope".
@@ -309,7 +314,11 @@ def plan_static_reservations(pfx_data: Dict[str, Any], ips_data: Dict[str, Any],
             skipped.append({"ip": ip, "reason": "mac holds a lease"})
             continue
         # Step 7: a sweep-only host needs positive evidence — an IP outside
-        # every Kea pool (a DHCP client always holds a pool address).
+        # every Kea pool (a DHCP client always holds a pool address). An
+        # agent's "static" is host-level evidence and is NOT pool-checked: a
+        # static host inside a pool is exactly the clash this pass prevents,
+        # and a DHCP client of this Kea (even with an infinite lease) holds a
+        # lease, which step 6 already vetoes.
         if "agent" not in m["sources"]:
             kea = next((k for k in kea_nets if addr in k[0]), None)
             if kea is None or kea[1] is None:
@@ -475,6 +484,8 @@ async def _run_pass(hub, now: float) -> Dict[str, Any]:
     groups, _skipped = hub._scope_groups(hub._get_dhcp_spokes())
     ipam = get_netbox_spoke(hub)
     writes = 0
+    # NetBox reads still current after this pass, handed to the sync.
+    reads: Dict[str, Any] = {}
     for tid, candidates in sorted(by_tid.items()):
         # The tenant's NetBox scope; no mapping → never touch it.
         scope = netbox_tenant_scope(hub, tid)
@@ -498,6 +509,8 @@ async def _run_pass(hub, now: float) -> Dict[str, Any]:
         except Exception as e:  # noqa: BLE001
             totals["errors"].append({"tenant": tid, "error": f"netbox read: {e}"})
             continue
+        read_key = hub._filters_key(filters)
+        reads[read_key] = (pfx_data, ips_data)
         plan = plan_static_reservations(pfx_data, ips_data, leases, candidates, kea_subnets)
         totals["tenants"] += 1
         totals["skipped"] += len(plan["skipped"])
@@ -514,6 +527,8 @@ async def _run_pass(hub, now: float) -> Dict[str, Any]:
             if writes >= _MAX_WRITES_PER_PASS or not ipam or r.get("ip_id") is None:
                 break
             writes += 1
+            # A write (even a failed one) may change NetBox: the sync re-reads.
+            reads.pop(read_key, None)
             try:
                 res = unwrap_spoke(await hub.request_response(
                     ipam, "NETBOX_UPDATE_IP_ADDR",
@@ -531,8 +546,27 @@ async def _run_pass(hub, now: float) -> Dict[str, Any]:
             totals["reserved"].append({"tenant": tid, "ip": r["ip"],
                                        "mac": r["mac"], "source": r["source"]})
 
-    # Step 5: refresh cached IPs and record the pass.
+    # Step 5: hand unchanged reads to the sync, refresh cached IPs and record the pass.
+    hub._hand_over_netbox_reads(reads)
     if totals["reserved"]:
         hub.refresh_module_cache("netbox_ips")
     return hub._record_status("static_reservations",
                               status="error" if totals["errors"] else "ok", **totals)
+
+
+def status_for_tenant(status: Dict[str, Any], tid: Optional[str]) -> Dict[str, Any]:
+    """The ``static_reservations`` status as tenant ``tid`` may see it.
+
+    The pass is fleet-wide, so its reserved/conflict/error lists name every
+    tenant's IPs and MACs. ``tid`` None (a global admin who has not switched
+    into a tenant) sees it all; anyone else sees only ``tid``'s entries (none
+    for ``""``), and the fleet-wide counters are left out.
+    """
+    if tid is None or not isinstance(status, dict):
+        return status
+    # Keep only this tenant's rows; drop counters that span tenants.
+    out = {k: v for k, v in status.items() if k not in ("tenants", "skipped")}
+    for key in ("reserved", "conflicts", "errors"):
+        out[key] = [r for r in status.get(key) or []
+                    if isinstance(r, dict) and tid and same_tenant(r.get("tenant"), tid)]
+    return out

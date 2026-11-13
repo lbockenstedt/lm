@@ -57,18 +57,23 @@ def test_worker_strict_reply_errors_or_echoes_strict(monkeypatch):
 class _Transport:
     """Fan-out stand-in returning canned per-node replies."""
 
-    def __init__(self, results):
+    def __init__(self, results, members=None):
         self._results = results
+        self._members = members if members is not None else list(results)
+
+    def member_ids(self):
+        """The configured HA members."""
+        return list(self._members)
 
     async def fanout(self, command, data, timeout=20.0, member_ids=None):
         """Return the canned replies."""
         return {"results": self._results}
 
 
-def _ha(results, payload):
+def _ha(results, payload, members=None):
     """Run DHCPSpoke._ha_list over canned node replies."""
     spoke = object.__new__(DHCPSpoke)
-    spoke._transport = _Transport(results)
+    spoke._transport = _Transport(results, members)
     return asyncio.run(spoke._ha_list("KEAW_LIST_LEASES", payload, "leases"))
 
 
@@ -81,6 +86,9 @@ def test_ha_strict_only_when_every_node_honoured_it():
     down = {"status": "ERROR", "message": "lease read failed"}
     reply = _ha({"a": ok, "b": down}, {"strict": True})
     assert reply["strict"] is False and reply["member_errors"]
+    # A configured member missing from the fan-out results is not strict.
+    reply = _ha({"a": ok}, {"strict": True}, members=["a", "b"])
+    assert reply["strict"] is False and reply["member_errors"] == {"b": "no response"}
     # Non-strict callers see no new key.
     assert "strict" not in _ha({"a": ok}, {})
 
