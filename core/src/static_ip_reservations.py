@@ -362,12 +362,17 @@ def _sweep_candidates(hub, tid: str, now: float) -> List[Dict[str, Any]]:
     return out
 
 
-async def _agent_candidates(hub) -> Dict[str, List[Dict[str, Any]]]:
-    """``{tid: [candidate]}`` from connected agents bound to a real tenant.
+async def _agent_candidates(hub) -> Tuple[Dict[str, List[Dict[str, Any]]], set]:
+    """``({tid: [candidate]}, failed_tids)`` from connected agents bound to a
+    real tenant.
 
     Unbound and shared agents are skipped (their hosts have no single owning
-    tenant). Polls run at most ``_AGENT_CONCURRENCY`` at a time; an agent that
-    errors, times out or predates ``GET_HOST_ADDRESSING`` contributes nothing.
+    tenant). Polls run at most ``_AGENT_CONCURRENCY`` at a time. An agent that
+    predates ``GET_HOST_ADDRESSING`` contributes nothing, like a host with no
+    agent. An agent that errors or times out puts its tenant in
+    ``failed_tids``: it might have said ``dhcp`` or ``unknown`` for an address
+    the sweep also saw, so that tenant's sweep-only hosts wait for a pass
+    where every agent answered.
     """
     # Connected agents with an owning tenant.
     active = getattr(hub, "active_connections", None)
@@ -380,8 +385,8 @@ async def _agent_candidates(hub) -> Dict[str, List[Dict[str, Any]]]:
             agents.append((sid, tid))
     sem = asyncio.Semaphore(_AGENT_CONCURRENCY)
 
-    async def _poll(sid: str) -> List[Dict[str, Any]]:
-        """One agent's addresses, or [] on any failure."""
+    async def _poll(sid: str) -> Optional[List[Dict[str, Any]]]:
+        """One agent's addresses; [] for an older agent, None on failure."""
         # Bounded, best-effort read.
         async with sem:
             try:
@@ -389,20 +394,26 @@ async def _agent_candidates(hub) -> Dict[str, List[Dict[str, Any]]]:
                     sid, "GET_HOST_ADDRESSING", {}, timeout=_AGENT_TIMEOUT))
             except Exception as e:  # noqa: BLE001
                 logger.debug("static reservations: agent %s: %s", sid, e)
-                return []
-        if not isinstance(reply, dict) or reply.get("status") != "SUCCESS":
+                return None
+        if isinstance(reply, dict) and reply.get("status") == "SUCCESS":
+            return [a for a in reply.get("addresses") or [] if isinstance(a, dict)]
+        if isinstance(reply, dict) and "unknown agent command" in str(reply.get("message", "")).lower():
             return []
-        return [a for a in reply.get("addresses") or [] if isinstance(a, dict)]
+        return None
 
     # Poll and group by tenant.
     results = await asyncio.gather(*[_poll(sid) for sid, _ in agents])
     out: Dict[str, List[Dict[str, Any]]] = {}
+    failed = set()
     for (sid, tid), addresses in zip(agents, results):
+        if addresses is None:
+            failed.add(tid)
+            continue
         for a in addresses:
             out.setdefault(tid, []).append({
                 "ip": a.get("ip"), "mac": a.get("mac"),
                 "mode": a.get("mode") or "unknown", "source": "agent"})
-    return out
+    return out, failed
 
 
 async def _strict_read(hub, spokes: List[str], command: str,
@@ -470,13 +481,16 @@ async def reserve_static_hosts_once(hub, now: Optional[float] = None,
 async def _run_pass(hub, now: float) -> Dict[str, Any]:
     """The body of ``reserve_static_hosts_once`` (no throttle)."""
     # Step 1: gather candidates per real (non-shared) tenant.
-    by_tid = await _agent_candidates(hub)
+    by_tid, failed_tids = await _agent_candidates(hub)
     for tid in list((getattr(hub, "_nw_live_arp", None) or {}).keys()):
+        if tid in failed_tids:
+            continue
         by_tid.setdefault(tid, [])
         by_tid[tid].extend(_sweep_candidates(hub, tid, now))
     by_tid = {t: c for t, c in by_tid.items() if c and t and not tenant_is_shared(t)}
     totals = {"tenants": 0, "reserved": [], "conflicts": [], "skipped": 0,
-              "errors": []}
+              "errors": [{"tenant": t, "error": "agent poll failed; sweep hosts wait"}
+                         for t in sorted(failed_tids) if not tenant_is_shared(t)]}
     if not by_tid:
         return hub._record_status("static_reservations", status="ok", **totals)
 
@@ -527,8 +541,10 @@ async def _run_pass(hub, now: float) -> Dict[str, Any]:
             totals["conflicts"].append({"tenant": tid, **c})
         # Step 4: write the reservations, capped per pass.
         for r in plan["reserve"]:
-            if writes >= _MAX_WRITES_PER_PASS or not ipam or r.get("ip_id") is None:
+            if writes >= _MAX_WRITES_PER_PASS or not ipam:
                 break
+            if r.get("ip_id") is None:
+                continue
             writes += 1
             # A write (even a failed one) may change NetBox: the sync re-reads.
             reads.pop(read_key, None)

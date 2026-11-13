@@ -445,3 +445,50 @@ def test_pass_reads_and_writes_the_same_ipam_spoke():
     assert hub.writes() == []
     assert not [1 for s, _c, _p in hub.log if s == "netbox-2"]
     assert st["errors"] and "netbox read" in st["errors"][0]["error"]
+
+
+def _sweep_hub_with_agent_reply(reply, now):
+    """Tenant t-b: a fresh sweep host plus one bound agent answering ``reply``."""
+    class _AgentReply(_Hub):
+        async def request_response(self, spoke_id, command, payload, timeout=30.0):
+            if command == "GET_HOST_ADDRESSING":
+                self.log.append((spoke_id, command, payload))
+                if isinstance(reply, Exception):
+                    raise reply
+                return {"payload": {"data": reply}}
+            return await super().request_response(spoke_id, command, payload, timeout)
+
+    seen = {"t-b": {"10.20.0.50": {"address": "10.20.0.50", "last_seen": now - 60}}}
+    fresh = {"t-b": {"at": now - 60, "macs": {"10.20.0.50": MAC_A}}}
+    return _AgentReply(spoke_tenants={"agent-1": "t-b"}, seen=seen, live_arp=fresh)
+
+
+def test_a_failed_agent_poll_holds_back_its_tenants_sweep_hosts():
+    """The agent might have said dhcp/unknown for the swept address, so a
+    timeout or error must not read as "the agent has nothing to say"."""
+    now = 1_000_000.0
+    for reply in (TimeoutError("no reply"), {"status": "ERROR", "message": "ip failed"}):
+        hub = _sweep_hub_with_agent_reply(reply, now)
+        st = _run(hub, now)
+        assert hub.writes() == []
+        assert st["errors"] == [{"tenant": "t-b", "error": "agent poll failed; sweep hosts wait"}]
+    # An agent too old to know the command is like a host with no agent.
+    hub = _sweep_hub_with_agent_reply(
+        {"status": "ERROR", "message": "Unknown agent command 'GET_HOST_ADDRESSING'. "}, now)
+    st = _run(hub, now)
+    assert [r["source"] for r in st["reserved"]] == ["sweep"]
+
+
+def test_a_reservation_without_a_netbox_id_does_not_stop_the_rest(monkeypatch):
+    import static_ip_reservations as sir
+    real = sir.plan_static_reservations
+
+    def _plan(*args, **kwargs):
+        plan = real(*args, **kwargs)
+        plan["reserve"] = [dict(plan["reserve"][0], ip_id=None, ip="10.20.0.49")] + plan["reserve"]
+        return plan
+
+    monkeypatch.setattr(sir, "plan_static_reservations", _plan)
+    hub = _Hub(agent_addresses=_agent_static())
+    _run(hub)
+    assert [w["ip_id"] for w in hub.writes()] == [7]

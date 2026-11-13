@@ -1079,10 +1079,13 @@ def test_host_addressing_reports_static_dhcp_and_unknown(monkeypatch):
          "linkinfo": {"info_kind": "bridge"},
          "addr_info": [{"family": "inet", "local": "10.50.0.2", "scope": "global"}]},
     ]
-    monkeypatch.setattr(
-        agent_spoke.subprocess, "run",
-        lambda *args, **kwargs: types.SimpleNamespace(
-            returncode=0, stdout=json.dumps(rows)))
+    argv = []
+
+    def _run(cmd, *args, **kwargs):
+        argv.append(cmd)
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps(rows))
+
+    monkeypatch.setattr(agent_spoke.subprocess, "run", _run)
 
     assert agent_spoke._host_addressing() == [
         {"ip": "10.20.0.50", "mac": "02:00:00:00:00:0a", "mode": "static",
@@ -1094,6 +1097,8 @@ def test_host_addressing_reports_static_dhcp_and_unknown(monkeypatch):
         {"ip": "10.50.0.2", "mac": "02:00:00:00:00:0f", "mode": "static",
          "interface": "vmbr0"},
     ]
+    # linkinfo (the link kind) is only in ip's detailed output.
+    assert argv == [["ip", "-j", "-d", "-4", "address", "show", "up"]]
     # A failing "ip" command reports nothing rather than guessing.
     monkeypatch.setattr(
         agent_spoke.subprocess, "run",

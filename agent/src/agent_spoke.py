@@ -608,7 +608,7 @@ def _local_service_addresses() -> list:
     # Plus every global IPv4 address from "ip -j".
     try:
         result = subprocess.run(
-            ["ip", "-j", "-d", "-4", "address", "show", "up"],
+            ["ip", "-j", "-4", "address", "show", "up"],
             capture_output=True, text=True, check=False, timeout=10)
         if result.returncode == 0:
             for interface in json.loads(getattr(result, "stdout", "") or "[]"):
@@ -656,7 +656,7 @@ def _host_addressing() -> list:
     # Read every up interface's IPv4 addresses as JSON.
     try:
         result = subprocess.run(
-            ["ip", "-j", "-4", "address", "show", "up"],
+            ["ip", "-j", "-d", "-4", "address", "show", "up"],
             capture_output=True, text=True, check=False, timeout=10)
         if result.returncode != 0:
             return []
