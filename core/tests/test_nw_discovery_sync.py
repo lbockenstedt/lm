@@ -223,6 +223,29 @@ async def test_pull_merges_mac_table_and_arp_into_one_record():
     assert r05["ip"] == "10.20.0.5"   # IP filled from the ARP sighting
 
 
+# ── full cycle: MAC sightings for the static reservations' device replacement ─
+
+@pytest.mark.asyncio
+async def test_a_cycle_with_a_device_on_a_disconnected_spoke_is_not_a_full_sweep():
+    # Every device polled: the old-MAC watch runs from this cycle.
+    h = _hub_with_responses()
+    await h.run_nw_discovery_sync_all()
+    assert h._static_res_macs["since"] is not None
+    assert "aa:bb:cc:dd:ee:05" in h._static_res_macs["seen"]
+    # A device bound to an nw spoke that is not connected was never polled.
+    h = _hub_with_responses()
+    h.state.system_state["global_config"]["nw_devices"].append(
+        {"id": "edge-sw2", "name": "edge-sw2", "spoke_id": "nw-2"})
+    await h.run_nw_discovery_sync_all()
+    assert h._static_res_macs["since"] is None
+    # An unbound device next to bound ones is polled by no spoke either.
+    h = _hub_with_responses()
+    h.state.system_state["global_config"]["nw_devices"].append(
+        {"id": "edge-sw3", "name": "edge-sw3"})
+    await h.run_nw_discovery_sync_all()
+    assert h._static_res_macs["since"] is None
+
+
 # ── full cycle: per-tenant (IP) + unscoped (MAC-only) pushes ─────────────────
 
 @pytest.mark.asyncio
