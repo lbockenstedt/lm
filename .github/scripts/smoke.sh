@@ -53,6 +53,12 @@ done
 
 root="$(git rev-parse --show-toplevel)" || exit 2
 cd "$root" || exit 2
+# A pre-push hook in a git worktree exports an absolute GIT_DIR. Every step
+# below inherits it, so the promotion self-test's scratch `git init`, commit,
+# `branch -M main` and `push origin` ran against the real repo instead. From
+# here git finds the repo from the working directory, as it would in CI.
+# shellcheck disable=SC2046 # one variable name per word
+unset $(git rev-parse --local-env-vars)
 # The repo name comes from the origin remote, so a git worktree in a directory
 # with another name (e.g. wt-feature) still runs that repo's steps; fall back
 # to the directory name when there is no origin.
