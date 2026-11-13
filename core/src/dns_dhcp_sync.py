@@ -797,9 +797,12 @@ class DnsDhcpSyncMixin:
         ``self._dhcp_delivered`` ends up holding the DHCP scope keys whose Kea
         now has this tick's NetBox data (pushed, or unchanged since the last
         push); the static-reservations rollback undoes only the other scopes.
+        ``self._dhcp_delivered_at`` is when this sync started, so a "Use new
+        MAC" replacement is judged only by a sync that read NetBox after it.
         """
         # Nothing delivered yet; an early return or a raise leaves it empty.
         self._dhcp_delivered = set()
+        self._dhcp_delivered_at = time.time()
         # Nothing to do without NetBox or any target spoke.
         ipam = self.get_spoke_by_type("ipam")
         if not ipam:

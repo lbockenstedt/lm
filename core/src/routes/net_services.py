@@ -1774,6 +1774,35 @@ def register(app, hub, ctx):
             },
         }
 
+    @app.post("/setup/static-reservations/use-new-mac")
+    async def static_reservations_use_new_mac(request: Request, tenant: str = None):
+        """The "Use new MAC" button on System → Sync: move one reservation the
+        last pass showed as "different MAC at this IP" to the new MAC now
+        (``static_ip_reservations.use_new_mac``; the spoke keeps every
+        safety check). Global admins only, like the sync settings, and only
+        inside the tenant they have switched into. Body ``{ip, old_mac,
+        new_mac}``; 409 with the reason when it cannot be done."""
+        from static_ip_reservations import use_new_mac
+        # Admins only, inside a tenant.
+        if not _is_admin(_session_user(request)):
+            raise HTTPException(status_code=403, detail="Admin access required")
+        tid = _effective_tenant(request, tenant)
+        if not tid:
+            raise HTTPException(status_code=400, detail="Switch into a tenant first")
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = None
+        if not isinstance(body, dict) or not all(
+                isinstance(body.get(k), str) and body.get(k) for k in ("ip", "old_mac", "new_mac")):
+            raise HTTPException(status_code=400, detail="ip, old_mac and new_mac are required")
+        # The hub relays; the spoke checks and writes.
+        res = await use_new_mac(app.state.hub, tid, body["ip"], body["old_mac"],
+                                body["new_mac"])
+        if res.get("status") != "ok":
+            raise HTTPException(status_code=409, detail=res.get("error") or "cannot replace")
+        return res
+
     # ─── Hurricane Electric (HE.NET) public-DNS API ───────────────────────────
     # The public-address-space analogue of the DNS (Unbound) routes above:
     # relays HENET_* commands to the ``henet`` spoke via _relay_spoke (same

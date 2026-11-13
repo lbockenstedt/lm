@@ -84,8 +84,10 @@ class _Hub(DnsDhcpSyncMixin):
         return {"ipam": "netbox-1", "dhcp": "dhcp-1"}.get(module_type)
 
     def get_all_spokes_by_type(self, module_type):
-        return {"agent": ["agent-1", "agent-2"], "dhcp": list(self._dhcp),
-                "ipam": ["netbox-1"]}.get(module_type, [])
+        # Connected spokes only, like the real hub.
+        return [s for s in {"agent": ["agent-1", "agent-2"], "dhcp": list(self._dhcp),
+                            "ipam": ["netbox-1"]}.get(module_type, [])
+                if s in self.active_connections]
 
     def refresh_module_cache(self, key):
         self.refreshed.append(key)
@@ -142,7 +144,8 @@ def test_pass_relays_each_tenants_inputs_in_one_command_without_tenant_ids():
     assert payload["tenants"] == [{
         "ref": "0", "filters": {"tenant": "tenant-a"},
         "agent_addresses": [{"ip": "10.20.0.50", "mac": MAC_A, "mode": "static"}],
-        "sweep": [], "kea": "k0"}]
+        "sweep": [], "kea": "k0", "replace_watch": []}]
+    assert payload["auto_replace"] is True
     assert payload["kea"]["k0"]["leases"] == []
     assert payload["kea"]["k0"]["subnets"][0]["subnet"] == "10.20.0.0/24"
     assert payload["max_writes"] == 25
