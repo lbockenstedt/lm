@@ -41,6 +41,35 @@ Talks to the LDAP server via `python-ldap` (`ldap.initialize` + `simple_bind_s`)
 
 `GET_VERSION`, `UPDATE_CONFIG` (re-init `LdapManager`), `INSTALL_CERT` (hub-brokered Let's Encrypt cert install — writes leaf/key/CA under `/etc/ldap/tls`, points slapd `cn=config` `olcTLSCertificateFile`/`olcTLSCertificateKeyFile`/`olcTLSCACertificateFile` at them via `ldapmodify -Y EXTERNAL -H ldapi:///`, restarts `slapd`; root only), `LIST_OUS`, `CREATE_OU`, `UPDATE_OU` (modrdn rename), `LIST_USERS`, `CREATE_USER` (`inetOrgPerson`; `secrets.token_urlsafe(16)` random password if none, returned), `UPDATE_USER` (modify cn/sn/givenName/mail + optional uid rename), `LIST_GROUPS` (`groupOfNames` or `posixGroup`), `CREATE_GROUP` (`groupOfNames` requires ≥1 member → seeded with base DN), `UPDATE_GROUP` (cn modrdn), `ADD_USER_TO_GROUP`, `REMOVE_USER_FROM_GROUP`, `SET_PASSWORD` (`passwd_s` with `modify_s` userPassword fallback), `DELETE_ENTITY`, `SEARCH_USERS` (filter on uid/cn/mail/sn/givenName/dNSHostName, escapes `\*()`, tags `source="ldap"`, type `user`/`computer`).
 
+## Account locations: LDAP, Entra and AD
+
+The Directory module is meant to manage every account a tenant uses from one
+place. Accounts live in one of three locations:
+
+| Location | Where it is shown | Sign-in |
+| :--- | :--- | :--- |
+| **LDAP** (most accounts) | Directory → Users, organised in OUs | Local password in LDAP |
+| **LDAP → Entra** (linked) | Directory → Users, Auth = Entra, with its UPN | LDAP bind with `userPassword: {SASL}<upn>`; saslauthd checks the password against Entra (ROPC). No local password is kept |
+| **Entra only** | Directory → Entra, the tenant's `LM-<tenant>-*` groups | Entra |
+| **Active Directory** | Not shown yet (read-only spoke stub) | AD |
+
+A linked LDAP user is the link: its UPN is stored in the `{SASL}` marker and
+returned as `upn` with `auth_mode: entra` in the tenant's user list. Linked sign-in works
+only for cloud-only Entra accounts with no MFA or Conditional Access prompt,
+and fails while Entra is unreachable.
+
+**Not built yet** (next phases):
+
+- **Link status.** Mark a linked user whose UPN is not one of the tenant's
+  Entra accounts as a broken link, by checking it against the cached Entra
+  list (no extra Graph calls).
+- **Link / unlink an existing user**, and **import** an Entra account as a
+  linked LDAP user. Linking removes the local password.
+- **AD in the hub and WebUI:** push the `ad` block to the spoke (with
+  `bind_password` in the Credential Vault), relay `AD_*` reads, and show AD
+  accounts in the Directory. Which tenant owns an AD connection is still to
+  be decided.
+
 ## OUs inside a tenant
 
 Tenant admins organise users into OUs (folders) below the tenant's
@@ -133,6 +162,27 @@ Without SSO the list is empty with `configured: false` and writes return 503.
 
 All routes take the tenant like the LDAP routes (`tenant_id`; only an admin may
 name another tenant) and need the tenant-admin tier to write.
+
+**WebUI: Directory → Entra.** The left panel lists the tenant's Entra groups
+(**All accounts** plus each `LM-<tenant>-*` group with its member count);
+pick one to filter the table. A **cached** badge next to the heading means
+the list is more than 5 minutes old (hover for when it was last read, and
+whether Entra could not be refreshed). **+ Account** opens a form for the UPN, display
+name, password (leave it blank to have one generated) and the groups to
+join. A generated password is shown above the table until you click
+**Done**; if you leave or reload the tab first, it is shown again when you
+next open Directory → Entra for that tenant (it is kept in the page's memory
+only, so a browser reload loses it). If you leave while the account is still
+being created, a toast says so and the password is shown when you next open
+Directory → Entra for that tenant (several such passwords are shown one
+after another, each after **Done**); it also stays shown if the list then
+fails to load. While a password is shown, **+ Account** and **+ Group** are
+disabled until you click **Done**. **+ Group** creates `LM-<tenant>-<name>`;
+the panel's **Delete** removes the picked group (its accounts stay). Each
+row has **+ Group** (add to one of the tenant's groups), or **Remove** while
+a group is picked, and **Delete**; Remove and both Deletes ask for
+confirmation first. Write controls appear only for tenant admins. When Entra
+is not set up (Settings → Single sign-on) the tab says so.
 
 ## Active Directory (read-only stub)
 

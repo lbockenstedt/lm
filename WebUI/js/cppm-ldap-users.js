@@ -675,11 +675,14 @@ function _ldapTenantQuery() {
 let _ldapLoadSeq = 0;
 
 async function loadLDAPData(subMenu) {
-    subMenu = (subMenu === 'Groups') ? 'Groups' : 'Users';
+    subMenu = ['Groups', 'Entra'].includes(subMenu) ? subMenu : 'Users';
     const headEl = document.getElementById('ldap-table-head');
     const bodyEl = document.getElementById('ldap-table-body');
     if (!headEl || !bodyEl) return;
     const seq = ++_ldapLoadSeq;
+    // Any new load hides the Entra subview (its open form is dropped; a shown
+    // one-time password goes back to its in-memory queue until Done).
+    lmViews.directoryHideEntra?.();
 
     await ensureLDAPTenants();
     if (seq !== _ldapLoadSeq) return;
@@ -692,8 +695,15 @@ async function loadLDAPData(subMenu) {
     const canWrite = isAdmin() || isTenantAdmin();
 
     try {
-        // Groups have no OU tree; hide it before the fetch so a failed fetch can't leave it up.
-        if (subMenu === 'Groups') lmViews.directoryHideOus?.();
+        // Groups and Entra have no OU tree; hide it before the fetch so a failed fetch can't leave it up.
+        if (subMenu !== 'Users') lmViews.directoryHideOus?.();
+        // Entra accounts and groups are drawn by js/views/directory-entra.js.
+        if (subMenu === 'Entra') {
+            headEl.innerHTML = ['UPN', 'Name', 'Status', 'Groups', 'Actions']
+                .map(h => `<th class="px-4 py-3 font-bold">${h}</th>`).join('');
+            await lmViews.directoryEntra({ tenant, canWrite, isCurrent: () => seq === _ldapLoadSeq });
+            return;
+        }
         const endpoint = (subMenu === 'Groups' ? '/api/ldap/groups' : '/api/ldap/users') + _ldapTenantQuery();
         const headers = (subMenu === 'Groups')
             ? ['Group', 'Members', 'Actions']
@@ -741,6 +751,8 @@ function editLDAPUser(uid) {
 }
 
 function showLDAPModal(subMenu, editItem) {
+    // On the Entra subview "+ Add" opens its inline account form instead.
+    if (subMenu === 'Entra') { lmViews.directoryEntraAdd?.(); return; }
     subMenu = (subMenu === 'Groups') ? 'Groups' : 'Users';
     const editing = !!editItem;
     const modal = document.createElement('div');
