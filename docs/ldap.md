@@ -41,6 +41,35 @@ Talks to the LDAP server via `python-ldap` (`ldap.initialize` + `simple_bind_s`)
 
 `GET_VERSION`, `UPDATE_CONFIG` (re-init `LdapManager`), `INSTALL_CERT` (hub-brokered Let's Encrypt cert install — writes leaf/key/CA under `/etc/ldap/tls`, points slapd `cn=config` `olcTLSCertificateFile`/`olcTLSCertificateKeyFile`/`olcTLSCACertificateFile` at them via `ldapmodify -Y EXTERNAL -H ldapi:///`, restarts `slapd`; root only), `LIST_OUS`, `CREATE_OU`, `UPDATE_OU` (modrdn rename), `LIST_USERS`, `CREATE_USER` (`inetOrgPerson`; `secrets.token_urlsafe(16)` random password if none, returned), `UPDATE_USER` (modify cn/sn/givenName/mail + optional uid rename), `LIST_GROUPS` (`groupOfNames` or `posixGroup`), `CREATE_GROUP` (`groupOfNames` requires ≥1 member → seeded with base DN), `UPDATE_GROUP` (cn modrdn), `ADD_USER_TO_GROUP`, `REMOVE_USER_FROM_GROUP`, `SET_PASSWORD` (`passwd_s` with `modify_s` userPassword fallback), `DELETE_ENTITY`, `SEARCH_USERS` (filter on uid/cn/mail/sn/givenName/dNSHostName, escapes `\*()`, tags `source="ldap"`, type `user`/`computer`).
 
+## Account locations: LDAP, Entra and AD
+
+The Directory module is meant to manage every account a tenant uses from one
+place. Accounts live in one of three locations:
+
+| Location | Where it is shown | Sign-in |
+| :--- | :--- | :--- |
+| **LDAP** (most accounts) | Directory → Users, organised in OUs | Local password in LDAP |
+| **LDAP → Entra** (linked) | Directory → Users, Auth = Entra, with its UPN | LDAP bind with `userPassword: {SASL}<upn>`; saslauthd checks the password against Entra (ROPC). No local password is kept |
+| **Entra only** | Directory → Entra, the tenant's `LM-<tenant>-*` groups | Entra |
+| **Active Directory** | Not shown yet (read-only spoke stub) | AD |
+
+A linked LDAP user is the link: its UPN is stored in the `{SASL}` marker and
+returned as `upn` with `auth_mode: entra` in the tenant's user list. Linked sign-in works
+only for cloud-only Entra accounts with no MFA or Conditional Access prompt,
+and fails while Entra is unreachable.
+
+**Not built yet** (next phases):
+
+- **Link status.** Mark a linked user whose UPN is not one of the tenant's
+  Entra accounts as a broken link, by checking it against the cached Entra
+  list (no extra Graph calls).
+- **Link / unlink an existing user**, and **import** an Entra account as a
+  linked LDAP user. Linking removes the local password.
+- **AD in the hub and WebUI:** push the `ad` block to the spoke (with
+  `bind_password` in the Credential Vault), relay `AD_*` reads, and show AD
+  accounts in the Directory. Which tenant owns an AD connection is still to
+  be decided.
+
 ## OUs inside a tenant
 
 Tenant admins organise users into OUs (folders) below the tenant's
