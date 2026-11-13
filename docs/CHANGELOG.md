@@ -12,6 +12,17 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ## Week of 2026-11-09
 
+### Firewalls
+
+- **Both firewalls of an HA pair now work from one spoke.** When two
+  firewalls were bound to the same spoke, only the first was configured, and
+  every page and change for the second (impairments included) ran on the
+  first. Each firewall now gets its own connection and cache on the spoke.
+  An impairment is reported as added only when the firewall confirmed it.
+  A spoke with no firewall bound no longer borrows another firewall's
+  settings; bind each firewall to its spoke in Setup → Firewalls.
+  See [opnsense](opnsense.md).
+
 ### DHCP
 
 - **Static hosts are reserved automatically.** When a tenant's agent reports

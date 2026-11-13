@@ -138,7 +138,8 @@ def register(app, hub, ctx):
 
     async def _push_record(prod, record):
         """Push a record's config to its bound spoke when connected. Mirrors each
-        product's ``/setup`` push: firewall → UPDATE_CONFIG(record); nw → the
+        product's ``/setup`` push: firewall → the spoke's whole firewall list
+        (hub.opn_config_for_spoke, as on reconnect); nw → the
         bound fleet slice; instance → UPDATE_CONFIG(payload_fn(record)); dns/dhcp
         → save-only (no push). Returns True when a message was sent."""
         # Only push when the record is bound to a spoke that is connected right now.
@@ -148,11 +149,11 @@ def register(app, hub, ctx):
         # The product's push strategy decides what gets sent.
         mode = prod.get("push")
         if mode == "firewall":
-            # Overlay any Credential Vault api_key/api_secret just before the
-            # push so the plaintext lives only in the vault, not in
-            # global_config (mirrors the nw/instance branches below).
-            record = await instance_vault.overlay(hub, record, prod["key"])
-            await hub.send_to_spoke(_hub_msg(spoke_id, "UPDATE_CONFIG", record))
+            # Every firewall bound to the spoke (e.g. both boxes of an HA
+            # pair), vault secrets resolved; sending only this record would
+            # leave the spoke with one box until it reconnects.
+            config = await hub.opn_config_for_spoke(spoke_id)
+            await hub.send_to_spoke(_hub_msg(spoke_id, "UPDATE_CONFIG", config))
             return True
         # Network devices: send the spoke its whole device slice.
         if mode == "nw":
@@ -402,7 +403,12 @@ def register(app, hub, ctx):
                 instance_vault.strip_inline_secrets(rec, _prod["key"])
                 _save(_prod, _store(_prod))
                 # Push the updated config to the (possibly new) bound spoke.
-                pushed = await _push_record(_prod, rec)
+                # Moved off a spoke: the old one is re-sent its list (as on
+                # reconnect), and an unbind has no new spoke to push to.
+                moved = _prod.get("push") == "firewall" and old_spoke and old_spoke != rec.get("spoke_id")
+                pushed = True if moved and not rec.get("spoke_id") else await _push_record(_prod, rec)
+                if moved:
+                    pushed = await _push_record(_prod, {"spoke_id": old_spoke}) and pushed
                 # If the record moved off a role sub-spoke, unload that role when nothing else uses
                 # it.
                 if route in PRODUCT_ROLE and old_spoke and old_spoke != rec.get("spoke_id"):
@@ -431,9 +437,11 @@ def register(app, hub, ctx):
             records = [r for r in _store(_prod)
                        if not (isinstance(r, dict) and r.get("id") == rid)]
             _save(_prod, records)
-            # nw: re-push the (now-smaller) fleet so the bound spoke drops it.
+            # nw/firewall: re-push the (now-smaller) list so the bound spoke drops it.
+            # (nw has done this since before; its unbound fallback is why a nw
+            # move is not re-pushed to the old spoke as a firewall move is.)
             pushed = False
-            if _prod.get("push") == "nw" and spoke_id and hub._primary_key(spoke_id) in hub.active_connections:
+            if _prod.get("push") in ("nw", "firewall") and spoke_id and hub._primary_key(spoke_id) in hub.active_connections:
                 pushed = await _push_record(_prod, {"spoke_id": spoke_id})
             # Unload the role from the spoke if no remaining record still uses it.
             if route in PRODUCT_ROLE and spoke_id:
