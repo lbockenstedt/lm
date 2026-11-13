@@ -1,8 +1,8 @@
 """Hardware-serial stitching: matcher, junk-serial rejection and hub refresh."""
 from types import SimpleNamespace
 
-from hw_serial_links import (controller_link_for, match_links, normalize_serial,
-                             refresh_hw_serial_links)
+from hw_serial_links import (HW_HEALTH_STALE_S, controller_link_for, hw_health_for_nodes,
+                             match_links, normalize_serial, refresh_hw_serial_links)
 
 
 def test_normalize_rejects_junk_and_vm_serials():
@@ -85,3 +85,46 @@ def test_refresh_links_agent_host():
     hub = _hub([dev], [], agents={"g1": {"hostname": "pve1", "hw_serial": "CZ12345678"}})
     refresh_hw_serial_links(hub, {"c1": "cz12345678"})
     assert dev["host_link"] == {**dev["host_link"], "kind": "agent", "id": "g1", "name": "pve1"}
+
+
+def _ilo(i, node, tenant="acme", kind="agent"):
+    return {"id": i, "name": "ilo-" + node, "address": "192.0.2.10", "object_type": "ipmi",
+            "tenant_id": tenant, "host_link": {"kind": kind, "id": "g1", "name": node + ".lab"}}
+
+
+def test_hw_health_follows_the_serial_link_to_the_node():
+    health = {"overall": "failed", "source": "snmp", "polled_at": 1000.0,
+              "components": {"memory": [{"name": "DIMM 3", "condition": "failed"}]}}
+    hub = _hub([_ilo("c1", "pve1"), _ilo("c2", "nas", kind="truenas"),
+                {"id": "sw", "object_type": "cx_switch", "host_link": {"kind": "agent", "name": "pve2"}}], [])
+    hub.nw_device_cache = {"c1": {"hw_health": health}}
+    out = hw_health_for_nodes(hub, ["PVE1", "pve2", "nas"], now=1000.0 + 60)
+    assert set(out) == {"PVE1"}
+    assert out["PVE1"]["controller"] == {"id": "c1", "name": "ilo-pve1", "address": "192.0.2.10"}
+    assert out["PVE1"]["health"]["overall"] == "failed" and "stale" not in out["PVE1"]
+    assert hw_health_for_nodes(hub, ["pve1"], now=1000.0 + HW_HEALTH_STALE_S + 1)["pve1"]["stale"]
+    assert hw_health_for_nodes(hub, ["pve1"], visible=lambda t: t == "other") == {}
+
+
+def test_hw_health_linked_but_not_reported_and_error_states():
+    hub = _hub([_ilo("c1", "pve1"), _ilo("c2", "pve2")], [])
+    hub.nw_device_cache = {"c2": {"hw_health": {"error": "SNMP timeout", "error_at": 5.0}}}
+    out = hw_health_for_nodes(hub, ["pve1", "pve2"])
+    assert out["pve1"]["health"] is None and "error" not in out["pve1"]
+    assert out["pve2"]["health"] is None and out["pve2"]["error"] == "SNMP timeout"
+
+
+def test_hw_health_with_components_but_no_overall_is_still_a_reading():
+    hub = _hub([_ilo("c1", "pve1")], [])
+    hub.nw_device_cache = {"c1": {"hw_health": {"components": {"fans": [{"name": "Fan 1", "condition": "ok"}]}}}}
+    assert hw_health_for_nodes(hub, ["pve1"])["pve1"]["health"]["components"]["fans"]
+
+
+def test_hw_health_bad_polled_at_spoils_only_that_node():
+    hub = _hub([_ilo("c1", "pve1"), _ilo("c2", "pve2")], [])
+    hub.nw_device_cache = {"c1": {"hw_health": {"overall": "ok", "polled_at": "soon"}},
+                           "c2": {"hw_health": {"overall": "failed", "polled_at": 10 ** 9 - 60}}}
+    got = hw_health_for_nodes(hub, ["pve1", "pve2"], now=10 ** 9)
+    # Age unknown is flagged like stale; the other node is untouched.
+    assert got["pve1"]["health"]["overall"] == "ok" and got["pve1"]["stale"] is True
+    assert got["pve2"]["health"]["overall"] == "failed" and "stale" not in got["pve2"]

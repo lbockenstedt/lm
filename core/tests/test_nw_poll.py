@@ -188,3 +188,19 @@ def test_poll_nw_device_unknown_device_errors():
     res = asyncio.run(hub.poll_nw_device("does-not-exist"))
     assert res["status"] == "ERROR"
     assert "not configured" in res["message"]
+
+def test_poll_nw_device_passes_ilo_hardware_health_through_only_when_sent():
+    """POLL NOW hands the spoke's ``hw_health`` on to the cache; an older spoke
+    that sends none adds no key, so the cached reading is not blanked."""
+    device = {"id": "gw1", "name": "core-gw", "object_type": "gateway",
+              "address": "10.20.0.1", "spoke_id": "nw-1"}
+    health = {"overall": "ok", "source": "snmp", "polled_at": 1.0, "components": {}}
+    resp = _poll_response()
+    resp["payload"]["data"]["data"]["hw_health"] = health
+    responses = {("nw-1", "NW_POLL"): resp,
+                 ("netbox-1", "NETBOX_GET_PREFIXES"): _prefixes_payload(),
+                 ("netbox-1", "NETBOX_SYNC_NW_DEVICE"): _sync_nw_device_ok()}
+    hub = _PollHub(global_config=_global_config(device), responses=responses)
+    assert asyncio.run(hub.poll_nw_device("gw1"))["hw_health"] == health
+    responses[("nw-1", "NW_POLL")] = _poll_response()
+    assert "hw_health" not in asyncio.run(hub.poll_nw_device("gw1"))

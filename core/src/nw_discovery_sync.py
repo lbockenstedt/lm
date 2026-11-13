@@ -1659,7 +1659,11 @@ class NwDiscoverySyncMixin:
         status = "SUCCESS" if (reachable and not errors) else (
             "PARTIAL" if reachable else "ERROR")
         # Full poll report, with a one-line human summary in "message".
+        # ``hw_health`` (iLO hardware health) is passed through only when the
+        # spoke sent it, so an older spoke leaves the cached reading alone.
+        extra = {"hw_health": pdata["hw_health"]} if isinstance(pdata.get("hw_health"), dict) else {}
         return {
+            **extra,
             "status": status,
             "reachable": reachable,
             "latency_ms": latency_ms,
