@@ -14,6 +14,7 @@ from api import (
 import time
 
 import instance_vault
+from storage_perf import merge_rows
 from warm_cache import ALL_SCOPE, CacheJob
 
 
@@ -268,7 +269,8 @@ def register(app, hub, ctx):
 
     async def _perf_history(app_, start, end):
         """5-minute averages for ``start``..``end`` from the spoke that stores
-        them; the hub's pushed copy when the spoke is offline or fails."""
+        them, gaps filled from the hub's pushed copy; only the hub's copy when
+        the spoke is offline or fails."""
         hub = app.state.hub
         appliance_id = app_.get("id")
         spoke_id = _truenas_spoke_for(app_)
@@ -281,7 +283,8 @@ def register(app, hub, ctx):
                     spoke_id, "TRUENAS_GET_PERF_HISTORY", payload, timeout=20.0))
                 if isinstance(res, dict) and res.get("status") == "SUCCESS":
                     return {"status": "SUCCESS", "interval": 300, "source": "spoke",
-                            "data": res.get("data") or []}
+                            "data": merge_rows(res.get("data"), hub.storage_perf.get(
+                                "truenas", appliance_id, start, end))}
                 logger.warning("truenas perf history %s from spoke: %s", appliance_id,
                                (res or {}).get("message") if isinstance(res, dict) else res)
             except Exception as e:  # noqa: BLE001 — fall back to the hub copy
