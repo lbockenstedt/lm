@@ -88,6 +88,50 @@ empty means the top level. A spoke too old for these commands gets a 501 that
 says to update it. If an older spoke ignores `ou_path` on create, the reply
 carries a `warning` that the user was created at the top level.
 
+## Entra accounts and groups per tenant
+
+Entra has no notion of an LM tenant, so each tenant gets its own Entra
+security groups, made by the hub through Microsoft Graph and recorded on the
+tenant (`directory_entra_groups`):
+
+- **Base group `LM-<tenant>-Users`.** Created the first time the tenant
+  creates an Entra account or group. Every Entra account created in the
+  Directory joins it, and its direct members are the tenant's Entra accounts:
+  the Directory lists them and can delete only them. Users of a group nested
+  inside it are not counted. Add an account to it by hand in Entra only if it
+  belongs to that tenant.
+- **Tenant groups `LM-<tenant>-<name>`.** A tenant admin creates and deletes
+  them, and adds or removes the tenant's Entra accounts. `Users` is reserved
+  for the base group, which can't be deleted or edited directly.
+
+These are separate from **Permission Groups** (Entra group → LM tenants and
+rights), which decide who may manage LM. Those are never used to list a
+tenant's accounts.
+
+Creating an account never takes over an existing one (409 if the UPN is in
+use). The password is the one the admin types, or a generated one returned
+once in the reply; LM never stores or logs it. The sign-in does not force a
+password change, so a linked LDAP login works straight away. If joining a
+group fails, the new account is deleted again rather than left outside the
+tenant.
+
+Needs the SSO app (Settings → Single sign-on) with the Graph **application**
+permissions `User.ReadWrite.All` and `Group.ReadWrite.All`, admin-consented.
+Without SSO the list is empty with `configured: false` and writes return 503.
+
+| Route | Body | Does |
+| :--- | :--- | :--- |
+| `GET /api/ldap/entra` | | `{configured, users, groups}` from the hub cache (refreshed every 5 minutes and after each write) |
+| `POST /api/ldap/entra/users` | `upn`, `name`, `password` (blank = generate), `group_ids` | Create an account in the base group (and those groups) |
+| `DELETE /api/ldap/entra/users` | `id` | Delete one of the tenant's accounts |
+| `POST /api/ldap/entra/groups` | `name` | Create `LM-<tenant>-<name>` |
+| `DELETE /api/ldap/entra/groups` | `id` | Delete one of the tenant's groups |
+| `POST /api/ldap/entra/groups/members` | `group_id`, `user_id` | Add one of the tenant's accounts |
+| `DELETE /api/ldap/entra/groups/members` | `group_id`, `user_id` | Remove a member |
+
+All routes take the tenant like the LDAP routes (`tenant_id`; only an admin may
+name another tenant) and need the tenant-admin tier to write.
+
 ## Active Directory (read-only stub)
 
 `src/ad_directory.py` reads users from an AD domain, so the Directory view can

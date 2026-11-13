@@ -190,45 +190,51 @@ def canonicalize_user_attrs(attrs):
     return out
 
 
+def directory_resolve(hub, sess, request: Request, data=None, write: bool = False):
+    """Resolve the tenant a Directory request acts on, enforce the cross-tenant
+    guard, AND classify the read/write scope (defense-in-depth, mirroring
+    firewall/nw — see ``_authz_firewall`` / ``_authz_nw_device``). Returns
+    ``(tenant_id, ou_slug, scope)``. Shared by the LDAP and Entra directory
+    routes.
+
+    ``resolve_directory_tenant`` picks the tenant (an admin may name any; a
+    non-admin only their own — case-insensitively) and 403s a foreign
+    tenant. ``read_scope``/``write_scope`` then re-check the TIER (a write
+    needs edit access) and give the single canonical deny point the other
+    modules have. For an admin both return ``"full"`` for any tenant, so the
+    all-OU admin view is preserved. ``scope`` is returned for callers that
+    need to narrow shared-tenant writes (none today — own-tenant only — but
+    the contract matches the other modules)."""
+    # Who is asking, and which tenant they asked for (body, else ?tenant=).
+    is_adm = access.is_admin(sess)
+    acting = (sess or {}).get("user", {}).get("tenants") or []
+    requested = ""
+    if isinstance(data, dict):
+        requested = str(data.get("tenant_id") or data.get("tenant") or "").strip()
+    if not requested:
+        requested = str(request.query_params.get("tenant") or "").strip()
+    # Resolve the tenant; a foreign tenant is refused.
+    tid, status, detail = access.resolve_directory_tenant(is_adm, acting, requested)
+    if status:
+        raise HTTPException(status_code=status, detail=detail)
+    # Check the caller's read/write scope for that tenant.
+    scope = access.write_scope(sess, tid) if write else access.read_scope(sess, tid)
+    if scope == "deny":
+        raise HTTPException(
+            status_code=403,
+            detail="You do not have access to this tenant's directory")
+    return tid, access.ldap_tenant_slug(hub, tid), scope
+
+
 def register(app, hub, ctx):
     """Register directory (LDAP) routes on the Hub app."""
     # Session lookup from the shared route context.
     _session_user = ctx._session_user
 
     def _directory_resolve(request: Request, data=None, write: bool = False):
-        """Resolve the tenant this request acts on, enforce the cross-tenant
-        guard, AND classify the read/write scope (defense-in-depth, mirroring
-        firewall/nw — see ``_authz_firewall`` / ``_authz_nw_device``). Returns
-        ``(tenant_id, ou_slug, scope)``.
-
-        ``resolve_directory_tenant`` picks the tenant (an admin may name any; a
-        non-admin only their own — case-insensitively) and 403s a foreign
-        tenant. ``read_scope``/``write_scope`` then re-check the TIER (a write
-        needs edit access) and give the single canonical deny point the other
-        modules have. For an admin both return ``"full"`` for any tenant, so the
-        all-OU admin view is preserved. ``scope`` is returned for callers that
-        need to narrow shared-tenant writes (none today — own-tenant only — but
-        the contract matches the other modules)."""
-        # Who is asking, and which tenant they asked for (body, else ?tenant=).
-        sess = _session_user(request)
-        is_adm = access.is_admin(sess)
-        acting = (sess or {}).get("user", {}).get("tenants") or []
-        requested = ""
-        if isinstance(data, dict):
-            requested = str(data.get("tenant_id") or data.get("tenant") or "").strip()
-        if not requested:
-            requested = str(request.query_params.get("tenant") or "").strip()
-        # Resolve the tenant; a foreign tenant is refused.
-        tid, status, detail = access.resolve_directory_tenant(is_adm, acting, requested)
-        if status:
-            raise HTTPException(status_code=status, detail=detail)
-        # Check the caller's read/write scope for that tenant.
-        scope = access.write_scope(sess, tid) if write else access.read_scope(sess, tid)
-        if scope == "deny":
-            raise HTTPException(
-                status_code=403,
-                detail="You do not have access to this tenant's directory")
-        return tid, access.ldap_tenant_slug(hub, tid), scope
+        """Resolve the request's tenant, guard and scope for this caller (see
+        :func:`directory_resolve`)."""
+        return directory_resolve(hub, _session_user(request), request, data, write)
 
     async def _relay(cmd: str, payload: dict, spoke_id: str):
         """Relay an LDAP_* command to the directory spoke and unwrap its data.
