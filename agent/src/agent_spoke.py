@@ -19,6 +19,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import types
 import tempfile
 import time
 # Path for files; typing helpers.
@@ -1207,11 +1208,35 @@ class GenericAgent(BaseSpoke):
         sys.modules[pkg_name] = mod
         try:
             spec.loader.exec_module(mod)
+            self._warn_borrowed_modules(role_name, mod, role_src)
             return getattr(mod, cls_name)
         except Exception as e:
             logger.error("Failed to load role '%s': %s", role_name, e)
             sys.modules.pop(pkg_name, None)
             return None
+
+    @staticmethod
+    def _warn_borrowed_modules(role_name: str, mod, role_src: str) -> list:
+        """Roles share one process and one ``sys.modules``, so a flat import
+        (``from perf_store import PerfStore``) gets ANOTHER role's module when
+        that role loaded a file of the same name first. Log each name the role
+        uses that came from such a module; give role modules unique names.
+
+        Returns the borrowed module names (for tests)."""
+        own = {f.stem for f in Path(role_src).glob("*.py")}
+        borrowed = set()
+        for value in list(vars(mod).values()):
+            name = value.__name__ if isinstance(value, types.ModuleType) \
+                else getattr(value, "__module__", None)
+            loaded = sys.modules.get(name) if name in own else None
+            path = getattr(loaded, "__file__", None)
+            if path and Path(path).resolve().parent != Path(role_src).resolve():
+                borrowed.add(name)
+        for name in sorted(borrowed):
+            logger.error("Role '%s' imported '%s' from %s, not its own %s: two roles "
+                         "have a module of that name", role_name, name,
+                         sys.modules[name].__file__, Path(role_src) / f"{name}.py")
+        return sorted(borrowed)
 
     def _sync_load_role(self, role_name: str, role_config: dict,
                         sub_spoke_id: str = None) -> Optional[BaseSpoke]:
