@@ -269,3 +269,61 @@ def test_tenant_switch_hides_the_old_tenants_ous(hub_url_and_session):  # noqa: 
             page.locator("#ldap-ou-panel").wait_for(state="visible")
         finally:
             browser.close()
+
+
+def test_delete_ou_asks_first_and_only_for_an_empty_leaf(hub_url_and_session):  # noqa: F811
+    """Delete is disabled on an OU with child OUs, and an enabled Delete
+    sends nothing until the confirm toast naming the OU is accepted (rule 1.2)."""
+    base, token = hub_url_and_session
+    ous = {"ous": [{"path": ["Ops"], "name": "Ops", "user_count": 0},
+                   {"path": ["Ops", "Night"], "name": "Night", "user_count": 0}],
+           "root_user_count": 0}
+    with sync_api.sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            context = browser.new_context()
+            context.add_cookies([{"name": "lm_session", "value": token, "url": base}])
+            page = context.new_page()
+            deletes = []
+
+            def json_route(body):
+                return lambda r: r.fulfill(content_type="application/json", body=json.dumps(body))
+
+            def ous_route(route):
+                if route.request.method == "DELETE":
+                    deletes.append(json.loads(route.request.post_data))
+                    route.fulfill(content_type="application/json", body='{"status": "SUCCESS"}')
+                else:
+                    route.fulfill(content_type="application/json", body=json.dumps(ous))
+
+            page.route("**/api/ldap/tenants", json_route(
+                {"tenants": [{"id": "acme", "name": "Acme", "ou": "acme"}]}))
+            page.route("**/api/ldap/health", json_route({}))
+            page.route("**/api/ldap/users?*", json_route([]))
+            page.route("**/api/ldap/ous*", ous_route)
+            page.goto(base + "/")
+            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.evaluate("setView('ldap')")
+            panel = page.locator("#ldap-ou-panel")
+            delete = panel.locator("button[data-action='deleteOu']")
+
+            panel.locator("button[title='Ops']").click()
+            assert delete.is_disabled()  # Ops holds Night
+
+            panel.locator("button[title='Ops/Night']").click()
+            assert delete.is_enabled()
+            delete.click()
+            toast = page.locator(".lm-toast", has_text="Ops/Night")
+            toast.locator("button", has_text="Cancel").click()
+            page.wait_for_timeout(200)
+            assert deletes == []
+
+            delete.click()
+            # The cancelled toast may still be fading out; answer the new one.
+            page.locator(".lm-toast", has_text="Ops/Night").last.locator(
+                "button", has_text="Confirm").click()
+            while not deletes:
+                page.wait_for_timeout(50)
+            assert deletes == [{"tenant_id": "acme", "path": ["Ops", "Night"]}]
+        finally:
+            browser.close()
