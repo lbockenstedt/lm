@@ -10,6 +10,7 @@ from api import (
     _FW_WRITE_TIMEOUT, _hub_msg, logger, uuid,
 )
 # Hub data-cache job description.
+from storage_perf import merge_rows
 from warm_cache import CacheJob
 
 # Firewall read endpoints → OPNsense spoke command. Only OPNsense has a spoke;
@@ -289,7 +290,8 @@ def register(app, hub, ctx):
         """The firewall's 5-minute performance averages (throughput, packets,
         CPU, memory, states). No range = the last 7 days from the hub's copy
         (instant, and works with the spoke offline). A ``start``/``end`` range
-        (epoch seconds) is read from the spoke with ``OPNSENSE_GET_PERF_HISTORY``;
+        (epoch seconds) is read from the spoke with ``OPNSENSE_GET_PERF_HISTORY``,
+        with any bucket the spoke lacks filled in from the hub's copy;
         the hub's copy is used if the spoke is offline, fails or is too old to
         know the command. No data yet is an empty list, not an error."""
         hub = app.state.hub
@@ -307,7 +309,8 @@ def register(app, hub, ctx):
                     timeout=20.0))
                 if isinstance(res, dict) and res.get("status") == "SUCCESS":
                     return {"status": "SUCCESS", "interval": 300, "source": "spoke",
-                            "data": res.get("data") or []}
+                            "data": merge_rows(res.get("data"), hub.storage_perf.get(
+                                "opnsense", firewall_id, start, end))}
                 logger.info("firewall perf history %s from spoke: %s", firewall_id,
                             res.get("message") if isinstance(res, dict) else res)
             except Exception as e:  # noqa: BLE001 - fall back to the hub copy

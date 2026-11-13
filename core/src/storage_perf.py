@@ -5,7 +5,8 @@ keep 7 days on their own disk, and push each average as ``STORAGE_PERF_SAMPLE``
 ``{module, samples: [{device_id, ts, samples, metrics}]}``. The hub keeps this
 copy (keyed ``<module>:<device_id>``, persisted to
 ``<cache_dir>/storage_perf.json``) so the default 7-day chart loads instantly
-and survives the spoke being offline; other ranges are read from the spoke.
+and survives the spoke being offline; other ranges are read from the spoke,
+with any bucket the spoke lacks filled in from this copy (``merge_rows``).
 Not tied to Zabbix or to any one device type.
 
 A leaf: stdlib + cache_core only.
@@ -23,6 +24,19 @@ KEEP_S = 7 * 86400
 # Modules that push STORAGE_PERF_SAMPLE -> the global_config list holding their
 # devices. The hub ignores samples from any other module.
 PERF_DEVICE_LISTS = {"truenas": "truenas_appliances", "opnsense": "firewalls"}
+
+
+def merge_rows(spoke_rows: Any, hub_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The spoke's rows plus any bucket only the hub's copy has, oldest first.
+
+    The spoke is the store of record, so its row wins a bucket both have; the
+    hub's copy fills buckets the spoke lost (a restart before a save, or the
+    file overwritten)."""
+    by_ts = {r["ts"]: r for r in hub_rows if isinstance(r, dict) and "ts" in r}
+    for r in spoke_rows if isinstance(spoke_rows, list) else []:
+        if isinstance(r, dict) and "ts" in r:
+            by_ts[r["ts"]] = r
+    return [by_ts[t] for t in sorted(by_ts)]
 
 
 class StoragePerfStore:
