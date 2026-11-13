@@ -14,6 +14,18 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ### Firewalls
 
+- **Impairments can target aliases and devices, and run on a schedule.**
+  Pick IP / CIDR (one or more), a firewall alias (optionally one member at a
+  time) or LM devices, and choose Always on or Scheduled ("every 3 h for
+  15 min", optional start). Several targets rotate, one per window. The list
+  shows the schedule, the next on/off time and any switching error, with an
+  On/Off button. The firewall spoke switches the rules and turns an
+  impairment off if switching fails. See [opnsense](opnsense.md).
+- **Impairments work on current OPNsense again.** Adding an impairment
+  failed with "10 Gbit/s exceeds the maximum bandwidth of 4 Gbit/s": LM made
+  its shaper pipes at 10 Gbit/s, which OPNsense now refuses. Pipes are now
+  made at 4 Gbit/s. The form also takes an optional bandwidth limit; a limit
+  above 4 Gbit/s is refused with a clear message. See [opnsense](opnsense.md).
 - **Both firewalls of an HA pair now work from one spoke.** When two
   firewalls were bound to the same spoke, only the first was configured, and
   every page and change for the second (impairments included) ran on the

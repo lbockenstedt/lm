@@ -4388,14 +4388,8 @@ function renderPxmxNodes() {
         const ramTotalGb = ((n.mem_total || 0) / 1073741824).toFixed(1);
         const statusCls  = n.status === 'online' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700';
         const selCls     = key === sel ? 'bg-green-50 ring-1 ring-green-300' : 'hover:bg-slate-50';
-        // HA maintenance toggle (Global Admin, like Delete); wired below, not inline.
-        // Only for online nodes whose agent reports the state (older agents send none).
-        const inMaint    = n.maintenance === true;
-        const maintBtn   = (isAdmin() && n.status === 'online' && !n.offline && typeof n.maintenance === 'boolean')
-            ? `<button data-pxmx-maint="${escAttr(n.node)}" data-pxmx-maint-cluster="${escAttr(n.cluster || '')}" data-pxmx-maint-on="${inMaint ? '1' : '0'}"
-                    class="text-xs text-amber-700 hover:text-amber-900 font-medium mr-3"
-                    title="${inMaint ? 'Exit maintenance: take this node out of HA maintenance mode' : 'Enter maintenance: put this node into HA maintenance mode (HA moves its HA-managed guests to other nodes)'}">Maintenance</button>`
-            : '';
+        // HA maintenance switch + Reboot (Global Admin, like Delete); wired below, not inline.
+        const nodeCtl    = isAdmin() ? pxmxNodeControlsHtml(n, escAttr) : '';
         return `<tr data-node-key="${escAttr(key)}" onclick="openNodeVms('${escJs(key)}')" class="border-b border-slate-100 cursor-pointer ${selCls}">
             <td class="px-4 py-2 text-xs text-slate-500">${n.cluster ? String(n.cluster).toUpperCase() : '—'}</td>
             <td class="px-4 py-2 font-medium">${String(n.node || '').toUpperCase()}${pxmxClusterBadge(n)}${pxmxMaintBadge(n)}</td>
@@ -4406,7 +4400,7 @@ function renderPxmxNodes() {
             <td class="px-4 py-2">${ramTotalGb} GB</td>
             <td class="px-4 py-2 text-xs text-slate-500">${pxmxShortVer(n.proxmox_version) || '—'}</td>
             <td class="px-4 py-2 text-right" onclick="event.stopPropagation()">
-                ${maintBtn}<button onclick="deletePxmxServer('${escJs(n.node)}','${escJs(n.cluster || '')}')"
+                ${nodeCtl}<button onclick="deletePxmxServer('${escJs(n.node)}','${escJs(n.cluster || '')}')"
                     class="text-xs text-red-600 hover:text-red-800 font-medium"
                     title="Remove this server from the view and clear its cached VMs. For a host you've intentionally shut down; a still-online host re-appears on the next poll.">Delete</button>
             </td>
@@ -4415,20 +4409,170 @@ function renderPxmxNodes() {
     wrap.innerHTML = tableWrap(tableHead(cols) + `<tbody>${rows}</tbody>`);
     wrap.querySelectorAll('[data-pxmx-maint]').forEach(b => b.addEventListener('click', ev => {
         ev.stopPropagation();
-        pxmxToggleMaintenance(b.dataset.pxmxMaint, b.dataset.pxmxMaintCluster, b.dataset.pxmxMaintOn === '1');
+        pxmxToggleMaintenance(b.dataset.pxmxMaint, b.dataset.pxmxCluster, b.dataset.pxmxMaintOn === '1');
+    }));
+    wrap.querySelectorAll('[data-pxmx-reboot]').forEach(b => b.addEventListener('click', ev => {
+        ev.stopPropagation();
+        pxmxRebootNode(b.dataset.pxmxReboot, b.dataset.pxmxCluster);
     }));
 }
 
-// Enter or exit HA maintenance mode on a Proxmox node after a confirm. The hub
-// relays it to an agent of the node's cluster, which runs
-// `ha-manager crm-command node-maintenance enable|disable <node>`. Errors
-// (HA not configured, no quorum, old agent) show as a toast.
+// Node operations waiting for telemetry to confirm them, keyed by
+// pxmxNodeKey: {op: 'enter'|'exit'|'reboot', node, tenant, ts, uptime0, sawDown}.
+// Only the tenant view that started an operation shows or settles it.
+const _pxmxNodeOps = new Map();
+const _PXMX_NODE_OP_TIMEOUT = { enter: 300000, exit: 300000, reboot: 1200000 };
+let _pxmxNodeOpsTimer = null;
+
+// The Maintenance ON/OFF switch (the sync-sources pill switch) and, once the
+// agent reports the node in maintenance, the Reboot button. While a change
+// waits for telemetry the switch keeps the reported state, disabled, with
+// "Entering…" / "Exiting…"; a reboot shows "Rebooting…" until the node is
+// back online.
+function pxmxNodeControlsHtml(n, escAttr) {
+    const pend = pxmxNodeOpFor(n);
+    const nodeAttrs = `data-pxmx-cluster="${escAttr(n.cluster || '')}"`;
+    if (pend && pend.op === 'reboot') {
+        return `<span data-pxmx-node-pending class="text-xs font-semibold text-blue-700 mr-3" title="Waiting for the node to go offline and come back">Rebooting…</span>`;
+    }
+    // Only online nodes whose agent reports the HA state (older agents send none).
+    if (n.status !== 'online' || n.offline || typeof n.maintenance !== 'boolean') return '';
+    const on = n.maintenance === true;
+    const label = pend ? (pend.op === 'enter' ? 'Entering…' : 'Exiting…') : (on ? 'ON' : 'OFF');
+    const tip = pend ? 'Waiting for the node to report the new state'
+        : (on ? 'Maintenance is ON. Click to disable maintenance mode' : 'Maintenance is OFF. Click to enable maintenance mode');
+    const sw = `<span class="inline-flex items-center gap-1.5 mr-3 align-middle">
+            <span class="text-xs text-slate-600">Maintenance</span>
+            <button type="button" role="switch" aria-checked="${on}" aria-label="Maintenance" title="${tip}"
+                data-pxmx-maint="${escAttr(n.node)}" ${nodeAttrs} data-pxmx-maint-on="${on ? '1' : '0'}" ${pend ? 'disabled' : ''}
+                class="relative inline-flex h-5 w-10 items-center rounded-full transition-colors ${on ? 'bg-primary' : 'bg-slate-300'} ${pend ? 'opacity-50 cursor-wait' : ''}"><span class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${on ? 'translate-x-5' : 'translate-x-1'}"></span></button>
+            <span data-pxmx-maint-state class="text-xs font-semibold ${on ? 'text-amber-700' : 'text-slate-500'}">${label}</span>
+        </span>`;
+    const reboot = (on && !pend)
+        ? `<button data-pxmx-reboot="${escAttr(n.node)}" ${nodeAttrs}
+                class="text-xs text-blue-700 hover:text-blue-900 font-medium mr-3"
+                title="Reboot this node (it is in maintenance mode)">Reboot</button>`
+        : '';
+    return sw + reboot;
+}
+
+// Settle pending node operations against a fresh node list: a maintenance
+// change once the reported state matches; a reboot once the node is online
+// with a lower uptime than when the reboot was requested (it booted again).
+// Only when the node reported no uptime does "seen offline, then online"
+// stand in for that.
+function pxmxReconcileNodeOps(nodes) {
+    if (!_pxmxNodeOps.size) return;
+    const list = (nodes || []).filter(Boolean);
+    const now = Date.now();
+    for (const [key, ent] of Array.from(_pxmxNodeOps.entries())) {
+        if (ent.tenant !== (currentTenant || '')) continue;
+        const n = list.find(x => pxmxNodeKey(x.cluster, x.node) === key)
+            || list.find(x => !x.cluster && x.node === ent.node);
+        const online = !!n && n.status === 'online' && !n.offline;
+        if (ent.op === 'reboot') {
+            const up = online && Number(n.uptime) > 0 ? Number(n.uptime) : 0;
+            const rebooted = ent.uptime0 > 0 ? (up > 0 && up < ent.uptime0) : (online && ent.sawDown);
+            if (rebooted) { _pxmxNodeOps.delete(key); continue; }
+            if (!online) ent.sawDown = true;
+        } else if (n && n.maintenance === (ent.op === 'enter')) {
+            _pxmxNodeOps.delete(key);
+        }
+    }
+}
+
+// Drop pending node operations older than their timeout with a note, so a
+// lost request (or a node list that can't be read) never stays pending forever.
+function pxmxExpireNodeOps() {
+    const now = Date.now();
+    for (const [key, ent] of Array.from(_pxmxNodeOps.entries())) {
+        if (now - ent.ts > _PXMX_NODE_OP_TIMEOUT[ent.op]) {
+            _pxmxNodeOps.delete(key);
+            showToast(`${ent.node}: no confirmation from the node yet; check its state`, 'info');
+        }
+    }
+}
+
+// While node operations are pending and the Nodes table is shown, re-read the
+// node list every 10 s, settle the pending entries and redraw the table.
+function pxmxScheduleNodeOpsPoll() {
+    if (_pxmxNodeOpsTimer || !_pxmxNodeOps.size) return;
+    _pxmxNodeOpsTimer = setTimeout(async () => {
+        _pxmxNodeOpsTimer = null;
+        if (!document.getElementById('pxmx-nodes-wrap')) return;
+        pxmxExpireNodeOps();
+        if (!_pxmxNodeOps.size) { renderPxmxNodes(); return; }
+        try {
+            const r = await fetch('/api/pxmx/nodes?tenant=' + encodeURIComponent(currentTenant || ''));
+            const d = r.ok ? await r.json() : null;
+            if (pxmxNodeListIsLive(d) && Array.isArray(window._pxmxNodes)) {
+                window._pxmxNodes.splice(0, window._pxmxNodes.length, ...d.nodes);
+                pxmxReconcileNodeOps(d.nodes);
+                renderPxmxNodes();
+            }
+        } catch (e) { console.warn('node state poll failed', e); }
+        pxmxScheduleNodeOpsPoll();
+    }, 10000);
+}
+
+// The pending operation shown on a node row: matched by cluster and name, or
+// by name alone for an offline row the hub rebuilt without its cluster.
+function pxmxNodeOpFor(n) {
+    const tenant = currentTenant || '';
+    const ent = _pxmxNodeOps.get(pxmxNodeKey(n.cluster, n.node));
+    if (ent) return ent.tenant === tenant ? ent : null;
+    if (n.cluster) return null;
+    return Array.from(_pxmxNodeOps.values()).find(e => e.node === n.node && e.tenant === tenant) || null;
+}
+
+// True for a node list read from live (or cached-live) telemetry; a failed,
+// stale or disconnected read must not settle a pending operation.
+function pxmxNodeListIsLive(d) {
+    return !!d && Array.isArray(d.nodes) && !d.stale && d.spoke_connected !== false;
+}
+
+// Mark a node operation pending, redraw, and start polling for confirmation.
+function pxmxStartNodeOp(node, cluster, op) {
+    const key = pxmxNodeKey(cluster, node);
+    const row = (window._pxmxNodes || []).find(n => pxmxNodeKey(n.cluster, n.node) === key);
+    _pxmxNodeOps.set(key, { op, node, tenant: currentTenant || '', ts: Date.now(),
+        uptime0: Number(row && row.uptime) || 0, sawDown: false });
+    renderPxmxNodes();
+    pxmxScheduleNodeOpsPoll();
+}
+
+// Reboot a node that the agent reports in HA maintenance, after a confirm.
+// The agent re-checks maintenance and refuses while guests still run; its
+// message shows as an error toast.
+async function pxmxRebootNode(node, cluster) {
+    if (!node) return;
+    if (!await showConfirmToast(`Reboot ${node}? It is in maintenance mode.`)) return;
+    try {
+        const res = await fetch('/api/pxmx/server/reboot?tenant=' + encodeURIComponent(currentTenant || ''), {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ node, cluster }),
+        });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast(d.detail || 'Reboot request failed', 'error');
+            return;
+        }
+        showToast(d.message || `${node}: reboot requested`, 'success');
+        pxmxStartNodeOp(node, cluster, 'reboot');
+    } catch (e) {
+        showToast('Error: ' + (e.message || e), 'error');
+    }
+}
+
+// Enable or disable HA maintenance mode on a Proxmox node after a confirm. The
+// hub relays it to an agent of the node's cluster. The switch then shows
+// "Entering…" / "Exiting…" until the node reports the new state. Errors (HA
+// not configured, no quorum, old agent) show as a toast.
 async function pxmxToggleMaintenance(node, cluster, inMaint) {
     if (!node) return;
     const enable = !inMaint;
-    const question = enable
-        ? `Enter maintenance mode on '${node}'?\n\nRuns "ha-manager crm-command node-maintenance enable ${node}". HA moves this node's HA-managed guests to other cluster nodes and keeps new ones off it until maintenance ends.`
-        : `Exit maintenance mode on '${node}'?\n\nRuns "ha-manager crm-command node-maintenance disable ${node}". HA-managed guests may move back to it.`;
+    const question = `${enable ? 'Enable' : 'Disable'} maintenance mode on ${node}?`;
     if (!await showConfirmToast(question)) return;
     try {
         const res = await fetch('/api/pxmx/server/maintenance?tenant=' + encodeURIComponent(currentTenant || ''), {
@@ -4442,11 +4586,7 @@ async function pxmxToggleMaintenance(node, cluster, inMaint) {
             return;
         }
         showToast(d.message || 'Maintenance mode updated', 'success');
-        // Show the new state now; the next node refresh confirms it from the HA status.
-        (window._pxmxNodes || []).forEach(n => {
-            if (n.node === node && String(n.cluster || '') === String(cluster || '')) n.maintenance = enable;
-        });
-        renderPxmxNodes();
+        pxmxStartNodeOp(node, cluster, enable ? 'enter' : 'exit');
     } catch (e) {
         showToast('Error: ' + (e.message || e), 'error');
     }
@@ -4894,6 +5034,9 @@ async function loadPxmxData(subMenu, forceRefresh = false) {    const container 
             // openNodeVms / pxmxNodeDetailHtml).
             window._pxmxNodes = nodes;
             window._pxmxVms = vms;
+            pxmxExpireNodeOps();
+            if (nodesR.ok && pxmxNodeListIsLive(nodesData)) pxmxReconcileNodeOps(nodes);
+            pxmxScheduleNodeOpsPoll();
             // Reconcile optimistic in-flight badges against this fresh list before
             // any rows are built (drop confirmed deletes, clear settled ops, time out).
             pxmxReconcileVmInflight(vms);
