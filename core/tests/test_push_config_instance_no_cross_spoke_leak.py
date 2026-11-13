@@ -50,6 +50,8 @@ class _FakeHub:
     def _primary_key(self, spoke_id):
         return self._alias.get(spoke_id, spoke_id)
 
+    opn_config_for_spoke = LabManagerHub.opn_config_for_spoke
+
     async def send_to_spoke(self, msg):
         self.sent.append(msg)
 
@@ -224,3 +226,50 @@ async def test_opn_firewall_matches_across_identity_generations():
     hub.spoke_module_types["guid-fw"] = "firewall"
     await LabManagerHub.push_config_to_spoke(hub, "guid-fw")
     assert _config_pushed(hub)["host"] == "10.0.0.2"
+
+
+@pytest.mark.asyncio
+async def test_opn_pushes_every_firewall_bound_to_the_spoke():
+    """Both boxes of an HA pair on one spoke: the first stays the default, and
+    the list carries both (connection fields only) so firewall_id can route."""
+    hub = _FakeHub({"firewalls": [
+        {"id": "fw-a", "name": "A", "spoke_id": "opn", "model": "opnsense", "host": "10.0.0.5",
+         "port": 443, "api_key": "k1", "api_secret": "s1", "tenant_id": "t1"},
+        {"id": "fw-x", "spoke_id": "other", "model": "opnsense", "host": "10.9.9.9"},
+        {"id": "fw-b", "name": "B", "spoke_id": "opn", "model": "opnsense", "host": "10.0.0.6",
+         "port": 443, "api_key": "k2", "api_secret": "s2"},
+    ]}, module_type="firewall")
+    hub.spoke_module_types["opn"] = "firewall"
+    await LabManagerHub.push_config_to_spoke(hub, "opn")
+    data = _config_pushed(hub)
+    assert data["id"] == "fw-a" and data["host"] == "10.0.0.5"
+    assert [f["id"] for f in data["firewalls"]] == ["fw-a", "fw-b"]
+    assert data["firewalls"][1] == {"id": "fw-b", "name": "B", "host": "10.0.0.6", "port": 443,
+                                    "api_key": "k2", "api_secret": "s2"}
+
+
+@pytest.mark.asyncio
+async def test_unbound_opn_spoke_never_gets_another_spokes_firewall():
+    """A spoke with nothing bound is told to clear (empty list); it never gets
+    a firewall bound to another spoke, or an unbound one."""
+    hub = _FakeHub({"firewalls": [
+        {"id": "fw-x", "spoke_id": "other", "model": "opnsense", "host": "10.9.9.9",
+         "api_key": "k", "api_secret": "s"},
+        {"id": "fw-t2", "model": "opnsense", "host": "10.8.8.8", "tenant_id": "t2",
+         "api_key": "k", "api_secret": "s"},
+    ]}, module_type="firewall")
+    hub.spoke_module_types["opn"] = "firewall"
+    await LabManagerHub.push_config_to_spoke(hub, "opn")
+    assert _config_pushed(hub) == {"firewalls": []}
+
+
+@pytest.mark.asyncio
+async def test_unbound_firewall_is_never_pushed_even_to_its_own_tenant():
+    """No fallback: an unbound firewall (legacy, or unbound on purpose) is not
+    sent to a spoke with nothing bound, so an unbind clears the spoke."""
+    hub = _FakeHub({"firewalls": [
+        {"id": "fw-1", "model": "opnsense", "host": "10.0.0.5", "api_key": "k", "api_secret": "s"},
+    ]}, module_type="firewall")
+    hub.spoke_module_types["opn"] = "firewall"
+    await LabManagerHub.push_config_to_spoke(hub, "opn")
+    assert _config_pushed(hub) == {"firewalls": []}

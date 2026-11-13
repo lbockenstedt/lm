@@ -353,6 +353,7 @@ jobs:
           BR: ${{ steps.route.outputs.branch }}
           UNIT_PR: ${{ steps.build.outputs.unit_pr }}
           UNIT_SUBJECT: ${{ steps.build.outputs.unit_subject }}
+          UNITS_CARRIED: ${{ steps.build.outputs.units_carried }}
           REMAINING: ${{ steps.build.outputs.remaining }}
         run: |
           set -e
@@ -449,7 +450,14 @@ jobs:
           fi
           {
             printf '## Intent & Problem Statement\n\n'
-            if [ -n "$UNIT_SUBJECT" ]; then
+            if [ -n "$UNITS_CARRIED" ]; then
+              # promote.sh extended the oldest unit over later units that change
+              # the same files, so the intent must name every one of them.
+              printf 'Promotes **several units of work** from `%s` into `%s`. The oldest\n' "$SRC" "$TGT"
+              printf 'unit is carried together with later units that change the same\n'
+              printf 'files, because promoting a version a later unit already replaced\n'
+              printf 'would be rejected:\n\n%s\n' "$UNITS_CARRIED"
+            elif [ -n "$UNIT_SUBJECT" ]; then
               printf 'Promotes **one unit of work** from `%s` into `%s`' "$SRC" "$TGT"
               if [ -n "$UNIT_PR" ]; then printf ' (originally #%s)' "$UNIT_PR"; fi
               printf ':\n\n> %s\n\n' "$UNIT_SUBJECT"

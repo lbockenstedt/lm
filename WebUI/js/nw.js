@@ -92,6 +92,18 @@ window.nwOpenDevice = function (deviceId) {
     if (c) c.innerHTML = _nwDetailHtml();
 };
 
+// Device to open once the next device list loads; set by nwShowDevice.
+let _nwPendingDevice = null;
+
+// Open Network Devices on one device's detail page from another page (the
+// iLO link on Proxmox → Diagnostics). The device must be in the selected tenant.
+async function nwShowDevice(deviceId) {
+    _nwPendingDevice = String(deviceId);
+    await setView('nw');
+    // setView can refuse (no Network access); don't open this device later.
+    if (currentView !== 'nw') _nwPendingDevice = null;
+}
+
 // Back to the current category's device list (no refetch).
 window.nwBackToList = function () {
     window._nwDetail = null;
@@ -299,6 +311,8 @@ async function loadNwData(category) {
         return;
     }
     if (category !== 'Overview' && !CATEGORIES.includes(category)) category = 'Overview';
+    const openId = _nwPendingDevice;
+    _nwPendingDevice = null;
     window._nwDetail = null;
     container.innerHTML = `<div class="py-12 text-center text-slate-500 animate-pulse">Loading ${escapeHtml(category)}…</div>`;
 
@@ -323,6 +337,7 @@ async function loadNwData(category) {
     try {
         const data = await r.json();
         if (data && data.select_tenant) {
+            if (openId) showToast('Select a tenant to open that controller.', 'error');
             // ADMIN (default) tenant: the hub no longer accumulates every
             // tenant's devices — pick a specific tenant to see its fleet.
             container.innerHTML = `<div class="py-12 text-center space-y-3">
@@ -351,6 +366,9 @@ async function loadNwData(category) {
         // the detail back-button repaints the overview without a refetch.
         window._nwView = { category: 'Overview', devices: items, counts };
         _renderNwOverview(items, counts);
+        const row = openId && items.find(it => (it._members || [it]).some(m => String(m.id) === openId));
+        if (row) nwOpenDevice(row.id);
+        else if (openId) showToast('That controller is not in the selected tenant; pick its tenant to open it.', 'error');
         return;
     }
     window._nwView = { category, devices, counts };

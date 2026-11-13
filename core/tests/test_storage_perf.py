@@ -194,7 +194,7 @@ def test_firewall_history_default_is_the_hub_copy_and_ranges_ask_the_spoke(monke
     assert hub.calls == []
     body = client.get("/api/firewall/fw-1/performance/history?start=100&end=200").json()
     assert body["source"] == "spoke" and body["data"] == [{"ts": 1}]
-    assert hub.calls == [("OPNSENSE_GET_PERF_HISTORY", {"start": 100, "end": 200})]
+    assert hub.calls == [("OPNSENSE_GET_PERF_HISTORY", {"start": 100, "end": 200, "firewall_id": "fw-1"})]
     assert client.get("/api/firewall/nope/performance/history").status_code == 404
 
 

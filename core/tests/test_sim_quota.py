@@ -625,6 +625,15 @@ def test_available_sims_from_ini_offers_client_script_sims():
     assert {"www_discover", "collab"} <= ids
 
 
+def test_rogue_dns_catalog_metadata():
+    """Rogue DNS is offered without a primitive and remains wireless-exclusive."""
+    ids = {s["sim_id"] for s in sim_quota.available_sims_from_ini("")}
+    assert "rogue_dns" in ids
+    assert sim_quota.SIM_META["rogue_dns"] == {
+        "category": "failure", "multi_capable": False, "media": "wireless",
+    }
+
+
 def test_sim_meta_is_the_sims_json_list():
     # sims.json is the one sim list; the hub must not keep its own copy.
     import json

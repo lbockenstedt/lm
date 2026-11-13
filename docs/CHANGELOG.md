@@ -14,6 +14,32 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ### Firewalls
 
+- **Both firewalls of an HA pair now work from one spoke.** When two
+  firewalls were bound to the same spoke, only the first was configured, and
+  every page and change for the second (impairments included) ran on the
+  first. Each firewall now gets its own connection and cache on the spoke.
+  An impairment is reported as added only when the firewall confirmed it.
+  A spoke with no firewall bound no longer borrows another firewall's
+  settings; bind each firewall to its spoke in Setup → Firewalls.
+  See [opnsense](opnsense.md).
+
+### DHCP
+
+- **Static hosts are reserved automatically.** When a tenant's agent reports
+  a static address, or the network sweep sees a host with a live MAC, no
+  Kea lease and an address outside the Kea pools, inside a DHCP-enabled
+  prefix, LM marks its NetBox IP as a DHCP
+  reservation so Kea never hands that address to another client. Existing
+  reservations for another MAC, in NetBox or directly in Kea, are never
+  overwritten; they are reported as conflicts in the sync status. The netbox
+  spoke does the work and records each change with its before and after; a
+  pass whose writes fail is rolled back, and so is a tenant's part of a pass
+  when that tenant's DHCP sync after it fails. It needs an
+  updated netbox spoke (an older one shows "unsupported"). See
+  [dhcp.md](dhcp.md#static-hosts-become-reservations).
+
+### Firewalls
+
 - **Firewall performance history.** Firewalls → Overview now has History
   charts per firewall: throughput (bits/s), packets/s with interface errors,
   CPU and memory, and pf states, for all interfaces or one picked interface.
@@ -23,6 +49,14 @@ CI/tooling changes are omitted unless they change what an operator sees.
   update. See [opnsense.md](opnsense.md#how-to-use-it).
 
 ### Simulations
+
+- **Rogue DNS (static IP + fixed DNS)** (`rogue_dns`) adds a default-off
+  wireless Linux/Windows simulation to the catalog, client controls and bucket
+  editor, with a DNS server IP field and three timing fields. Clients browse
+  for 30 minutes on DHCP, retain the same IP/mask/gateway with fixed DNS for
+  60 minutes while browsing, then restore DHCP and repeat. No alert is linked.
+  Requires the companion cs#257 client update; deploy the LM catalog first.
+  See [cs.md](cs.md#rogue-dns-static-ip--fixed-dns).
 
 - **WWW Discover - Network Diagnostics** (`www_discover`) adds a separate,
   default-off Linux/Windows web-traffic flag to the client controls and bucket

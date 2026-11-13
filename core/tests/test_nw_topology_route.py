@@ -254,6 +254,8 @@ def _with_netbox(hub, rows):
     async def _rr(spoke_id, cmd, data, timeout=30.0):
         if cmd == "NETBOX_GET_DEVICES":
             return {"payload": {"data": {"devices": list(rows)}}}
+        if cmd == "NETBOX_GET_CABLES":
+            return {"payload": {"data": {"status": "SUCCESS", "cables": []}}}
         return await original(spoke_id, cmd, data, timeout=timeout)
 
     hub.request_response = _rr
@@ -281,6 +283,47 @@ def test_netbox_rows_outside_the_tenants_prefixes_are_dropped(monkeypatch, tmp_p
     assert "acme-pdu" in names
     assert "other-pdu" not in names
     assert "no-ip-device" not in names   # unplaceable → fails closed
+
+
+def test_netbox_inventory_is_fetched_once_per_window_and_still_filtered_per_reader(monkeypatch, tmp_path):
+    """lm#1876: every map load waited ~6 s on the full NetBox device list."""
+    c, hub = _build(monkeypatch, tmp_path)
+    _with_netbox(hub, [{"name": "acme-pdu", "primary_ip": "10.0.0.50/24"},
+                       {"name": "other-pdu", "primary_ip": "192.168.1.50/24"}])
+    fetches = []
+    counted = hub.request_response
+
+    async def _count(spoke_id, cmd, data, timeout=30.0):
+        if cmd == "NETBOX_GET_DEVICES":
+            fetches.append(cmd)
+        return await counted(spoke_id, cmd, data, timeout=timeout)
+
+    hub.request_response = _count
+    for user in ("a", "b"):
+        tok = _mint(hub, user, tenants=["acme"])
+        names = _names(c.get("/api/nw/topology", cookies={"lm_session": tok}).json())
+        assert "acme-pdu" in names and "other-pdu" not in names  # cached rows are still filtered
+    assert len(fetches) == 1
+
+
+def test_a_failed_cable_list_keeps_the_devices_and_is_not_cached(monkeypatch, tmp_path):
+    c, hub = _build(monkeypatch, tmp_path)
+    _with_netbox(hub, [{"name": "acme-pdu", "primary_ip": "10.0.0.50/24"}])
+    calls = []
+    inner = hub.request_response
+
+    async def _rr(spoke_id, cmd, data, timeout=30.0):
+        if cmd == "NETBOX_GET_CABLES":
+            calls.append(cmd)
+            raise TimeoutError("no reply")
+        return await inner(spoke_id, cmd, data, timeout=timeout)
+
+    hub.request_response = _rr
+    tok = _mint(hub, "u", tenants=["acme"])
+    for _ in range(2):
+        body = c.get("/api/nw/topology", cookies={"lm_session": tok}).json()
+        assert "acme-pdu" in _names(body)
+    assert len(calls) == 2  # retried, not cached as "no cables"
 
 
 def test_netbox_being_down_degrades_instead_of_failing(monkeypatch, tmp_path):
