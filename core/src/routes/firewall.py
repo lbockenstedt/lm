@@ -564,6 +564,23 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=403,
                                 detail="On shared infrastructure the target must be inside your tenant's subnets")
 
+    def _impair_check_bandwidth(data):
+        """Refuse a bandwidth limit above 4 Gbit/s (compared in bits/s): OPNsense
+        keeps a shaper pipe's bits/s in 32 bits and rejects faster pipes."""
+        units = {"Kbit": 10**3, "Mbit": 10**6, "Gbit": 10**9}
+        raw = str(data.get("bandwidth") or "").strip()
+        if raw in ("", "0"):
+            return
+        unit = data.get("bandwidth_unit") or "Mbit"
+        try:
+            value = int(raw)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Bandwidth must be a whole number")
+        if unit not in units or value < 0:
+            raise HTTPException(status_code=400, detail="Bandwidth must be a whole number of Kbit, Mbit or Gbit")
+        if value * units[unit] > 4 * units["Gbit"]:
+            raise HTTPException(status_code=400, detail="OPNsense pipes are limited to 4 Gbit/s")
+
     async def _impair_write(firewall_id, command, data):
         """Send an impairment change. Anything but a SUCCESS reply becomes a 400,
         so the UI never reports an impairment that was not created."""
@@ -583,6 +600,7 @@ def register(app, hub, ctx):
         # Read it, check the caller may add it, and send it.
         data = await request.json()
         await _impair_authz(request, firewall_id, payload=data)
+        _impair_check_bandwidth(data)
         return await _impair_write(firewall_id, "OPNSENSE_ADD_IMPAIRMENT", data)
 
     # Edit a network impairment.
@@ -592,6 +610,7 @@ def register(app, hub, ctx):
         # Read it, check the caller may change it, and send it.
         data = await request.json()
         await _impair_authz(request, firewall_id, payload=data, uuid=impair_id)
+        _impair_check_bandwidth(data)
         return await _impair_write(firewall_id, "OPNSENSE_EDIT_IMPAIRMENT", {**data, "uuid": impair_id})
 
     # Delete a network impairment.

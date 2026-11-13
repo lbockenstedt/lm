@@ -3919,10 +3919,11 @@ async function loadOpnsenseManagement() {
         else if (subMenu === 'DNS Records') keys = ['firewall', 'hostname', 'ip', 'type', 'ttl', 'description'];
         else if (subMenu === 'Aliases') keys = ['firewall', 'name', 'type', 'content', 'category', 'description'];
         else if (subMenu === 'Impairment') {
-            keys = ['firewall', 'target', 'interface', 'direction', 'latency', 'packet_loss', 'state', 'description'];
+            keys = ['firewall', 'target', 'interface', 'direction', 'latency', 'packet_loss', 'bandwidth_limit', 'state', 'description'];
             items.forEach(it => {
                 it.latency = `${it.delay} ms`;
                 it.packet_loss = `${it.loss} %`;
+                it.bandwidth_limit = it.bandwidth ? `${it.bandwidth} ${it.bandwidth_unit}/s` : 'none';
                 it.state = !it.complete ? 'incomplete' : (it.enabled ? 'active' : 'disabled');
             });
         }

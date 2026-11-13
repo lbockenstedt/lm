@@ -272,6 +272,24 @@ def test_impairment_on_shared_firewall_must_be_inside_tenant_subnet():
     assert [cmd for _, cmd, _ in hub.calls] == ["OPNSENSE_ADD_IMPAIRMENT"]
 
 
+def test_impairment_bandwidth_above_4_gbit_is_refused_before_the_spoke():
+    """OPNsense refuses shaper pipes above 4 Gbit/s; units are compared in bits/s."""
+    hub, _ = _fw_hub()
+    hub.replies[("sp-1", "OPNSENSE_ADD_IMPAIRMENT")] = lambda p: {"status": "SUCCESS", "uuid": "i1"}
+    hub.replies[("sp-1", "OPNSENSE_EDIT_IMPAIRMENT")] = lambda p: {"status": "SUCCESS", "uuid": "i2"}
+    c = _fw_client(hub, _ADMIN)
+    base = {"target": "192.0.2.5", "delay": 50}
+    for bw, unit in (("5", "Gbit"), ("4001", "Mbit")):
+        r = c.post("/api/firewall/fw-1/impair", json={**base, "bandwidth": bw, "bandwidth_unit": unit})
+        assert r.status_code == 400 and "limited to 4 Gbit/s" in r.json()["detail"]
+        r = c.put("/api/firewall/fw-1/impair/i1", json={**base, "bandwidth": bw, "bandwidth_unit": unit})
+        assert r.status_code == 400
+    assert c.post("/api/firewall/fw-1/impair", json={**base, "bandwidth": "abc"}).status_code == 400
+    assert hub.calls == []
+    assert c.post("/api/firewall/fw-1/impair", json={**base, "bandwidth": "4", "bandwidth_unit": "Gbit"}).status_code == 200
+    assert c.post("/api/firewall/fw-1/impair", json=base).status_code == 200
+
+
 def test_two_firewalls_on_one_spoke_each_name_their_firewall():
     """Both boxes of an HA pair share one spoke; every command must carry its
     firewall_id or the spoke runs it on the first box."""

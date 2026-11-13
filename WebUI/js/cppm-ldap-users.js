@@ -311,6 +311,7 @@ function _impairFields(item, input, label) {
             <div class="space-y-1"><label class="${label}">Interface</label><input type="text" id="add-opn-iface" value="${v('interface') || 'lan'}" placeholder="lan" class="${input}" title="OPNsense interface the host or subnet sits on (e.g. lan, opt1)"></div>
             <div class="space-y-1"><label class="${label}">Latency (ms)</label><input type="number" min="0" max="10000" id="add-opn-delay" value="${v('delay') || '0'}" class="${input}" title="Added one-way delay in milliseconds (0-10000). With direction Both, the round trip gets it twice."></div>
             <div class="space-y-1"><label class="${label}">Packet Loss (%)</label><input type="number" min="0" max="100" step="0.1" id="add-opn-loss" value="${v('loss') || '0'}" class="${input}" title="Percentage of packets dropped (0-100), per direction"></div>
+            <div class="space-y-1"><label class="${label}">Bandwidth Limit</label><div class="flex gap-2"><input type="number" min="0" step="1" id="add-opn-bw" value="${item.bandwidth ? v('bandwidth') : ''}" placeholder="No limit" class="${input}" title="Optional cap per direction; blank = no limit. OPNsense pipes are limited to 4 Gbit/s."><select id="add-opn-bw-unit" class="${input} w-28">${['Kbit', 'Mbit', 'Gbit'].map(u => `<option value="${u}" ${(item.bandwidth_unit || 'Mbit') === u ? 'selected' : ''}>${u}/s</option>`).join('')}</select></div></div>
             <div class="space-y-1"><label class="${label}">Direction</label><select id="add-opn-direction" class="${input}" title="Download = traffic to the host/subnet, Upload = traffic from it">${opt('both', 'Both')}${opt('download', 'Download (to target)')}${opt('upload', 'Upload (from target)')}</select></div>
             <div class="space-y-1"><label class="${label}">Enabled</label><select id="add-opn-enabled" class="${input}" title="Disable to keep the entry but stop impairing"><option value="1">Yes</option><option value="0" ${item.enabled === false ? 'selected' : ''}>No</option></select></div>
         </div>
@@ -322,7 +323,21 @@ function _impairBody(g) {
     return { target: g('add-opn-target'), interface: g('add-opn-iface') || 'lan',
              direction: g('add-opn-direction') || 'both', delay: g('add-opn-delay') || '0',
              loss: g('add-opn-loss') || '0', enabled: g('add-opn-enabled') || '1',
+             bandwidth: g('add-opn-bw') || '', bandwidth_unit: g('add-opn-bw-unit') || 'Mbit',
              description: g('add-opn-desc') };
+}
+
+// Check an impairment body before sending; returns an error message or ''.
+// OPNsense refuses shaper pipes above 4 Gbit/s, compared in bits/s (so
+// 5000 Mbit/s is refused too).
+function _impairError(body) {
+    if (!body.target) return 'Host or subnet is required.';
+    const raw = String(body.bandwidth || '').trim();
+    if (raw === '' || raw === '0') return '';
+    if (!/^\d+$/.test(raw)) return 'Bandwidth must be a whole number.';
+    const unit = { Kbit: 1e3, Mbit: 1e6, Gbit: 1e9 }[body.bandwidth_unit];
+    if (!unit) return 'Bandwidth unit must be Kbit, Mbit or Gbit.';
+    return Number(raw) * unit > 4e9 ? 'OPNsense pipes are limited to 4 Gbit/s.' : '';
 }
 
 function showOpnsenseAddModal(subMenu) {
@@ -408,7 +423,8 @@ function showOpnsenseAddModal(subMenu) {
 
 async function submitOpnsenseAdd(subMenu) {
     const g = id => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
-    const btn = document.querySelector('#opn-add-modal button:last-child');
+    const btn = document.querySelector('#opn-add-modal button[title^=Submit]');
+    const btnLabel = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = 'Adding…'; }
     const fwSel = document.getElementById('add-opn-fw');
     const fwId = (fwSel && fwSel.value) || (_opnFirewalls[0] && _opnFirewalls[0].id);
@@ -453,7 +469,8 @@ async function submitOpnsenseAdd(subMenu) {
         } else if (subMenu === 'Impairment') {
             url = `/api/firewall/${fwId}/impair`;
             body = _impairBody(g);
-            if (!body.target) { showToast('Host or subnet is required.', 'error'); return; }
+            const impairError = _impairError(body);
+            if (impairError) { showToast(impairError, 'error'); return; }
         } else return;
 
         const r = await fetch(url + _taTenantQuery(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -462,6 +479,9 @@ async function submitOpnsenseAdd(subMenu) {
         loadOpnsenseManagement();
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
+    } finally {
+        // A refused or failed submit leaves the modal open: make Submit usable again.
+        if (btn && btn.isConnected) { btn.disabled = false; btn.textContent = btnLabel; }
     }
 }
 
@@ -543,7 +563,8 @@ function showOpnsenseEditModal(fwId, subMenu, itemIdx) {
 
 async function submitOpnsenseEdit(fwId, subMenu, itemId) {
     const g = id => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
-    const btn = document.querySelector('#opn-add-modal button:last-child');
+    const btn = document.querySelector('#opn-add-modal button[title^=Save]');
+    const btnLabel = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
     let url = '', body = {};
 
@@ -586,7 +607,8 @@ async function submitOpnsenseEdit(fwId, subMenu, itemId) {
         } else if (subMenu === 'Impairment') {
             url = `/api/firewall/${fwId}/impair/${encodedId}`;
             body = _impairBody(g);
-            if (!body.target) { showToast('Host or subnet is required.', 'error'); return; }
+            const impairError = _impairError(body);
+            if (impairError) { showToast(impairError, 'error'); return; }
         } else return;
 
         const r = await fetch(url + _taTenantQuery(), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -595,6 +617,9 @@ async function submitOpnsenseEdit(fwId, subMenu, itemId) {
         loadOpnsenseManagement();
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
+    } finally {
+        // A refused or failed submit leaves the modal open: make Submit usable again.
+        if (btn && btn.isConnected) { btn.disabled = false; btn.textContent = btnLabel; }
     }
 }
 

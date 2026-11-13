@@ -14,6 +14,11 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ### Firewalls
 
+- **Impairments work on current OPNsense again.** Adding an impairment
+  failed with "10 Gbit/s exceeds the maximum bandwidth of 4 Gbit/s": LM made
+  its shaper pipes at 10 Gbit/s, which OPNsense now refuses. Pipes are now
+  made at 4 Gbit/s. The form also takes an optional bandwidth limit; a limit
+  above 4 Gbit/s is refused with a clear message. See [opnsense](opnsense.md).
 - **Both firewalls of an HA pair now work from one spoke.** When two
   firewalls were bound to the same spoke, only the first was configured, and
   every page and change for the second (impairments included) ran on the
