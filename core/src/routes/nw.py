@@ -2009,12 +2009,24 @@ def register(app, hub, ctx):
             leaves, _supers = await _nw_netbox_prefix_split(hub, tenant_id)
             logger.info("scan aggregate tenant=%s netbox: %d leaf prefix(es), %d supernet(s)",
                         tenant_id, len(leaves), len(_supers))
-            c = 0
-            for net in leaves:
-                hosts = net.hosts() if net.prefixlen < 31 else iter([net.network_address])
-                for host in hosts:
-                    if _add(str(host)):
-                        c += 1
+            hosts = [str(h) for net in leaves
+                     for h in (net.hosts() if net.prefixlen < 31 else [net.network_address])]
+            # When the cap cuts this tier short, the next scan starts where this one
+            # stopped, so every leaf host is reached over a few scans instead of the
+            # same tail being dropped every time.
+            offsets = hub.state.system_state.setdefault("global_config", {}).setdefault(
+                "nw_scan_leaf_offset", {})
+            start = offsets.get(tenant_id, 0) % len(hosts) if hosts else 0
+            c, cut = 0, None
+            for i in range(len(hosts)):
+                if cut is None and len(seen) >= cap:
+                    cut = i
+                if _add(hosts[(start + i) % len(hosts)]):
+                    c += 1
+            new_offset = (start + cut) % len(hosts) if cut is not None else 0
+            if offsets.get(tenant_id, 0) != new_offset:
+                offsets[tenant_id] = new_offset
+                hub.state._mark_dirty()
             if c:
                 per_source["netbox"] = c
 

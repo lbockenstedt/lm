@@ -1071,3 +1071,32 @@ def test_reenabled_sweep_waits_for_its_first_tick_instead_of_stalled(monkeypatch
     assert r.status_code == 200, r.text
     body = _client.get("/api/nw/sweep?tenant=acme", cookies={"lm_session": tok}).json()
     assert body["health"] == "waiting"
+
+
+def test_scheduled_scan_resumes_leaf_hosts_cut_off_by_the_cap(monkeypatch, tmp_path):
+    _client, hub = _build(monkeypatch, tmp_path)
+    from routes import nw as nw_routes
+    monkeypatch.setattr(nw_routes, "_NW_SCAN_MAX_TOTAL", 4)
+
+    async def prefixes(_hub, _tid):
+        return ["10.0.0.0/29"]                       # hosts .1 - .6
+    monkeypatch.setattr(access_mod, "fetch_tenant_prefixes", prefixes)
+
+    async def rr(spoke_id, cmd, data, timeout=30.0):
+        hub.calls.append((spoke_id, cmd, data))
+        if cmd == "NW_SCAN":
+            return {"payload": {"data": {"status": "SUCCESS", "reachable": []}}}
+        return {"payload": {"data": {"status": "SUCCESS", "alive": []}}}
+    hub.request_response = rr
+    for name in ("get_dns_spoke_for_tenant", "get_dhcp_spoke_for_tenant",
+                 "get_cppm_spoke_for_tenant"):
+        setattr(hub, name, lambda *_a, **_k: None)
+    hub.get_spoke_by_type = lambda t: "ipam-spoke" if t == "ipam" else "nw-acme"
+
+    def scanned():
+        hub.calls.clear()
+        asyncio.run(hub.run_nw_scheduled_scan("acme"))
+        return next(d for _s, c, d in hub.calls if c == "NW_SCAN")["targets"]
+    assert scanned() == ["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"]
+    # The next scan starts with the two hosts the cap left out.
+    assert scanned() == ["10.0.0.5", "10.0.0.6", "10.0.0.1", "10.0.0.2"]
