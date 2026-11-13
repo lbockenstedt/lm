@@ -61,7 +61,9 @@ The WebUI shows an OU as a path such as `Engineering/Lab`.
   tenant's groups. The spoke does this itself, so no `refint` overlay is needed
   (it may manage a remote server it can't reconfigure).
 - **Delete is safe.** Only an empty OU (no users, no child OUs) can be deleted,
-  and the `ou=users` root can't be renamed or deleted.
+  and the `ou=users` root can't be renamed or deleted. The WebUI's Delete
+  button is disabled for an OU with users or child OUs, and it asks for
+  confirmation, naming the tenant and OU path, before it sends the delete.
 - **Downstream readers must search the subtree.** Anything that reads users
   (ClearPass, applications) must search `ou=users,ou=<tenant>,…` with subtree
   scope, or it will miss users in OUs.
