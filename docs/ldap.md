@@ -51,7 +51,7 @@ place. Accounts live in one of three locations:
 | **LDAP** (most accounts) | Directory → Users, organised in OUs | Local password in LDAP |
 | **LDAP → Entra** (linked) | Directory → Users, Auth = Entra, with its UPN | LDAP bind with `userPassword: {SASL}<upn>`; saslauthd checks the password against Entra (ROPC). No local password is kept |
 | **Entra only** | Directory → Entra, the tenant's `LM-<tenant>-*` groups | Entra |
-| **Active Directory** | Not shown yet (read-only spoke stub) | AD |
+| **Active Directory** | Not built yet (see below) | AD |
 
 A linked LDAP user is the link: its UPN is stored in the `{SASL}` marker and
 returned as `upn` with `auth_mode: entra` in the tenant's user list. Linked sign-in works
@@ -184,7 +184,13 @@ a group is picked, and **Delete**; Remove and both Deletes ask for
 confirmation first. Write controls appear only for tenant admins. When Entra
 is not set up (Settings → Single sign-on) the tab says so.
 
-## Active Directory (read-only stub)
+## Active Directory (planned; read-only stub on a branch)
+
+> **Not on `dev`.** The stub lives on the ldap branch
+> `feat/ad-readonly-stub`. It was taken off `dev` because its
+> `bind_password` must go through the Credential Vault from day one
+> (fleet rule 5.1), and it returns together with that hub wiring.
+> Until then a spoke answers the `AD_*` commands with "Unknown command".
 
 `src/ad_directory.py` reads users from an AD domain, so the Directory view can
 later show LDAP, Entra and AD accounts together. It is read-only for now:
