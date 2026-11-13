@@ -153,7 +153,8 @@ def test_timeout_marks_spoke_failed_for_later_tenants():
     hub = _Hub(_tenants(8), reply)
     rows = _all_tenants(hub)
     assert len(rows) == 8
-    assert hub.count("ipam", "NETBOX_GET_DEVICES") == 5
+    assert hub.count("ipam", "NETBOX_COUNT") == 5
+    assert hub.count("ipam", "NETBOX_GET_DEVICES") == 0
     assert all(r["devices"] == 0 for r in rows.values())
 
 
@@ -222,3 +223,32 @@ def test_single_tenant_summary_timeout_is_zero_not_crash():
     assert out["devices"] == 0
     assert out["vms"] == 1
 
+
+def test_netbox_counts_come_from_netbox_count_not_full_lists():
+    """Fetching every device/prefix/IP row just to count it hit the 8s cap on
+    big tenants; NETBOX_COUNT returns NetBox's own counts. An older spoke that
+    doesn't know the command still gets counted from the full lists."""
+    def reply(spoke, cmd, payload):
+        if cmd == "NETBOX_COUNT" and payload["tenant"] == "t1":
+            return 0, {"status": "SUCCESS", "devices": 4, "prefixes": 2, "ip_addresses": 900}
+        if cmd == "NETBOX_COUNT":
+            return 0, {"status": "ERROR", "message": "Unknown command: NETBOX_COUNT"}
+        if cmd == "NETBOX_GET_DEVICES":
+            return 0, {"devices": [{}, {}, {}]}
+        return 0, {}
+    hub = _Hub(_tenants(2), reply)
+    rows = _all_tenants(hub)
+    assert (rows["t1"]["devices"], rows["t1"]["prefixes"], rows["t1"]["ips_used"]) == (4, 2, 900)
+    assert rows["t2"]["devices"] == 3
+    assert hub.count("ipam", "NETBOX_GET_DEVICES", lambda p: p["tenant"] == "t1") == 0
+
+
+def test_a_tenant_group_is_counted_with_the_group_filter():
+    def reply(spoke, cmd, payload):
+        return 0, {"status": "SUCCESS", "devices": 9, "prefixes": 0, "ip_addresses": 0}
+    tenants = _tenants(1)
+    tenants["group:emea"] = {"is_tenant_group": True, "netbox_tenant_group_slug": "emea"}
+    hub = _Hub(tenants, reply)
+    _all_tenants(hub)
+    assert hub.count("ipam", "NETBOX_COUNT", lambda p: p == {"tenant_group": "emea"}) == 1
+    assert hub.count("ipam", "NETBOX_COUNT", lambda p: p == {"tenant": "t1"}) == 1

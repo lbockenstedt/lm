@@ -307,11 +307,26 @@ def register(app, hub, ctx):
                 return {}
             return _unwrap_spoke(r) if isinstance(r, dict) else {}
 
-        # Fetch devices, prefixes, IPs, sessions and VMs all at once.
+        async def _netbox_counts():
+            """(devices, prefixes, IPs) from NetBox's own counts; an older
+            NetBox spoke without NETBOX_COUNT gets the full lists instead."""
+            # A tenant group counts its member tenants via NetBox's group filter.
+            group = access.netbox_tenant_scope(hub, _tid) if _tid else {}
+            scope = ({"tenant_group": group["tenant_group"]} if group.get("is_group")
+                     else {"tenant": nb_slug})
+            c = await _req(spoke_ipam, "NETBOX_COUNT", scope)
+            if c.get("status") == "SUCCESS":
+                return c.get("devices", 0), c.get("prefixes", 0), c.get("ip_addresses", 0)
+            d, p, i = await _asyncio.gather(
+                _req(spoke_ipam, "NETBOX_GET_DEVICES", scope),
+                _req(spoke_ipam, "NETBOX_GET_PREFIXES", scope),
+                _req(spoke_ipam, "NETBOX_GET_IPS",     scope))
+            return (len(d.get("devices", [])), len(p.get("prefixes", [])),
+                    len(i.get("ip_addresses", [])))
+
+        # Fetch the NetBox counts, sessions and VMs all at once.
         _core = await _asyncio.gather(
-            _req(spoke_ipam, "NETBOX_GET_DEVICES", {"tenant": nb_slug}),
-            _req(spoke_ipam, "NETBOX_GET_PREFIXES", {"tenant": nb_slug}),
-            _req(spoke_ipam, "NETBOX_GET_IPS",     {"tenant": nb_slug}),
+            _netbox_counts(),
             _req(spoke_nac, "CPPM_GET_ACCESS_TRACKER", {}),
             # One PXMX_LIST_VMS per visible hypervisor spoke, concurrently. The
             # same spoke shared by several tenants is de-duped across the fan-out
@@ -329,16 +344,11 @@ def register(app, hub, ctx):
                                          "prefer_cache": True})
               for apk, sp in owned_agent_reqs],
         )
-        # Split the results: the first four, then the per-spoke VMs, then the pinned-agent VMs.
-        devices_r, prefixes_r, ips_r, sessions_r = _core[:4]
+        # Split the results: NetBox counts and sessions, then the per-spoke VMs, then the pinned-agent VMs.
+        (devices, prefixes, ips_used), sessions_r = _core[:2]
         _n_hv = len(hv_spokes)
-        _vm_envelopes   = _core[4:4 + _n_hv]
-        _owned_envelopes = _core[4 + _n_hv:]
-
-        # Count devices, prefixes and used IPs.
-        devices  = len(devices_r.get("devices",   []))
-        prefixes = len(prefixes_r.get("prefixes", []))
-        ips_used = len(ips_r.get("ip_addresses",  []))
+        _vm_envelopes   = _core[2:2 + _n_hv]
+        _owned_envelopes = _core[2 + _n_hv:]
         # Merge VMs across all visible spokes, de-duped by unique_id
         # ("<cluster>/<node>/<vmid>") so a cluster-mate spoke self-reporting the
         # full cluster (or the unbound-global spoke overlapping a visible one)

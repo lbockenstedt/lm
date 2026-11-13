@@ -947,6 +947,10 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
             const haCluster = d.cluster && d.cluster.enabled !== false ? d.cluster : null;
             const haPanel = _dhcpHaPanel(haCluster);
             const nodeEvidence = haCluster ? _ddMemberEvidence(d.members, 'dhcp', haCluster.updating_members) : '';
+            // A failed journal read is shown as such, not as "no warnings".
+            const warnLines = (d.journal_error ? [`Kea journal unavailable: ${d.journal_error}`] : [])
+                .concat(d.ca_journal_error ? [`Kea control-agent journal unavailable: ${d.ca_journal_error}`] : [])
+                .concat(d.last_errors || []);
             container.innerHTML = `
                 <div class="flex items-center justify-between gap-3 mb-4">
                     <div>
@@ -993,9 +997,9 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                     <div class="px-4 py-3 text-sm font-semibold text-slate-700 border-b border-slate-200">Configured scopes</div>
                     ${subnetRows ? tw(th(['ID', 'Subnet', 'Gateway', 'Pools']) + `<tbody>${subnetRows}</tbody>`) : '<p class="p-4 text-slate-500 italic text-sm">No subnets reported.</p>'}
                 </div>
-                ${(d.last_errors || []).length ? `<div class="bg-white border border-slate-200 rounded-lg p-4">
+                ${warnLines.length ? `<div class="bg-white border border-slate-200 rounded-lg p-4">
                     <div class="text-sm font-semibold text-slate-700 mb-2">Recent service warnings/errors</div>
-                    <pre class="text-xs whitespace-pre-wrap break-all text-slate-600">${escapeHtml(d.last_errors.join('\n'))}</pre>
+                    <pre class="text-xs whitespace-pre-wrap break-all text-slate-600">${escapeHtml(warnLines.join('\n'))}</pre>
                 </div>` : ''}
                 ${_dhcpPacketTracePanel()}
                 ${_dhcpDnsHookPanel(dnsHook)}`;
