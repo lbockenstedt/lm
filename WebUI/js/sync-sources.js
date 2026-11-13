@@ -664,8 +664,10 @@ async function saveStaticResConfig() {
             method: 'POST',
             body: JSON.stringify({ config: { static_ip_reservations: { ...prev, enabled, interval: minutes * 60 } } })
         });
-        if (r.ok) showToast(`Static host reservations ${enabled ? 'on' : 'off'} — applied on the next sync cycle.`, 'success');
-        else showToast('Failed to save.', 'error');
+        if (r.ok) {
+            showToast(`Static host reservations ${enabled ? 'on' : 'off'} — applied on the next sync cycle.`, 'success');
+            loadStaticResConfig();
+        } else showToast('Failed to save.', 'error');
     } catch (e) {
         showToast('Error saving: ' + e.message, 'error');
     }

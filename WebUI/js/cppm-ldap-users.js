@@ -660,7 +660,7 @@ function onLDAPTenantChange() {
     const sel = document.getElementById('ldap-tenant-select');
     if (sel) window._ldapTenant = sel.value;
     // The OU panel still holds the old tenant; hide it until the new one loads.
-    lmViews.directoryHideOus();
+    lmViews.directoryHideOus?.();
     _updateLDAPOuHint();
     loadLDAPData(currentSubView || 'Users');
 }
@@ -693,7 +693,7 @@ async function loadLDAPData(subMenu) {
 
     try {
         // Groups have no OU tree; hide it before the fetch so a failed fetch can't leave it up.
-        if (subMenu === 'Groups') lmViews.directoryHideOus();
+        if (subMenu === 'Groups') lmViews.directoryHideOus?.();
         const endpoint = (subMenu === 'Groups' ? '/api/ldap/groups' : '/api/ldap/users') + _ldapTenantQuery();
         const headers = (subMenu === 'Groups')
             ? ['Group', 'Members', 'Actions']

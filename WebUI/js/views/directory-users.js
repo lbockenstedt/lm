@@ -84,11 +84,13 @@ function renderPanel() {
     const picked = state.picked;
     const isOu = picked && picked.length > 0;
     const pickedCount = isOu ? (state.ous.find(o => samePath(o.path, picked)) || {}).user_count || 0 : 0;
+    // An OU with child OUs can't be deleted either.
+    const hasChildren = isOu && state.ous.some(o => o.path.length > picked.length && samePath(o.path.slice(0, picked.length), picked));
     const act = 'px-2 py-1 rounded-md text-xs font-bold bg-slate-100 text-slate-600 hover:bg-slate-200 disabled:opacity-50';
     const actions = state.canWrite && !state.ouError ? safeHtml`<div class="flex flex-wrap gap-1 pt-2">
         <button data-action="newOu" class="${act}" title="Create an OU inside ${pathLabel(picked || [])}">+ OU</button>
         <button data-action="renameOu" class="${act}" ${isOu ? '' : 'disabled'} title="Rename the selected OU; its users and group memberships follow">Rename</button>
-        <button data-action="deleteOu" class="${act}" ${isOu && !pickedCount ? '' : 'disabled'} title="Delete the selected OU (only when it holds no users or OUs)">Delete</button>
+        <button data-action="deleteOu" class="${act}" ${isOu && !pickedCount && !hasChildren ? '' : 'disabled'} title="Delete the selected OU (only when it holds no users or OUs)">Delete</button>
     </div>` : '';
     const tree = state.ouError
         ? safeHtml`<div class="text-xs text-slate-500 p-2">${state.ouError}</div>`
@@ -185,9 +187,15 @@ const actions = {
     pick: el => { state.picked = JSON.parse(el.dataset.path); state.form = null; refresh(); },
     newOu: () => { state.form = { kind: 'new', parent: state.picked || [] }; refresh(); },
     renameOu: () => { state.form = { kind: 'rename', path: state.picked }; refresh(); },
-    // A deleted OU drops out of the reloaded list, so the table falls back to all.
-    deleteOu: () => write('DELETE', '/api/ldap/ous', { path: state.picked },
-        `OU ${pathLabel(state.picked)} deleted.`),
+    // Deleting removes the OU from the directory, so ask first, naming the
+    // tenant and OU. A deleted OU drops out of the reloaded list, so the
+    // table falls back to all.
+    deleteOu: async () => {
+        const path = state.picked;
+        const tenant = (window._ldapTenants || []).find(t => t.id === state.tenant) || {};
+        if (!await showConfirmToast(`Delete OU ${pathLabel(path)} from ${tenant.name || 'this tenant'}'s directory?`)) return;
+        return write('DELETE', '/api/ldap/ous', { path }, `OU ${pathLabel(path)} deleted.`);
+    },
     cancel: () => { state.form = null; refresh(); },
     submit: () => submitForm(),
     move: el => {
