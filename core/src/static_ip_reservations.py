@@ -61,7 +61,7 @@ import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 # Tenant scoping, spoke ownership and MAC normalisation.
-from access import (get_netbox_spoke, netbox_tenant_scope, norm_mac, same_tenant,
+from access import (netbox_tenant_scope, norm_mac, same_tenant,
                     spoke_owner_tenant, tenant_is_shared,
                     tenant_shared_fallback_blocked, unwrap_spoke)
 # The one rule for "this prefix is a Kea scope".
@@ -482,7 +482,10 @@ async def _run_pass(hub, now: float) -> Dict[str, Any]:
 
     # Step 2: Kea DHCP spokes grouped by the tenant scope they serve.
     groups, _skipped = hub._scope_groups(hub._get_dhcp_spokes())
-    ipam = get_netbox_spoke(hub)
+    # One IPAM spoke for reads and writes: NetBox ids only mean something on
+    # the instance they came from. It is the sync's first choice too, so the
+    # reads handed over below match what the sync would fetch.
+    ipam = next(iter(hub._ipam_spoke_candidates()), None)
     writes = 0
     # NetBox reads still current after this pass, handed to the sync.
     reads: Dict[str, Any] = {}
@@ -505,7 +508,7 @@ async def _run_pass(hub, now: float) -> Dict[str, Any]:
         if any(c.get("source") == "sweep" for c in candidates):
             kea_subnets = await _strict_read(hub, spokes, "DHCP_LIST_SUBNETS", "subnets")
         try:
-            pfx_data, ips_data = await hub._netbox_prefixes_and_ips(filters)
+            pfx_data, ips_data = await hub._netbox_prefixes_and_ips(filters, spoke=ipam)
         except Exception as e:  # noqa: BLE001
             totals["errors"].append({"tenant": tid, "error": f"netbox read: {e}"})
             continue

@@ -601,6 +601,7 @@ async function loadStaticResConfig() {
     } catch (e) { console.error('loadStaticResConfig failed', e); }
 }
 
+// Save the card's on/off switch and interval (minutes → seconds) into global_config.
 async function saveStaticResConfig() {
     const r0 = await setupFetch('/setup/config');
     const prev = r0.ok ? (((await r0.json()).global_config || {}).static_ip_reservations || {}) : {};

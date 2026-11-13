@@ -423,3 +423,25 @@ def test_pass_hands_unchanged_reads_to_the_sync_but_not_written_ones():
     hub = _Hub(agent_addresses=_agent_static())
     _run(hub)
     assert hub.writes() and key not in hub._take_netbox_reads()
+
+
+def test_pass_reads_and_writes_the_same_ipam_spoke():
+    """NetBox ids are per instance: when the first IPAM spoke's read fails the
+    pass must not fail over to another instance and then write its id back."""
+    class _TwoIpam(_Hub):
+        def get_all_spokes_by_type(self, module_type):
+            if module_type == "ipam":
+                return ["netbox-1", "netbox-2"]
+            return super().get_all_spokes_by_type(module_type)
+
+        async def request_response(self, spoke_id, command, payload, timeout=30.0):
+            if spoke_id == "netbox-1" and command == "NETBOX_GET_IPS":
+                self.log.append((spoke_id, command, payload))
+                return {"payload": {"data": {"status": "ERROR", "message": "down"}}}
+            return await super().request_response(spoke_id, command, payload, timeout)
+
+    hub = _TwoIpam(agent_addresses=_agent_static())
+    st = _run(hub)
+    assert hub.writes() == []
+    assert not [1 for s, _c, _p in hub.log if s == "netbox-2"]
+    assert st["errors"] and "netbox read" in st["errors"][0]["error"]

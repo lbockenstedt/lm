@@ -1052,7 +1052,8 @@ def test_agent_advertises_zabbix_server_capability(monkeypatch):
 
 def test_host_addressing_reports_static_dhcp_and_unknown(monkeypatch):
     """GET_HOST_ADDRESSING: kernel "dynamic" = DHCP, permanent primary = static,
-    secondary (VIP) = unknown; loopback and container bridges are left out."""
+    secondary (VIP) = unknown; loopback, container bridges and virtual link
+    kinds are left out, a LAN bridge is kept."""
     rows = [
         {"ifname": "lo", "link_type": "loopback", "address": "00:00:00:00:00:00",
          "addr_info": [{"family": "inet", "local": "127.0.0.1", "scope": "host"}]},
@@ -1066,6 +1067,17 @@ def test_host_addressing_reports_static_dhcp_and_unknown(monkeypatch):
                         "dynamic": True, "valid_life_time": 3600}]},
         {"ifname": "docker0", "link_type": "ether", "address": "02:00:00:00:00:0c",
          "addr_info": [{"family": "inet", "local": "172.17.0.1", "scope": "global"}]},
+        {"ifname": "podman0", "link_type": "ether", "address": "02:00:00:00:00:0d",
+         "linkinfo": {"info_kind": "bridge"},
+         "addr_info": [{"family": "inet", "local": "10.88.0.1", "scope": "global"}]},
+        # A renamed virtual link is caught by its kind, not its name.
+        {"ifname": "uplink9", "link_type": "ether", "address": "02:00:00:00:00:0e",
+         "linkinfo": {"info_kind": "macvlan"},
+         "addr_info": [{"family": "inet", "local": "10.40.0.5", "scope": "global"}]},
+        # A LAN bridge holding the host's own address is kept.
+        {"ifname": "vmbr0", "link_type": "ether", "address": "02:00:00:00:00:0f",
+         "linkinfo": {"info_kind": "bridge"},
+         "addr_info": [{"family": "inet", "local": "10.50.0.2", "scope": "global"}]},
     ]
     monkeypatch.setattr(
         agent_spoke.subprocess, "run",
@@ -1079,6 +1091,8 @@ def test_host_addressing_reports_static_dhcp_and_unknown(monkeypatch):
          "interface": "eth0"},
         {"ip": "10.30.0.7", "mac": "02:00:00:00:00:0b", "mode": "dhcp",
          "interface": "eth1"},
+        {"ip": "10.50.0.2", "mac": "02:00:00:00:00:0f", "mode": "static",
+         "interface": "vmbr0"},
     ]
     # A failing "ip" command reports nothing rather than guessing.
     monkeypatch.setattr(

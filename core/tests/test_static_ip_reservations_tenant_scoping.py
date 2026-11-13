@@ -47,3 +47,24 @@ def test_an_agent_only_touches_its_own_tenants_netbox_scope():
     _run(hub)
     reads = {p.get("tenant") for _s, c, p in hub.log if c.startswith("NETBOX_GET")}
     assert reads == {"tenant-a"}
+
+
+def _sync_status_rows(user):
+    """GET /api/dns-dhcp/sync-status as ``user``; the static rows it returns."""
+    from test_dhcp_tenant_routing import FakeHub, _build
+    hub = FakeHub({"dhcp-a"})
+    hub.state.system_state = {"global_config": {}}
+    hub.dns_dhcp_sync_status = {"static_reservations": _STATUS}
+    hub._dns_hook_desired = lambda: False
+    hub._dhcp_hold_declined = lambda: False
+    body = _build({"user": user}, hub).get("/api/dns-dhcp/sync-status").json()
+    return body["status"]["static_reservations"]["reserved"]
+
+
+def test_sync_status_route_needs_the_dhcp_right_to_show_rows():
+    """The route sits outside the /api/dhcp/ gate, so it checks the right itself."""
+    with_right = {"tenant_id": "t-a", "permissions": {"dhcp": True}}
+    without = {"tenant_id": "t-a", "permissions": {"nw": True}}
+    assert [r["ip"] for r in _sync_status_rows(with_right)] == ["10.20.0.50"]
+    assert _sync_status_rows(without) == []
+    assert len(_sync_status_rows({"is_admin": True, "permissions": {"admin": True}})) == 2

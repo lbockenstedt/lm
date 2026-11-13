@@ -1741,7 +1741,8 @@ def register(app, hub, ctx):
         (fuels the DNS/DHCP status tiles). Read-only, authed (under /api/).
         ``static_reservations`` lists every tenant's IPs and MACs, so it is cut
         down to the caller's effective tenant; only a global admin who has
-        not switched into a tenant sees all of it."""
+        not switched into a tenant sees all of it. This path is outside the
+        ``/api/dhcp/`` gate, so a user without the ``dhcp`` right sees no rows."""
         from static_ip_reservations import status_for_tenant
         hub = app.state.hub
         # The stored sync settings.
@@ -1750,8 +1751,9 @@ def register(app, hub, ctx):
         # Tenant-scope the static reservation status.
         status = dict(hub.dns_dhcp_sync_status or {})
         if "static_reservations" in status:
+            sess = _session_user(request)
             tid = _effective_tenant(request, tenant)
-            if tid is None and not _is_admin(_session_user(request)):
+            if (tid is None and not _is_admin(sess)) or not access.has_module_access(sess, "dhcp"):
                 tid = ""
             status["static_reservations"] = status_for_tenant(status["static_reservations"], tid)
         # Last-run status plus the effective settings.

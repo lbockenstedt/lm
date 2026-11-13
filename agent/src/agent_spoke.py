@@ -608,7 +608,7 @@ def _local_service_addresses() -> list:
     # Plus every global IPv4 address from "ip -j".
     try:
         result = subprocess.run(
-            ["ip", "-j", "-4", "address", "show", "up"],
+            ["ip", "-j", "-d", "-4", "address", "show", "up"],
             capture_output=True, text=True, check=False, timeout=10)
         if result.returncode == 0:
             for interface in json.loads(getattr(result, "stdout", "") or "[]"):
@@ -632,13 +632,20 @@ def _local_service_addresses() -> list:
     return addresses
 
 
-# Container/virtual bridges whose addresses never belong in a LAN DHCP scope.
-_HOST_ADDRESSING_SKIP_IFACES = ("docker", "veth", "virbr", "br-", "cni",
-                                "flannel", "cali", "tun", "tap", "wg")
+# Container/virtual interfaces whose addresses never belong in a LAN DHCP
+# scope. Virtual link kinds are skipped by type (``ip -d`` linkinfo); NAT
+# bridges look like any bridge, so they are skipped by their usual names. A
+# plain LAN bridge (e.g. Proxmox vmbr0) carries the host's own address and is
+# kept. The hub also refuses any address outside a NetBox DHCP scope.
+_HOST_ADDRESSING_SKIP_KINDS = {"veth", "tun", "tap", "wireguard", "vxlan", "dummy",
+                               "macvlan", "macvtap", "ipvlan", "ipip", "gre", "sit"}
+_HOST_ADDRESSING_SKIP_IFACES = ("docker", "veth", "virbr", "br-", "cni", "flannel",
+                                "cali", "tun", "tap", "wg", "podman", "cbr", "lxc",
+                                "lxdbr", "incusbr", "cilium", "weave", "kube", "zt")
 
 
 def _host_addressing() -> list:
-    """IPv4 addressing mode per interface address, from ``ip -j -4 address``.
+    """IPv4 addressing mode per interface address, from ``ip -j -d -4 address``.
 
     Returns ``[{ip, mac, mode, interface}]``. ``mode`` is ``dhcp`` when the
     kernel marks the address ``dynamic`` (a DHCP lease with a finite
@@ -661,7 +668,9 @@ def _host_addressing() -> list:
         # Only physical-style Ethernet links with a MAC.
         name = str(interface.get("ifname") or "")
         mac = str(interface.get("address") or "").lower()
+        kind = str((interface.get("linkinfo") or {}).get("info_kind") or "")
         if interface.get("link_type") != "ether" or not mac \
+                or kind in _HOST_ADDRESSING_SKIP_KINDS \
                 or name.startswith(_HOST_ADDRESSING_SKIP_IFACES):
             continue
         for info in interface.get("addr_info") or []:

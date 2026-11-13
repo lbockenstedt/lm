@@ -533,7 +533,8 @@ class DnsDhcpSyncMixin:
         # Bound spokes first, keeping the original order otherwise.
         return sorted(spokes, key=lambda s: 0 if pk(s) in bound else 1)
 
-    async def _netbox_prefixes_and_ips(self, filters: Dict[str, Any] = None
+    async def _netbox_prefixes_and_ips(self, filters: Dict[str, Any] = None,
+                                       spoke: str = None
                                        ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Fetch NetBox prefixes + IPs, failing over across IPAM spokes.
 
@@ -545,10 +546,13 @@ class DnsDhcpSyncMixin:
         ``filters`` (``tenant`` / ``tenant_group``, see ``_sync_scope``) is
         passed to both reads so a tenant-dedicated target only gets its own
         tenant's prefixes and IPs.
+
+        ``spoke`` reads from that one spoke only, with no failover: a caller
+        that writes back by NetBox id must write to the instance it read.
         """
         # Filters for both reads, and spokes to try in order.
         req = dict(filters or {})
-        candidates = self._ipam_spoke_candidates()
+        candidates = [spoke] if spoke else self._ipam_spoke_candidates()
         if not candidates:
             raise RuntimeError("NetBox spoke not connected")
         # Try each spoke until one returns both lists.
