@@ -364,3 +364,30 @@ def test_sync_skips_reload_when_query_logging_already_restarted_this_call(
     assert out["status"] == "SUCCESS"
     assert out["reloaded"] is True
     assert reload_calls == []
+
+
+def test_stats_sampler_reads_the_query_log_between_requests(tmp_path, monkeypatch, mgr):
+    """The first stats request after a quiet spell used to parse hours of
+    backlog inline (a 14.8s GET /api/dns/stats); the 5-minute sampler now
+    keeps the tail current."""
+    _patch_paths(tmp_path, monkeypatch)
+    with open(um_mod.QUERY_LOG, "w") as f:
+        f.writelines(QUERY_LINES)
+    monkeypatch.setattr(UnboundManager, "_read_counters", lambda self: (None, "down"))
+
+    mgr.sample_stats()
+
+    assert mgr._query_log_offset == os.path.getsize(um_mod.QUERY_LOG)
+    assert len(mgr._query_events) == 4
+
+
+def test_query_readers_wait_while_the_sampler_holds_the_query_lock(tmp_path, monkeypatch, mgr):
+    import threading
+    _patch_paths(tmp_path, monkeypatch)
+    done = threading.Event()
+    with mgr._query_lock:
+        reader = threading.Thread(target=lambda: (mgr.get_query_names(), done.set()))
+        reader.start()
+        assert not done.wait(0.2)
+    assert done.wait(5)
+    reader.join()

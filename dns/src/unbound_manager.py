@@ -10,9 +10,11 @@ import os
 import re
 import shutil
 # Address parsing, sockets and binary packing for DNS probes.
+import functools
 import ipaddress
 import socket
 import struct
+import threading
 # JSON, threads and timing.
 import time
 # Bounded event queue.
@@ -32,6 +34,17 @@ MAIN_CONF = "/etc/unbound/unbound.conf"
 BRIDGE_CONF_NAME = "lm-include.conf"
 # Query log file Unbound writes when query logging is on.
 QUERY_LOG = "/var/log/unbound/lm-queries.log"
+
+
+def _query_locked(method):
+    """Run ``method`` holding the manager's query lock: the stats sampler
+    thread tails the query log while requests read what it builds."""
+    @functools.wraps(method)
+    def locked(self, *args, **kwargs):
+        """``method`` under ``self._query_lock``."""
+        with self._query_lock:
+            return method(self, *args, **kwargs)
+    return locked
 
 
 def worker_code_version() -> dict:
@@ -168,6 +181,8 @@ class UnboundManager:
         # ("Pi-hole style") query log, which needs individual timestamped
         # events rather than the aggregate counters above.
         self._query_events = deque(maxlen=MAX_QUERY_EVENTS)
+        # Held by the log tail and every reader of the two tables above.
+        self._query_lock = threading.RLock()
         # Set after a successful restart/AppArmor apply in this process so a
         # host whose logfile never appears is not restarted on every sync.
         self._logging_restarted = False
@@ -966,6 +981,7 @@ class UnboundManager:
         return {"status": "unchanged", "changed": False, "restarted": False,
                 "ok": True, "reason": "already-enabled"}
 
+    @_query_locked
     def _tail_query_log(self) -> None:
         """Incrementally parse newly-appended lines of the unbound query log
         into ``self._query_counts``, tracking a byte offset so repeated
@@ -1081,6 +1097,7 @@ class UnboundManager:
                                m.group("name").lower(), m.group("type").upper()))
         return events
 
+    @_query_locked
     def get_client_queries(self, client: str = None, minutes: int = 10,
                            search: str = None, limit: int = CLIENT_QUERY_LIMIT,
                            source_prefixes: list = None) -> dict:
@@ -1162,6 +1179,7 @@ class UnboundManager:
                 "queries": rows[:(limit or CLIENT_QUERY_LIMIT)],
                 "top_names": top_names}
 
+    @_query_locked
     def get_query_names(self, search: str = None, limit: int = TOP_NAMES_LIMIT,
                          source_prefixes: list = None, range_days: int = None,
                          range_seconds: int = None) -> list:
@@ -1383,7 +1401,10 @@ class UnboundManager:
         return aggregate_types or threaded_types
 
     def sample_stats(self, force: bool = False) -> bool:
-        """Take one counter snapshot for the windowed-stats history."""
+        """Take one counter snapshot for the windowed-stats history, and read
+        the query log's new lines so a stats request after a quiet spell only
+        parses the last few minutes instead of hours of backlog."""
+        self._tail_query_log()
         # Read counters; skip if unavailable.
         raw, err = self._read_counters()
         if raw is None:
