@@ -77,6 +77,7 @@ cites the commits that motivated its checklist.
 
 | Skill | Recipe for |
 | :--- | :--- |
+| `review` | AB's two review panels run locally on a change before every push (any tool). |
 | `dual-copy-guard` | Keeping twin files (hub↔spoke, linux↔windows, pipelines) in step. |
 | `add-simulation` | A new client traffic simulation. |
 | `add-webui-control` | A single WebUI button, toggle or small form. |
