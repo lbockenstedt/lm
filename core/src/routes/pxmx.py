@@ -12,6 +12,8 @@ from api import (
 )
 # Background warm-cache job type, and the marker meaning "visible to every admin".
 from warm_cache import ALL_SCOPE, CacheJob
+# iLO <-> hypervisor serial links, for the hardware health on Diagnostics.
+import hw_serial_links
 
 # Shared freshest-wins dedup (also used inside pxmx_node_vm_aggregation to
 # collapse cluster-mate AGENTS on one spoke) — reused here to collapse
@@ -2201,18 +2203,67 @@ def register(app, hub, ctx):
     # Expose the feed on the hub so its background loop can call it.
     hub.pxmx_drive_health_feed_once = _drive_health_feed_once
 
+    def _attach_hw_health(request: Request, tenant: str, out):
+        """Add each node's iLO hardware health (``hw_health``) to a drive-health
+        answer, read from the hub caches through the chassis-serial link — no
+        spoke call at render time. Only controllers in the caller's tenant
+        scope are used; nodes without a linked iLO get no key, and if the
+        lookup itself fails every node gets ``{"unavailable": true}``. Returns
+        a copy; the cached answer is never modified."""
+        nodes = out.get("nodes") if isinstance(out, dict) else None
+        if not isinstance(nodes, list) or not nodes:
+            return out
+        try:
+            # The effective tenant: a non-admin's ?tenant= is honoured only for
+            # tenants they belong to, so iLO names/addresses never leak across.
+            sess = _session_user(request)
+            tid = access.session_effective_tenant(sess, tenant)
+            scope = access.tenant_scope_ids(tid)
+            if scope is None:
+                # No tenant resolved: a None scope means "everything" to
+                # in_tenant_scope, so an admin falls back to the ADMIN scope
+                # and anyone else sees no controllers.
+                if not _is_admin(sess):
+                    return out
+                tid = access.ADMIN_TENANT_ID
+                scope = access.tenant_scope_ids(tid)
+            hide_shared = access.tenant_left_shared(app.state.hub, tid, "nw")
+
+            def _visible(ctl_tenant):
+                """Whether a controller record (by tenant) is in this caller's scope."""
+                if hide_shared and access.tenant_is_shared(ctl_tenant):
+                    return False
+                return access.in_tenant_scope(ctl_tenant, scope)
+
+            names = [str(n.get("node")) for n in nodes if isinstance(n, dict) and n.get("node")]
+            linked = hw_serial_links.hw_health_for_nodes(app.state.hub, names, _visible)
+        except Exception as e:  # noqa: BLE001 - hardware health must never break drive diagnostics
+            logger.warning("drive-health: iLO hardware health attach failed: %s", e)
+            # Say so per node, so the UI doesn't show "no controller linked".
+            linked = {str(n["node"]): {"unavailable": True} for n in nodes
+                      if isinstance(n, dict) and n.get("node")}
+        return {**out, "nodes": [{**n, "hw_health": linked[n["node"]]}
+                                 if isinstance(n, dict) and n.get("node") in linked else n
+                                 for n in nodes]}
+
     @app.get("/api/pxmx/drive-health")
     async def get_pxmx_drive_health(request: Request, tenant: str = None, node: str = None, refresh: bool = False):
-        """Retrieve drive health and SSD wear diagnostics across hypervisor nodes.
+        """Retrieve drive health and SSD wear diagnostics across hypervisor nodes,
+        plus each node's linked iLO hardware health (``hw_health``).
 
         Results are cached in memory for up to 60 seconds; passing refresh=True
         bypasses the cache to guarantee a live poll.
         """
-        hub = app.state.hub
         # Any logged-in user.
-        sess = _session_user(request)
-        if not sess:
+        if not _session_user(request):
             raise HTTPException(status_code=401, detail="Authentication required")
+        out = await _drive_health_payload(request, tenant, node, refresh)
+        return _attach_hw_health(request, tenant, out)
+
+    async def _drive_health_payload(request: Request, tenant: str, node: str, refresh: bool):
+        """The drive-health answer for this scope: the hub cache first, then the
+        spokes, then the last known data (see get_pxmx_drive_health)."""
+        hub = app.state.hub
 
         # Resolve the tenant and the hypervisor spokes in its scope.
         tid = _resolve_tenant(request, tenant)

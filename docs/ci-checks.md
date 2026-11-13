@@ -126,6 +126,13 @@ copies. ab adds the `target` input (dev → main override) and the weekday
 schedule; kvm promotes on dispatch only. To change promotion, edit the
 reusable in lm.
 
+A dev → qa promotion carries one unit of work (one merged PR or direct push).
+When later units change the same files, they travel with the oldest unit,
+because promoting a file version that a later unit already replaced would be
+rejected. A unit that conflicts on its own is likewise batched with the next
+unit. The PR is then titled after the oldest carried unit with "(+N more)", and
+its body lists every unit it carries.
+
 ## Promoting several repos
 
 `.github/scripts/promote_fleet.sh [--to qa|main] <repo>...` dispatches

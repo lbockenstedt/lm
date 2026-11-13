@@ -1281,6 +1281,20 @@ function _renderSetupSyncTile(content) {
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-sm font-bold text-slate-500">Static hosts → DHCP reservations</h3>
+                </div>
+                <p class="text-xs text-slate-500 mb-3">A host with a static IP inside a DHCP scope holds no lease, so Kea could hand its address to another client. When on, the netbox spoke marks each statically addressed host's existing NetBox IP as a DHCP reservation (MAC + reservation flag) just before a DNS/DHCP sync, and that sync pushes it to Kea. Hosts come from tenant-bound agents and the network sweep; conflicts are reported, never overwritten, and the writes for a tenant are rolled back if its DHCP sync fails. Off by default because it writes to NetBox.</p>
+                <div class="flex flex-wrap items-end gap-4">
+                    <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="static-res-enabled" class="w-4 h-4 text-green-600 rounded">Reserve statically addressed hosts</label>
+                    <div class="space-y-1">
+                        <label class="${labelCls}" for="static-res-interval">Every (minutes)</label>
+                        <input type="number" id="static-res-interval" min="5" value="15" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                </div>
+                <div id="static-res-status" class="text-xs text-slate-500 mt-3"></div>
+            </div>
+            <div class="${card}">
+                <div class="flex items-center justify-between mb-4">
                     <h3 class="text-sm font-bold text-slate-500">Hypervisor → IPAM Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button id="vm-sync-run-btn" onclick="runVmSyncNow()" class="${btnCls}">Sync now</button>
                 </div>
@@ -1634,6 +1648,7 @@ function _renderSetupSyncTile(content) {
     loadRealtimeNacSyncStatus();
     loadDnsHookConfig();
     loadDhcpDeclineConfig();
+    loadStaticResConfig();
     loadVmSyncSources();
     loadVmSyncConfig();
     loadVmSyncStatus();
@@ -1670,6 +1685,7 @@ function _syncSaveFnFor(el) {
     if (id.startsWith('rt-nac-sync-'))      return saveRealtimeNacSyncConfig;
     if (id.startsWith('dns-hook-'))         return saveDnsHookConfig;
     if (id.startsWith('dhcp-decline-'))     return saveDhcpDeclineConfig;
+    if (id.startsWith('static-res-'))       return saveStaticResConfig;
     if (id.startsWith('ep-sync-'))          return saveEndpointSyncConfig;
     if (id.startsWith('vm-sync-'))          return saveVmSyncConfig;
     if (id.startsWith('fw-sync-'))          return saveFwDiscoveryConfig;

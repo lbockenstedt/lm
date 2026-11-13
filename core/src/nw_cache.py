@@ -377,9 +377,26 @@ class NwCacheMixin:
             vlans = poll_result.get("vlans")
             if isinstance(vlans, list):
                 entry["vlans"] = {"status": "SUCCESS", "data": vlans}
+        self._nw_note_hw_health(entry, poll_result.get("hw_health"))
         # Stamp the write time and schedule a debounced save.
         entry["fetched_at"] = time.time()
         self._nw_cache_file.schedule_save(self._nw_tenant_of_device(device_id))
+
+    @staticmethod
+    def _nw_note_hw_health(entry: Dict[str, Any], health: Any) -> None:
+        """Keep a controller's server hardware health (``hw_health`` from an
+        iLO poll) in its own slot. A failed read keeps the last good reading
+        and adds ``error``/``error_at``; a poll without the key (older nw
+        spoke, non-iLO device) changes nothing."""
+        if not isinstance(health, dict):
+            return
+        if health.get("error"):
+            last = {k: v for k, v in (entry.get("hw_health") or {}).items()
+                    if k not in ("error", "error_at")}
+            entry["hw_health"] = {**last, "error": str(health["error"])[:300],
+                                  "error_at": health.get("polled_at") or time.time()}
+        else:
+            entry["hw_health"] = health
 
     # ── persist ───────────────────────────────────────────────────────────────
     # Persistence itself lives in cache_core.JsonCacheFile: the debounced

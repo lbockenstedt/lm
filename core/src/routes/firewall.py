@@ -34,6 +34,22 @@ def _fw_record(hub, firewall_id):
     return next((f for f in firewalls if f.get("id") == firewall_id), None)
 
 
+def _fw_name(hub, firewall_id):
+    """The firewall's name for log lines (its id when it has none)."""
+    return (_fw_record(hub, firewall_id) or {}).get("name") or firewall_id
+
+
+def _spoke_reply(result):
+    """The spoke's own reply ({status, message, ...}) from a request_response
+    result, whatever its wrapping: the full frame ``{payload: {type, data:
+    {...}}}``, the payload alone (as _fw_spoke_cmd returns it), or a bare dict
+    (a hub-side timeout). Status checks must read this level."""
+    reply = result.get("payload", result) if isinstance(result, dict) else result
+    if isinstance(reply, dict) and "status" not in reply and isinstance(reply.get("data"), dict):
+        reply = reply["data"]
+    return reply
+
+
 def fw_cache_job(hub, firewall_id: str, endpoint: str) -> CacheJob:
     """Hub-cache job for one firewall endpoint. Namespace ``fw_<endpoint>``,
     key = firewall id: a firewall's data is stored ONCE no matter how many
@@ -51,13 +67,14 @@ def fw_cache_job(hub, firewall_id: str, endpoint: str) -> CacheJob:
         if not spoke_id or hub._primary_key(spoke_id) not in hub.active_connections:
             raise HTTPException(status_code=503, detail=f"Firewall spoke {spoke_id} not connected")
         # Ask the spoke for the data.
+        # firewall_id: a spoke can manage several firewalls (e.g. an HA pair).
         result = await hub.request_response(
-            spoke_id, FW_READ_CMDS[endpoint], {},
+            spoke_id, FW_READ_CMDS[endpoint], {"firewall_id": firewall_id},
             timeout=_FW_FETCH_TIMEOUTS.get(endpoint, _FW_FETCH_TIMEOUT_DEFAULT))
         # A spoke ERROR (e.g. OPNsense < 26.1 with no NAT MVC API, or an API
         # key lacking the module scope) must surface rather than be cached as
         # an empty list.
-        reply = result.get("payload", result) if isinstance(result, dict) else result
+        reply = _spoke_reply(result)
         if isinstance(reply, dict) and reply.get("status") == "ERROR":
             raise HTTPException(status_code=502,
                                 detail=reply.get("message", "Firewall spoke error"))
@@ -199,7 +216,8 @@ def register(app, hub, ctx):
             return None
         # Fetch the list (None on failure).
         try:
-            result = await hub.request_response(spoke_id, cmd, {}, timeout=_FW_WRITE_TIMEOUT)
+            result = await hub.request_response(spoke_id, cmd, {"firewall_id": fw.get("id")},
+                                                timeout=_FW_WRITE_TIMEOUT)
         except Exception:  # noqa: BLE001
             return None
         # Unwrap the reply into a list of records.
@@ -284,7 +302,8 @@ def register(app, hub, ctx):
         if spoke_id and hub._primary_key(spoke_id) in hub.active_connections:
             try:
                 res = access.unwrap_spoke(await hub.request_response(
-                    spoke_id, "OPNSENSE_GET_PERF_HISTORY", {"start": start, "end": end},
+                    spoke_id, "OPNSENSE_GET_PERF_HISTORY",
+                    {"start": start, "end": end, "firewall_id": firewall_id},
                     timeout=20.0))
                 if isinstance(res, dict) and res.get("status") == "SUCCESS":
                     return {"status": "SUCCESS", "interval": 300, "source": "spoke",
@@ -364,9 +383,11 @@ def register(app, hub, ctx):
         spoke_id = fw.get("spoke_id")
         if not spoke_id or hub._primary_key(spoke_id) not in hub.active_connections:
             raise HTTPException(status_code=503, detail=f"Firewall spoke {spoke_id} not connected")
-        # Send the command and unwrap the reply.
+        # Send the command (naming the firewall, as one spoke can manage several)
+        # and unwrap the reply.
         try:
-            result = await hub.request_response(spoke_id, command, data, timeout=_FW_WRITE_TIMEOUT)
+            result = await hub.request_response(spoke_id, command, {**data, "firewall_id": firewall_id},
+                                                timeout=_FW_WRITE_TIMEOUT)
             if isinstance(result, dict):
                 payload = result.get("payload", result)
                 if isinstance(payload, dict) and "data" in payload:
@@ -541,11 +562,15 @@ def register(app, hub, ctx):
                                 detail="On shared infrastructure the target must be inside your tenant's subnets")
 
     async def _impair_write(firewall_id, command, data):
-        """Send an impairment change; a spoke ERROR becomes a 400."""
+        """Send an impairment change. Anything but a SUCCESS reply becomes a 400,
+        so the UI never reports an impairment that was not created."""
         result = await _fw_write(app.state.hub, firewall_id, command, data, "impair")
-        reply = result.get("payload", result) if isinstance(result, dict) else result
-        if isinstance(reply, dict) and reply.get("status") == "ERROR":
-            raise HTTPException(status_code=400, detail=reply.get("message", "Firewall spoke error"))
+        reply = _spoke_reply(result)
+        if not (isinstance(reply, dict) and reply.get("status") == "SUCCESS"):
+            detail = (reply.get("message") if isinstance(reply, dict) else None) or "Firewall spoke error"
+            logger.warning("%s on firewall %s failed: %s", command, _fw_name(app.state.hub, firewall_id), detail)
+            raise HTTPException(status_code=400, detail=detail)
+        logger.info("%s on firewall %s: %s", command, _fw_name(app.state.hub, firewall_id), reply.get("message"))
         return result
 
     # Add a network impairment.
@@ -635,16 +660,10 @@ def register(app, hub, ctx):
             # otherwise it stays "No firewall configured" until it reconnects.
             # The vault-resolved api_key/api_secret are overlaid onto a COPY
             # just before the push — the plaintext never touches global_config.
-            pushed = False
             new_spoke = new_fw.get("spoke_id")
-            if new_spoke and hub._primary_key(new_spoke) in hub.active_connections:
-                try:
-                    push_fw = await instance_vault.overlay(hub, new_fw, "firewalls")
-                    await hub.send_to_spoke(_hub_msg(new_spoke, "UPDATE_CONFIG", push_fw))
-                    pushed = True
-                    _redeploy_certs_soon(hub, new_spoke)
-                except Exception as e:  # noqa: BLE001 — saved; reconnect re-push covers it
-                    logger.warning("add_firewall: config push to %s failed: %s", new_spoke, e)
+            pushed = await _push_fw_spoke(hub, new_spoke)
+            if pushed:
+                _redeploy_certs_soon(hub, new_spoke)
 
             return {"status": "ok", "firewall": new_fw, "pushed": pushed}
         except HTTPException:
@@ -653,6 +672,23 @@ def register(app, hub, ctx):
         except Exception as e:
             logger.exception("add_firewall failed")
             raise HTTPException(status_code=500, detail=str(e))
+
+    async def _push_fw_spoke(hub, spoke_id) -> bool:
+        """Send an OPNsense spoke its full firewall list (hub.opn_config_for_spoke,
+        the same payload as on reconnect) so adding, moving or deleting one box
+        of a pair never leaves the spoke with only that box. Skipped when the
+        spoke is offline (the reconnect push covers it). With no firewall left
+        it sends an empty list, which clears the spoke. True when sent; False
+        when offline or the send failed (logged)."""
+        if not spoke_id or hub._primary_key(spoke_id) not in hub.active_connections:
+            return False
+        try:
+            config = await hub.opn_config_for_spoke(spoke_id)
+            await hub.send_to_spoke(_hub_msg(spoke_id, "UPDATE_CONFIG", config))
+            return True
+        except Exception as e:  # noqa: BLE001 — saved; the reconnect push covers it
+            logger.warning("firewall config push to %s failed: %s", spoke_id, e)
+            return False
 
     # Change a firewall's setup.
     @app.put("/setup/firewalls/{firewall_id}")
@@ -679,6 +715,7 @@ def register(app, hub, ctx):
                     and not (merged.get("api_key") and merged.get("api_secret"))):
                 raise HTTPException(status_code=400, detail="OPNsense needs both an API key and an API secret")
             # Apply the changes, check any vault reference, drop inline secrets, and save.
+            old_spoke = firewalls[fw_index].get("spoke_id")
             firewalls[fw_index].update(update_data)
             sess = _session_user(request)
             await instance_vault.validate_ref(
@@ -687,17 +724,22 @@ def register(app, hub, ctx):
             hub.state.system_state["global_config"] = global_config
             hub.state._mark_dirty()
 
-            # Push to the spoke if connected (redeploying certs if the connection changed).
+            # Moved to another spoke: the old one drops it from its list.
             spoke_id = firewalls[fw_index].get("spoke_id")
-            if spoke_id and hub._primary_key(spoke_id) in hub.active_connections:
-                push_fw = await instance_vault.overlay(hub, firewalls[fw_index], "firewalls")
-                msg = _hub_msg(spoke_id, "UPDATE_CONFIG", push_fw)
-                await hub.send_to_spoke(msg)
-                if {"host", "port", "api_key", "api_secret", "vault_credential", "credential_ref", "spoke_id"} & set(update_data):
-                    _redeploy_certs_soon(hub, spoke_id)
+            old_ok = new_ok = True
+            if old_spoke and old_spoke != spoke_id:
+                old_ok = await _push_fw_spoke(hub, old_spoke)
+            # Push to the spoke if connected (redeploying certs if the connection changed).
+            # Unbinding leaves no new spoke: only the old spoke's clear counts.
+            if spoke_id or not old_spoke:
+                new_ok = await _push_fw_spoke(hub, spoke_id)
+            if spoke_id and new_ok and {"host", "port", "api_key", "api_secret", "vault_credential", "credential_ref", "spoke_id"} & set(update_data):
+                _redeploy_certs_soon(hub, spoke_id)
+            # Report "pushed" only when every affected spoke got its list.
+            if new_ok and old_ok:
                 return {"status": "ok", "message": "Firewall configuration updated and pushed to spoke.", "pushed": True}
             else:
-                return {"status": "partial_success", "message": "Configuration saved, but associated spoke is not connected.", "pushed": False}
+                return {"status": "partial_success", "message": "Configuration saved, but not pushed: the spoke is offline or the push failed (it gets it when it reconnects).", "pushed": False}
         except HTTPException:
             raise  # 4xx/503 must propagate as-is, not be re-wrapped as 500
         # Anything else is logged and a 500.
@@ -714,22 +756,24 @@ def register(app, hub, ctx):
         global_config = hub.state.system_state.get("global_config", {})
         firewalls = global_config.get("firewalls", [])
 
-        original_len = len(firewalls)
+        gone = [fw for fw in firewalls if fw["id"] == firewall_id]
         firewalls[:] = [fw for fw in firewalls if fw["id"] != firewall_id]
 
-        if len(firewalls) == original_len:
+        if not gone:
             raise HTTPException(status_code=404, detail="Firewall not found")
 
         # Save.
         hub.state.system_state["global_config"] = global_config
         hub.state._mark_dirty()
+        # Its spoke drops it from its list (and forgets its credentials).
+        pushed = await _push_fw_spoke(hub, gone[0].get("spoke_id"))
         # Drop the deleted firewall's cached data (every fw_<endpoint>
         # namespace, exact key) so it isn't served or persisted any more.
         for _ep in FW_READ_CMDS:
             entries = hub.warm_cache.get(f"fw_{_ep}") or {}
             if firewall_id in entries:
                 hub.warm_drop(f"fw_{_ep}", (firewall_id,))
-        return {"status": "ok", "message": f"Firewall {firewall_id} deleted."}
+        return {"status": "ok", "message": f"Firewall {firewall_id} deleted.", "pushed": pushed}
 
     # ── Network Devices: data + CRUD (/api/nw/*, /setup/nw-devices) ───────────
     # A single nw spoke manages a FLEET of switches + gateways (AOS-S / AOS-CX /

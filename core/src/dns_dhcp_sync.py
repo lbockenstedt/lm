@@ -232,6 +232,25 @@ def apply_kea_leases(records: List[Dict[str, Any]], leases: List[Dict[str, Any]]
     return out
 
 
+def is_dhcp_scope(prefix: Dict[str, Any]) -> bool:
+    """Whether a NetBox prefix row becomes a Kea scope (see ``build_dhcp_payload``).
+
+    It needs a prefix value, a status other than ``container`` and a truthy
+    ``custom_fields.dhcp_enabled``.
+    """
+    # Rows without a prefix value are never scopes.
+    if not isinstance(prefix, dict) or not prefix.get("prefix"):
+        return False
+    # Aggregate/parent blocks are never scopes themselves.
+    status = prefix.get("status")
+    if isinstance(status, dict):
+        status = status.get("value")
+    if str(status or "").lower() == "container":
+        return False
+    # Only prefixes explicitly opted in with the checkbox.
+    return bool((prefix.get("custom_fields") or {}).get("dhcp_enabled"))
+
+
 def build_dhcp_payload(pfx_data: Dict[str, Any],
                        ips_data: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """NetBox prefixes + IPs → (subnets, reservations) Kea sync payload.
@@ -277,16 +296,12 @@ def build_dhcp_payload(pfx_data: Dict[str, Any],
     # Build one Kea subnet per eligible prefix.
     subnets: List[Dict[str, Any]] = []
     for p in (pfx_data.get("prefixes") or []):
-        # Skip prefixes with no prefix value.
-        prefix_str = p.get("prefix", "")
-        if not prefix_str:
+        # Skip prefixes that are not opted-in DHCP scopes.
+        if not is_dhcp_scope(p):
             continue
-        if (p.get("status") or "").lower() == "container":
-            continue  # aggregate/parent block — never a DHCP scope itself
+        prefix_str = p.get("prefix", "")
         # Custom fields hold the DHCP options.
         cf = p.get("custom_fields") or {}
-        if not cf.get("dhcp_enabled"):
-            continue  # not opted in — carve child prefixes with the checkbox on
         # Translate NetBox custom fields into the spoke's subnet shape.
         subnets.append({
             "subnet":              prefix_str,
@@ -518,7 +533,8 @@ class DnsDhcpSyncMixin:
         # Bound spokes first, keeping the original order otherwise.
         return sorted(spokes, key=lambda s: 0 if pk(s) in bound else 1)
 
-    async def _netbox_prefixes_and_ips(self, filters: Dict[str, Any] = None
+    async def _netbox_prefixes_and_ips(self, filters: Dict[str, Any] = None,
+                                       spoke: str = None
                                        ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Fetch NetBox prefixes + IPs, failing over across IPAM spokes.
 
@@ -530,10 +546,13 @@ class DnsDhcpSyncMixin:
         ``filters`` (``tenant`` / ``tenant_group``, see ``_sync_scope``) is
         passed to both reads so a tenant-dedicated target only gets its own
         tenant's prefixes and IPs.
+
+        ``spoke`` reads from that one spoke only, with no failover: a caller
+        that writes back by NetBox id must write to the instance it read.
         """
         # Filters for both reads, and spokes to try in order.
         req = dict(filters or {})
-        candidates = self._ipam_spoke_candidates()
+        candidates = [spoke] if spoke else self._ipam_spoke_candidates()
         if not candidates:
             raise RuntimeError("NetBox spoke not connected")
         # Try each spoke until one returns both lists.
@@ -774,7 +793,13 @@ class DnsDhcpSyncMixin:
         unbound (shared/admin/unassigned) spokes keep the unfiltered set.
         Hashes are kept per (side, scope); a failed fetch or push never
         latches a hash and never pushes an empty set for that scope.
+
+        ``self._dhcp_delivered`` ends up holding the DHCP scope keys whose Kea
+        now has this tick's NetBox data (pushed, or unchanged since the last
+        push); the static-reservations rollback undoes only the other scopes.
         """
+        # Nothing delivered yet; an early return or a raise leaves it empty.
+        self._dhcp_delivered = set()
         # Nothing to do without NetBox or any target spoke.
         ipam = self.get_spoke_by_type("ipam")
         if not ipam:
@@ -845,6 +870,8 @@ class DnsDhcpSyncMixin:
                 hk = self._hash_key(side, key)
                 if last.get(hk) == h:
                     new_hashes[hk] = h
+                    if side == "dhcp":
+                        self._dhcp_delivered.add(key)
                     continue
                 # Queue a push to each spoke in this scope, remembering its index.
                 cmd = "DNS_SYNC" if side == "dns" else "DHCP_SYNC"
@@ -852,13 +879,13 @@ class DnsDhcpSyncMixin:
                 for sid in sids:
                     indices.append(len(pushes))
                     pushes.append(self.request_response(sid, cmd, payload, timeout=30.0))
-                push_groups.append((side, hk, h, indices))
+                push_groups.append((side, key, hk, h, indices))
 
         # Run all pushes in parallel.
         results = await asyncio.gather(*pushes, return_exceptions=True) if pushes else []
         # Latch a scope's hash ONLY when every push for it succeeded, so a
         # transiently-offline spoke is retried next cycle.
-        for side, hk, h, indices in push_groups:
+        for side, key, hk, h, indices in push_groups:
             res = [results[i] for i in indices]
             errs = [e for e in map(self._push_error, res) if e]
             if errs:
@@ -868,6 +895,8 @@ class DnsDhcpSyncMixin:
             else:
                 new_hashes[hk] = h
                 st[side]["spoke_results"].extend(unwrap_spoke(r) for r in res)
+                if side == "dhcp":
+                    self._dhcp_delivered.add(key)
 
         # Record each side's status.
         for side, skipped in (("dns", dns_skipped), ("dhcp", dhcp_skipped)):
@@ -927,13 +956,31 @@ class DnsDhcpSyncMixin:
                 await self._reconcile_dns_hook()
             except Exception as e:  # noqa: BLE001
                 logger.warning("DNS hook reconcile failed: %s", e)
-            if not self._dds_cfg()["enabled"]:
+            from static_ip_reservations import (reserve_static_hosts_once,
+                                                roll_back_if_sync_failed)
+            sync_on = self._dds_cfg()["enabled"]
+            # The netbox spoke marks statically addressed hosts as
+            # reservations first, so this tick's sync already pushes them to
+            # Kea. With the sync off the pass records "disabled".
+            try:
+                await reserve_static_hosts_once(self, sync_enabled=sync_on)
+            except Exception as e:  # noqa: BLE001 — never block the sync
+                logger.warning("static IP reservations pass failed: %s", e)
+            if not sync_on:
                 return
             # Single NetBox fetch + skip-if-unchanged (see
             # _sync_dns_dhcp_once). The manual /api/dns|dhcp/sync buttons
             # still call the per-side methods directly (they re-fetch,
             # which is correct for an explicit button press).
-            await self._sync_dns_dhcp_once()
+            try:
+                await self._sync_dns_dhcp_once()
+            finally:
+                # A scope whose DHCP sync failed (or a sync that raised) would
+                # leave the pass's reservations in NetBox only; undo those.
+                try:
+                    await roll_back_if_sync_failed(self)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("static IP reservations rollback failed: %s", e)
 
         # Run forever with no startup delay; errors are logged and retried after the interval.
         await run_sync_loop(
