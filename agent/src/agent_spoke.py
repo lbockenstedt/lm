@@ -651,7 +651,8 @@ def _host_addressing() -> list:
     kernel marks the address ``dynamic`` (a DHCP lease with a finite
     lifetime), ``static`` for a permanent primary address and ``unknown`` for
     secondary addresses (VIPs move between hosts). Loopback, non-Ethernet and
-    container interfaces are left out. Raises nothing; [] on any failure.
+    container interfaces are left out. Raises nothing; None when ``ip``
+    fails, so the hub can tell "no addresses" from "could not read them".
     """
     # Read every up interface's IPv4 addresses as JSON.
     try:
@@ -659,10 +660,10 @@ def _host_addressing() -> list:
             ["ip", "-j", "-d", "-4", "address", "show", "up"],
             capture_output=True, text=True, check=False, timeout=10)
         if result.returncode != 0:
-            return []
+            return None
         interfaces = json.loads(getattr(result, "stdout", "") or "[]")
     except (OSError, subprocess.SubprocessError, ValueError, TypeError):
-        return []
+        return None
     out = []
     for interface in interfaces if isinstance(interfaces, list) else []:
         # Only physical-style Ethernet links with a MAC.
@@ -2363,6 +2364,8 @@ class GenericAgent(BaseSpoke):
         # the hub can reserve statically addressed hosts in DHCP.
         if cmd == "GET_HOST_ADDRESSING":
             addresses = await asyncio.to_thread(_host_addressing)
+            if addresses is None:
+                return {"status": "ERROR", "message": "could not read host addresses"}
             return {"status": "SUCCESS", "addresses": addresses}
 
         # Available, installed and active roles and deploy status.

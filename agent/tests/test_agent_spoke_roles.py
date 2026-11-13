@@ -1099,8 +1099,8 @@ def test_host_addressing_reports_static_dhcp_and_unknown(monkeypatch):
     ]
     # linkinfo (the link kind) is only in ip's detailed output.
     assert argv == [["ip", "-j", "-d", "-4", "address", "show", "up"]]
-    # A failing "ip" command reports nothing rather than guessing.
+    # A failing "ip" command is a failure, not "no addresses".
     monkeypatch.setattr(
         agent_spoke.subprocess, "run",
         lambda *args, **kwargs: types.SimpleNamespace(returncode=1, stdout=""))
-    assert agent_spoke._host_addressing() == []
+    assert agent_spoke._host_addressing() is None

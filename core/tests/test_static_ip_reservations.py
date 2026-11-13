@@ -472,6 +472,7 @@ def test_a_failed_agent_poll_holds_back_its_tenants_sweep_hosts():
         st = _run(hub, now)
         assert hub.writes() == []
         assert st["errors"] == [{"tenant": "t-b", "error": "agent poll failed; sweep hosts wait"}]
+        assert st["status"] == "error"
     # An agent too old to know the command is like a host with no agent.
     hub = _sweep_hub_with_agent_reply(
         {"status": "ERROR", "message": "Unknown agent command 'GET_HOST_ADDRESSING'. "}, now)
@@ -492,3 +493,29 @@ def test_a_reservation_without_a_netbox_id_does_not_stop_the_rest(monkeypatch):
     hub = _Hub(agent_addresses=_agent_static())
     _run(hub)
     assert [w["ip_id"] for w in hub.writes()] == [7]
+
+
+def test_a_failed_kea_subnet_read_is_an_error_not_a_quiet_skip():
+    now = 1_000_000.0
+    seen = {"t-b": {"10.20.0.50": {"address": "10.20.0.50", "last_seen": now - 60}}}
+    fresh = {"t-b": {"at": now - 60, "macs": {"10.20.0.50": MAC_A}}}
+    hub = _Hub(spoke_tenants={}, seen=seen, live_arp=fresh,
+               subnets_reply={"status": "ERROR", "message": "kea down"})
+    st = _run(hub, now)
+    assert hub.writes() == []
+    assert st["status"] == "error"
+    assert st["errors"] == [{"tenant": "t-b", "error": "no strict kea subnet read"}]
+
+
+def test_a_tenant_whose_own_kea_is_offline_is_an_error(monkeypatch):
+    import static_ip_reservations as sir
+    monkeypatch.setattr(sir, "_tenant_kea_spokes", lambda *a: [])
+    hub = _Hub(agent_addresses=_agent_static())
+    monkeypatch.setattr(sir, "tenant_has_own_spoke", lambda h, t, m: True)
+    st = _run(hub)
+    assert st["status"] == "error"
+    assert st["errors"] == [{"tenant": "t-a", "error": "own kea not connected"}]
+    # No Kea of its own and none shared: nothing to protect, not an error.
+    monkeypatch.setattr(sir, "tenant_has_own_spoke", lambda h, t, m: False)
+    st = _run(_Hub(agent_addresses=_agent_static()))
+    assert st["status"] == "ok" and st["errors"] == []

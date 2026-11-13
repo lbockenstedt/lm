@@ -62,7 +62,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 # Tenant scoping, spoke ownership and MAC normalisation.
 from access import (netbox_tenant_scope, norm_mac, same_tenant,
-                    spoke_owner_tenant, tenant_is_shared,
+                    spoke_owner_tenant, tenant_has_own_spoke, tenant_is_shared,
                     tenant_shared_fallback_blocked, unwrap_spoke)
 # The one rule for "this prefix is a Kea scope".
 from dns_dhcp_sync import is_dhcp_scope
@@ -492,7 +492,8 @@ async def _run_pass(hub, now: float) -> Dict[str, Any]:
               "errors": [{"tenant": t, "error": "agent poll failed; sweep hosts wait"}
                          for t in sorted(failed_tids) if not tenant_is_shared(t)]}
     if not by_tid:
-        return hub._record_status("static_reservations", status="ok", **totals)
+        return hub._record_status("static_reservations",
+                                  status="error" if totals["errors"] else "ok", **totals)
 
     # Step 2: Kea DHCP spokes grouped by the tenant scope they serve.
     groups, _skipped = hub._scope_groups(hub._get_dhcp_spokes())
@@ -512,6 +513,9 @@ async def _run_pass(hub, now: float) -> Dict[str, Any]:
         # The tenant's own Kea, else the shared one; none → nothing to protect.
         spokes = _tenant_kea_spokes(hub, tid, str(scope.get("key")), groups)
         if not spokes:
+            # Its own Kea is offline: the pass could not do the work.
+            if tenant_has_own_spoke(hub, tid, "dhcp"):
+                totals["errors"].append({"tenant": tid, "error": "own kea not connected"})
             continue
         leases = await _strict_read(hub, spokes, "DHCP_LIST_LEASES", "leases")
         if leases is None:
@@ -521,6 +525,8 @@ async def _run_pass(hub, now: float) -> Dict[str, Any]:
         kea_subnets = None
         if any(c.get("source") == "sweep" for c in candidates):
             kea_subnets = await _strict_read(hub, spokes, "DHCP_LIST_SUBNETS", "subnets")
+            if kea_subnets is None:
+                totals["errors"].append({"tenant": tid, "error": "no strict kea subnet read"})
         try:
             pfx_data, ips_data = await hub._netbox_prefixes_and_ips(filters, spoke=ipam)
         except Exception as e:  # noqa: BLE001
@@ -579,7 +585,8 @@ def status_for_tenant(status: Dict[str, Any], tid: Optional[str]) -> Dict[str, A
     The pass is fleet-wide, so its reserved/conflict/error lists name every
     tenant's IPs and MACs. ``tid`` None (a global admin who has not switched
     into a tenant) sees it all; anyone else sees only ``tid``'s entries (none
-    for ``""``), and the fleet-wide counters are left out.
+    for ``""``), the fleet-wide counters are left out and ``status`` reflects
+    only the viewer's own errors.
     """
     if tid is None or not isinstance(status, dict):
         return status
@@ -588,4 +595,6 @@ def status_for_tenant(status: Dict[str, Any], tid: Optional[str]) -> Dict[str, A
     for key in ("reserved", "conflicts", "errors"):
         out[key] = [r for r in status.get(key) or []
                     if isinstance(r, dict) and tid and same_tenant(r.get("tenant"), tid)]
+    if out.get("status") in ("ok", "error"):
+        out["status"] = "error" if out["errors"] else "ok"
     return out

@@ -29,6 +29,12 @@ def test_tenant_view_sees_only_its_own_rows_and_no_fleet_counters():
     assert "tenants" not in view and "skipped" not in view
 
 
+def test_tenant_status_reflects_only_its_own_errors():
+    failed = dict(_STATUS, status="error")
+    assert status_for_tenant(failed, "t-b")["status"] == "ok"
+    assert status_for_tenant(failed, "t-a")["status"] == "error"
+
+
 def test_a_user_with_no_tenant_sees_no_rows():
     view = status_for_tenant(_STATUS, "")
     assert view["reserved"] == view["conflicts"] == view["errors"] == []
