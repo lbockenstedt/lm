@@ -24,6 +24,14 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ### Simulations
 
+- **Rogue DNS (static IP + fixed DNS)** (`rogue_dns`) adds a default-off
+  wireless Linux/Windows simulation to the catalog, client controls and bucket
+  editor, with a DNS server IP field and three timing fields. Clients browse
+  for 30 minutes on DHCP, retain the same IP/mask/gateway with fixed DNS for
+  60 minutes while browsing, then restore DHCP and repeat. No alert is linked.
+  Requires the companion cs#257 client update; deploy the LM catalog first.
+  See [cs.md](cs.md#rogue-dns-static-ip--fixed-dns).
+
 - **WWW Discover - Network Diagnostics** (`www_discover`) adds a separate,
   default-off Linux/Windows web-traffic flag to the client controls and bucket
   editor. Each run opens one uniformly random Teams, Zoom, Okta, Google, or
