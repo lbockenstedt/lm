@@ -948,3 +948,22 @@ def test_sweep_loop_includes_the_admin_tenant_without_a_tenant_record(monkeypatc
             await hub.run_nw_sweep_loop()
     asyncio.run(run())
     assert swept == ["default"]
+
+
+@pytest.mark.asyncio
+async def test_fleet_of_device_pushes_holds_only_a_few_netbox_slots():
+    h = _SyncHub(global_config=_global_config())
+    in_flight, peak = [0], [0]
+
+    async def slow_netbox(spoke_id, command, payload, timeout=30.0):
+        if command != "NETBOX_SYNC_NW_DEVICE":
+            return {}
+        in_flight[0] += 1
+        peak[0] = max(peak[0], in_flight[0])
+        await asyncio.sleep(0.01)
+        in_flight[0] -= 1
+        return {"payload": {"data": {"status": "SUCCESS", "pushed": 1, "errors": 0}}}
+    h.request_response = slow_netbox
+    await asyncio.gather(*(h.push_nw_device_inventory(
+        {"id": f"d{i}", "name": f"sw{i}", "address": f"10.0.0.{i}"}, {}, []) for i in range(12)))
+    assert peak[0] == nw_discovery_sync.NW_NETBOX_PUSHES_AT_ONCE

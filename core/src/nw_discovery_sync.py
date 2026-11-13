@@ -71,6 +71,10 @@ logger = logging.getLogger("Hub")
 # Tenants whose background sweep batch runs at the same time (each holds about
 # one nw spoke command slot, so this keeps the shared spoke from filling up).
 NW_SWEEP_PARALLEL_TENANTS = 3
+# Device inventory pushes in flight to NetBox at once. Poll results arrive for
+# the whole fleet together; unbounded, their pushes filled the NetBox spoke's
+# command queue ("spoke command queue full") and starved other NetBox reads.
+NW_NETBOX_PUSHES_AT_ONCE = 3
 
 # Matches a dotted IPv4 address, used to tell an IP "name" from a real hostname.
 _IP_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
@@ -1346,8 +1350,11 @@ class NwDiscoverySyncMixin:
         }
         # Send the inventory and summarize NetBox's reply; failures are recorded, not raised.
         try:
-            rr = await self.request_response(netbox, self._NW_DEVICE_PUSH_COMMAND,
-                                             payload, timeout=120.0)
+            if not isinstance(getattr(self, "_nw_push_sem", None), asyncio.Semaphore):
+                self._nw_push_sem = asyncio.Semaphore(NW_NETBOX_PUSHES_AT_ONCE)
+            async with self._nw_push_sem:
+                rr = await self.request_response(netbox, self._NW_DEVICE_PUSH_COMMAND,
+                                                 payload, timeout=120.0)
             # Unwrap the reply and coerce each counter.
             rd = unwrap_spoke(rr) if isinstance(rr, dict) else {}
             netbox_push = {

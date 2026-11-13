@@ -276,3 +276,28 @@ def test_gateway_take_walks_24s_and_skips_known():
     # Nested supernets are walked once, via the outermost one.
     nested = [ipaddress.ip_network("10.0.0.0/16"), ipaddress.ip_network("10.0.0.0/20")]
     assert gateway_take(nested, 0, 1)[2] == 256
+
+
+def test_background_device_refreshes_hold_only_a_few_nw_spoke_slots():
+    import asyncio
+    import routes.nw as nw_routes
+    in_flight, peak = [0], [0]
+
+    class Hub:
+        async def request_response(self, spoke_id, cmd, payload, timeout=30.0):
+            in_flight[0] += 1
+            peak[0] = max(peak[0], in_flight[0])
+            await asyncio.sleep(0.01)
+            in_flight[0] -= 1
+            return {"payload": {"data": {"status": "SUCCESS", "data": []}}}
+
+        async def nw_cache_set_device(self, device_id, endpoint, data):
+            pass
+
+    hub = Hub()
+
+    async def run():
+        await asyncio.gather(*(nw_routes._nw_bg_refresh_device(
+            hub, f"d{i}", "macs", "nw-1", "NW_GET_MAC_TABLE", {}, 5.0) for i in range(12)))
+    asyncio.run(run())
+    assert peak[0] == nw_routes._NW_BG_REFRESH_AT_ONCE

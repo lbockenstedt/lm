@@ -32,6 +32,8 @@ _NW_BG_INFLIGHT: set = set()
 # tenant -> IPs waiting for the seen-hosts NetBox push (drained by one task).
 _NW_SEEN_PENDING: dict = {}
 _NW_BG_TASKS: set = set()
+# Per-device background cache refreshes running against the nw spoke at once.
+_NW_BG_REFRESH_AT_ONCE = 4
 
 
 def _nw_truthy(v) -> bool:
@@ -161,9 +163,14 @@ async def _nw_bg_refresh_device(hub, device_id, endpoint, spoke_id, spoke_cmd,
     """Per-device endpoint revalidate: re-run the live spoke fetch and refresh
     the cache so the next cache-first serve is fresh. Best-effort; the on-demand
     poll button + spoke poll telemetry are the primary refreshers."""
+    # A few refreshes at once: a stale fleet spawns one per device, and all of
+    # them together filled the nw spoke's command queue.
+    if not isinstance(getattr(hub, "_nw_bg_refresh_sem", None), asyncio.Semaphore):
+        hub._nw_bg_refresh_sem = asyncio.Semaphore(_NW_BG_REFRESH_AT_ONCE)
     # Fetch live from the spoke and cache the unwrapped result.
-    result = await hub.request_response(spoke_id, spoke_cmd, relay_payload,
-                                        timeout=timeout)
+    async with hub._nw_bg_refresh_sem:
+        result = await hub.request_response(spoke_id, spoke_cmd, relay_payload,
+                                            timeout=timeout)
     data = access.unwrap_spoke(result)
     await hub.nw_cache_set_device(device_id, endpoint, data)
 
