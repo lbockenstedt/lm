@@ -1705,6 +1705,33 @@ class NwDiscoverySyncMixin:
         status["pull_errors"] = pull.get("errors", [])
         return status
 
+    def _nw_remember_live_arp(self, buckets: Dict[str, List[Dict[str, str]]]) -> None:
+        """Keep this cycle's per-tenant ``{ip: mac}`` map in memory for the
+        static-IP reservation pass (``static_ip_reservations``).
+
+        An IP seen with two different MACs is dropped (ambiguous). IPs that
+        enrichment borrowed from a DHCP lease/reservation are harmless here:
+        that pass never reserves an address the MAC already leases or holds.
+        """
+        # Stamp the snapshot so stale maps can be ignored.
+        now = time.time()
+        live: Dict[str, Dict[str, Any]] = {}
+        for tid, records in (buckets or {}).items():
+            macs: Dict[str, str] = {}
+            ambiguous = set()
+            for rec in records or []:
+                ip, mac = rec.get("ip"), rec.get("mac")
+                if not ip or not mac:
+                    continue
+                # Same IP, different MAC: ambiguous, never use it.
+                if macs.get(ip, mac) != mac:
+                    ambiguous.add(ip)
+                macs.setdefault(ip, mac)
+            for ip in ambiguous:
+                macs.pop(ip, None)
+            live[tid] = {"at": now, "macs": macs}
+        self._nw_live_arp = live
+
     async def run_nw_discovery_sync_all(self) -> Dict[str, Any]:
         """Full cycle: pull → attribute → push every attributed tenant, one at a
         time (the NetBox spoke paces background syncs itself). Returns ``{"results": [...],
@@ -1719,6 +1746,7 @@ class NwDiscoverySyncMixin:
         mac_only = [r for r in records if not r.get("ip") and r.get("mac")]
         # Attribute IP-bearing records to tenants.
         buckets, dropped = await self._nw_attribute(ip_records)
+        self._nw_remember_live_arp(buckets)
         tids = list(buckets.keys())
         # Nothing to push: still refresh LLDP topology, log, and return empty results.
         if not tids and not mac_only:

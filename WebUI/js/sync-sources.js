@@ -578,6 +578,47 @@ async function saveDhcpDeclineConfig() {
     }
 }
 
+// ── Static hosts → DHCP reservations (System → Sync; global_config.static_ip_reservations) ──
+// Off when unset; the hub runs the pass just before each DNS/DHCP sync.
+async function loadStaticResConfig() {
+    try {
+        const r = await setupFetch('/setup/config');
+        if (!r.ok) return;
+        const cfg = ((await r.json()).global_config || {}).static_ip_reservations || {};
+        const en = document.getElementById('static-res-enabled');
+        const iv = document.getElementById('static-res-interval');
+        if (en) en.checked = cfg.enabled === true;
+        if (iv) iv.value = Math.round((cfg.interval || 900) / 60);
+        // Last pass, already cut to the viewer's tenant by the hub.
+        const st = document.getElementById('static-res-status');
+        const s = await _spokeFetch('/api/dns-dhcp/sync-status');
+        const p = (s && s.ok && s.data && (s.data.status || {}).static_reservations) || {};
+        if (st && p.last_run) {
+            st.textContent = `Last pass: ${p.status || ''} · ${new Date(p.last_run * 1000).toLocaleString()}`
+                + ` · reserved ${(p.reserved || []).length} · conflicts ${(p.conflicts || []).length}`
+                + ` · errors ${(p.errors || []).length}`;
+        }
+    } catch (e) { console.error('loadStaticResConfig failed', e); }
+}
+
+// Save the card's on/off switch and interval (minutes → seconds) into global_config.
+async function saveStaticResConfig() {
+    const enabled = !!document.getElementById('static-res-enabled')?.checked;
+    const minutes = Math.max(5, parseInt(document.getElementById('static-res-interval')?.value, 10) || 15);
+    try {
+        const r0 = await setupFetch('/setup/config');
+        const prev = r0.ok ? (((await r0.json()).global_config || {}).static_ip_reservations || {}) : {};
+        const r = await setupFetch('/setup/config', {
+            method: 'POST',
+            body: JSON.stringify({ config: { static_ip_reservations: { ...prev, enabled, interval: minutes * 60 } } })
+        });
+        if (r.ok) showToast(`Static host reservations ${enabled ? 'on' : 'off'} — applied on the next sync cycle.`, 'success');
+        else showToast('Failed to save.', 'error');
+    } catch (e) {
+        showToast('Error saving: ' + e.message, 'error');
+    }
+}
+
 async function saveRealtimeNacSyncConfig() {
     const enabled = document.getElementById('rt-nac-sync-enabled')?.checked ? true : false;
     const intervalMin = Math.max(1, parseInt(document.getElementById('rt-nac-sync-interval')?.value, 10) || 1);

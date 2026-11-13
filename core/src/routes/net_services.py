@@ -1736,16 +1736,29 @@ def register(app, hub, ctx):
         return result
 
     @app.get("/api/dns-dhcp/sync-status")
-    async def dns_dhcp_sync_status():
+    async def dns_dhcp_sync_status(request: Request, tenant: str = None):
         """Last-run status + config for the NetBox→Unbound/Kea auto-sync loop
-        (fuels the DNS/DHCP status tiles). Read-only, authed (under /api/)."""
+        (fuels the DNS/DHCP status tiles). Read-only, authed (under /api/).
+        ``static_reservations`` lists every tenant's IPs and MACs, so it is cut
+        down to the caller's effective tenant (a global admin sees a tenant's
+        rows only after switching into it). This path is outside the
+        ``/api/dhcp/`` gate, so a user without the ``dhcp`` right sees no rows."""
+        from static_ip_reservations import status_for_tenant
         hub = app.state.hub
         # The stored sync settings.
         gc = hub.state.system_state.get("global_config", {}) or {}
         cfg = gc.get("dns_dhcp_sync", {}) or {}
+        # Tenant-scope the static reservation status.
+        status = dict(hub.dns_dhcp_sync_status or {})
+        if "static_reservations" in status:
+            sess = _session_user(request)
+            tid = _effective_tenant(request, tenant)
+            if not access.has_module_access(sess, "dhcp"):
+                tid = ""
+            status["static_reservations"] = status_for_tenant(status["static_reservations"], tid)
         # Last-run status plus the effective settings.
         return {
-            "status": hub.dns_dhcp_sync_status,
+            "status": status,
             "config": {
                 "enabled":  bool(cfg.get("enabled", True)),
                 "interval": int(cfg.get("interval", 300) or 300),
