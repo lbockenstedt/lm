@@ -144,7 +144,8 @@ class _Hub(DnsDhcpSyncMixin):
                    "t-b": {"netbox_tenant_slug": "tenant-b"},
                    "shared": {"netbox_tenant_slug": "shared"}}
         self.state = FakeState(
-            system_state={"global_config": {"nw_seen_hosts": seen or {}},
+            system_state={"global_config": {"nw_seen_hosts": seen or {},
+                                            "static_ip_reservations": {"enabled": True}},
                           "module_metadata": module_metadata or {}},
             tenants=tenants,
             spoke_tenants=spoke_tenants if spoke_tenants is not None
@@ -396,3 +397,17 @@ def test_failed_pass_is_not_throttled():
     del hub._scope_groups
     st = asyncio.run(reserve_static_hosts_once(hub, now=1100.0))
     assert [r["ip"] for r in st["reserved"]] == ["10.20.0.50"]
+
+
+def test_the_pass_is_off_until_an_operator_turns_it_on():
+    hub = _Hub(agent_addresses=_agent_static())
+    del hub.state.system_state["global_config"]["static_ip_reservations"]
+    assert asyncio.run(reserve_static_hosts_once(hub, now=1000.0)) == {"status": "disabled"}
+    assert hub.writes() == []
+
+
+def test_a_structured_netbox_dhcp_status_is_not_reserved():
+    row = dict(_ip("10.20.0.50/24", 7), status={"value": "dhcp", "label": "DHCP"})
+    plan = plan_static_reservations(_pfx(), _ips(row), [], [_static("10.20.0.50")])
+    assert plan["reserve"] == []
+    assert _reasons(plan, "skipped") == {"10.20.0.50": "netbox status is dhcp"}

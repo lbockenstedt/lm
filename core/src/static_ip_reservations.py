@@ -29,8 +29,9 @@ conflicts instead. Leases and pools come from the tenant's OWN Kea when it
 has one, else from the shared Kea, and are read strictly (an unreadable Kea
 skips the tenant rather than reading as "no leases").
 
-Config: ``global_config.static_ip_reservations`` ``{enabled: true,
-interval: 900}``. Status: ``GET /api/dns-dhcp/sync-status`` →
+Config: ``global_config.static_ip_reservations`` ``{enabled: false,
+interval: 900}``; off until an operator turns it on, since it writes to NetBox
+and so to Kea. Status: ``GET /api/dns-dhcp/sync-status`` →
 ``static_reservations``.
 
 This module is a **leaf**: stdlib plus sibling leaves only.
@@ -271,7 +272,11 @@ def plan_static_reservations(pfx_data: Dict[str, Any], ips_data: Dict[str, Any],
         if addr in (net.network_address, net.broadcast_address):
             skipped.append({"ip": ip, "reason": "network or broadcast address"})
             continue
-        if str(row.get("status") or "").lower() == "dhcp":
+        # NetBox returns status as "dhcp" or as {"value": "dhcp", "label": "DHCP"}.
+        status = row.get("status")
+        if isinstance(status, dict):
+            status = status.get("value")
+        if str(status or "").lower() == "dhcp":
             skipped.append({"ip": ip, "reason": "netbox status is dhcp"})
             continue
         cf = row.get("custom_fields") or {}
@@ -324,7 +329,7 @@ def _cfg(hub) -> Dict[str, Any]:
     # "or {}" guards against a stored None.
     gc = hub.state.system_state.get("global_config", {}) or {}
     cfg = gc.get(_CFG_KEY, {}) or {}
-    return {"enabled": bool(cfg.get("enabled", True)),
+    return {"enabled": bool(cfg.get("enabled", False)),
             "interval": int(cfg.get("interval", _DEFAULT_INTERVAL) or _DEFAULT_INTERVAL)}
 
 
