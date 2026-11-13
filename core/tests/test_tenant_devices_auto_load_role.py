@@ -205,3 +205,39 @@ def test_spoke_pool_field_persists_through_add_and_update():
     assert upd.status_code == 200
     stored = hub.state.system_state["global_config"]["nac_instances"][0]
     assert stored["spoke_pool"] == ["spokeA", "spokeB", "spokeC"]
+
+
+def test_tenant_firewall_save_pushes_the_whole_list_and_clears_the_old_spoke():
+    """Tenant Devices → Firewalls goes through the same full-list push as
+    Setup: editing one box of a pair sends both, and moving the last box off a
+    spoke sends that spoke an empty list."""
+    from main import LabManagerHub
+    c, hub, holder = _build()
+    hub.state.get_global_config = lambda: hub.state.system_state["global_config"]
+    hub.opn_config_for_spoke = lambda sid: LabManagerHub.opn_config_for_spoke(hub, sid)
+    for sid in ("fwA", "fwB"):
+        _connect_role_subspoke(hub, sid, "firewall")
+    hub.state.system_state["global_config"]["firewalls"] = [
+        {"id": f, "spoke_id": "fwA", "tenant_id": "acme", "model": "opnsense",
+         "host": h, "api_key": "k", "api_secret": "s"}
+        for f, h in (("a", "10.0.0.5"), ("b", "10.0.0.6"))]
+    holder.current = _sess(tenants=["acme"], tenant_id="acme")
+
+    def lists():
+        out = [(m.header.destination_id, [f["id"] for f in m.payload.data["firewalls"]]) for m in hub.sent]
+        hub.sent.clear()
+        return out
+
+    assert c.put("/tenant/devices/firewalls/b", json={"config": {"name": "B2"}}).json()["pushed"] is True
+    assert lists() == [("fwA", ["a", "b"])]
+    c.put("/tenant/devices/firewalls/a", json={"config": {"spoke_id": "fwB"}})
+    assert lists() == [("fwB", ["a"]), ("fwA", ["b"])]
+    hub.state.system_state["global_config"]["firewalls"].append(
+        {"id": "c", "spoke_id": "fwA", "tenant_id": "acme", "model": "opnsense",
+         "host": "10.0.0.7", "api_key": "k", "api_secret": "s"})
+    # An unbind has no new spoke; the old spoke's smaller list is the push.
+    assert c.put("/tenant/devices/firewalls/c", json={"config": {"spoke_id": ""}}).json()["pushed"] is True
+    assert lists() == [("fwA", ["b"])]
+    c.delete("/tenant/devices/firewalls/c")
+    c.delete("/tenant/devices/firewalls/b")
+    assert lists() == [("fwA", [])]

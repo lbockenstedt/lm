@@ -4788,6 +4788,7 @@ async function renderPxmxDiagnostics(container, forceRefresh = false) {
                     </div>
                     <span class="text-xs text-slate-500">${drives.length} drive${drives.length === 1 ? '' : 's'}</span>
                 </div>
+                ${lmViews.ilohealth ? lmViews.ilohealth(n.hw_health) : ''}
                 ${alertHtml}
                 ${tableContent}
             </div>`;
@@ -4800,6 +4801,7 @@ async function renderPxmxDiagnostics(container, forceRefresh = false) {
             ${summaryCardsHtml}
             ${tablesHtml}
         </div>`;
+    if (lmViews.ilohealthWire) lmViews.ilohealthWire(container);
 }
 
 async function loadPxmxData(subMenu, forceRefresh = false) {    const container = document.getElementById('pxmx-content');

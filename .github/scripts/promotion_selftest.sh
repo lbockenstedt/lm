@@ -89,6 +89,47 @@ out=$(PROMOTE_SPLIT=1 SRC=dev TGT=qa BR=promote/dev-to-qa bash .github/scripts/p
 case "$out" in *"Nothing to promote"*) echo "  PASS queue drains when every unit is promoted"; pass=$((pass+1));;
   *) echo "  FAIL expected a drained queue, got: $out"; fail=$((fail+1));; esac
 
+echo "== a unit extended over later units names all of them =="
+# Unit 1 (PR #8) adds zeta; unit 2 (a direct push) fixes zeta. Unit 1 cannot be
+# promoted alone (its zeta is already superseded), so both travel together, and
+# the PR must still be named after the oldest unit while listing both.
+git checkout -q -B dev origin/dev
+git checkout -q -b unitZ
+echo "zeta" > zeta.py; git add zeta.py; git commit -qm "add zeta"
+git checkout -q dev
+git merge -q --no-ff unitZ -m "Merge pull request #8 from o/unitZ" -m "feat: add the zeta module"
+echo "zeta fixed" > zeta.py; git commit -qam "fix zeta"
+git push -q origin dev; git fetch -q origin
+GITHUB_OUTPUT="$T/ext.out" PROMOTE_SPLIT=1 SRC=dev TGT=qa BR=promote/dev-to-qa bash .github/scripts/promote.sh >/dev/null
+chk "extended unit carries the later fix" "$(cat zeta.py)" "zeta fixed"
+chk "named after the oldest unit's PR"    "$(git log -1 --pretty=%s)" "promote: dev -> qa (#8)"
+chk "subject says more units ride along"  "$(sed -n '/^unit_subject<</{n;p;}' "$T/ext.out")" "feat: add the zeta module (+1 more)"
+chk "every carried unit is listed"        "$(sed -n '/^units_carried<</,/^PROMOTE_EOF/p' "$T/ext.out" | sed '1d;$d' | tr '\n' '|')" "- #8 feat: add the zeta module|- fix zeta|"
+git push -q origin promote/dev-to-qa:qa; git fetch -q origin
+
+echo "== units batched forward after a conflict are named too =="
+# qa gets a repair that dev's PR #9 predates, so unit 1 conflicts in isolation.
+# A back-merge (unit 2) resolves it, and the promotion carries both units: the
+# PR must be named after #9 and list both, not just the back-merge.
+git checkout -q -B qa origin/qa
+echo "eta repaired" > eta.py; git add eta.py; git commit -qm "repair eta on qa"; git push -q origin qa
+git checkout -q -B dev origin/dev
+git checkout -q -b unitE
+echo "eta dev" > eta.py; git add eta.py; git commit -qm "add eta"
+git checkout -q dev
+git merge -q --no-ff unitE -m "Merge pull request #9 from o/unitE" -m "feat: add the eta module"
+git fetch -q origin
+git merge -q --no-ff origin/qa -m "backmerge qa into dev" >/dev/null 2>&1 || true
+echo "eta dev" > eta.py; git checkout -q --ours VERSION; git add eta.py VERSION
+git commit -q --no-edit
+git push -q origin dev; git fetch -q origin
+GITHUB_OUTPUT="$T/conf.out" PROMOTE_SPLIT=1 SRC=dev TGT=qa BR=promote/dev-to-qa bash .github/scripts/promote.sh >/dev/null 2>&1
+chk "batched unit carries the resolution" "$(cat eta.py)" "eta dev"
+chk "named after the conflicting PR"      "$(git log -1 --pretty=%s)" "promote: dev -> qa (#9)"
+chk "subject counts the batched unit"     "$(sed -n '/^unit_subject<</{n;p;}' "$T/conf.out")" "feat: add the eta module (+1 more)"
+chk "both batched units are listed"       "$(sed -n '/^units_carried<</,/^PROMOTE_EOF/p' "$T/conf.out" | sed '1d;$d' | tr '\n' '|')" "- #9 feat: add the eta module|- backmerge qa into dev|"
+git push -q origin promote/dev-to-qa:qa; git fetch -q origin
+
 echo "== batched mode is unchanged by the split option =="
 git checkout -q -B dev origin/dev
 echo "gamma" > gamma.py; git add gamma.py; git commit -qm "add gamma"

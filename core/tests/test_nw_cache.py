@@ -363,3 +363,28 @@ async def test_legacy_nw_data_json_is_split_once(tmp_path):
     assert hub.nw_cache_get_device("a1", "info")["data"] == {"m": 1}
     assert not (cache / "nw_data.json").exists()
     assert os.path.exists(_shard(cache, "acme", "nw_devices.json"))
+
+
+_HEALTH = {"overall": "degraded", "source": "snmp", "polled_at": 1000.0,
+           "components": {"power": [{"name": "Power supply 2", "condition": "failed"}]}}
+
+
+async def test_poll_keeps_ilo_hardware_health_and_last_good_on_error(tmp_path):
+    """An iLO poll's ``hw_health`` gets its own slot; a failed read keeps the
+    last good reading plus the error, and a poll without the key (older nw
+    spoke) leaves it alone."""
+    hub = _CacheHub(str(tmp_path))
+    await hub.nw_cache_set_poll("ilo1", {"status": "SUCCESS", "reachable": True, "hw_health": _HEALTH})
+    assert hub.nw_cache_get_device("ilo1", "hw_health") == _HEALTH
+    await hub.nw_cache_set_poll("ilo1", {"status": "PARTIAL", "reachable": True,
+                                         "hw_health": {"error": "timeout", "polled_at": 2000.0}})
+    kept = hub.nw_cache_get_device("ilo1", "hw_health")
+    assert kept["overall"] == "degraded" and kept["error"] == "timeout" and kept["error_at"] == 2000.0
+    await hub.nw_cache_set_poll("ilo1", {"status": "SUCCESS", "reachable": True})
+    assert hub.nw_cache_get_device("ilo1", "hw_health")["error"] == "timeout"
+    await hub.nw_cache_set_poll("ilo1", {"status": "SUCCESS", "reachable": True, "hw_health": _HEALTH})
+    assert "error" not in hub.nw_cache_get_device("ilo1", "hw_health")
+    await _flush(hub)
+    restarted = _CacheHub(str(tmp_path))
+    restarted.nw_cache_load()
+    assert restarted.nw_cache_get_device("ilo1", "hw_health")["overall"] == "degraded"

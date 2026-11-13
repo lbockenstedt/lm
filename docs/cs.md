@@ -53,7 +53,7 @@ The cs spoke itself owns the simulation "profile" logic, the per-client override
 - Config: `CS_GET_CONFIG`, `CS_UPDATE_CONFIG`/`UPDATE_CONFIG`, `CS_UPDATE_USER_OVERRIDES`.
 - Kill switch: `CS_KILL_SWITCH`, `CS_GET_KILL_SWITCH`.
 - Demo scenarios (TTL + auto-expiry): `CS_DEMO_SCENARIO`, `CS_DEMO_CLEAR`, `CS_GET_DEMO_ACTIVE`, `CS_GET_DEMO_SCENARIOS`.
-- Per-client override panel (11 toggles): `CS_GET/SET/CLEAR/SET_ALL_CLIENT_OVERRIDES`. Toggles: `kill_switch`, `dns_fail`, `iperf`, `download`, `www_traffic`, `ping_test`, `ssidpw_fail`, `auth_fail`, `dhcp_fail`, `port_flap`, `assoc_fail`.
+- Per-client override panel: `CS_GET/SET/CLEAR/SET_ALL_CLIENT_OVERRIDES`. Toggles include `kill_switch`, `dns_fail`, `iperf`, `download`, `www_traffic`, `rogue_dns`, `ping_test`, `ssidpw_fail`, `auth_fail`, `dhcp_fail`, `port_flap`, `assoc_fail`.
 - Per-host USB VMID overrides: `CS_GET/SET/CLEAR_HOST_USB_OVERRIDE`.
 - CS ingest (unified pxmx agent → hub → here): `CS_INGEST_TELEMETRY/LOG/PROGRESS/WATCHDOG_EVENT/HW_RESET/COMMAND_RESULT`, `CS_STORE_PROXMOX_TOKEN`.
 - Command queue: `CS_QUEUE_COMMAND`, `CS_POLL_AGENT_INBOX`, `CS_ACK_COMMAND`, `CS_GET_USB_CONFIG`, `CS_GET_COMMANDS`, `CS_CLEAR_COMMANDS`, `CS_DELETE_COMMAND`, `CS_UPDATE_SETTINGS`, `CS_CONFIG_UPDATE` (hub-pushed provisioning config; `_HUB_DIRECT_KEYS` + `_HUB_KEY_REMAP`; writes `hub-sim-overrides.conf`/`hub-user-overrides.conf`).
@@ -64,6 +64,33 @@ The cs spoke itself owns the simulation "profile" logic, the per-client override
 - lm-spoke: `lm-spoke/src/cs_spoke.py`, `control_plane.py` (`CSControlPlane`, `module_type="simulation"`, CS telemetry relay, standalone), `client_api.py` (FastAPI :8080 — `/api/health`, `/api/kill-switch`, `POST /api/status`, `/api/client/key`, `/api/config`(+`/overrides`/`/parsed`), `/api/scripts/{platform}/*`, `/api/clients`(+`/{h}/control`), `/api/commands`, `/api/inbox`(/ack), `ws /ws/client`), `client_registry.py`, `command_queue.py`, `proxmox_deploy.py` (`ProxmoxDeploy` — telemetry ingest, `relay_payload` with `provision` diagnostic), `sim_config.py`, `simulation_engine.py`, `demo_scenarios.py`, `token_store.py`, `data_models.py`, `dhcp_status.py`, `sim_primitives.py`, `agent_role.py`; `lm-spoke/role.py`, `lm-spoke/API_SPEC.md`.
 - webui-spoke legacy: `webui-spoke/server.py`, `lm_relay.py` (`CSBridge`/`LMControlPlane`), `acme.py`.
 - Clients: `clients/linux/agent.sh` + scripts, `clients/windows/*.ps1`, `clients/t3/*`; configs `configs/simulation.conf`, `configs/user-overrides.conf`.
+
+## Rogue DNS (static IP + fixed DNS)
+
+`rogue_dns` is a default-off Linux/Windows wireless simulation based on
+`www_traffic`, classified as an exclusive failure sim with **no alert**.
+Enable its toggle in the `[s0]`–`[s9]` bucket editor or per-client controls and
+set `[address] rogue_dns_server` to an existing local DNS server IP in the
+engine's simulation-conf editor. The simulation does not create a DNS server.
+
+The repeating cycle is **30 minutes DHCP → 60 minutes static → DHCP**.
+During DHCP it browses with the usual `www_traffic` pacing and `websites.txt`
+whenever the rogue script is not running, even if `www_traffic` is off.
+During the static phase it retains the lease's IPv4 address/mask/gateway,
+uses the supplied DNS server, and browses one random URL in headless Firefox
+every 60 seconds. Enabling `www_traffic` separately leaves that sim unchanged.
+
+Config levers under `[simulation]` are `rogue_dns_dhcp_interval=1800`,
+`rogue_dns_duration=3600`, and `rogue_dns_browse_interval=60` (all seconds).
+`rogue_dns_server` defaults to blank; a blank/invalid server or missing lease
+skips the network change. DHCP is restored by trap/finally, then the DHCP
+window restarts. Persistent `rogue_dns.state` files in `/usr/local/scripts/`
+and `C:\Scripts\` recover stale static phases after a crash/reboot/update;
+Windows also restores at orchestrator startup. Linux changes are runtime-only,
+not saved NetworkManager profile changes.
+
+Requires the companion client implementation in **cs#257**; deploy the LM
+catalog before the cs changes. See [Rogue DNS configuration and recovery](alert-generation.md#rogue-dns-static-ip--fixed-dns--rogue_dns).
 
 ## WWW Discover - Network Diagnostics
 
@@ -133,7 +160,7 @@ requires those client updates to generate this traffic.
 
 **The sim engine + config resolver.** `simulation_engine.py` + `sim_config.py` compute each client's effective profile. A client is deterministically bucketed into one of ten profiles `s0`–`s9` by `crc32(hostname) % 10`, then layered: `[simulation]` globals → `[address]`/`[server]` targets → the `[sX]` bucket → a per-`[username]` override (username = hostname before the first `-`, e.g. `jsmith-1` → `jsmith`). All of this is edited in **Simulations → Config → Simulation** (`simulation.conf`) and user-overrides. Hub-pushed overrides are merged from `hub-sim-overrides.conf` / `hub-user-overrides.conf` on top.
 
-**Client registry + per-client overrides.** Every sim VM that reports in is tracked in `client_registry.py` (persisted to `data/clients.json`): last-seen, SSID, gateway reachability, running sims, recent errors. The **per-client Control Panel** (11 fault toggles) writes *persisted* overrides into that registry. **Demo scenarios** (`demo_scenarios.py`) are the ephemeral counterpart: an in-memory, 120-minute-TTL override that flips one failure flag and auto-expires (or clears on reboot) back to whatever the operator had set — demos never mutate the persisted registry.
+**Client registry + per-client overrides.** Every sim VM that reports in is tracked in `client_registry.py` (persisted to `data/clients.json`): last-seen, SSID, gateway reachability, running sims, recent errors. The **per-client Control Panel** (including the `rogue_dns` toggle) writes *persisted* overrides into that registry. **Demo scenarios** (`demo_scenarios.py`) are the ephemeral counterpart: an in-memory, 120-minute-TTL override that flips one failure flag and auto-expires (or clears on reboot) back to whatever the operator had set — demos never mutate the persisted registry.
 
 **Hub-config store + command queue.** Auto-provisioning knobs (templates, VMID range, thresholds, dongle VID:PIDs) live in a local store (`local_store.py`) and/or arrive from the hub via `CS_CONFIG_UPDATE`. The command queue (`command_queue.py`) holds VM actions (`pending → delivered → completed/failed/expired`) with an idempotent enqueue and a sim-VMID safeguard (refuses anything below VMID 90000 or in `protected_vmids`, default `{1001}`) so the UI can only ever touch sim VMs.
 
@@ -200,7 +227,7 @@ requires that companion update to execute the windows.
 
 **The engine** (`sim_quota_engine.py`) owns a persisted ledger (`sim_quota_ledger.json`) and a 60s reconcile loop (plus an immediate reconcile on every effective-quota push). Per sweep, per quota: keep ledger clients still online + in-site + running the sim; keep an offline client in the ledger (the sim keeps running on the VM through a WS blip) and let a substitute fill the online gap; release only a client offline past `OFFLINE_TTL_S` (3600s); top up to N from the free-runner pool; trim over-N extras. Quotas that left the effective set release all their clients. Provenance: the engine only ever toggles the specific `sim_id` flag (+ `wsite`) it owns on a ledger client; a human manual pin on any other sim flag is never touched.
 
-**multi_capable — exclusivity vs packing.** Failure sims (`dns_fail`, `dhcp_fail`, `assoc_fail`, `auth_fail`, `ssidpw_fail`, `port_flap`) are `multi_capable=False` → **exclusive: one failure sim per client** (the engine won't stack a second failure sim onto a client already running one, whether the existing one came from the engine, a manual pin, or the bucket default). Traffic sims (`ping_test`, `download`, `www_traffic`, `iperf`) are `multi_capable=True` → **they PACK**: a traffic quota may stack onto a client the engine already owns under another quota, and onto a client running an exclusive failure sim. So a single client can run `dns_fail` + `ping_test` + `download`, but never `dns_fail` + `assoc_fail`.
+**multi_capable — exclusivity vs packing.** Failure sims (`dns_fail`, `dhcp_fail`, `assoc_fail`, `auth_fail`, `ssidpw_fail`, `port_flap`, `rogue_dns`) are `multi_capable=False` → **exclusive: one failure sim per client** (the engine won't stack a second failure sim onto a client already running one, whether the existing one came from the engine, a manual pin, or the bucket default). Traffic sims (`ping_test`, `download`, `www_traffic`, `iperf`) are `multi_capable=True` → **they PACK**: a traffic quota may stack onto a client the engine already owns under another quota, and onto a client running an exclusive failure sim. So a single client can run `dns_fail` + `ping_test` + `download`, but never `dns_fail` + `assoc_fail`.
 
 **Site resolution — why it's PXMX-server-based (per-site pool vs tenant pool).** A quota's `site` decides which clients are eligible. The engine resolves a client's effective site in priority order: a per-client `wsite` **override** → the **hosting PXMX server's assigned site** (`pxmx_site_map`, Config → PXMX Sites; only servers with Client-Sim enabled are listed there — a disabled server keeps its saved pool for when it is re-enabled) → the bucket-default `wsite` → a `sim_config` fallback. The PXMX-server step is the load-bearing one, and it exists because of how the RF plant is wired:
 
@@ -252,7 +279,7 @@ Each product tab (Central, Central On-Prem, Mist) has a **Diagnostic** subtab th
 
 **Run a demo scenario (auto-expiring fault).** Simulations → **Clients** tab → the target client's **Demo** column → pick a scenario (`normal` = clear, or one of `dns_fail` / `dhcp_fail` / `assoc_fail` / `auth_fail` / `ssidpw_fail` / `port_flap`) → trigger. It shows in the **"Active Demo Scenarios"** card with minutes remaining; it auto-clears after **120 minutes** (or on client reboot), reverting to the client's persisted state. Clear early from the same card / column.
 
-**Toggle a per-client fault (persisted override).** Simulations → **Clients** → the client row's **⚙ Control** button opens **"Live Overrides — {hostname}"** with the 11 toggles: `kill_switch`, `dns_fail`, `iperf`, `download`, `www_traffic`, `ping_test`, `ssidpw_fail`, `auth_fail`, `dhcp_fail`, `port_flap`, `assoc_fail`. Set what you want → **Apply** (persists to that client), **Clear Overrides** (removes them), or **Apply to ALL** (pushes the same set to every registered client). Unlike a demo, these persist until you clear them. The client picks them up on its next `/api/config` fetch.
+**Toggle a per-client fault (persisted override).** Simulations → **Clients** → the client row's **⚙ Control** button opens **"Live Overrides — {hostname}"** with toggles including `kill_switch`, `dns_fail`, `iperf`, `download`, `www_traffic`, `rogue_dns`, `ping_test`, `ssidpw_fail`, `auth_fail`, `dhcp_fail`, `port_flap`, `assoc_fail`. Set what you want → **Apply** (persists to that client), **Clear Overrides** (removes them), or **Apply to ALL** (pushes the same set to every registered client). Unlike a demo, these persist until you clear them. The client picks them up on its next `/api/config` fetch.
 
 **Use the kill switch (emergency stop).** Simulations → **Clients** → the banner at the top: **"⛔ Emergency Stop"** halts all sims (clients poll `/api/kill-switch` and stand down); **"▶ Resume Sims"** re-enables. This is global; the per-client `kill_switch` override above stops just one client.
 
