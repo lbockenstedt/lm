@@ -49,6 +49,14 @@ CI/tooling changes are omitted unless they change what an operator sees.
   when that tenant's DHCP sync after it fails. It needs an
   updated netbox spoke (an older one shows "unsupported"). See
   [dhcp.md](dhcp.md#static-hosts-become-reservations).
+- **Replaced devices keep their address.** When a device at a static IP is
+  replaced and answers with a new MAC, its reservation (and the interface
+  MAC in NetBox) now moves to the new MAC once the old MAC has been gone a
+  day and the new one has shown for 30 minutes, with every other check kept.
+  The System → Sync card lists these, and a **Use new MAC** button on a
+  conflict does it at once. Turn the automatic part off with the card's
+  checkbox. Needs the updated netbox spoke. See
+  [dhcp.md](dhcp.md#static-hosts-become-reservations).
 
 ### Firewalls
 
