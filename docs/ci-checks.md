@@ -85,7 +85,11 @@ Order, cheapest first, as in `ci.yml`:
 
 Set `PYTHON=` to use your own interpreter or virtualenv instead (nothing is
 installed into it; `--timeout` is dropped if it lacks `pytest-timeout`). Skip
-the hook once with `git push --no-verify`. CI-only, not run locally: lm's
+the hook once with `git push --no-verify`. smoke.sh drops git's repo-local variables (`git rev-parse
+--local-env-vars`, e.g. `GIT_DIR`) once it has found the repo root: a hook in
+a git worktree exports an absolute `GIT_DIR`, and the scratch repos in
+`promotion_selftest.sh` and `.github/tests` otherwise renamed, committed to
+and pushed from the real repository. CI-only, not run locally: lm's
 browser smoke test (skips when `CI` is unset) and nw's advisory
 ruff/bandit/pip-audit/ShellCheck reports, which never fail a build.
 
