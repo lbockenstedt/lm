@@ -591,6 +591,26 @@ async def test_tenant_without_netbox_mapping_is_skipped_never_given_everything()
     assert "dhcp-nomap" not in hub.pushed()
 
 
+class _LrbKeaDownHub(_TenantHub):
+    """The lrb tenant's own Kea rejects its push."""
+    async def request_response(self, spoke_id, command, payload, timeout=30.0):
+        if command == "DHCP_SYNC" and spoke_id == "dhcp-lrb":
+            raise RuntimeError("kea down")
+        return await super().request_response(spoke_id, command, payload, timeout)
+
+
+@pytest.mark.asyncio
+async def test_delivered_dhcp_scopes_exclude_a_failed_push_and_survive_unchanged_ticks():
+    hub = _LrbKeaDownHub({"dhcp-shared": None, "dhcp-lrb": "lrb"}, _TENANTS)
+    await hub._sync_dns_dhcp_once()
+    assert hub._dhcp_delivered == {""}
+    await hub._sync_dns_dhcp_once()                 # shared unchanged: still delivered
+    assert hub._dhcp_delivered == {""}
+    hub._spokes["ipam"] = None                      # no NetBox: nothing delivered
+    await hub._sync_dns_dhcp_once()
+    assert hub._dhcp_delivered == set()
+
+
 @pytest.mark.asyncio
 async def test_per_scope_hash_only_repushes_the_changed_tenant():
     hub = _TenantHub({"dhcp-shared": None, "dhcp-lrb": "lrb"}, _TENANTS)
@@ -607,32 +627,3 @@ async def test_on_demand_dhcp_sync_is_tenant_scoped_too():
     res = await hub.sync_dhcp_from_netbox()
     assert res["status"] == "ok" and res["subnets_synced"] == 1
     assert hub.pushed() == {"dhcp-lrb": ["10.1.0.0/24"]}
-
-
-@pytest.mark.asyncio
-async def test_sync_reuses_a_fresh_handed_over_read_once():
-    """The static-reservation pass hands its unchanged NetBox reads to the
-    same tick's sync, so a tenant scope is read once per tick, not twice
-    (rule 4.8). The handoff is used once and ignored when stale."""
-    hub = _TenantHub({"dhcp-shared": None, "dhcp-lrb": "lrb"}, _TENANTS)
-    handed = ({"prefixes": [{"prefix": "10.7.0.0/24", "status": "active",
-                             "custom_fields": {"dhcp_enabled": True}}]},
-              {"ip_addresses": []})
-    hub._hand_over_netbox_reads({hub._filters_key({"tenant": "lrb"}): handed})
-    await hub._sync_dns_dhcp_once()
-    lrb_reads = [p for _s, c, p in hub.request_log
-                 if c.startswith("NETBOX_GET") and p.get("tenant") == "lrb"]
-    assert lrb_reads == []
-    assert hub.pushed()["dhcp-lrb"] == ["10.7.0.0/24"]
-    # Consumed: the next tick reads NetBox again.
-    hub.request_log.clear()
-    hub._last_sync_hashes = {}
-    await hub._sync_dns_dhcp_once()
-    assert hub.pushed()["dhcp-lrb"] == ["10.1.0.0/24"]
-    # A stale handoff is ignored.
-    hub._hand_over_netbox_reads({hub._filters_key({"tenant": "lrb"}): handed})
-    hub._netbox_read_handoff = (hub._netbox_read_handoff[0] - 600, hub._netbox_read_handoff[1])
-    hub.request_log.clear()
-    hub._last_sync_hashes = {}
-    await hub._sync_dns_dhcp_once()
-    assert hub.pushed()["dhcp-lrb"] == ["10.1.0.0/24"]

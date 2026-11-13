@@ -1283,7 +1283,7 @@ function _renderSetupSyncTile(content) {
                 <div class="flex items-center justify-between mb-4">
                     <h3 class="text-sm font-bold text-slate-500">Static hosts → DHCP reservations</h3>
                 </div>
-                <p class="text-xs text-slate-500 mb-3">A host with a static IP inside a DHCP scope holds no lease, so Kea could hand its address to another client. When on, the hub marks each statically addressed host's existing NetBox IP as a DHCP reservation (MAC + reservation flag) just before a DNS/DHCP sync, and that sync pushes it to Kea. Hosts come from tenant-bound agents and the network sweep; conflicts are reported, never overwritten. Off by default because it writes to NetBox.</p>
+                <p class="text-xs text-slate-500 mb-3">A host with a static IP inside a DHCP scope holds no lease, so Kea could hand its address to another client. When on, the netbox spoke marks each statically addressed host's existing NetBox IP as a DHCP reservation (MAC + reservation flag) just before a DNS/DHCP sync, and that sync pushes it to Kea. Hosts come from tenant-bound agents and the network sweep; conflicts are reported, never overwritten, and the writes for a tenant are rolled back if its DHCP sync fails. Off by default because it writes to NetBox.</p>
                 <div class="flex flex-wrap items-end gap-4">
                     <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="static-res-enabled" class="w-4 h-4 text-green-600 rounded">Reserve statically addressed hosts</label>
                     <div class="space-y-1">

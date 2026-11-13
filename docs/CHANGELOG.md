@@ -20,7 +20,11 @@ CI/tooling changes are omitted unless they change what an operator sees.
   prefix, LM marks its NetBox IP as a DHCP
   reservation so Kea never hands that address to another client. Existing
   reservations for another MAC, in NetBox or directly in Kea, are never
-  overwritten; they are reported as conflicts in the sync status. See
+  overwritten; they are reported as conflicts in the sync status. The netbox
+  spoke does the work and records each change with its before and after; a
+  pass whose writes fail is rolled back, and so is a tenant's part of a pass
+  when that tenant's DHCP sync after it fails. It needs an
+  updated netbox spoke (an older one shows "unsupported"). See
   [dhcp.md](dhcp.md#static-hosts-become-reservations).
 
 ### Firewalls

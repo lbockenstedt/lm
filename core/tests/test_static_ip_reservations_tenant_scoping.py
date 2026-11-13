@@ -31,10 +31,12 @@ def test_tenant_view_sees_only_its_own_rows_and_no_fleet_counters():
     assert "tenants" not in view and "skipped" not in view and "clean" not in view
 
 
-def test_tenant_status_reflects_only_its_own_errors():
-    failed = dict(_STATUS, status="error")
-    assert status_for_tenant(failed, "t-b")["status"] == "ok"
-    assert status_for_tenant(failed, "t-a")["status"] == "error"
+def test_tenant_status_reflects_only_its_own_rows():
+    """error beats conflicts beats ok (evaluated cleanly) beats skipped."""
+    assert status_for_tenant(_STATUS, "t-a")["status"] == "error"
+    assert status_for_tenant(_STATUS, "t-b")["status"] == "conflicts"
+    assert status_for_tenant(dict(_STATUS, conflicts=[]), "t-b")["status"] == "ok"
+    assert status_for_tenant(_STATUS, "t-c")["status"] == "skipped"
 
 
 def test_a_user_with_no_tenant_sees_no_rows():
@@ -42,55 +44,52 @@ def test_a_user_with_no_tenant_sees_no_rows():
     assert view["reserved"] == view["conflicts"] == view["errors"] == []
 
 
-def test_a_tenant_without_a_netbox_mapping_is_never_read_or_written():
+def test_a_pass_wide_error_is_shown_to_every_tenant():
+    """The netbox spoke unreachable or too old names no tenant."""
+    status = dict(_STATUS, errors=[{"tenant": None, "error": "netbox spoke too old; update it"}],
+                  status="unsupported")
+    view = status_for_tenant(status, "t-b")
+    assert view["status"] == "unsupported" and len(view["errors"]) == 1
+
+
+def test_a_tenant_without_a_netbox_mapping_is_never_sent():
     hub = _Hub(agent_addresses=_agent_static())
     hub.state._tenants["t-a"] = {}
     _run(hub)
-    assert hub.writes() == []
-    assert not [1 for _s, c, _p in hub.log if c.startswith("NETBOX_")]
+    assert hub.sent() == []
 
 
-def test_an_agent_only_touches_its_own_tenants_netbox_scope():
+def test_an_agent_only_puts_its_own_tenants_netbox_scope_in_the_pass():
     hub = _Hub(agent_addresses=_agent_static())
     _run(hub)
-    reads = {p.get("tenant") for _s, c, p in hub.log if c.startswith("NETBOX_GET")}
-    assert reads == {"tenant-a"}
+    assert [t["filters"] for t in hub.sent()[0]["tenants"]] == [{"tenant": "tenant-a"}]
 
 
-def _sync_status_rows(user):
-    """GET /api/dns-dhcp/sync-status as ``user``; the static rows it returns."""
+def _sync_status(user, stored=_STATUS):
+    """GET /api/dns-dhcp/sync-status as ``user``; its static_reservations."""
     from test_dhcp_tenant_routing import FakeHub, _build
     hub = FakeHub({"dhcp-a"})
     hub.state.system_state = {"global_config": {}}
-    hub.dns_dhcp_sync_status = {"static_reservations": _STATUS}
+    hub.dns_dhcp_sync_status = {"static_reservations": stored} if stored is not None else {}
     hub._dns_hook_desired = lambda: False
     hub._dhcp_hold_declined = lambda: False
     body = _build({"user": user}, hub).get("/api/dns-dhcp/sync-status").json()
-    return body["status"]["static_reservations"]["reserved"]
+    return body["status"]["static_reservations"]
+
+
+_WITH_RIGHT = {"tenant_id": "t-a", "permissions": {"dhcp": True}}
 
 
 def test_sync_status_route_needs_the_dhcp_right_to_show_rows():
     """The route sits outside the /api/dhcp/ gate, so it checks the right itself."""
-    with_right = {"tenant_id": "t-a", "permissions": {"dhcp": True}}
+    assert [r["ip"] for r in _sync_status(_WITH_RIGHT)["reserved"]] == ["10.20.0.50"]
     without = {"tenant_id": "t-a", "permissions": {"nw": True}}
-    assert [r["ip"] for r in _sync_status_rows(with_right)] == ["10.20.0.50"]
-    assert _sync_status_rows(without) == []
-    assert _sync_status_rows({"is_admin": True, "permissions": {"admin": True}}) == []
+    assert _sync_status(without) == {"visibility_reason": "no_permission"}
 
 
-def test_pass_status_words_name_no_tenant():
-    """``ok`` needs a tenant evaluated without error; no tenants → skipped;
-    every tenant errored → degraded. A viewer's word is its own outcome; an
-    unswitched admin sees the pass-wide word and no tenant ids."""
-    hub = _Hub()
-    assert _run(hub)["status"] == "skipped"
-    hub = _Hub(agent_addresses=_agent_static(), leases_reply={"status": "ERROR"})
-    st = _run(hub)
-    assert st["status"] == "degraded" and st["clean"] == []
-    assert status_for_tenant(st, "t-a")["status"] == "error"
-    hub = _Hub(agent_addresses=_agent_static())
-    st = _run(hub)
-    assert st["status"] == "ok" and st["clean"] == ["t-a"]
-    admin = status_for_tenant(st, None)
-    assert admin["status"] == "ok" and "clean" not in admin
-    assert status_for_tenant(st, "t-b")["status"] == "skipped"
+def test_sync_status_route_says_why_rows_are_hidden_or_missing():
+    assert _sync_status(_WITH_RIGHT)["visibility_reason"] == "tenant"
+    admin = {"is_admin": True, "permissions": {"admin": True}}
+    assert _sync_status(admin) == {"status": "error", "visibility_reason": "no_tenant"}
+    # Never ran: no status word, but still a reason.
+    assert _sync_status(_WITH_RIGHT, stored=None) == {"visibility_reason": "tenant"}

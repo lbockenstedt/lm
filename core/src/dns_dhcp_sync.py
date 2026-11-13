@@ -583,29 +583,6 @@ class DnsDhcpSyncMixin:
         # Every spoke failed.
         raise RuntimeError("NetBox fetch failed on every IPAM spoke — " + " | ".join(errors))
 
-    @staticmethod
-    def _filters_key(filters: Dict[str, Any] = None) -> str:
-        """A stable key for a NetBox read's ``filters`` (handoff lookups)."""
-        return json.dumps(filters or {}, sort_keys=True)
-
-    def _hand_over_netbox_reads(self, reads: Dict[str, Any]) -> None:
-        """Keep ``{_filters_key: (pfx, ips)}`` reads for this tick's sync.
-
-        The static-reservation pass runs just before the sync and reads the
-        same tenant scopes; handing its reads over means the scope is read
-        once per tick, not twice (fleet rule 4.8).
-        """
-        self._netbox_read_handoff = (time.time(), reads)
-
-    def _take_netbox_reads(self) -> Dict[str, Any]:
-        """The reads handed over in the last 2 minutes, consumed once."""
-        # Take and clear, so a later tick never reuses them.
-        handoff = getattr(self, "_netbox_read_handoff", None)
-        self._netbox_read_handoff = None
-        if not handoff or time.time() - handoff[0] > 120:
-            return {}
-        return handoff[1]
-
     def _sync_scope(self, spoke_id):
         """NetBox read scope for one DHCP/DNS target spoke (tenant isolation).
 
@@ -816,10 +793,13 @@ class DnsDhcpSyncMixin:
         unbound (shared/admin/unassigned) spokes keep the unfiltered set.
         Hashes are kept per (side, scope); a failed fetch or push never
         latches a hash and never pushes an empty set for that scope.
+
+        ``self._dhcp_delivered`` ends up holding the DHCP scope keys whose Kea
+        now has this tick's NetBox data (pushed, or unchanged since the last
+        push); the static-reservations rollback undoes only the other scopes.
         """
-        # Reads the static-reservation pass just made (taken first, so they
-        # are never left for a later tick).
-        handed_over = self._take_netbox_reads()
+        # Nothing delivered yet; an early return or a raise leaves it empty.
+        self._dhcp_delivered = set()
         # Nothing to do without NetBox or any target spoke.
         ipam = self.get_spoke_by_type("ipam")
         if not ipam:
@@ -842,10 +822,6 @@ class DnsDhcpSyncMixin:
         # Fetch NetBox data once per scope.
         fetched, fetch_errors = {}, {}
         for key, filters in scopes.items():
-            reused = handed_over.get(self._filters_key(filters))
-            if reused:
-                fetched[key] = reused
-                continue
             try:
                 fetched[key] = await self._netbox_prefixes_and_ips(filters)
             except Exception as e:  # noqa: BLE001
@@ -894,6 +870,8 @@ class DnsDhcpSyncMixin:
                 hk = self._hash_key(side, key)
                 if last.get(hk) == h:
                     new_hashes[hk] = h
+                    if side == "dhcp":
+                        self._dhcp_delivered.add(key)
                     continue
                 # Queue a push to each spoke in this scope, remembering its index.
                 cmd = "DNS_SYNC" if side == "dns" else "DHCP_SYNC"
@@ -901,13 +879,13 @@ class DnsDhcpSyncMixin:
                 for sid in sids:
                     indices.append(len(pushes))
                     pushes.append(self.request_response(sid, cmd, payload, timeout=30.0))
-                push_groups.append((side, hk, h, indices))
+                push_groups.append((side, key, hk, h, indices))
 
         # Run all pushes in parallel.
         results = await asyncio.gather(*pushes, return_exceptions=True) if pushes else []
         # Latch a scope's hash ONLY when every push for it succeeded, so a
         # transiently-offline spoke is retried next cycle.
-        for side, hk, h, indices in push_groups:
+        for side, key, hk, h, indices in push_groups:
             res = [results[i] for i in indices]
             errs = [e for e in map(self._push_error, res) if e]
             if errs:
@@ -917,6 +895,8 @@ class DnsDhcpSyncMixin:
             else:
                 new_hashes[hk] = h
                 st[side]["spoke_results"].extend(unwrap_spoke(r) for r in res)
+                if side == "dhcp":
+                    self._dhcp_delivered.add(key)
 
         # Record each side's status.
         for side, skipped in (("dns", dns_skipped), ("dhcp", dhcp_skipped)):
@@ -976,20 +956,31 @@ class DnsDhcpSyncMixin:
                 await self._reconcile_dns_hook()
             except Exception as e:  # noqa: BLE001
                 logger.warning("DNS hook reconcile failed: %s", e)
-            if not self._dds_cfg()["enabled"]:
-                return
-            # Mark statically addressed hosts as reservations first, so this
-            # tick's sync already pushes them to Kea.
-            from static_ip_reservations import reserve_static_hosts_once
+            from static_ip_reservations import (reserve_static_hosts_once,
+                                                roll_back_if_sync_failed)
+            sync_on = self._dds_cfg()["enabled"]
+            # The netbox spoke marks statically addressed hosts as
+            # reservations first, so this tick's sync already pushes them to
+            # Kea. With the sync off the pass records "disabled".
             try:
-                await reserve_static_hosts_once(self)
+                await reserve_static_hosts_once(self, sync_enabled=sync_on)
             except Exception as e:  # noqa: BLE001 — never block the sync
                 logger.warning("static IP reservations pass failed: %s", e)
+            if not sync_on:
+                return
             # Single NetBox fetch + skip-if-unchanged (see
             # _sync_dns_dhcp_once). The manual /api/dns|dhcp/sync buttons
             # still call the per-side methods directly (they re-fetch,
             # which is correct for an explicit button press).
-            await self._sync_dns_dhcp_once()
+            try:
+                await self._sync_dns_dhcp_once()
+            finally:
+                # A scope whose DHCP sync failed (or a sync that raised) would
+                # leave the pass's reservations in NetBox only; undo those.
+                try:
+                    await roll_back_if_sync_failed(self)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("static IP reservations rollback failed: %s", e)
 
         # Run forever with no startup delay; errors are logged and retried after the interval.
         await run_sync_loop(

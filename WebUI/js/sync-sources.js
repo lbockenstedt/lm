@@ -579,26 +579,78 @@ async function saveDhcpDeclineConfig() {
 }
 
 // ── Static hosts → DHCP reservations (System → Sync; global_config.static_ip_reservations) ──
-// Off when unset; the hub runs the pass just before each DNS/DHCP sync.
+// Off when unset; the hub runs the pass just before each DNS/DHCP sync and
+// the netbox spoke does the work.
+const _STATIC_RES_TONES = { muted: 'text-slate-500', ok: 'text-green-700',
+                            warn: 'text-amber-700', error: 'text-red-600' };
+
+// What the status line says, as {text, tone}. A pure function of the two
+// fetches so every state is covered in one place: each argument is
+// undefined while loading, 'failed' when the fetch failed, else the parsed
+// /setup/config global_config entry and the /api/dns-dhcp/sync-status body.
+function staticResStatusView(cfg, sync) {
+    if (cfg === undefined) return { text: 'Loading…', tone: 'muted' };
+    if (cfg === 'failed') return { text: 'Could not load the settings.', tone: 'error' };
+    if (!cfg || cfg.enabled !== true) return { text: 'Off.', tone: 'muted' };
+    if (sync === undefined) return { text: 'Loading the last pass…', tone: 'muted' };
+    if (sync === 'failed') return { text: 'Could not load the last pass.', tone: 'error' };
+    const status = sync && typeof sync === 'object' ? sync.status : null;
+    if (!status || typeof status !== 'object') return { text: 'Unexpected status reply.', tone: 'error' };
+    const p = status.static_reservations;
+    if (p === undefined) return { text: 'This hub reports no pass status.', tone: 'warn' };
+    if (!p || typeof p !== 'object') return { text: 'Unexpected status reply.', tone: 'error' };
+    if (p.visibility_reason === 'no_permission') return { text: 'Pass results need the DHCP right.', tone: 'muted' };
+    if (!p.status) return { text: 'No pass has run yet.', tone: 'muted' };
+    const when = p.last_run ? ` · ${new Date(p.last_run * 1000).toLocaleString()}` : '';
+    if (p.visibility_reason === 'no_tenant') {
+        const tone = { error: 'error', conflicts: 'warn', unsupported: 'warn', ok: 'ok' }[p.status] || 'muted';
+        return { text: `Last pass: ${p.status}${when}. Switch into a tenant to see its hosts.`, tone };
+    }
+    const n = k => (Array.isArray(p[k]) ? p[k] : []).length;
+    const counts = ` · reserved ${n('reserved')} · conflicts ${n('conflicts')} · errors ${n('errors')}`;
+    const first = (p.errors || []).find(e => e && e.error);
+    switch (p.status) {
+    case 'disabled': return { text: `Off${p.reason ? ` (${p.reason})` : ''}${when}.`, tone: 'muted' };
+    case 'unsupported': return { text: `The netbox spoke is too old for this; update it${when}.`, tone: 'warn' };
+    case 'error': return { text: `Last pass failed${when}${counts}${first ? ` · ${first.error}` : ''}`, tone: 'error' };
+    case 'conflicts': return { text: `Last pass found conflicts${when}${counts}`, tone: 'warn' };
+    case 'ok': return { text: `Last pass OK${when}${counts}`, tone: 'ok' };
+    case 'skipped': return { text: `Last pass had nothing to check${when}.`, tone: 'muted' };
+    default: return { text: 'Unexpected status reply.', tone: 'error' };
+    }
+}
+
+// Show staticResStatusView on the card, coloured by its tone.
+function _renderStaticResStatus(cfg, sync) {
+    const st = document.getElementById('static-res-status');
+    if (!st) return;
+    const v = staticResStatusView(cfg, sync);
+    st.textContent = v.text;
+    st.className = `text-xs mt-3 ${_STATIC_RES_TONES[v.tone]}`;
+}
+
 async function loadStaticResConfig() {
+    let cfg;
+    _renderStaticResStatus(cfg);
     try {
         const r = await setupFetch('/setup/config');
-        if (!r.ok) return;
-        const cfg = ((await r.json()).global_config || {}).static_ip_reservations || {};
-        const en = document.getElementById('static-res-enabled');
-        const iv = document.getElementById('static-res-interval');
+        cfg = r.ok ? (((await r.json()).global_config || {}).static_ip_reservations || {}) : 'failed';
+    } catch (e) { cfg = 'failed'; }
+    const en = document.getElementById('static-res-enabled');
+    const iv = document.getElementById('static-res-interval');
+    if (cfg !== 'failed') {
         if (en) en.checked = cfg.enabled === true;
         if (iv) iv.value = Math.round((cfg.interval || 900) / 60);
-        // Last pass, already cut to the viewer's tenant by the hub.
-        const st = document.getElementById('static-res-status');
+    }
+    _renderStaticResStatus(cfg);
+    if (cfg === 'failed' || cfg.enabled !== true) return;
+    // Last pass, already cut to the viewer's tenant by the hub.
+    let sync;
+    try {
         const s = await _spokeFetch('/api/dns-dhcp/sync-status');
-        const p = (s && s.ok && s.data && (s.data.status || {}).static_reservations) || {};
-        if (st && p.last_run) {
-            st.textContent = `Last pass: ${p.status || ''} · ${new Date(p.last_run * 1000).toLocaleString()}`
-                + ` · reserved ${(p.reserved || []).length} · conflicts ${(p.conflicts || []).length}`
-                + ` · errors ${(p.errors || []).length}`;
-        }
-    } catch (e) { console.error('loadStaticResConfig failed', e); }
+        sync = s && s.ok ? s.data : 'failed';
+    } catch (e) { sync = 'failed'; }
+    _renderStaticResStatus(cfg, sync);
 }
 
 // Save the card's on/off switch and interval (minutes → seconds) into global_config.
