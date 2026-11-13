@@ -541,28 +541,35 @@ def register(app, hub, ctx):
         # Send it and refresh the cached DNS records.
         return await _fw_write(hub, firewall_id, "OPNSENSE_EDIT_DNS_RECORD", {"uuid": record_id, **data}, "dns")
 
-    # ── Network impairment (latency / loss for a host or subnet) ─────────────
+    # ── Network impairment (latency / loss / bandwidth, maybe scheduled) ─────
+    def _impair_targets(payload):
+        """The addresses an impairment payload names: ``targets`` (a list; the
+        current form) or the single ``target`` an older UI sends."""
+        targets = payload.get("targets")
+        if targets is None:
+            targets = [payload.get("target", "")]
+        if not isinstance(targets, list) or not targets:
+            raise HTTPException(status_code=400, detail="Targets must be a non-empty list")
+        return [str(t).strip() for t in targets]
+
     async def _impair_authz(request, firewall_id, payload=None, uuid=None):
-        """Usual firewall write check, plus: on a SHARED firewall the target
-        must lie INSIDE one of the caller's prefixes (the generic check only
-        needs an overlap, which would let a tenant impair a whole /8)."""
-        # Run the usual write check, then (shared firewalls only) the inside-a-subnet check.
-        import ipaddress
-        await _authz_fw_write(request, firewall_id, "impair", payload=payload, uuid=uuid)
+        """Usual firewall write check. On a SHARED firewall the impairment (the
+        new one and the one it replaces) must have EVERY target INSIDE one of the
+        caller's prefixes (the generic check only needs an overlap, which would
+        let a tenant impair a whole /8), and alias targets are refused (the hub
+        cannot see what an alias holds); see access.impairment_inside."""
+        # The specific reasons first, so a refusal says why.
         _fw, scope = _authz_firewall(request, firewall_id, write=True)
-        if scope != "constrained" or payload is None:
-            return
-        # Is the target inside one of the caller's prefixes? A bad address counts as no.
-        try:
-            target = ipaddress.ip_network(str(payload.get("target", "")).strip(), strict=False)
-            owned = [ipaddress.ip_network(p, strict=False)
-                     for p in await access.resolve_owned_prefixes(app.state.hub, _session_user(request))]
-            inside = any(target.version == n.version and target.subnet_of(n) for n in owned)
-        except ValueError:
-            inside = False
-        if not inside:
-            raise HTTPException(status_code=403,
-                                detail="On shared infrastructure the target must be inside your tenant's subnets")
+        if scope == "constrained" and payload is not None:
+            if payload.get("target_type") == "alias":
+                raise HTTPException(status_code=403,
+                                    detail="On shared infrastructure an impairment cannot target an alias")
+            _impair_targets(payload)
+            owned = await access.resolve_owned_prefixes(app.state.hub, _session_user(request))
+            if not access.impairment_inside(payload, owned):
+                raise HTTPException(status_code=403,
+                                    detail="On shared infrastructure every target must be inside your tenant's subnets")
+        await _authz_fw_write(request, firewall_id, "impair", payload=payload, uuid=uuid)
 
     def _impair_check_bandwidth(data):
         """Refuse a bandwidth limit above 4 Gbit/s (compared in bits/s): OPNsense
@@ -596,7 +603,7 @@ def register(app, hub, ctx):
     # Add a network impairment.
     @app.post("/api/firewall/{firewall_id}/impair")
     async def add_impairment(firewall_id: str, request: Request):
-        """Add an impairment (latency/loss) for a host or subnet."""
+        """Add an impairment (latency/loss/bandwidth, always on or scheduled)."""
         # Read it, check the caller may add it, and send it.
         data = await request.json()
         await _impair_authz(request, firewall_id, payload=data)

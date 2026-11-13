@@ -298,40 +298,158 @@ async function deleteOpnsenseItem(fwId, subMenu, itemId) {
     }
 }
 
-// Network impairment form (Impairment tab): latency / packet loss for one host
-// or subnet, applied on the firewall by the os-netimpair plugin. Shared by the
-// add and edit modals; ``item`` is the row being edited (or {} for a new one).
+// Network impairment form (Impairment tab): latency / packet loss / bandwidth
+// for addresses, firewall aliases or LM devices, always on or on a rotating
+// schedule; built on the firewall by the spoke (os-netimpair plugin). Shared by
+// the add and edit modals; ``item`` is the row being edited (or {} for a new
+// one). Selects are filled and toggled by _impairWire once the modal is shown.
 function _impairFields(item, input, label) {
-    const v = k => (item[k] !== undefined && item[k] !== null ? String(item[k]) : '').replace(/"/g, '&quot;');
+    const v = k => (item[k] !== undefined && item[k] !== null ? String(item[k]) : '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
     const dir = item.direction || 'both';
     const opt = (val, text) => `<option value="${val}" ${dir === val ? 'selected' : ''}>${text}</option>`;
+    const type = item.target_type || 'ip';
+    const topt = (val, text) => `<option value="${val}" ${type === val ? 'selected' : ''}>${text}</option>`;
+    const sched = item.schedule || null;
+    const ipText = type === 'ip' ? (item.targets || (item.target ? [item.target] : [])).join(', ') : '';
     return `
         <div class="grid grid-cols-2 gap-4">
-            <div class="space-y-1"><label class="${label}">Host or Subnet</label><input type="text" id="add-opn-target" value="${v('target')}" placeholder="10.0.0.5 or 10.0.0.0/24" class="${input}" title="IP address or CIDR subnet whose traffic is impaired"></div>
-            <div class="space-y-1"><label class="${label}">Interface</label><input type="text" id="add-opn-iface" value="${v('interface') || 'lan'}" placeholder="lan" class="${input}" title="OPNsense interface the host or subnet sits on (e.g. lan, opt1)"></div>
+            <div class="space-y-1"><label class="${label}">Target Type</label><select id="add-opn-ttype" class="${input}" title="What to impair: addresses or subnets, a firewall alias, or LM devices">${topt('ip', 'IP / CIDR')}${topt('alias', 'Alias')}${topt('device', 'Device')}</select></div>
+            <div class="space-y-1"><label class="${label}">Interface</label><input type="text" id="add-opn-iface" value="${v('interface') || 'lan'}" placeholder="lan" class="${input}" title="OPNsense interface the targets sit on (e.g. lan, opt1)"></div>
+        </div>
+        <div class="space-y-1" data-impair-for="ip"><label class="${label}">Hosts or Subnets</label><input type="text" id="add-opn-target" value="${ipText.replace(/"/g, '&quot;')}" placeholder="192.0.2.5 or 192.0.2.0/24; several separated by commas" class="${input}" title="IP addresses or CIDR subnets, comma-separated. Scheduled: one per window, in order; always on: all at once."></div>
+        <div class="space-y-1 hidden" data-impair-for="alias"><label class="${label}">Aliases</label><select id="add-opn-alias" multiple size="4" class="${input}" title="Firewall aliases; their member addresses are copied in when saved (save again after changing an alias)"></select>
+            <label class="flex items-center gap-2 text-xs text-slate-600"><input type="checkbox" id="add-opn-alias-members" ${item.alias_members ? 'checked' : ''}> One member at a time (one alias; each member is its own target)</label></div>
+        <div class="space-y-1 hidden" data-impair-for="device"><label class="${label}">Devices</label><select id="add-opn-device" multiple size="4" class="${input}" title="LM devices (NetBox) with a primary IP; the IP is impaired"></select></div>
+        <div class="grid grid-cols-2 gap-4">
             <div class="space-y-1"><label class="${label}">Latency (ms)</label><input type="number" min="0" max="10000" id="add-opn-delay" value="${v('delay') || '0'}" class="${input}" title="Added one-way delay in milliseconds (0-10000). With direction Both, the round trip gets it twice."></div>
             <div class="space-y-1"><label class="${label}">Packet Loss (%)</label><input type="number" min="0" max="100" step="0.1" id="add-opn-loss" value="${v('loss') || '0'}" class="${input}" title="Percentage of packets dropped (0-100), per direction"></div>
             <div class="space-y-1"><label class="${label}">Bandwidth Limit</label><div class="flex gap-2"><input type="number" min="0" step="1" id="add-opn-bw" value="${item.bandwidth ? v('bandwidth') : ''}" placeholder="No limit" class="${input}" title="Optional cap per direction; blank = no limit. OPNsense pipes are limited to 4 Gbit/s."><select id="add-opn-bw-unit" class="${input} w-28">${['Kbit', 'Mbit', 'Gbit'].map(u => `<option value="${u}" ${(item.bandwidth_unit || 'Mbit') === u ? 'selected' : ''}>${u}/s</option>`).join('')}</select></div></div>
-            <div class="space-y-1"><label class="${label}">Direction</label><select id="add-opn-direction" class="${input}" title="Download = traffic to the host/subnet, Upload = traffic from it">${opt('both', 'Both')}${opt('download', 'Download (to target)')}${opt('upload', 'Upload (from target)')}</select></div>
+            <div class="space-y-1"><label class="${label}">Direction</label><select id="add-opn-direction" class="${input}" title="Download = traffic to the target, Upload = traffic from it">${opt('both', 'Both')}${opt('download', 'Download (to target)')}${opt('upload', 'Upload (from target)')}</select></div>
             <div class="space-y-1"><label class="${label}">Enabled</label><select id="add-opn-enabled" class="${input}" title="Disable to keep the entry but stop impairing"><option value="1">Yes</option><option value="0" ${item.enabled === false ? 'selected' : ''}>No</option></select></div>
+            <div class="space-y-1"><label class="${label}">When</label><select id="add-opn-mode" class="${input}" title="Always on, or on for some minutes every few hours"><option value="always">Always on</option><option value="scheduled" ${sched ? 'selected' : ''}>Scheduled</option></select></div>
+        </div>
+        <div class="grid grid-cols-3 gap-4 ${sched ? '' : 'hidden'}" id="add-opn-schedule">
+            <div class="space-y-1"><label class="${label}">Every (hours)</label><input type="number" min="1" max="720" id="add-opn-every" value="${sched ? sched.every_hours : 3}" class="${input}" title="A window starts every this many hours (1-720)"></div>
+            <div class="space-y-1"><label class="${label}">For (minutes)</label><input type="number" min="1" id="add-opn-for" value="${sched ? sched.for_minutes : 15}" class="${input}" title="How long each window impairs; shorter than the interval"></div>
+            <div class="space-y-1"><label class="${label}">Start</label><input type="datetime-local" id="add-opn-start" value="${sched && sched.start ? _impairLocalInput(sched.start) : ''}" class="${input}" title="First window (your local time); blank = now. Several targets rotate: one per window, in order."></div>
         </div>
         <div class="space-y-1"><label class="${label}">Description</label><input type="text" id="add-opn-desc" value="${v('description')}" placeholder="Optional description" class="${input}" title="Optional description"></div>
-        <p class="text-xs text-slate-500">Needs the os-netimpair plugin on the firewall. LM creates a Traffic Shaper pipe and rule per direction (tagged lm-impair) and applies them.</p>`;
+        <p class="text-xs text-slate-500">Needs the os-netimpair plugin on the firewall. LM creates a Traffic Shaper pipe per direction and a rule per direction and target (tagged lm-impair); scheduled rules are switched by the firewall spoke.</p>`;
+}
+
+// epoch seconds <-> the value of a datetime-local input (local time).
+function _impairLocalInput(epoch) {
+    const d = new Date(epoch * 1000);
+    d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+    return d.toISOString().slice(0, 16);
+}
+
+// Show the fields for the chosen target type and schedule mode, and fill the
+// alias and device pickers (aliases from the chosen firewall's cache, devices
+// from NetBox). ``item`` preselects an edited impairment's targets.
+function _impairWire(item, fwId) {
+    const $ = id => document.getElementById(id);
+    const show = () => {
+        document.querySelectorAll('[data-impair-for]').forEach(el =>
+            el.classList.toggle('hidden', el.dataset.impairFor !== $('add-opn-ttype').value));
+        $('add-opn-schedule').classList.toggle('hidden', $('add-opn-mode').value !== 'scheduled');
+    };
+    $('add-opn-ttype').addEventListener('change', show);
+    $('add-opn-mode').addEventListener('change', show);
+    show();
+    const picked = new Set(item.targets || []);
+    const fill = (sel, entries) => {
+        sel.replaceChildren(...entries.map(([value, text]) => {
+            const o = new Option(text, value);
+            o.selected = picked.has(value);
+            return o;
+        }));
+    };
+    const loadAliases = async () => {
+        const id = ($('add-opn-fw') && $('add-opn-fw').value) || fwId;
+        const sel = $('add-opn-alias');
+        if (!id || !sel) return;
+        let names = [];
+        try {
+            // Scoped like the impairment list: a switched admin sees the tenant's aliases.
+            const r = await fetch(`/api/firewall/${encodeURIComponent(id)}/aliases`
+                + (currentTenant ? `?tenant=${encodeURIComponent(currentTenant)}` : ''));
+            const d = await r.json();
+            const rows = Array.isArray(d) ? d : Array.isArray(d.data) ? d.data
+                : Array.isArray(d.payload && d.payload.data) ? d.payload.data : [];
+            names = rows.map(a => a.name).filter(Boolean);
+        } catch (e) { /* keep whatever the edited item names */ }
+        if (item.target_type === 'alias') (item.targets || []).forEach(n => { if (!names.includes(n)) names.push(n); });
+        fill(sel, names.map(n => [n, n]));
+    };
+    const loadDevices = async () => {
+        let devices = [];
+        try {
+            const tparam = currentTenant && currentTenant !== 'default' ? `?tenant=${encodeURIComponent(currentTenant)}` : '';
+            const r = await fetch('/api/netbox/devices' + tparam);
+            const d = await r.json();
+            devices = (d.devices || []).filter(dv => dv.primary_ip)
+                .map(dv => [String(dv.primary_ip).split('/')[0], `${dv.name} (${String(dv.primary_ip).split('/')[0]})`]);
+        } catch (e) { /* no NetBox: only the edited item's devices */ }
+        if (item.target_type === 'device') (item.targets || []).forEach((ip, i) => {
+            if (!devices.some(([v]) => v === ip)) devices.push([ip, `${(item.labels || [])[i] || ip} (${ip})`]);
+        });
+        fill($('add-opn-device'), devices);
+    };
+    if ($('add-opn-fw')) $('add-opn-fw').addEventListener('change', loadAliases);
+    loadAliases();
+    loadDevices();
 }
 
 function _impairBody(g) {
-    return { target: g('add-opn-target'), interface: g('add-opn-iface') || 'lan',
+    const type = g('add-opn-ttype') || 'ip';
+    const chosen = id => Array.from((document.getElementById(id) || {}).selectedOptions || []);
+    let targets = [], labels = [];
+    if (type === 'alias') targets = chosen('add-opn-alias').map(o => o.value);
+    else if (type === 'device') {
+        const opts = chosen('add-opn-device');
+        targets = opts.map(o => o.value);
+        labels = opts.map(o => o.text.replace(/ \([^)]*\)$/, ''));
+    } else targets = g('add-opn-target').split(/[\s,]+/).filter(Boolean);
+    let schedule = null;
+    if (g('add-opn-mode') === 'scheduled') {
+        const start = g('add-opn-start');
+        schedule = { every_hours: Number(g('add-opn-every')), for_minutes: Number(g('add-opn-for')),
+                     start: start ? Math.floor(new Date(start).getTime() / 1000) : 0 };
+    }
+    const membersBox = document.getElementById('add-opn-alias-members');
+    return { target_type: type, targets, labels, target: _impairLegacyTarget(type, targets, schedule),
+             alias_members: type === 'alias' && !!(membersBox && membersBox.checked),
+             schedule, interface: g('add-opn-iface') || 'lan',
              direction: g('add-opn-direction') || 'both', delay: g('add-opn-delay') || '0',
              loss: g('add-opn-loss') || '0', enabled: g('add-opn-enabled') || '1',
              bandwidth: g('add-opn-bw') || '', bandwidth_unit: g('add-opn-bw-unit') || 'Mbit',
              description: g('add-opn-desc') };
 }
 
+// The single "target" a spoke from before targets/schedules reads: sent only
+// when such a spoke would do exactly what was asked (one address, always on),
+// so an older spoke refuses anything else instead of half-doing it.
+function _impairLegacyTarget(type, targets, schedule) {
+    return type !== 'alias' && targets.length === 1 && !schedule ? targets[0] : '';
+}
+
 // Check an impairment body before sending; returns an error message or ''.
 // OPNsense refuses shaper pipes above 4 Gbit/s, compared in bits/s (so
-// 5000 Mbit/s is refused too).
+// 5000 Mbit/s is refused too). The spoke checks addresses and aliases again.
 function _impairError(body) {
-    if (!body.target) return 'Host or subnet is required.';
+    if (!body.targets.length) {
+        return { alias: 'Pick at least one alias.', device: 'Pick at least one device.' }[body.target_type]
+            || 'Host or subnet is required.';
+    }
+    if (body.alias_members && body.targets.length !== 1) return 'One member at a time needs exactly one alias.';
+    const s = body.schedule;
+    if (s) {
+        if (!Number.isInteger(s.every_hours) || s.every_hours < 1 || s.every_hours > 720) return 'Every must be 1 to 720 hours.';
+        if (!Number.isInteger(s.for_minutes) || s.for_minutes < 1 || s.for_minutes >= s.every_hours * 60) {
+            return 'For must be at least 1 minute and shorter than the interval.';
+        }
+    }
     const raw = String(body.bandwidth || '').trim();
     if (raw === '' || raw === '0') return '';
     if (!/^\d+$/.test(raw)) return 'Bandwidth must be a whole number.';
@@ -412,23 +530,24 @@ function showOpnsenseAddModal(subMenu) {
                 <h3 class="text-lg font-bold text-navy">Add ${subMenu.replace(/s$/, '')}</h3>
                 <button onclick="document.getElementById('opn-add-modal').remove()" class="text-slate-500 hover:text-slate-600" title="Close dialog"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
-            <div class="p-6 space-y-4">${fwPicker}${fields}</div>
+            <div class="p-6 space-y-4 max-h-[65vh] overflow-y-auto">${fwPicker}${fields}</div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="document.getElementById('opn-add-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800" title="Cancel and discard changes">Cancel</button>
                 <button onclick="${submitFn}" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm" title="Submit and save ${subMenu.replace(/s$/, '')}">Add</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
+    if (subMenu === 'Impairment') _impairWire({}, _opnFirewalls[0] && _opnFirewalls[0].id);
 }
 
 async function submitOpnsenseAdd(subMenu) {
     const g = id => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
+    const fwSel = document.getElementById('add-opn-fw');
+    const fwId = (fwSel && fwSel.value) || (_opnFirewalls[0] && _opnFirewalls[0].id);
+    if (!fwId) { showToast('No firewall selected.', 'error'); return; }
     const btn = document.querySelector('#opn-add-modal button[title^=Submit]');
     const btnLabel = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = 'Adding…'; }
-    const fwSel = document.getElementById('add-opn-fw');
-    const fwId = (fwSel && fwSel.value) || (_opnFirewalls[0] && _opnFirewalls[0].id);
-    if (!fwId) { showToast('No firewall selected.', 'success'); return; }
     let url = '', body = {};
 
     try {
@@ -552,13 +671,14 @@ function showOpnsenseEditModal(fwId, subMenu, itemIdx) {
                 <h3 class="text-lg font-bold text-navy">Edit ${subMenu.replace(/s$/, '')}</h3>
                 <button onclick="document.getElementById('opn-add-modal').remove()" class="text-slate-500 hover:text-slate-600" title="Close dialog"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
-            <div class="p-6 space-y-4">${fields}</div>
+            <div class="p-6 space-y-4 max-h-[65vh] overflow-y-auto">${fields}</div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="document.getElementById('opn-add-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800" title="Cancel and discard changes">Cancel</button>
                 <button onclick="submitOpnsenseEdit('${fwId}','${subMenu}','${itemId.replace(/'/g,"\\'")}')" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold transition-all shadow-sm" title="Save changes to ${subMenu.replace(/s$/, '')}">Save</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
+    if (subMenu === 'Impairment') _impairWire(item, fwId);
 }
 
 async function submitOpnsenseEdit(fwId, subMenu, itemId) {

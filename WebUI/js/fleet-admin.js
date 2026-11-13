@@ -3810,6 +3810,49 @@ async function unloadRole(spokeId, role) {
 
 
 
+// Display columns for one listed impairment: schedule ("when"), the next
+// on/off switch in local time, and the state (incl. the scheduler's last error).
+function _impairRow(it) {
+    const at = t => new Date(t * 1000).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+    const s = it.schedule;
+    it.latency = `${it.delay} ms`;
+    it.packet_loss = `${it.loss} %`;
+    it.bandwidth_limit = it.bandwidth ? `${it.bandwidth} ${it.bandwidth_unit}/s` : 'none';
+    it.when = s ? `every ${s.every_hours} h for ${s.for_minutes} min` : 'always';
+    it.next_change = !s || !it.enabled ? '-'
+        : it.active ? (it.next_off ? `off ${at(it.next_off)}` : '-')
+        : (it.next_on ? `on ${at(it.next_on)}${it.next_target ? ' (' + it.next_target + ')' : ''}` : '-');
+    if (!it.complete) it.state = 'incomplete';
+    else if (it.error) it.state = `error: ${it.error}`;
+    else if (!it.enabled) it.state = 'disabled';
+    else if (!s) it.state = 'active';
+    else it.state = it.active ? `impairing ${it.active_target || ''}`.trim() : 'waiting';
+}
+
+// Turn a listed impairment on or off: an edit that resends it with "enabled"
+// flipped (the spoke rebuilds it; a schedule keeps its start).
+async function _impairToggle(it, btn) {
+    if (!it) return;
+    btn.disabled = true;
+    const targets = it.targets || (it.target ? [it.target] : []);
+    const body = { target_type: it.target_type || 'ip', targets, labels: it.labels || [],
+                   target: _impairLegacyTarget(it.target_type || 'ip', targets, it.schedule || null),
+                   alias_members: !!it.alias_members, schedule: it.schedule || null,
+                   interface: it.interface || 'lan', direction: it.direction || 'both',
+                   delay: String(it.delay || 0), loss: String(it.loss || 0),
+                   bandwidth: it.bandwidth ? String(it.bandwidth) : '', bandwidth_unit: it.bandwidth_unit || 'Mbit',
+                   description: it.description || '', enabled: it.enabled ? '0' : '1' };
+    try {
+        const r = await fetch(`/api/firewall/${encodeURIComponent(it._fwId)}/impair/${encodeURIComponent(it.uuid)}` + _taTenantQuery(),
+            { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || r.statusText); }
+        loadOpnsenseManagement();
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+        btn.disabled = false;
+    }
+}
+
 async function loadOpnsenseManagement() {
     const container = document.getElementById('opn-table-container');
     if (!container) return;
@@ -3899,7 +3942,7 @@ async function loadOpnsenseManagement() {
 
         if (items.length === 0) {
             if (subMenu === 'Impairment' && !errors.length) {
-                container.innerHTML = `<div class="py-12 text-center text-slate-500 italic">No impairments. Use "+ Add Impairment" to add latency or packet loss for a host or subnet (needs the os-netimpair plugin on the firewall).</div>`;
+                container.innerHTML = `<div class="py-12 text-center text-slate-500 italic">No impairments. Use "+ Add Impairment" to add latency, packet loss or a bandwidth limit for addresses, an alias or devices, always on or on a schedule (needs the os-netimpair plugin on the firewall).</div>`;
                 return;
             }
             // Distinguish "legitimately empty" from "the spoke returned an error"
@@ -3919,13 +3962,8 @@ async function loadOpnsenseManagement() {
         else if (subMenu === 'DNS Records') keys = ['firewall', 'hostname', 'ip', 'type', 'ttl', 'description'];
         else if (subMenu === 'Aliases') keys = ['firewall', 'name', 'type', 'content', 'category', 'description'];
         else if (subMenu === 'Impairment') {
-            keys = ['firewall', 'target', 'interface', 'direction', 'latency', 'packet_loss', 'bandwidth_limit', 'state', 'description'];
-            items.forEach(it => {
-                it.latency = `${it.delay} ms`;
-                it.packet_loss = `${it.loss} %`;
-                it.bandwidth_limit = it.bandwidth ? `${it.bandwidth} ${it.bandwidth_unit}/s` : 'none';
-                it.state = !it.complete ? 'incomplete' : (it.enabled ? 'active' : 'disabled');
-            });
+            keys = ['firewall', 'target', 'interface', 'direction', 'latency', 'packet_loss', 'bandwidth_limit', 'when', 'next_change', 'state', 'description'];
+            items.forEach(it => _impairRow(it));
         }
         else keys = ['firewall', ...Object.keys(items[0] || {}).filter(k => k !== 'id' && !k.toLowerCase().includes('hit') && k !== 'firewall' && !k.startsWith('_'))];
 
@@ -3997,6 +4035,7 @@ async function loadOpnsenseManagement() {
             const delCell = showDelete ? `
                 <td class="px-4 py-3 text-right">
                     <div class="flex items-center justify-end gap-1">
+                        ${subMenu === 'Impairment' ? `<button data-impair-toggle="${idx}" class="px-2 py-0.5 text-xs font-medium border border-slate-300 rounded text-slate-600 hover:text-blue-600" title="${item.enabled ? 'Turn this impairment off (kept, not deleted)' : 'Turn this impairment on'}">${item.enabled ? 'Off' : 'On'}</button>` : ''}
                         <button onclick="showOpnsenseEditModal('${item._fwId}','${subMenu}',${idx})" class="p-1 text-slate-500 hover:text-blue-600 transition-colors" title="Edit ${subMenu.replace(/s$/, '')}">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
                         </button>
@@ -4038,6 +4077,10 @@ async function loadOpnsenseManagement() {
                 </div>
                 ${footerHtml}
             </div>`;
+        if (subMenu === 'Impairment') {
+            container.querySelectorAll('[data-impair-toggle]').forEach(b =>
+                b.addEventListener('click', () => _impairToggle(_opnCurrentItems[b.dataset.impairToggle], b)));
+        }
     } catch (err) {
         console.error(`[OPNsense] Error in loadOpnsenseManagement:`, err);
         container.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading ${subMenu}: ${err.message}</div>`;
