@@ -248,12 +248,12 @@ function pxmxVmTabsHtml() {
     const _cmp = (a, b) => String(a || '').localeCompare(String(b || ''), undefined,
         { numeric: true, sensitivity: 'base' });
     const sortedNodes = nodes.slice().sort((a, b) => _cmp(a.cluster, b.cluster) || _cmp(a.node, b.node));
-    const tabBtn = (key, label, count, active) =>
-        `<button onclick="pxmxSelectVmTab('${escJsAttr(key || '')}')" class="px-3 py-1.5 rounded-full text-xs font-bold transition-colors ${active ? 'bg-brand/10 text-primary-text border border-brand' : 'text-slate-500 hover:bg-slate-100 border border-transparent'}" title="Filter virtual machines by server ${escapeHtml(label)}">${escapeHtml(label)} <span class="opacity-60">(${count})</span></button>`;
+    const tabBtn = (key, label, count, active, badge = '') =>
+        `<button onclick="pxmxSelectVmTab('${escJsAttr(key || '')}')" class="px-3 py-1.5 rounded-full text-xs font-bold transition-colors ${active ? 'bg-brand/10 text-primary-text border border-brand' : 'text-slate-500 hover:bg-slate-100 border border-transparent'}" title="Filter virtual machines by server ${escapeHtml(label)}">${escapeHtml(label)}${badge} <span class="opacity-60">(${count})</span></button>`;
     const countFor = key => allVms.filter(v => pxmxNodeKey(v.cluster, v.node) === key).length;
     return `<div class="flex flex-wrap gap-1.5 mb-3">
         ${tabBtn('', 'All', allVms.length, !activeKey)}
-        ${sortedNodes.map(n => tabBtn(pxmxNodeKey(n.cluster, n.node), n.node, countFor(pxmxNodeKey(n.cluster, n.node)), activeKey === pxmxNodeKey(n.cluster, n.node))).join('')}
+        ${sortedNodes.map(n => tabBtn(pxmxNodeKey(n.cluster, n.node), n.node, countFor(pxmxNodeKey(n.cluster, n.node)), activeKey === pxmxNodeKey(n.cluster, n.node), pxmxMaintBadge(n))).join('')}
     </div>`;
 }
 window.pxmxSelectVmTab = function (key) {
@@ -1223,7 +1223,7 @@ async function pxmxDeploySpokeSubmit(uniqueId) {
 function pxmxOpenCreateVm() {
     const nodes = window._pxmxNodes || [];
     if (!nodes.length) { showToast('No Proxmox nodes available', 'error'); return; }
-    const nodeOpts = nodes.map(n => `<option value="${escapeHtml(n.node)}">${escapeHtml(n.node)}${n.cluster ? ' (' + escapeHtml(n.cluster) + ')' : ''}</option>`).join('');
+    const nodeOpts = nodes.map(n => `<option value="${escapeHtml(n.node)}">${escapeHtml(n.node)}${n.cluster ? ' (' + escapeHtml(n.cluster) + ')' : ''}${n.maintenance === true ? ' — in maintenance' : ''}</option>`).join('');
     const tpl = `<div id="pxmx-create-vm-modal" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/40">
         <div class="bg-white rounded-lg shadow-xl w-full max-w-lg p-5 space-y-3">
             <div class="flex items-center justify-between">
@@ -4360,6 +4360,14 @@ function pxmxClusterBadge(n) {
     return `<span title="${title}" class="inline-flex align-text-bottom text-slate-500 ml-1"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="${d}"></path></svg></span>`;
 }
 
+// Wrench icon beside a node's name while it is in HA maintenance mode
+// (node.maintenance comes from the agent's read of the cluster HA status).
+function pxmxMaintBadge(n) {
+    if (!(n && n.maintenance === true)) return '';
+    return `<span data-pxmx-maint-icon title="In HA maintenance mode" class="inline-flex align-text-bottom text-amber-600 ml-1"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-label="In maintenance mode"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M21.75 6.75a4.5 4.5 0 01-4.884 4.484c-1.076-.091-2.264.071-2.95.904l-7.152 8.684a2.548 2.548 0 11-3.586-3.586l8.684-7.152c.833-.686.995-1.874.904-2.95a4.5 4.5 0 016.336-4.486l-3.276 3.276a3.004 3.004 0 002.25 2.25l3.276-3.276c.256.565.398 1.192.398 1.852z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M4.867 19.125h.008v.008h-.008v-.008z"></path></svg></span>`;
+}
+
+// Render the clickable Nodes table; the selected row is highlighted.
 function renderPxmxNodes() {
     const wrap = document.getElementById('pxmx-nodes-wrap');
     if (!wrap) return;
@@ -4380,9 +4388,17 @@ function renderPxmxNodes() {
         const ramTotalGb = ((n.mem_total || 0) / 1073741824).toFixed(1);
         const statusCls  = n.status === 'online' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700';
         const selCls     = key === sel ? 'bg-green-50 ring-1 ring-green-300' : 'hover:bg-slate-50';
+        // HA maintenance toggle (Global Admin, like Delete); wired below, not inline.
+        // Only for online nodes whose agent reports the state (older agents send none).
+        const inMaint    = n.maintenance === true;
+        const maintBtn   = (isAdmin() && n.status === 'online' && !n.offline && typeof n.maintenance === 'boolean')
+            ? `<button data-pxmx-maint="${escAttr(n.node)}" data-pxmx-maint-cluster="${escAttr(n.cluster || '')}" data-pxmx-maint-on="${inMaint ? '1' : '0'}"
+                    class="text-xs text-amber-700 hover:text-amber-900 font-medium mr-3"
+                    title="${inMaint ? 'Exit maintenance: take this node out of HA maintenance mode' : 'Enter maintenance: put this node into HA maintenance mode (HA moves its HA-managed guests to other nodes)'}">Maintenance</button>`
+            : '';
         return `<tr data-node-key="${escAttr(key)}" onclick="openNodeVms('${escJs(key)}')" class="border-b border-slate-100 cursor-pointer ${selCls}">
             <td class="px-4 py-2 text-xs text-slate-500">${n.cluster ? String(n.cluster).toUpperCase() : '—'}</td>
-            <td class="px-4 py-2 font-medium">${String(n.node || '').toUpperCase()}${pxmxClusterBadge(n)}</td>
+            <td class="px-4 py-2 font-medium">${String(n.node || '').toUpperCase()}${pxmxClusterBadge(n)}${pxmxMaintBadge(n)}</td>
             <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${statusCls}">${n.status}</span></td>
             <td class="px-4 py-2">${n.cpu_usage ?? '—'}%</td>
             <td class="px-4 py-2">${n.cpu_cores ?? '—'}</td>
@@ -4390,13 +4406,50 @@ function renderPxmxNodes() {
             <td class="px-4 py-2">${ramTotalGb} GB</td>
             <td class="px-4 py-2 text-xs text-slate-500">${pxmxShortVer(n.proxmox_version) || '—'}</td>
             <td class="px-4 py-2 text-right" onclick="event.stopPropagation()">
-                <button onclick="deletePxmxServer('${escJs(n.node)}','${escJs(n.cluster || '')}')"
+                ${maintBtn}<button onclick="deletePxmxServer('${escJs(n.node)}','${escJs(n.cluster || '')}')"
                     class="text-xs text-red-600 hover:text-red-800 font-medium"
                     title="Remove this server from the view and clear its cached VMs. For a host you've intentionally shut down; a still-online host re-appears on the next poll.">Delete</button>
             </td>
         </tr>`;
     }).join('');
     wrap.innerHTML = tableWrap(tableHead(cols) + `<tbody>${rows}</tbody>`);
+    wrap.querySelectorAll('[data-pxmx-maint]').forEach(b => b.addEventListener('click', ev => {
+        ev.stopPropagation();
+        pxmxToggleMaintenance(b.dataset.pxmxMaint, b.dataset.pxmxMaintCluster, b.dataset.pxmxMaintOn === '1');
+    }));
+}
+
+// Enter or exit HA maintenance mode on a Proxmox node after a confirm. The hub
+// relays it to an agent of the node's cluster, which runs
+// `ha-manager crm-command node-maintenance enable|disable <node>`. Errors
+// (HA not configured, no quorum, old agent) show as a toast.
+async function pxmxToggleMaintenance(node, cluster, inMaint) {
+    if (!node) return;
+    const enable = !inMaint;
+    const question = enable
+        ? `Enter maintenance mode on '${node}'?\n\nRuns "ha-manager crm-command node-maintenance enable ${node}". HA moves this node's HA-managed guests to other cluster nodes and keeps new ones off it until maintenance ends.`
+        : `Exit maintenance mode on '${node}'?\n\nRuns "ha-manager crm-command node-maintenance disable ${node}". HA-managed guests may move back to it.`;
+    if (!await showConfirmToast(question)) return;
+    try {
+        const res = await fetch('/api/pxmx/server/maintenance?tenant=' + encodeURIComponent(currentTenant || ''), {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ node, cluster, enable }),
+        });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast(d.detail || 'Maintenance request failed', 'error');
+            return;
+        }
+        showToast(d.message || 'Maintenance mode updated', 'success');
+        // Show the new state now; the next node refresh confirms it from the HA status.
+        (window._pxmxNodes || []).forEach(n => {
+            if (n.node === node && String(n.cluster || '') === String(cluster || '')) n.maintenance = enable;
+        });
+        renderPxmxNodes();
+    } catch (e) {
+        showToast('Error: ' + (e.message || e), 'error');
+    }
 }
 
 // Remove a hypervisor server (pxmx host) from the Overview / Virtual Machines
@@ -4454,7 +4507,7 @@ function pxmxNodeDetailHtml(node, vms) {
     const statusCls  = node.status === 'online' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700';
 
     return `<div class="rounded-lg border border-slate-200 bg-slate-50/50 p-4 mb-4">
-            <h3 class="text-base font-semibold text-navy">${node.node}
+            <h3 class="text-base font-semibold text-navy">${node.node}${pxmxMaintBadge(node)}
                 <span class="text-xs text-slate-500 font-normal">${node.cluster ? '· cluster ' + node.cluster : ''}</span> ${helpIcon('pxmx', null, 'Hypervisor help')}</h3>
             <p class="text-xs text-slate-500 mt-1">Status
                 <span class="px-2 py-0.5 rounded-full text-xs font-medium ${statusCls}">${node.status}</span>
