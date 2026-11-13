@@ -950,3 +950,186 @@ def test_sweep_skips_space_the_directed_scan_covers(monkeypatch, tmp_path):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["found"] == 1 and body["running"] is False and "discovered" not in body
+    # Progress is saved by address, so a restart resumes after the last host swept.
+    assert body["health"] == "stopped" and body["last_ip"] == "10.9.3.254"
+
+
+def test_sweep_pings_8192_hosts_per_tick_in_spoke_sized_chunks(monkeypatch, tmp_path):
+    _client, hub = _build(monkeypatch, tmp_path)
+
+    async def prefixes(_hub, _tid):
+        return ["10.9.0.0/16", "10.9.255.0/24"]
+    monkeypatch.setattr(access_mod, "fetch_tenant_prefixes", prefixes)
+
+    async def rr(spoke_id, cmd, data, timeout=30.0):
+        hub.calls.append((spoke_id, cmd, data))
+        if cmd == "NW_PING_SWEEP":
+            return {"payload": {"data": {"status": "SUCCESS", "alive": [
+                t for t in data["targets"] if t == "10.9.20.5"]}}}
+        return {"payload": {"data": {"status": "SUCCESS", "reachable": []}}}
+    hub.request_response = rr
+    for name in ("get_dns_spoke_for_tenant", "get_dhcp_spoke_for_tenant",
+                 "get_cppm_spoke_for_tenant"):
+        setattr(hub, name, lambda *_a, **_k: None)
+    gc = hub.state.system_state["global_config"]
+    gc["nw_gw_sweep"] = {"acme": {"cursor": 0, "cycle_done_at": time.time()}}  # gateway pass done
+
+    asyncio.run(hub.run_nw_sweep_step("acme", force=True))
+    pings = [d["targets"] for _s, c, d in hub.calls if c == "NW_PING_SWEEP"]
+    assert [len(p) for p in pings] == [2048, 2048, 2048, 2048]
+    assert pings[0][0] == "10.9.0.1" and pings[-1][-1] == "10.9.32.0"
+    probe = next(d for _s, c, d in hub.calls if c == "NW_SCAN")
+    assert probe["targets"] == ["10.9.20.5"]
+    assert gc["nw_sweep"]["acme"]["last_ip"] == "10.9.32.0"
+
+
+def _sweep_hub(monkeypatch, tmp_path, alive, gateway_done=True,
+               scan_reply=None, prefix_list=("10.9.0.0/16", "10.9.255.0/24")):
+    """A hub with tenant acme's /16 supernet; NW_PING_SWEEP answers with ``alive(targets)``."""
+    _client, hub = _build(monkeypatch, tmp_path)
+    scan_reply = scan_reply or {"status": "SUCCESS", "reachable": []}
+
+    async def prefixes(_hub, _tid):
+        return list(prefix_list)
+    monkeypatch.setattr(access_mod, "fetch_tenant_prefixes", prefixes)
+
+    async def rr(spoke_id, cmd, data, timeout=30.0):
+        hub.calls.append((spoke_id, cmd, data))
+        if cmd == "NW_PING_SWEEP":
+            return {"payload": {"data": {"status": "SUCCESS", "alive": alive(data["targets"])}}}
+        return {"payload": {"data": scan_reply}}
+    hub.request_response = rr
+    for name in ("get_dns_spoke_for_tenant", "get_dhcp_spoke_for_tenant",
+                 "get_cppm_spoke_for_tenant"):
+        setattr(hub, name, lambda *_a, **_k: None)
+    gc = hub.state.system_state["global_config"]
+    if gateway_done:
+        gc["nw_gw_sweep"] = {"acme": {"cursor": 0, "cycle_done_at": time.time()}}
+    return hub, gc
+
+
+def test_sweep_probes_at_most_1024_responders_and_resumes_after_the_last(monkeypatch, tmp_path):
+    # Every address answers (a proxy-ARP network), in reverse order.
+    hub, gc = _sweep_hub(monkeypatch, tmp_path, lambda targets: list(reversed(targets)))
+    asyncio.run(hub.run_nw_sweep_step("acme", force=True))
+    probe = next(d for _s, c, d in hub.calls if c == "NW_SCAN")
+    assert len(probe["targets"]) == 1024
+    assert probe["targets"][0] == "10.9.0.1" and probe["targets"][-1] == "10.9.4.0"
+    assert gc["nw_sweep"]["acme"]["last_ip"] == "10.9.4.0"
+
+
+def test_sweep_records_a_gateway_pass_tick_and_a_bad_saved_position(monkeypatch, tmp_path):
+    # The gateway pass is still running: the host sweep says so instead of going stale.
+    hub, gc = _sweep_hub(monkeypatch, tmp_path, lambda targets: [], gateway_done=False)
+    asyncio.run(hub.run_nw_sweep_step("acme", force=True))
+    assert gc["nw_sweep"]["acme"]["last_status"] == "gateway"
+    # A failure before the ping (here a corrupt saved address) is recorded as an error.
+    hub, gc = _sweep_hub(monkeypatch, tmp_path, lambda targets: [])
+    gc.setdefault("nw_sweep", {})["acme"] = {"last_ip": "not-an-ip"}
+    asyncio.run(hub.run_nw_sweep_step("acme", force=True))
+    assert gc["nw_sweep"]["acme"]["last_status"] == "error"
+
+
+def test_sweep_retries_a_batch_whose_scan_failed(monkeypatch, tmp_path):
+    hub, gc = _sweep_hub(monkeypatch, tmp_path, lambda targets: targets[:1],
+                         scan_reply={"status": "ERROR", "message": "spoke busy"})
+    gc.setdefault("nw_sweep", {})["acme"] = {"last_ip": "10.9.0.9"}
+    asyncio.run(hub.run_nw_sweep_step("acme", force=True))
+    st = gc["nw_sweep"]["acme"]
+    assert st["last_status"] == "error" and "spoke busy" in st["last_error"]
+    assert st["last_ip"] == "10.9.0.9"           # not advanced: the batch is retried
+
+
+def test_sweep_reports_missing_prefixes_as_an_error_not_idle(monkeypatch, tmp_path):
+    hub, gc = _sweep_hub(monkeypatch, tmp_path, lambda targets: [], prefix_list=())
+    asyncio.run(hub.run_nw_sweep_step("acme", force=True))
+    assert gc["nw_sweep"]["acme"]["last_status"] == "error"
+
+
+def test_sweep_of_a_tenant_without_a_netbox_mapping_is_idle_not_an_error(monkeypatch, tmp_path):
+    hub, gc = _sweep_hub(monkeypatch, tmp_path, lambda targets: [], prefix_list=())
+    monkeypatch.setattr(access_mod, "netbox_tenant_scope", lambda _hub, _tid: {})
+    asyncio.run(hub.run_nw_sweep_step("acme", force=True))
+    assert gc["nw_sweep"]["acme"]["last_status"] == "no-supernets"
+
+
+def test_sweep_stops_and_reports_a_failed_gateway_ping(monkeypatch, tmp_path):
+    # The first ping (the gateway pass) fails; later host pings would answer.
+    pings = []
+
+    def ping_fails(targets):
+        pings.append(targets)
+        if len(pings) == 1:
+            raise RuntimeError("spoke busy")
+        return targets[:1]
+    hub, gc = _sweep_hub(monkeypatch, tmp_path, ping_fails, gateway_done=False)
+    asyncio.run(hub.run_nw_sweep_step("acme", force=True))
+    assert gc["nw_sweep"]["acme"]["last_status"] == "error"
+    assert not [c for _s, c, _d in hub.calls if c == "NW_SCAN"]   # no host batch ran
+
+
+def test_reenabled_sweep_waits_for_its_first_tick_instead_of_stalled(monkeypatch, tmp_path):
+    _client, hub = _build(monkeypatch, tmp_path)
+    gc = hub.state.system_state["global_config"]
+    gc["nw_sweep"] = {"acme": {"last_status": "ok", "last_run_at": time.time() - 86400}}
+    tok = _mint(hub, "admin", tenants=[], admin=True)
+    r = _client.post("/api/nw/sweep", json={"tenant": "acme", "enabled": True},
+                     cookies={"lm_session": tok})
+    assert r.status_code == 200, r.text
+    body = _client.get("/api/nw/sweep?tenant=acme", cookies={"lm_session": tok}).json()
+    assert body["health"] == "waiting"
+
+
+def test_enabled_sweep_the_loop_never_reaches_turns_stalled(monkeypatch, tmp_path):
+    _client, hub = _build(monkeypatch, tmp_path)
+    gc = hub.state.system_state["global_config"]
+    gc["nw_tenant_cfg"] = {"acme": {"sweep": {"enabled": True}}}
+    tok = _mint(hub, "admin", tenants=[], admin=True)
+
+    def health():
+        return _client.get("/api/nw/sweep?tenant=acme", cookies={"lm_session": tok}).json()["health"]
+    assert health() == "waiting"
+    # Two hours on and the loop still has not ticked it.
+    gc["nw_sweep"]["acme"]["waiting_since"] -= 7200
+    assert health() == "stalled"
+
+
+def test_scheduled_scan_resumes_leaf_hosts_cut_off_by_the_cap(monkeypatch, tmp_path):
+    _client, hub = _build(monkeypatch, tmp_path)
+    from routes import nw as nw_routes
+    monkeypatch.setattr(nw_routes, "_NW_SCAN_MAX_TOTAL", 4)
+
+    async def prefixes(_hub, _tid):
+        return ["10.0.0.0/29"]                       # hosts .1 - .6
+    monkeypatch.setattr(access_mod, "fetch_tenant_prefixes", prefixes)
+
+    async def rr(spoke_id, cmd, data, timeout=30.0):
+        hub.calls.append((spoke_id, cmd, data))
+        if cmd == "NW_SCAN":
+            return {"payload": {"data": {"status": "SUCCESS", "reachable": []}}}
+        return {"payload": {"data": {"status": "SUCCESS", "alive": []}}}
+    hub.request_response = rr
+    for name in ("get_dns_spoke_for_tenant", "get_dhcp_spoke_for_tenant",
+                 "get_cppm_spoke_for_tenant"):
+        setattr(hub, name, lambda *_a, **_k: None)
+    hub.get_spoke_by_type = lambda t: "ipam-spoke" if t == "ipam" else "nw-acme"
+
+    def scanned():
+        hub.calls.clear()
+        asyncio.run(hub.run_nw_scheduled_scan("acme"))
+        return next(d for _s, c, d in hub.calls if c == "NW_SCAN")["targets"]
+    assert scanned() == ["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"]
+    # The next scan starts with the two hosts the cap left out.
+    assert scanned() == ["10.0.0.5", "10.0.0.6", "10.0.0.1", "10.0.0.2"]
+
+
+def test_sweep_reports_a_gateway_pass_that_raises(monkeypatch, tmp_path):
+    from routes import nw as nw_routes
+    hub, gc = _sweep_hub(monkeypatch, tmp_path, lambda targets: targets, gateway_done=False)
+
+    def corrupt_cursor(*_a, **_k):
+        raise ValueError("bad gateway cursor")
+    monkeypatch.setattr(nw_routes, "gateway_take", corrupt_cursor)
+    asyncio.run(hub.run_nw_sweep_step("acme", force=True))
+    assert gc["nw_sweep"]["acme"]["last_status"] == "error"
+    assert "bad gateway cursor" in gc["nw_sweep"]["acme"]["last_error"]

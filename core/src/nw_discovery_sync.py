@@ -58,7 +58,7 @@ except Exception:  # pragma: no cover - access always importable in-app
     nw_spoke_tenant = None  # type: ignore
     spoke_owner_tenant = None  # type: ignore
 # unwrap_spoke strips the spoke response envelope down to its payload.
-from access import unwrap_spoke  # sibling leaf (no main/api back-import)
+from access import ADMIN_TENANT_ID, unwrap_spoke  # sibling leaf (no main/api back-import)
 # Device spec lookup (e.g. object type defaults) from the device_specs leaf.
 from device_specs import get_spec as get_device_spec  # sibling leaf
 import hw_serial_links  # sibling leaf: serial matcher for controller<->host stitching
@@ -67,6 +67,14 @@ from sync_loop import next_schedule_delay, run_sync_loop  # sibling leaf
 
 # Logs under the shared "Hub" logger so discovery messages appear with other hub output.
 logger = logging.getLogger("Hub")
+
+# Tenants whose background sweep batch runs at the same time (each holds about
+# one nw spoke command slot, so this keeps the shared spoke from filling up).
+NW_SWEEP_PARALLEL_TENANTS = 3
+# Device inventory pushes in flight to NetBox at once. Poll results arrive for
+# the whole fleet together; unbounded, their pushes filled the NetBox spoke's
+# command queue ("spoke command queue full") and starved other NetBox reads.
+NW_NETBOX_PUSHES_AT_ONCE = 3
 
 # Matches a dotted IPv4 address, used to tell an IP "name" from a real hostname.
 _IP_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
@@ -1342,8 +1350,11 @@ class NwDiscoverySyncMixin:
         }
         # Send the inventory and summarize NetBox's reply; failures are recorded, not raised.
         try:
-            rr = await self.request_response(netbox, self._NW_DEVICE_PUSH_COMMAND,
-                                             payload, timeout=120.0)
+            if not isinstance(getattr(self, "_nw_push_sem", None), asyncio.Semaphore):
+                self._nw_push_sem = asyncio.Semaphore(NW_NETBOX_PUSHES_AT_ONCE)
+            async with self._nw_push_sem:
+                rr = await self.request_response(netbox, self._NW_DEVICE_PUSH_COMMAND,
+                                                 payload, timeout=120.0)
             # Unwrap the reply and coerce each counter.
             rd = unwrap_spoke(rr) if isinstance(rr, dict) else {}
             netbox_push = {
@@ -2204,16 +2215,25 @@ class NwDiscoverySyncMixin:
                 # The step and opt-in check are wired up by routes/nw.py; wait until they exist.
                 step = getattr(self, "run_nw_sweep_step", None)
                 enabled = getattr(self, "nw_sweep_enabled_for_tenant", None)
-                if step and enabled and self.get_all_spokes_by_type("nw"):
-                    # Run one sweep batch per opted-in tenant; one tenant's failure does not stop
-                    # others.
-                    for tid in list((getattr(self.state, "tenant_state", {}) or {})
-                                    .get("tenants", {}) or {}):
-                        try:
-                            if enabled(tid):
+                # Each step checks for its own nw agent and records "no-agent" when there is none.
+                if step and enabled:
+                    # One sweep batch per opted-in tenant, a few at a time, so a slow
+                    # tenant never holds up the others; one failure does not stop the rest.
+                    limit = asyncio.Semaphore(NW_SWEEP_PARALLEL_TENANTS)
+
+                    async def _one(tid):
+                        """Run one sweep batch for ``tid``, logging (not raising) a failure."""
+                        async with limit:
+                            try:
                                 await step(tid)
-                        except Exception as e:  # noqa: BLE001
-                            logger.warning("nw sweep tenant=%s failed: %s", tid, e)
+                            except Exception as e:  # noqa: BLE001
+                                logger.warning("nw sweep tenant=%s failed: %s", tid, e)
+                    # The built-in Admin tenant often has no tenant_state record but can opt in too.
+                    tids = list((getattr(self.state, "tenant_state", {}) or {}).get("tenants", {}) or {})
+                    if ADMIN_TENANT_ID not in tids:
+                        tids.append(ADMIN_TENANT_ID)
+                    tids = [t for t in tids if enabled(t)]
+                    await asyncio.gather(*(_one(t) for t in tids))
             # Any unexpected tick error is logged; the loop keeps going.
             except Exception as e:  # noqa: BLE001 - loop must never die
                 logger.debug("nw sweep loop tick error: %s", e)

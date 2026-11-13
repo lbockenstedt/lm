@@ -1327,8 +1327,16 @@ async function _nwtLoadSweep() {
         const r = await setupFetch('/api/nw/sweep' + (currentTenant ? `?tenant=${encodeURIComponent(currentTenant)}` : ''));
         const d = await r.json();
         const pct = d.total ? Math.min(100, Math.round(100 * (d.cursor || 0) / d.total)) : 0;
-        const state = d.running ? '<span class="font-bold text-emerald-700">Running</span>'
-            : `<span class="font-bold text-slate-500">${d.enabled ? 'Waiting' : 'Stopped'}</span>`;
+        const look = {running: ['Running', 'text-emerald-700'], waiting: ['Waiting for next batch', 'text-slate-500'],
+            stalled: ['Stalled', 'text-red-700'], error: ['Error', 'text-red-700'], stopped: ['Stopped', 'text-slate-500'],
+            gateway: ['Gateway pass running', 'text-emerald-700'], idle: ['Nothing to sweep', 'text-slate-500'],
+            'no-agent': ['No nw agent', 'text-amber-700']}[d.health] || ['Stopped', 'text-slate-500'];
+        // Seconds as a short "90s" / "5 min" / "3 h" / "2 days" label.
+        const ago = s => s < 120 ? `${s}s` : s < 7200 ? `${Math.round(s / 60)} min` : s < 172800 ? `${Math.round(s / 3600)} h` : `${Math.round(s / 86400)} days`;
+        const state = `<span class="font-bold ${look[1]}">${look[0]}</span>`
+            + (d.last_batch_ago_s != null ? ` · last batch ${ago(d.last_batch_ago_s)} ago` : '')
+            + (d.last_batch_s ? ` (took ${ago(Math.round(d.last_batch_s))})` : '')
+            + (d.eta_s != null && d.health !== 'stopped' ? ` · about ${ago(d.eta_s)} left this cycle` : '');
         box.className = 'text-xs text-slate-600';
         box.innerHTML = `<div class="flex flex-wrap items-center gap-3 mb-2">
             <label class="flex items-center gap-2"><input type="checkbox" ${d.enabled ? 'checked' : ''} onchange="nwtSweepAction({enabled: this.checked})"> Enable sweep</label>

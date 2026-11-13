@@ -214,6 +214,47 @@ def test_sweep_take_cursor_and_wrap():
     assert ips == ["10.0.0.9", "10.0.0.10"] and cur == 0
 
 
+def test_sweep_resumes_at_the_same_address_after_the_prefix_set_changes():
+    from routes.nw import sweep_ranges, sweep_take, sweep_ip_at, sweep_resume_cursor, \
+        split_leaf_and_supernets
+    leaves, supers = split_leaf_and_supernets(["10.0.0.0/22", "10.0.3.0/24"])
+    before = sweep_ranges(supers, leaves)
+    _ips, cur, _ = sweep_take(before, 0, 300)          # swept 10.0.0.1 .. 10.0.1.44
+    last_ip = sweep_ip_at(before, cur - 1)
+    assert last_ip == "10.0.1.44"
+    # A /24 BEFORE the cursor becomes a leaf, so every index shifts by 256.
+    leaves, supers = split_leaf_and_supernets(["10.0.0.0/22", "10.0.3.0/24", "10.0.0.0/24"])
+    after = sweep_ranges(supers, leaves)
+    ips, _, _ = sweep_take(after, sweep_resume_cursor(after, last_ip), 2)
+    assert ips == ["10.0.1.45", "10.0.1.46"]
+    # The old index would have jumped ahead and skipped 256 addresses.
+    assert sweep_take(after, cur, 1)[0] != ["10.0.1.45"]
+    # Past the end means the cycle is done: start over.
+    assert sweep_resume_cursor(after, "10.0.2.255") == 0
+
+
+def test_sweep_health_flags_a_stalled_sweep():
+    from routes.nw import sweep_health
+    now = 100000.0
+    assert sweep_health({"last_run_at": now - 60, "last_status": "ok"}, True, now) == "running"
+    assert sweep_health({"last_run_at": now - 1800, "last_status": "ok"}, True, now) == "waiting"
+    assert sweep_health({"last_run_at": now - 7200, "last_status": "ok"}, True, now) == "stalled"
+    assert sweep_health({"last_run_at": None}, True, now) == "waiting"
+    assert sweep_health({"last_run_at": now, "last_status": "error"}, True, now) == "error"
+    assert sweep_health({"last_run_at": now - 7200}, False, now) == "stopped"
+
+
+def test_sweep_health_tells_idle_gateway_and_no_agent_apart_from_running():
+    from routes.nw import sweep_health
+    now = 100000.0
+    assert sweep_health({"last_run_at": now - 60, "last_status": "no-supernets"}, True, now) == "idle"
+    assert sweep_health({"last_run_at": now - 60, "last_status": "gateway"}, True, now) == "gateway"
+    assert sweep_health({"last_run_at": now - 60, "last_status": "no-agent"}, True, now) == "no-agent"
+    # A loop that stopped reaching the tenant is stalled whatever the last tick said.
+    assert sweep_health({"last_run_at": now - 7200, "last_status": "gateway"}, True, now) == "stalled"
+    assert sweep_health({"last_run_at": now - 7200, "last_status": "error"}, True, now) == "stalled"
+
+
 def test_wide_leaf_is_sweep_only():
     from routes.nw import split_leaf_and_supernets
     leaves, supers = split_leaf_and_supernets(["10.21.0.0/16", "172.21.0.0/24", "10.5.0.0/22"])
@@ -235,3 +276,28 @@ def test_gateway_take_walks_24s_and_skips_known():
     # Nested supernets are walked once, via the outermost one.
     nested = [ipaddress.ip_network("10.0.0.0/16"), ipaddress.ip_network("10.0.0.0/20")]
     assert gateway_take(nested, 0, 1)[2] == 256
+
+
+def test_background_device_refreshes_hold_only_a_few_nw_spoke_slots():
+    import asyncio
+    import routes.nw as nw_routes
+    in_flight, peak = [0], [0]
+
+    class Hub:
+        async def request_response(self, spoke_id, cmd, payload, timeout=30.0):
+            in_flight[0] += 1
+            peak[0] = max(peak[0], in_flight[0])
+            await asyncio.sleep(0.01)
+            in_flight[0] -= 1
+            return {"payload": {"data": {"status": "SUCCESS", "data": []}}}
+
+        async def nw_cache_set_device(self, device_id, endpoint, data):
+            pass
+
+    hub = Hub()
+
+    async def run():
+        await asyncio.gather(*(nw_routes._nw_bg_refresh_device(
+            hub, f"d{i}", "macs", "nw-1", "NW_GET_MAC_TABLE", {}, 5.0) for i in range(12)))
+    asyncio.run(run())
+    assert peak[0] == nw_routes._NW_BG_REFRESH_AT_ONCE
