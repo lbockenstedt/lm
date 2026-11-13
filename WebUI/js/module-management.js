@@ -1606,6 +1606,9 @@ async function doLogin() {
 
 async function doLogout() {
     await fetch('/auth/logout', { method: 'POST', credentials: 'same-origin' }).catch(() => {});
+    // Signing out does not reload the page: take a shown one-time password
+    // off the screen (it stays only for the user who made it).
+    lmViews.directoryHideEntra?.();
     currentUser = null;
     // Always return to login panel (not setup) on logout
     document.getElementById('setup-panel')?.classList.add('hidden');
