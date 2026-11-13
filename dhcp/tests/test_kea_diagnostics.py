@@ -16,7 +16,7 @@ def test_diagnostics_reports_service_interface_listener_and_leases(monkeypatch):
         "NRestarts": "0", "ExecMainStatus": "0", "error": "",
     })
 
-    def run(cmd, timeout=5):
+    def run(cmd, timeout=5, limit=4000):
         if cmd[0] == "ss":
             return _result(output=(
                 "udp UNCONN 0 0 10.0.0.5:67 0.0.0.0:*\n"
@@ -54,7 +54,7 @@ def test_diagnostics_is_unhealthy_when_config_retrieval_fails(monkeypatch):
         "ActiveState": "active", "SubState": "running",
         "NRestarts": "0", "ExecMainStatus": "0", "error": "",
     })
-    monkeypatch.setattr(mgr, "_run_diag", lambda cmd, timeout=5: _result(
+    monkeypatch.setattr(mgr, "_run_diag", lambda cmd, timeout=5, limit=4000: _result(
         output="udp UNCONN 0 0 10.0.0.5:67 0.0.0.0:*"
         if cmd[0] == "ss" else "configuration check successful"))
 
@@ -251,3 +251,31 @@ def test_an_exploding_ownership_check_never_breaks_diagnostics(monkeypatch):
     monkeypatch.setattr(mgr, "_heal_control_socket_ownership", boom)
 
     assert mgr._self_heal() == []
+
+
+def test_recent_warnings_tail_the_journal_and_filter_here(monkeypatch):
+    """journalctl -p warning scans the whole journal (seconds on a big one), so
+    the warnings are taken from a plain tail and filtered on Kea's severity."""
+    mgr = KeaManager()
+    monkeypatch.setattr(mgr, "_unit_status", lambda unit: {
+        "ActiveState": "active", "SubState": "running",
+        "NRestarts": "0", "ExecMainStatus": "0", "error": "",
+    })
+    calls = []
+
+    def run(cmd, timeout=5, limit=4000):
+        calls.append(cmd)
+        if cmd[0] == "journalctl" and "kea-dhcp4-server" in cmd:
+            return _result(output=(
+                "2026-11-12T10:00:00 kea kea-dhcp4[1]: INFO  [kea-dhcp4.dhcp4] DHCP4_STARTED\n"
+                "2026-11-12T10:00:01 kea kea-dhcp4[1]: WARN  [kea-dhcp4.dhcpsrv] DHCPSRV_NO_SOCKETS_OPEN\n"
+                "2026-11-12T10:00:02 kea systemd[1]: kea-ctrl-agent.service: Failed with result 'exit-code'."))
+        return _result(output="configuration check successful")
+
+    monkeypatch.setattr(mgr, "_run_diag", run)
+    monkeypatch.setattr(mgr, "_rpc", lambda *a, **k: {})
+    result = mgr.diagnostics()
+    journal = next(c for c in calls if c[0] == "journalctl" and "kea-dhcp4-server" in c)
+    assert "-p" not in journal and "--since" not in journal
+    assert [line.split(": ", 1)[1][:12] for line in result["last_errors"]] == [
+        "WARN  [kea-d", "kea-ctrl-age"]
