@@ -25,6 +25,42 @@ from routes.role_pool import PRODUCT_ROLE, ensure_role_loaded, maybe_unload_orph
 # fetch. This trades a bounded staleness window for an instant, poll-free UI.
 _NW_SERVE_MAX_AGE_S = 60.0
 
+# The map's NetBox inventory (whole fleet, unfiltered) is reused for this long:
+# the full device list takes ~6 s, and every map load used to wait on it.
+# Each reader's tenant filter still runs on every request.
+_NW_NETBOX_INV_TTL_S = 120.0
+
+
+def _nb_rows(resp, key):
+    """The ``key`` list from a NetBox reply, or None when the call failed
+    (an exception or an error reply, as opposed to an empty list)."""
+    if isinstance(resp, BaseException):
+        return None
+    data = access.unwrap_spoke(resp)
+    rows = data.get(key) if isinstance(data, dict) else None
+    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else None
+
+
+async def _nw_netbox_inventory(hub, netbox):
+    """(devices, cables) from NetBox, fetched together and cached on the hub.
+    A list whose call failed comes back empty, and nothing is cached then."""
+    cached = getattr(hub, "_nw_netbox_inv", None)
+    if cached and time.monotonic() - cached[0] < _NW_NETBOX_INV_TTL_S:
+        return cached[1], cached[2]
+    rr, cr = await asyncio.gather(
+        hub.request_response(netbox, "NETBOX_GET_DEVICES", {}, timeout=60.0),
+        hub.request_response(netbox, "NETBOX_GET_CABLES", {}, timeout=60.0),
+        return_exceptions=True)
+    rows, crows = _nb_rows(rr, "devices"), _nb_rows(cr, "cables")
+    if rows is not None and crows is not None:
+        hub._nw_netbox_inv = (time.monotonic(), rows, crows)
+    elif isinstance(rr, BaseException) or isinstance(cr, BaseException):
+        logger.info("nw_topology: NetBox inventory partly unavailable (%s / %s)",
+                    rr if isinstance(rr, BaseException) else "ok",
+                    cr if isinstance(cr, BaseException) else "ok")
+    return rows or [], crows or []
+
+
 # In-flight guard so rapid navigation coalesces to at most one background
 # revalidate per key (fleet: "__fleet__"; device: "<id>:<endpoint>"). The task
 # set keeps a strong ref so the fire-and-forget tasks aren't GC'd mid-flight.
@@ -1429,19 +1465,15 @@ def register(app, hub, ctx):
         try:
             netbox = hub.get_spoke_by_type("ipam")
             if netbox:
-                rr = await hub.request_response(netbox, "NETBOX_GET_DEVICES", {},
-                                                timeout=60.0)
-                rows = (access.unwrap_spoke(rr) or {}).get("devices") or []
-                netbox_devices = [r for r in rows if isinstance(r, dict)]
                 # Cables carry no IP of their own and are resolved purely by
                 # device NAME against nodes already on the map, so a cable
                 # whose end was filtered out below (another tenant's gear)
                 # harmlessly fails to resolve rather than needing its own
                 # tenant filter.
-                cr = await hub.request_response(netbox, "NETBOX_GET_CABLES", {},
-                                                timeout=60.0)
-                crows = (access.unwrap_spoke(cr) or {}).get("cables") or []
-                netbox_cables = [r for r in crows if isinstance(r, dict)]
+                rows, crows = await _nw_netbox_inventory(hub, netbox)
+                # Copies: the rows are shared by every reader for the window.
+                netbox_devices = [dict(r) for r in rows]
+                netbox_cables = [dict(r) for r in crows]
         except Exception as e:
             logger.info("nw_topology: NetBox inventory unavailable (%s)", e)
 
