@@ -815,3 +815,136 @@ async def test_netbox_pushes_are_one_tenant_at_a_time():
     await h.run_nw_discovery_sync_all()
     assert len(h.sync_payloads) >= 2
     assert h.max_inflight == 1
+
+
+def test_sweep_loop_runs_tenants_side_by_side(monkeypatch):
+    """A slow tenant's sweep batch must not hold up another tenant's."""
+    class _Stop(Exception):
+        pass
+
+    sleeps = []
+
+    async def fake_sleep(_s):
+        sleeps.append(_s)
+        if len(sleeps) > 1:          # boot wait, then stop after the first tick
+            raise _Stop
+
+    monkeypatch.setattr(nw_discovery_sync.asyncio, "sleep", fake_sleep)
+    hub = NwDiscoverySyncMixin()
+    hub.state = type("S", (), {"tenant_state": {"tenants": {"slow": {}, "fast": {}}}})()
+    hub.get_all_spokes_by_type = lambda _t: ["nw-1"]
+    hub.nw_sweep_enabled_for_tenant = lambda tid: tid != "default"
+    fast_done = None
+    order = []
+
+    async def step(tid):
+        if tid == "slow":
+            await asyncio.wait_for(fast_done.wait(), 1)   # only finishes once "fast" has
+        else:
+            fast_done.set()
+        order.append(tid)
+    hub.run_nw_sweep_step = step
+
+    async def run():
+        nonlocal fast_done
+        fast_done = asyncio.Event()
+        with pytest.raises(_Stop):
+            await hub.run_nw_sweep_loop()
+    asyncio.run(run())
+    assert order == ["fast", "slow"]
+
+
+def test_sweep_loop_caps_tenants_running_at_once(monkeypatch):
+    """No more than NW_SWEEP_PARALLEL_TENANTS sweep batches run together."""
+    class _Stop(Exception):
+        pass
+
+    sleeps = []
+    real_sleep = asyncio.sleep
+
+    async def fake_sleep(_s):
+        sleeps.append(_s)
+        if len(sleeps) > 1:          # boot wait, then stop after the first tick
+            raise _Stop
+
+    monkeypatch.setattr(nw_discovery_sync.asyncio, "sleep", fake_sleep)
+    hub = NwDiscoverySyncMixin()
+    hub.state = type("S", (), {"tenant_state": {"tenants": {f"t{i}": {} for i in range(6)}}})()
+    hub.get_all_spokes_by_type = lambda _t: ["nw-1"]
+    hub.nw_sweep_enabled_for_tenant = lambda tid: tid != "default"
+    running, peak, done = 0, 0, []
+
+    async def step(tid):
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        for _ in range(3):           # yield so the other batches get a chance to start
+            await real_sleep(0)
+        running -= 1
+        done.append(tid)
+    hub.run_nw_sweep_step = step
+
+    async def run():
+        with pytest.raises(_Stop):
+            await hub.run_nw_sweep_loop()
+    asyncio.run(run())
+    assert len(done) == 6
+    assert peak == nw_discovery_sync.NW_SWEEP_PARALLEL_TENANTS
+
+
+def test_sweep_loop_reaches_tenants_with_no_nw_agent_connected(monkeypatch):
+    """With no nw spoke at all the step still runs, so it can record "no-agent"."""
+    class _Stop(Exception):
+        pass
+
+    sleeps = []
+
+    async def fake_sleep(_s):
+        sleeps.append(_s)
+        if len(sleeps) > 1:
+            raise _Stop
+
+    monkeypatch.setattr(nw_discovery_sync.asyncio, "sleep", fake_sleep)
+    hub = NwDiscoverySyncMixin()
+    hub.state = type("S", (), {"tenant_state": {"tenants": {"acme": {}}}})()
+    hub.get_all_spokes_by_type = lambda _t: []
+    hub.nw_sweep_enabled_for_tenant = lambda tid: tid != "default"
+    ran = []
+
+    async def step(tid):
+        ran.append(tid)
+    hub.run_nw_sweep_step = step
+
+    async def run():
+        with pytest.raises(_Stop):
+            await hub.run_nw_sweep_loop()
+    asyncio.run(run())
+    assert ran == ["acme"]
+
+
+def test_sweep_loop_includes_the_admin_tenant_without_a_tenant_record(monkeypatch):
+    class _Stop(Exception):
+        pass
+
+    sleeps = []
+
+    async def fake_sleep(_s):
+        sleeps.append(_s)
+        if len(sleeps) > 1:          # boot wait, then stop after the first tick
+            raise _Stop
+
+    monkeypatch.setattr(nw_discovery_sync.asyncio, "sleep", fake_sleep)
+    hub = NwDiscoverySyncMixin()
+    hub.state = type("S", (), {"tenant_state": {"tenants": {"acme": {}}}})()
+    hub.nw_sweep_enabled_for_tenant = lambda tid: tid == "default"
+    swept = []
+
+    async def step(tid):
+        swept.append(tid)
+    hub.run_nw_sweep_step = step
+
+    async def run():
+        with pytest.raises(_Stop):
+            await hub.run_nw_sweep_loop()
+    asyncio.run(run())
+    assert swept == ["default"]
