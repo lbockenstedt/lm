@@ -152,7 +152,9 @@ value.
   **NetBox/IPAM** (`ipam_instances`) → `api_token`; **firewalls**
   (`firewalls`) → `api_key` / `api_secret` (an "API key + secret" secret,
   or a "Login" secret whose `username`/`password` alias onto them); **TrueNAS**
-  (`truenas_appliances`) → `api_key`. On save the inline secret is stripped and the ref
+  (`truenas_appliances`) → `api_key`; **Active Directory connections**
+  (`ad_connections`) → `bind_password`, and a `username` in the secret
+  replaces the typed `bind_user`. On save the inline secret is stripped and the ref
   validated; at push time `instance_vault.overlay()` fills the field(s) the
   resolved secret carries before the config reaches the spoke — this covers the
   add/update routes (`routes/firewall.py`, `routes/tenant_devices.py`) AND the
@@ -167,6 +169,13 @@ secrets for every product above, and **firewalls must carry a
 instance forms match: `automation-secrets` returns `vault_available`, and when
 it is true the secret inputs are hidden (and not sent), and the firewall form
 requires a vault pick (`_fillVaultCredSelect(..., {inputIds, required})`).
+Active Directory connections are **vault-only** (`instance_vault.VAULT_ONLY`):
+their bind password is refused inline even when no cloud vault is set up, so
+it is never stored in `global_config` or returned by the list route. The
+secret must sit in the connection's own tenant bucket (not another tenant's,
+not the `__admin__` slot). The Setup list returns the credential by name
+only, with `bind_password_set`; the bucket stays on the hub. See
+[ldap.md](ldap.md#active-directory-read-only).
 
 ## WebUI
 

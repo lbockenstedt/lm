@@ -2243,7 +2243,7 @@ const VIEW_SUBMENUS = {
     setup: ['Spokes & Agents', 'Module Management', 'Directory (LDAP)', 'Simulations', 'Remote Console', 'Test Data Feed'],
     opnsense: ['Overview', 'Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'Impairment', 'DHCP Leases', 'Interfaces'],
     pxmx: ['Overview', 'Virtual Machines', 'Diagnostics', 'Settings'],
-    ldap: ['Users', 'Groups', 'Entra'],
+    ldap: ['Users', 'Groups', 'Entra', 'AD'],
     cppm: ['NAC Status', 'Access Tracker', 'My Devices', 'Unknown Devices', 'My Users'],
     cs: ['Dashboard', 'Clients', 'Central', 'Central On-Prem', 'Mist', 'VM Server', 'Config', 'Setup', 'Spoke Management', 'Assistant'],
     netbox: ['Overview', 'Devices', 'Racks', 'Rack Placement', 'Prefixes', 'IP Addresses'],

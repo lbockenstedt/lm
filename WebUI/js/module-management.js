@@ -410,6 +410,37 @@ const DEVICE_TYPES = {
               options: [['','Inherit module default'],['0','Off (manual Poll Now only)'],['60','Every 1 minute'],['300','Every 5 minutes'],['900','Every 15 minutes'],['1800','Every 30 minutes'],['3600','Every hour'],['21600','Every 6 hours'],['86400','Every day']] },
         ],
     },
+    // A tenant's read-only Active Directory source for the Directory page.
+    // Not bound to a spoke: the hub sends it, with the vault password, to the
+    // tenant's directory spoke in each AD command (routes/directory_ad.py).
+    ad: {
+        title: 'Active Directory Connection',
+        endpoint: '/setup/ad-connections',
+        responseKey: 'instances',
+        moduleType: 'directory',
+        payloadKey: 'instance',
+        badgeLabel: 'AD',
+        adminOnly: true,
+        noSpoke: true,
+        vaultPicker: true,
+        vaultOnly: true,  // the bind password only ever comes from the vault (hub: VAULT_ONLY), so no inline box
+        checks: [['test', 'Test connection'], ['discover', 'Find domain controllers']],
+        rowSummary: d => `${d.domain || '—'}${d.primary_server ? ' · ' + d.primary_server : ''}`,
+        fields: [
+            { id: 'tenant_id', label: 'Tenant', type: 'tenant', required: true },
+            { id: 'domain', label: 'AD Domain', placeholder: 'corp.example.com', required: true },
+            { id: 'primary_server', label: 'Primary Server', placeholder: 'dc1.corp.example.com (optional with discovery)' },
+            { id: 'backup_server', label: 'Backup Server', placeholder: 'dc2.corp.example.com' },
+            { id: 'discover', label: 'Find DCs in DNS', type: 'select', coerce: 'bool', options: [['true', 'On (global catalogs, own site first)'], ['false', 'Off (configured servers only)']] },
+            { id: 'use_global_catalog', label: 'Query', type: 'select', coerce: 'bool', options: [['true', 'Global catalog (whole forest)'], ['false', 'Domain controller (this domain)']] },
+            { id: 'use_ssl', label: 'Encryption', type: 'select', coerce: 'bool', options: [['true', 'LDAPS'], ['false', 'StartTLS']] },
+            { id: 'site', label: 'AD Site', placeholder: 'Optional: prefer this site' },
+            { id: 'forest', label: 'Forest Root', placeholder: 'Optional: defaults to the domain' },
+            { id: 'dns_servers', label: 'DNS Servers', placeholder: 'Optional: 10.0.0.1, 10.0.0.2' },
+            { id: 'base_dn', label: 'Search Base', placeholder: 'Optional: DC=corp,DC=example,DC=com' },
+            { id: 'bind_user', label: 'Bind User', placeholder: 'svc-lm@corp.example.com (or the vault secret\'s username)' },
+        ],
+    },
 };
 
 // Device types the current user may manage (adminOnly types need a Global Admin).
@@ -777,7 +808,9 @@ async function loadAllDevices() {
     // tab bar and the row renderer can read them without re-deriving.
     all.forEach(d => {
         d._spokeName = d.spoke_id ? (_spokeNameById[d.spoke_id] || d.spoke_id) : '';
-        d._tenant = d.spoke_id ? (_spokeTenantById[d.spoke_id] || '') : '';
+        // A spokeless record (e.g. an AD connection) carries its own tenant.
+        d._tenant = d.spoke_id ? (_spokeTenantById[d.spoke_id] || '')
+            : ((DEVICE_TYPES[d._typeKey] || {}).noSpoke ? (d.tenant_id || '') : '');
         d._tenantLabel = d._tenant ? (_tenantNames[d._tenant] || d._tenant) : '';
     });
     if (!window._mdFilter) window._mdFilter = { type: 'all', tenant: 'all' };
@@ -892,7 +925,7 @@ function _renderManagedDeviceList() {
             : '';
         const eId = String(d._id).replace(/'/g, "\\'");
         return `<div class="flex items-center justify-between p-3 rounded-md bg-slate-50 border border-slate-200">
-            <div><span class="text-sm font-medium text-slate-700">${escapeHtml(name)}</span><span class="ml-2 px-2 py-0.5 rounded-full text-xs font-bold bg-blue-100 text-blue-700">${t.badgeLabel}</span>${tenant}<span class="ml-2 text-xs text-slate-500">${escapeHtml(summary)}${spoke}</span>${(d.vault_credential && d.vault_credential.name) ? `<span class="ml-2 text-xs text-emerald-600" title="Secret supplied from Credential Vault: ${escapeHtml(d.vault_credential.bucket)} › ${escapeHtml(d.vault_credential.name)}">🔐 vault</span>` : ''}</div>
+            <div><span class="text-sm font-medium text-slate-700">${escapeHtml(name)}</span><span class="ml-2 px-2 py-0.5 rounded-full text-xs font-bold bg-blue-100 text-blue-700">${t.badgeLabel}</span>${tenant}<span class="ml-2 text-xs text-slate-500">${escapeHtml(summary)}${spoke}</span>${(d.vault_credential && d.vault_credential.name) ? `<span class="ml-2 text-xs text-emerald-600" title="Secret supplied from Credential Vault: ${d.vault_credential.bucket ? escapeHtml(d.vault_credential.bucket) + ' › ' : ''}${escapeHtml(d.vault_credential.name)}">🔐 vault</span>` : ''}</div>
             <div class="flex gap-2">
                 <button onclick="editDevice('${d._typeKey}','${eId}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Edit</button>
                 <button onclick="deleteDevice('${d._typeKey}','${eId}')" class="text-xs text-red-400 hover:text-red-600 font-medium">Delete</button>
@@ -910,6 +943,10 @@ function _deviceFieldHtml(t, field, values) {
     if (field.type === 'select') {
         const opts = (field.options || []).map(([v, lbl]) => `<option value="${v}"${String(v) === String(val) ? ' selected' : ''}>${lbl}</option>`).join('');
         return `                    <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">${field.label}</label><select id="${id}" class="${cls}">${opts}</select></div>`;
+    }
+    // Tenant picker: filled from the tenant list once the modal is open.
+    if (field.type === 'tenant') {
+        return `                    <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">${field.label}</label><select id="${id}" data-tenant-picker="1" class="${cls}"><option value="">Loading tenants…</option></select></div>`;
     }
     const type = field.type || 'text';
     const ph = field.placeholder ? ` placeholder="${field.placeholder}"` : '';
@@ -930,7 +967,7 @@ function showAddDeviceModal(editTypeKey, editItem) {
             <div class="p-6 grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Device Name</label><input type="text" id="dev-name" placeholder="e.g. Core Firewall" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
                 <div class="space-y-2"><label class="text-xs text-slate-500 font-bold">Module Type</label><select id="dev-type" ${editItem ? 'disabled' : ''} onchange="_onDeviceTypeChange()" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${typeKeys.map(k => `<option value="${k}"${k === editTypeKey ? ' selected' : ''}>${DEVICE_TYPES[k].title}</option>`).join('')}</select></div>
-                <div class="space-y-2 md:col-span-2"><label class="text-xs text-slate-500 font-bold">Associated Spoke</label><select id="dev-spoke" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading spokes...</option></select></div>
+                <div id="dev-spoke-row" class="space-y-2 md:col-span-2"><label class="text-xs text-slate-500 font-bold">Associated Spoke</label><select id="dev-spoke" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading spokes...</option></select></div>
                 <div id="dev-fields" class="md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4"></div>
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3 sticky bottom-0">
@@ -960,9 +997,19 @@ function _renderDeviceModalFields(typeKey, values) {
     // async from the record's existing {bucket,name} reference.
     if (wrap && t.vaultPicker) {
         wrap.innerHTML += `<div class="md:col-span-2">${_vaultCredSelectHtml('dev-vaultcred')}</div>`;
-        _fillVaultCredSelect('dev-vaultcred', values && values.vault_credential, {
-            inputIds: t.fields.filter(f => f.vaultSecret).map(f => 'dev-' + f.id), required: !!t.vaultRequired });
+        // A list that returns the credential by name only (AD) keeps it in
+        // the record's own tenant bucket, so rebuild the full reference.
+        const vc = values && values.vault_credential;
+        const curRef = vc && vc.name && !vc.bucket ? { bucket: values.tenant_id, name: vc.name } : vc;
+        _fillVaultCredSelect('dev-vaultcred', curRef, {
+            inputIds: t.fields.filter(f => f.vaultSecret).map(f => 'dev-' + f.id),
+            required: !!(t.vaultRequired || t.vaultOnly), always: !!t.vaultOnly });
     }
+    // Types the hub routes itself (no Associated Spoke) hide that picker.
+    const spokeRow = document.getElementById('dev-spoke-row');
+    if (spokeRow) spokeRow.classList.toggle('hidden', !!t.noSpoke);
+    _fillTenantSelects(wrap, values);
+    if (wrap && t.checks && values && values.id) _addDeviceChecks(wrap, t, values.id);
     // Name is only auto-filled from the edit item (top-level field), not fields.
     if (values && values.name) {
         const nameEl = document.getElementById('dev-name');
@@ -977,6 +1024,56 @@ function _renderDeviceModalFields(typeKey, values) {
             ? '<option value="">— select spoke —</option>' + matched.map(s => `<option value="${s.spoke_id}"${s.spoke_id === current ? ' selected' : ''} title="${escapeHtml(s.spoke_id)}">${escapeHtml(_spokeName(s))}</option>`).join('')
             : `<option value="">No ${t.moduleType || ''} spokes found</option>`;
     });
+}
+
+// Fill every tenant picker in the modal with the tenant names, keeping the
+// stored choice. Built with DOM nodes, so names need no escaping.
+async function _fillTenantSelects(wrap, values) {
+    const selects = wrap ? wrap.querySelectorAll('select[data-tenant-picker]') : [];
+    if (!selects.length) return;
+    const tenants = await ensureTenants(true);
+    selects.forEach(sel => {
+        if (!tenants.length) { sel.replaceChildren(new Option('No tenants available', '')); return; }
+        sel.replaceChildren(new Option('— select tenant —', ''),
+            ...tenants.filter(t => !t.is_group).map(t => new Option(t.name || t.id, t.id)));
+        sel.value = (values && values[sel.id.slice('dev-'.length)]) || '';
+    });
+}
+
+// Check buttons for a saved record (e.g. AD: test the bind, list the DCs).
+// The result shows in a toast; the hub reports the reason when it fails.
+function _addDeviceChecks(wrap, t, id) {
+    const row = document.createElement('div');
+    row.className = 'md:col-span-2 flex gap-2';
+    t.checks.forEach(([check, label]) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'px-4 py-2 rounded-md text-sm font-semibold text-primary-text border border-brand hover:bg-primary hover:text-white transition-all';
+        btn.textContent = label;
+        btn.addEventListener('click', () => _runDeviceCheck(t, id, check, btn));
+        row.appendChild(btn);
+    });
+    wrap.appendChild(row);
+}
+
+// Run one check and toast the outcome (the saved record is checked, so save first).
+async function _runDeviceCheck(t, id, check, btn) {
+    btn.disabled = true;
+    try {
+        const res = await apiJson(`${t.endpoint}/${encodeURIComponent(id)}/${check}`, { method: 'POST' });
+        if (check === 'test') {
+            showToast(`Connected to ${res.server || 'AD'}`, 'success');
+        } else {
+            const names = (res.servers || []).map(s => `${s.host}:${s.port}`);
+            const errs = (res.errors || []).length ? ` (DNS: ${res.errors.join('; ')})` : '';
+            showToast(names.length ? `Servers, in order: ${names.join(', ')}${errs}` : `No servers found${errs}`,
+                      names.length ? 'success' : 'error');
+        }
+    } catch (e) {
+        showToast(`${check === 'test' ? 'Test' : 'Discovery'} failed: ${e.message}`, 'error');
+    } finally {
+        btn.disabled = false;
+    }
 }
 
 function _onDeviceTypeChange() {
@@ -1000,10 +1097,15 @@ async function saveDevice() {
     const id = modal.dataset.editId;
     const config = {
         name: (document.getElementById('dev-name').value || '').trim(),
-        spoke_id: document.getElementById('dev-spoke').value,
+        spoke_id: t.noSpoke ? '' : document.getElementById('dev-spoke').value,
     };
     if (!config.name) { showToast('Device name is required.', 'error'); return; }
+    const missing = t.fields.find(f => f.required && !(document.getElementById('dev-' + f.id) || {}).value);
+    if (missing) { showToast(`${missing.label} is required.`, 'error'); return; }
     if (t.vaultPicker && _vaultCredMissing('dev-vaultcred')) return;
+    if (t.vaultOnly && !_collectVaultCred('dev-vaultcred')) {
+        showToast('Select a Credential Vault credential for the password.', 'error'); return;
+    }
     t.fields.forEach(f => {
         const el = document.getElementById('dev-' + f.id);
         if (el && el.dataset.vaultHidden) return;  // secret comes from the vault

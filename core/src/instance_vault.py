@@ -105,6 +105,12 @@ SECRET_FIELDS = {
         "enable_secret":  ("enable_secret", "enable", "enable_password"),
         "snmp_community": ("snmp_community", "community"),
     },
+    "ad_connections": {
+        # A tenant's read-only Active Directory connection (Setup → Directory →
+        # Active Directory). The bind password is filled in at send time and
+        # sent inside the AD_* command; the directory spoke never stores it.
+        "bind_password": ("bind_password", "password", "secret"),
+    },
 }
 
 
@@ -119,7 +125,12 @@ SECRET_FIELDS = {
 # username/password login (no client_id), the inline client_id is kept as-is.
 # Products whose connection only works with a secret: once the hub's cloud
 # vault is available, a record must reference a vault credential.
-VAULT_REQUIRED = {"firewalls", "truenas_appliances"}
+VAULT_REQUIRED = {"firewalls", "truenas_appliances", "ad_connections"}
+
+# Products whose secret may ONLY come from the vault, with or without a cloud
+# vault: they are new (fleet rule 5.1, vault from day one), and the generic
+# /setup CRUD would otherwise store an inline secret in clear and list it.
+VAULT_ONLY = {"ad_connections"}
 
 
 NONSECRET_VAULT_FIELDS = {
@@ -141,6 +152,11 @@ NONSECRET_VAULT_FIELDS = {
         # nw_devices: overlaid (not stripped) so a vault "Console" secret can
         # supply both username + password for the scanner.
         "username": ("username", "user"),
+    },
+    "ad_connections": {
+        # The AD bind account, kept with its password in a vault "Login"
+        # secret; an inline bind_user stays unless the secret carries one.
+        "bind_user": ("bind_user", "username", "user"),
     },
 }
 
@@ -285,6 +301,12 @@ async def validate_ref(hub, record, sess, *, is_admin, storage_key):
     # Records without a reference only need the vault-only policy checks.
     ref = _normalize_ref(record)
     if ref is None:
+        # Vault-only products always need a reference.
+        if storage_key in VAULT_ONLY:
+            raise HTTPException(
+                status_code=400,
+                detail="Select a Credential Vault credential for this connection; "
+                       "its password is never stored inline.")
         # Products that require a vault reference reject records without one.
         if storage_key in VAULT_REQUIRED and cred_vault._vault_available(hub):
             raise HTTPException(
