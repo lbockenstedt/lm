@@ -104,3 +104,25 @@ def test_rate_guard_trips_on_burst(_isolate):
     rate = [e for e in _isolate if e["kind"] == "sentinel_rate"]
     assert rate, "expected a sentinel_rate anomaly once the burst exceeds the limit"
     assert rate[0]["severity"] == "warning"
+
+
+def test_every_module_that_reads_a_guarded_vault_seam_is_allowed():
+    # A new reader the contract misses logs a critical violation on every call
+    # (endpoint_sync's ClearPass NAD sync did ~740 times before it was listed).
+    import re
+    seams = {"automation_get": "vault.automation_get",
+             "automation_list_by_type": "vault.automation_list_by_type",
+             "reveal_secret": "vault.reveal_secret"}
+    call = re.compile(r"\.(automation_get|automation_list_by_type|reveal_secret)\(")
+    missing = []
+    for root, _dirs, files in os.walk(_SRC):
+        for name in files:
+            path = os.path.join(root, name)
+            module = os.path.relpath(path, _SRC)[:-3].replace(os.sep, ".")
+            if not name.endswith(".py") or module == "cred_vault":
+                continue
+            with open(path, encoding="utf-8") as fh:
+                for seam in set(call.findall(fh.read())):
+                    if not sentinel.is_allowed(seams[seam], module):
+                        missing.append((module, seams[seam]))
+    assert missing == []
