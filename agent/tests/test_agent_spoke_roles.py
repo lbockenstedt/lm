@@ -1074,6 +1074,13 @@ def test_host_addressing_reports_static_dhcp_and_unknown(monkeypatch):
         {"ifname": "uplink9", "link_type": "ether", "address": "02:00:00:00:00:0e",
          "linkinfo": {"info_kind": "macvlan"},
          "addr_info": [{"family": "inet", "local": "10.40.0.5", "scope": "global"}]},
+        # A tunnel named like a NIC is still caught by its kind ...
+        {"ifname": "zt0", "link_type": "ether", "address": "02:00:00:00:00:10",
+         "linkinfo": {"info_kind": "tun"},
+         "addr_info": [{"family": "inet", "local": "10.60.0.3", "scope": "global"}]},
+        # ... and a real NIC whose name merely starts like one is kept.
+        {"ifname": "tap-lan", "link_type": "ether", "address": "02:00:00:00:00:11",
+         "addr_info": [{"family": "inet", "local": "10.70.0.4", "scope": "global"}]},
         # A LAN bridge holding the host's own address is kept.
         {"ifname": "vmbr0", "link_type": "ether", "address": "02:00:00:00:00:0f",
          "linkinfo": {"info_kind": "bridge"},
@@ -1094,6 +1101,8 @@ def test_host_addressing_reports_static_dhcp_and_unknown(monkeypatch):
          "interface": "eth0"},
         {"ip": "10.30.0.7", "mac": "02:00:00:00:00:0b", "mode": "dhcp",
          "interface": "eth1"},
+        {"ip": "10.70.0.4", "mac": "02:00:00:00:00:11", "mode": "static",
+         "interface": "tap-lan"},
         {"ip": "10.50.0.2", "mac": "02:00:00:00:00:0f", "mode": "static",
          "interface": "vmbr0"},
     ]

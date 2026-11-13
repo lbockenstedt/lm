@@ -41,6 +41,16 @@ def _static(ip, mac=MAC_A, source="agent"):
     return {"ip": ip, "mac": mac, "mode": "static", "source": source}
 
 
+# The Kea subnet as config-get returns it: pool .100-.200, no host reservations.
+KEA = [{"subnet": "10.20.0.0/24", "pools": [{"pool": "10.20.0.100 - 10.20.0.200"}],
+        "reservations": []}]
+
+
+def _plan(pfx, ips, leases, cands, kea_subnets=KEA):
+    """plan_static_reservations with the default Kea subnet."""
+    return plan_static_reservations(pfx, ips, leases, cands, kea_subnets)
+
+
 def _reasons(plan, key):
     """``{ip: reason}`` for one plan bucket."""
     return {x["ip"]: x["reason"] for x in plan[key]}
@@ -49,7 +59,7 @@ def _reasons(plan, key):
 # ── planner ─────────────────────────────────────────────────────────────────
 
 def test_static_host_without_lease_is_reserved():
-    plan = plan_static_reservations(_pfx(), _ips(_ip("10.20.0.50/24", 7)), [],
+    plan = _plan(_pfx(), _ips(_ip("10.20.0.50/24", 7)), [],
                                     [_static("10.20.0.50")])
     assert plan["reserve"] == [{"ip_id": 7, "ip": "10.20.0.50", "mac": MAC_A,
                                 "source": "agent"}]
@@ -58,7 +68,7 @@ def test_static_host_without_lease_is_reserved():
 
 def test_dynamic_lease_is_not_reserved():
     leases = [{"ip-address": "10.20.0.50", "hw-address": MAC_A, "state": 0}]
-    plan = plan_static_reservations(_pfx(), _ips(_ip("10.20.0.50/24", 7)), leases,
+    plan = _plan(_pfx(), _ips(_ip("10.20.0.50/24", 7)), leases,
                                     [_static("10.20.0.50", source="sweep")])
     assert plan["reserve"] == []
     assert _reasons(plan, "skipped") == {"10.20.0.50": "dynamic lease"}
@@ -66,7 +76,7 @@ def test_dynamic_lease_is_not_reserved():
 
 def test_mac_holding_a_lease_elsewhere_is_not_reserved():
     leases = [{"ip-address": "10.20.0.60", "hw-address": MAC_A}]
-    plan = plan_static_reservations(_pfx(), _ips(_ip("10.20.0.50/24", 7)), leases,
+    plan = _plan(_pfx(), _ips(_ip("10.20.0.50/24", 7)), leases,
                                     [_static("10.20.0.50")])
     assert plan["reserve"] == []
     assert _reasons(plan, "skipped") == {"10.20.0.50": "mac holds a lease"}
@@ -75,14 +85,14 @@ def test_mac_holding_a_lease_elsewhere_is_not_reserved():
 def test_agent_dhcp_mode_vetoes_sweep():
     cands = [_static("10.20.0.50", source="sweep"),
              {"ip": "10.20.0.50", "mac": MAC_A, "mode": "dhcp", "source": "agent"}]
-    plan = plan_static_reservations(_pfx(), _ips(_ip("10.20.0.50/24", 7)), [], cands)
+    plan = _plan(_pfx(), _ips(_ip("10.20.0.50/24", 7)), [], cands)
     assert plan["reserve"] == []
     assert _reasons(plan, "skipped") == {"10.20.0.50": "agent reports dhcp"}
 
 
 def test_existing_reservation_for_other_mac_is_a_conflict_not_overwritten():
     row = _ip("10.20.0.50/24", 7, mac_address=MAC_B, dhcp_reservation=True)
-    plan = plan_static_reservations(_pfx(), _ips(row), [], [_static("10.20.0.50")])
+    plan = _plan(_pfx(), _ips(row), [], [_static("10.20.0.50")])
     assert plan["reserve"] == []
     assert _reasons(plan, "conflicts") == {"10.20.0.50": "reserved for another mac"}
 
@@ -91,7 +101,7 @@ def test_lease_for_other_mac_and_stale_netbox_mac_are_conflicts():
     rows = _ips(_ip("10.20.0.50/24", 7), _ip("10.20.0.51/24", 8, mac_address=MAC_B))
     leases = [{"ip-address": "10.20.0.50", "hw-address": MAC_B}]
     cands = [_static("10.20.0.50"), _static("10.20.0.51", mac="02:00:00:00:00:0c")]
-    plan = plan_static_reservations(_pfx(), rows, leases, cands)
+    plan = _plan(_pfx(), rows, leases, cands)
     assert plan["reserve"] == []
     assert _reasons(plan, "conflicts") == {"10.20.0.50": "leased to another mac",
                                            "10.20.0.51": "netbox mac differs"}
@@ -99,7 +109,7 @@ def test_lease_for_other_mac_and_stale_netbox_mac_are_conflicts():
 
 def test_already_reserved_same_mac_is_idempotent():
     row = _ip("10.20.0.50/24", 7, mac_address=MAC_A.upper(), dhcp_reservation=True)
-    plan = plan_static_reservations(_pfx(), _ips(row), [], [_static("10.20.0.50")])
+    plan = _plan(_pfx(), _ips(row), [], [_static("10.20.0.50")])
     assert plan["reserve"] == [] and not plan["conflicts"]
     assert _reasons(plan, "skipped") == {"10.20.0.50": "already reserved"}
 
@@ -110,7 +120,7 @@ def test_out_of_scope_unknown_mac_and_missing_ip_are_skipped():
              _static("10.40.0.5", mac="02:00:00:00:00:02"),   # only under the container
              _static("10.20.0.51", mac="incomplete"),         # MAC unknown
              _static("10.20.0.52", mac="02:00:00:00:00:03")]  # no NetBox IP object
-    plan = plan_static_reservations(_pfx(), rows, [], cands)
+    plan = _plan(_pfx(), rows, [], cands)
     assert plan["reserve"] == []
     assert _reasons(plan, "skipped") == {
         "10.30.0.5": "outside any dhcp scope", "10.40.0.5": "outside any dhcp scope",
@@ -119,7 +129,7 @@ def test_out_of_scope_unknown_mac_and_missing_ip_are_skipped():
 
 def test_mac_seen_at_two_addresses_is_skipped():
     rows = _ips(_ip("10.20.0.50/24", 7), _ip("10.20.0.51/24", 8))
-    plan = plan_static_reservations(_pfx(), rows, [],
+    plan = _plan(_pfx(), rows, [],
                                     [_static("10.20.0.50"), _static("10.20.0.51")])
     assert plan["reserve"] == []
     assert set(_reasons(plan, "skipped").values()) == {"mac seen at several addresses"}
@@ -130,7 +140,7 @@ def test_a_secondary_address_does_not_block_the_hosts_static_primary():
     rows = _ips(_ip("10.20.0.50/24", 7), _ip("10.20.0.99/24", 8))
     cands = [_static("10.20.0.50"),
              {"ip": "10.20.0.99", "mac": MAC_A, "mode": "unknown", "source": "agent"}]
-    plan = plan_static_reservations(_pfx(), rows, [], cands)
+    plan = _plan(_pfx(), rows, [], cands)
     assert [r["ip"] for r in plan["reserve"]] == ["10.20.0.50"]
     assert _reasons(plan, "skipped") == {"10.20.0.99": "not known to be static"}
 
@@ -171,7 +181,8 @@ class _Hub(DnsDhcpSyncMixin):
         # Default Kea pool .100-.200, so 10.20.0.50 is outside it.
         self._subnets_reply = subnets_reply if subnets_reply is not None else {
             "status": "SUCCESS", "strict": True, "subnets": [
-                {"subnet": "10.20.0.0/24", "pools": [{"pool": "10.20.0.100 - 10.20.0.200"}]}]}
+                {"subnet": "10.20.0.0/24", "pools": [{"pool": "10.20.0.100 - 10.20.0.200"}],
+                 "reservations": []}]}
         self._agent_addresses = agent_addresses or {}
         self._ips = ips if ips is not None else _ips(_ip("10.20.0.50/24", 7))
         if live_arp is not None:
@@ -321,16 +332,16 @@ def test_vrf_must_match_exactly():
     in another VRF, or one side global, never counts."""
     # Overlap: a more specific prefix in another VRF must not hide the IP's own scope.
     pfx = _vrf_pfx(("10.20.0.0/24", "red"), ("10.20.0.0/25", "blue"))
-    plan = plan_static_reservations(pfx, _vrf_ip("red"), [], [_static("10.20.0.50")])
+    plan = _plan(pfx, _vrf_ip("red"), [], [_static("10.20.0.50")])
     assert [r["ip"] for r in plan["reserve"]] == ["10.20.0.50"]
     # Nested VRF objects normalise (dict → id) on both sides.
     pfx = _vrf_pfx(("10.20.0.0/24", {"id": 3, "name": "red"}))
-    plan = plan_static_reservations(pfx, _vrf_ip({"id": 3, "name": "red"}), [],
+    plan = _plan(pfx, _vrf_ip({"id": 3, "name": "red"}), [],
                                     [_static("10.20.0.50")])
     assert [r["ip"] for r in plan["reserve"]] == ["10.20.0.50"]
     # One-sided empty: VRF prefix with a global IP, global prefix with a VRF IP.
     for pfx_vrf, ip_vrf in (("red", None), ("", "red")):
-        plan = plan_static_reservations(_vrf_pfx(("10.20.0.0/24", pfx_vrf)),
+        plan = _plan(_vrf_pfx(("10.20.0.0/24", pfx_vrf)),
                                         _vrf_ip(ip_vrf), [], [_static("10.20.0.50")])
         assert plan["reserve"] == []
         assert _reasons(plan, "skipped") == {"10.20.0.50": "vrf differs from scope"}
@@ -343,7 +354,7 @@ def test_malformed_or_conflicting_mac_vetoes_the_candidate():
              _static("10.20.0.50"),
              _static("10.20.0.51", mac=MAC_B), _static("10.20.0.51", mac="02:00:00:00:00:0c",
                                                        source="sweep")]
-    plan = plan_static_reservations(_pfx(), rows, [], cands)
+    plan = _plan(_pfx(), rows, [], cands)
     assert plan["reserve"] == []
     assert _reasons(plan, "skipped") == {"10.20.0.50": "malformed mac",
                                          "10.20.0.51": "conflicting macs"}
@@ -352,16 +363,18 @@ def test_malformed_or_conflicting_mac_vetoes_the_candidate():
 def test_sweep_only_host_needs_an_ip_outside_every_kea_pool():
     """A sweep-seen host inside a pool may be an offline DHCP client; outside
     the pools it cannot be one. Agent-reported static needs no pool check."""
-    subnets = [{"subnet": "10.20.0.0/24", "pools": [{"pool": "10.20.0.10 - 10.20.0.99"}]}]
+    subnets = [{"subnet": "10.20.0.0/24", "pools": [{"pool": "10.20.0.10 - 10.20.0.99"}],
+                "reservations": []}]
     rows = _ips(_ip("10.20.0.50/24", 7), _ip("10.20.0.150/24", 8), _ip("10.20.0.60/24", 9))
     cands = [_static("10.20.0.50", source="sweep"),
              _static("10.20.0.150", mac=MAC_B, source="sweep"),
              _static("10.20.0.60", mac="02:00:00:00:00:0c")]
-    plan = plan_static_reservations(_pfx(), rows, [], cands, subnets)
+    plan = _plan(_pfx(), rows, [], cands, subnets)
     assert sorted(r["ip"] for r in plan["reserve"]) == ["10.20.0.150", "10.20.0.60"]
     assert _reasons(plan, "skipped") == {"10.20.0.50": "inside a dhcp pool"}
     # Pools unknown: sweep-only candidates are skipped.
-    plan = plan_static_reservations(_pfx(), rows, [], cands[1:2])
+    bad_pool = [dict(subnets[0], pools=[{"pool": "not a range"}])]
+    plan = _plan(_pfx(), rows, [], cands[1:2], bad_pool)
     assert _reasons(plan, "skipped") == {"10.20.0.150": "kea pools unknown"}
 
 
@@ -418,7 +431,7 @@ def test_the_pass_is_off_until_an_operator_turns_it_on():
 
 def test_a_structured_netbox_dhcp_status_is_not_reserved():
     row = dict(_ip("10.20.0.50/24", 7), status={"value": "dhcp", "label": "DHCP"})
-    plan = plan_static_reservations(_pfx(), _ips(row), [], [_static("10.20.0.50")])
+    plan = _plan(_pfx(), _ips(row), [], [_static("10.20.0.50")])
     assert plan["reserve"] == []
     assert _reasons(plan, "skipped") == {"10.20.0.50": "netbox status is dhcp"}
 
@@ -552,3 +565,110 @@ def test_reservations_over_the_write_cap_are_counted_as_deferred(monkeypatch):
     hub = _Hub(agent_addresses=_agent_static())
     st = _run(hub)
     assert hub.writes() == [] and st["deferred"] == 1
+
+
+# ── round 11: Kea host reservations, shared-Kea reads, write backoff ────────
+
+def _kea_with(*reservations, **sub):
+    """The default Kea subnet holding ``reservations`` (Kea's own shape)."""
+    return [dict(KEA[0], reservations=[{"ip-address": ip, "hw-address": mac}
+                                       for ip, mac in reservations], **sub)]
+
+
+def test_kea_host_reservations_veto_and_report_conflicts():
+    """A reservation held directly in Kea counts like a NetBox one: the IP
+    reserved for another MAC, or the MAC reserved at another IP, is a
+    conflict; the same MAC at the same IP is already done."""
+    rows = _ips(_ip("10.20.0.50/24", 7))
+    cases = {
+        ("10.20.0.50", MAC_B): ("conflicts", "reserved in kea for another mac"),
+        ("10.20.0.60", MAC_A.upper()): ("conflicts", "mac reserved in kea at another address"),
+        ("10.20.0.50", MAC_A.upper()): ("skipped", "already reserved"),
+    }
+    for res, (bucket, reason) in cases.items():
+        plan = _plan(_pfx(), rows, [], [_static("10.20.0.50")], _kea_with(res))
+        assert plan["reserve"] == []
+        assert _reasons(plan, bucket) == {"10.20.0.50": reason}
+    # A reservation by client-id (no MAC) still takes the IP.
+    kea = [dict(KEA[0], reservations=[{"ip-address": "10.20.0.50", "client-id": "01:02"}])]
+    plan = _plan(_pfx(), rows, [], [_static("10.20.0.50")], kea)
+    assert _reasons(plan, "conflicts") == {"10.20.0.50": "reserved in kea for another mac"}
+
+
+def test_unknown_kea_reservations_reserve_nothing():
+    """Fail closed: no subnet read, a reservations value that is not a list,
+    or an IP outside every Kea subnet → nothing is written."""
+    rows = _ips(_ip("10.20.0.50/24", 7))
+    for kea, reason in ((None, "kea reservations unknown"),
+                        ([dict(KEA[0], reservations="?")], "kea reservations unknown"),
+                        ([dict(KEA[0], subnet="10.99.0.0/24")], "not in a kea subnet")):
+        plan = _plan(_pfx(), rows, [], [_static("10.20.0.50")], kea)
+        assert plan["reserve"] == []
+        assert _reasons(plan, "skipped") == {"10.20.0.50": reason}
+
+
+def test_pass_reports_a_kea_reservation_conflict_and_writes_nothing():
+    hub = _Hub(agent_addresses=_agent_static(), subnets_reply={
+        "status": "SUCCESS", "strict": True, "subnets": _kea_with(("10.20.0.50", MAC_B))})
+    st = _run(hub)
+    assert hub.writes() == []
+    assert st["conflicts"] == [{"tenant": "t-a", "ip": "10.20.0.50", "mac": MAC_A,
+                                "reason": "reserved in kea for another mac"}]
+
+
+def test_tenants_on_a_shared_kea_read_it_once_per_pass():
+    """Rule 4.8: two tenants on the same shared Kea → one strict lease read
+    and one strict subnet read per pass; NetBox stays per tenant."""
+    hub = _Hub(agent_addresses={"agent-1": _agent_static()["agent-1"],
+                                "agent-2": _agent_static(mac=MAC_B)["agent-1"]},
+               spoke_tenants={"agent-1": "t-a", "agent-2": "t-b"})
+    st = _run(hub)
+    assert sorted((r["tenant"], r["mac"]) for r in st["reserved"]) == [
+        ("t-a", MAC_A), ("t-b", MAC_B)]
+    kea = [(s, c) for s, c, _p in hub.log if c.startswith("DHCP_LIST_")]
+    assert sorted(kea) == [("dhcp-1", "DHCP_LIST_LEASES"), ("dhcp-1", "DHCP_LIST_SUBNETS")]
+    ips_reads = [p for _s, c, p in hub.log if c == "NETBOX_GET_IPS"]
+    assert ips_reads == [{"tenant": "tenant-a"}, {"tenant": "tenant-b"}]
+    # The next pass reads Kea again (the cache lives for one pass only).
+    _run(hub, now=1_000_000.0 + 10_000)
+    assert len([1 for _s, c, _p in hub.log if c == "DHCP_LIST_LEASES"]) == 2
+
+
+def test_a_failed_netbox_write_backs_off_for_an_hour():
+    class _WriteFails(_Hub):
+        fail = True
+
+        async def request_response(self, spoke_id, command, payload, timeout=30.0):
+            if command == "NETBOX_UPDATE_IP_ADDR" and self.fail:
+                self.log.append((spoke_id, command, payload))
+                return {"payload": {"data": {"status": "ERROR", "message": "netbox 500"}}}
+            return await super().request_response(spoke_id, command, payload, timeout)
+
+    hub = _WriteFails(agent_addresses=_agent_static())
+    t0 = 1_000_000.0
+    st = _run(hub, t0)
+    assert len(hub.writes()) == 1 and st["errors"][0]["error"] == "netbox 500"
+    # Within the hour: no new write, still reported.
+    st = _run(hub, t0 + 900)
+    assert len(hub.writes()) == 1
+    assert st["errors"] == [{"tenant": "t-a", "ip": "10.20.0.50",
+                             "error": "earlier write failed; retry after backoff"}]
+    # After the hour it is retried, and success clears the backoff.
+    hub.fail = False
+    st = _run(hub, t0 + 3700)
+    assert len(hub.writes()) == 2 and [r["ip"] for r in st["reserved"]] == ["10.20.0.50"]
+    assert hub._static_res_failed == {}
+
+
+def test_a_subnet_without_a_reservations_key_has_none():
+    """KeaManager.build omits ``reservations`` for a subnet with none, so a
+    missing key is an empty list, not unknown: the host is reserved, and a
+    reservation in another subnet still counts."""
+    rows = _ips(_ip("10.20.0.50/24", 7))
+    bare = {k: v for k, v in KEA[0].items() if k != "reservations"}
+    plan = _plan(_pfx(), rows, [], [_static("10.20.0.50")], [bare])
+    assert [r["ip"] for r in plan["reserve"]] == ["10.20.0.50"]
+    other = {"subnet": "10.30.0.0/24", "pools": [],
+             "reservations": [{"ip-address": "10.30.0.5", "hw-address": MAC_A}]}
+    plan = _plan(_pfx(), rows, [], [_static("10.20.0.50")], [bare, other])
+    assert _reasons(plan, "conflicts") == {"10.20.0.50": "mac reserved in kea at another address"}

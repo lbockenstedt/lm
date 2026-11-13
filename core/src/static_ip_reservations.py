@@ -27,10 +27,13 @@ Every candidate goes through ``plan_static_reservations``, which is
 deliberately conservative: it only marks an IP that NetBox already records in
 the tenant's scope, inside a DHCP-enabled prefix of exactly the IP's VRF, with
 one well-formed MAC, no Kea lease for the IP or the MAC, and it never
-overwrites a reservation or MAC that differs — those are reported as
-conflicts instead. Leases and pools come from the tenant's OWN Kea when it
-has one, else from the shared Kea, and are read strictly (an unreadable Kea
-skips the tenant rather than reading as "no leases").
+overwrites a reservation or MAC that differs, in NetBox or in Kea's own host
+reservations — those are reported as conflicts instead. Leases, subnets
+(pools and host reservations) come from the tenant's OWN Kea when it has one,
+else from the shared Kea, and are read strictly (an unreadable Kea skips the
+tenant rather than reading as "no leases" or "no reservations"). Each strict
+read happens once per Kea spoke set per pass, however many tenants share it.
+A NetBox write that fails is not retried for an hour.
 
 Config: ``global_config.static_ip_reservations`` ``{enabled: false,
 interval: 900}``; off until an operator turns it on, since it writes to NetBox
@@ -80,6 +83,8 @@ _ARP_MAX_AGE = 2 * 3600
 _AGENT_CONCURRENCY = 8
 _AGENT_TIMEOUT = 15.0
 _MAX_WRITES_PER_PASS = 25
+# A NetBox write that failed is not retried for this long (kept in memory).
+_WRITE_BACKOFF = 3600
 # A normalised MAC: six hex octets.
 _MAC_RE = re.compile(r"[0-9a-f]{2}(:[0-9a-f]{2}){5}")
 
@@ -162,6 +167,40 @@ def _kea_pools(kea_subnets: Optional[Iterable[Dict[str, Any]]]) -> List[Tuple[An
     return sorted(out, key=lambda s: -s[0].prefixlen)
 
 
+def _kea_reservations(kea_subnets: Optional[Iterable[Dict[str, Any]]]
+                      ) -> Optional[Tuple[Dict[str, set], Dict[str, set]]]:
+    """Kea host reservations as ``({ip: {mac}}, {mac: {ip}})``.
+
+    LM's Kea keeps every host reservation inline in its subnet4 config (no
+    hosts database), and ``KeaManager.build`` writes ``reservations`` only
+    for a subnet that has some, so a missing key means none (as
+    ``KeaManager.list_reservations`` reads it). No subnet read, or a
+    ``reservations`` value that is not a list, means unknown: the whole view
+    is None and the caller reserves nothing. A reservation keyed by something other than a MAC
+    (client-id, DUID) indexes its IP with an empty MAC, so the IP still
+    counts as taken.
+    """
+    # No subnet read → unknown.
+    if kea_subnets is None:
+        return None
+    by_ip: Dict[str, set] = {}
+    by_mac: Dict[str, set] = {}
+    for sub in kea_subnets:
+        # A missing key is none; anything but a list is unknown.
+        res = sub.get("reservations", []) if isinstance(sub, dict) else None
+        if not isinstance(res, list):
+            return None
+        # Index by IP (any key) and by MAC.
+        for r in res:
+            ip = _host((r or {}).get("ip-address"))
+            mac = norm_mac((r or {}).get("hw-address")) or ""
+            if ip:
+                by_ip.setdefault(ip, set()).add(mac)
+            if mac and ip:
+                by_mac.setdefault(mac, set()).add(ip)
+    return by_ip, by_mac
+
+
 def plan_static_reservations(pfx_data: Dict[str, Any], ips_data: Dict[str, Any],
                              leases: Iterable[Dict[str, Any]],
                              candidates: Iterable[Dict[str, Any]],
@@ -175,9 +214,20 @@ def plan_static_reservations(pfx_data: Dict[str, Any], ips_data: Dict[str, Any],
         leases: Kea v4 lease dicts (``ip-address``, ``hw-address``).
         candidates: ``{ip, mac, mode, source}``; ``mode`` is ``static``,
             ``dhcp`` (agent saw a lease: veto) or ``unknown``.
-        kea_subnets: Kea v4 subnets (``subnet``, ``pools``) from the same
-            Kea; a sweep-only candidate must sit outside every pool. None →
-            pools unknown, so sweep-only candidates are skipped.
+        kea_subnets: Kea v4 subnets (``subnet``, ``pools``,
+            ``reservations``) from the same Kea, as ``config-get`` returns
+            them; LM keeps all host reservations there and omits the key for
+            a subnet with none. They veto an IP reserved for another MAC and
+            a MAC reserved at another IP; a sweep-only candidate must also
+            sit outside every pool. None (no read), or a ``reservations``
+            value that is not a list, means Kea's reservations are unknown,
+            so nothing is reserved (fail closed).
+
+    Ambiguity rule: a MAC seen at several candidate IPs is skipped, except
+    that addresses an agent reports as ``unknown`` (a secondary or VIP on the
+    same NIC) are left out of that count. Such an address is never reserved
+    itself, so it must not stop the host's static primary from being
+    reserved.
 
     Returns:
         ``{"reserve": [{ip_id, ip, mac, source}], "conflicts": [{ip, mac,
@@ -188,6 +238,7 @@ def plan_static_reservations(pfx_data: Dict[str, Any], ips_data: Dict[str, Any],
     skipped: List[Dict[str, Any]] = []
     scopes = _scopes(pfx_data)
     kea_nets = _kea_pools(kea_subnets)
+    kea_res = _kea_reservations(kea_subnets)
 
     # Index NetBox IPs by host address; existing reservations by MAC.
     nb_rows: Dict[str, List[Dict[str, Any]]] = {}
@@ -304,6 +355,26 @@ def plan_static_reservations(pfx_data: Dict[str, Any], ips_data: Dict[str, Any],
         if reserved_mac_at.get(mac, ip) != ip:
             conflicts.append({"ip": ip, "mac": mac,
                               "reason": "mac reserved at another address"})
+            continue
+        # Step 5b: the same checks against host reservations held in Kea
+        # itself; unknown Kea reservations or subnet → wait (fail closed).
+        if kea_res is None:
+            skipped.append({"ip": ip, "reason": "kea reservations unknown"})
+            continue
+        kea_ip_macs, kea_mac_ips = kea_res
+        if not any(addr in k[0] for k in kea_nets):
+            skipped.append({"ip": ip, "reason": "not in a kea subnet"})
+            continue
+        if ip in kea_ip_macs:
+            if kea_ip_macs[ip] == {mac}:
+                skipped.append({"ip": ip, "reason": "already reserved"})
+            else:
+                conflicts.append({"ip": ip, "mac": mac,
+                                  "reason": "reserved in kea for another mac"})
+            continue
+        if kea_mac_ips.get(mac):
+            conflicts.append({"ip": ip, "mac": mac,
+                              "reason": "mac reserved in kea at another address"})
             continue
         # Step 6: any Kea lease for the IP or the MAC means not static.
         lease_macs = lease_macs_by_ip.get(ip)
@@ -445,6 +516,23 @@ async def _strict_read(hub, spokes: List[str], command: str,
     return rows
 
 
+async def _cached_strict_read(cache: Dict[Tuple, Any], hub, spokes: List[str],
+                              command: str, key: str) -> Optional[List[Dict[str, Any]]]:
+    """``_strict_read`` once per (command, spoke set) per pass.
+
+    Tenants on the same shared Kea would otherwise each pull the same full
+    lease and subnet lists (fleet rule 4.8). The planner already receives
+    the whole list from the tenant's Kea and matches only its own candidate
+    IPs and MACs against it, so reusing the rows changes nothing a tenant
+    sees. A failed read (None) is cached too: that Kea stays unreadable for
+    the rest of the pass.
+    """
+    ck = (command, tuple(sorted(spokes)))
+    if ck not in cache:
+        cache[ck] = await _strict_read(hub, spokes, command, key)
+    return cache[ck]
+
+
 def _tenant_kea_spokes(hub, tid: str, key: str, groups: Dict[str, Any]) -> List[str]:
     """The Kea spokes whose leases count for ``tid``: its OWN Kea when it has
     one (even if offline → none), else the shared/unbound Kea (fleet "own
@@ -508,6 +596,15 @@ async def _run_pass(hub, now: float) -> Dict[str, Any]:
     writes = 0
     # NetBox reads still current after this pass, handed to the sync.
     reads: Dict[str, Any] = {}
+    # Strict Kea reads, once per spoke set for this pass (shared Kea).
+    kea_cache: Dict[Tuple, Any] = {}
+    # (tenant, ip) → when its last NetBox write failed; in memory only.
+    failed_writes = getattr(hub, "_static_res_failed", None)
+    if failed_writes is None:
+        failed_writes = hub._static_res_failed = {}
+    # Forget failures older than the backoff so the map stays small.
+    for k in [k for k, at in failed_writes.items() if now - at >= _WRITE_BACKOFF]:
+        del failed_writes[k]
     for tid, candidates in sorted(by_tid.items()):
         # The tenant's NetBox scope; no mapping → never touch it.
         scope = netbox_tenant_scope(hub, tid)
@@ -521,16 +618,18 @@ async def _run_pass(hub, now: float) -> Dict[str, Any]:
             if tenant_has_own_spoke(hub, tid, "dhcp"):
                 totals["errors"].append({"tenant": tid, "error": "own kea not connected"})
             continue
-        leases = await _strict_read(hub, spokes, "DHCP_LIST_LEASES", "leases")
+        leases = await _cached_strict_read(kea_cache, hub, spokes,
+                                           "DHCP_LIST_LEASES", "leases")
         if leases is None:
             totals["errors"].append({"tenant": tid, "error": "no strict kea lease read"})
             continue
-        # Pools are only needed for sweep-only candidates; unknown → those skip.
-        kea_subnets = None
-        if any(c.get("source") == "sweep" for c in candidates):
-            kea_subnets = await _strict_read(hub, spokes, "DHCP_LIST_SUBNETS", "subnets")
-            if kea_subnets is None:
-                totals["errors"].append({"tenant": tid, "error": "no strict kea subnet read"})
+        # Subnets carry Kea's own host reservations (and the pools for
+        # sweep-only hosts); without them nothing can be reserved safely.
+        kea_subnets = await _cached_strict_read(kea_cache, hub, spokes,
+                                                "DHCP_LIST_SUBNETS", "subnets")
+        if kea_subnets is None:
+            totals["errors"].append({"tenant": tid, "error": "no strict kea subnet read"})
+            continue
         try:
             pfx_data, ips_data = await hub._netbox_prefixes_and_ips(filters, spoke=ipam)
         except Exception as e:  # noqa: BLE001
@@ -557,6 +656,12 @@ async def _run_pass(hub, now: float) -> Dict[str, Any]:
                 continue
             if r.get("ip_id") is None:
                 continue
+            # A recent failed write waits out the backoff instead of
+            # hammering NetBox every pass.
+            if now - failed_writes.get((tid, r["ip"]), float("-inf")) < _WRITE_BACKOFF:
+                totals["errors"].append({"tenant": tid, "ip": r["ip"],
+                                         "error": "earlier write failed; retry after backoff"})
+                continue
             writes += 1
             # A write (even a failed one) may change NetBox: the sync re-reads.
             reads.pop(read_key, None)
@@ -569,9 +674,11 @@ async def _run_pass(hub, now: float) -> Dict[str, Any]:
             except Exception as e:  # noqa: BLE001
                 res = {"status": "ERROR", "message": str(e)}
             if not isinstance(res, dict) or res.get("status") != "SUCCESS":
+                failed_writes[(tid, r["ip"])] = now
                 totals["errors"].append({"tenant": tid, "ip": r["ip"],
                                          "error": (res or {}).get("message", "write failed")})
                 continue
+            failed_writes.pop((tid, r["ip"]), None)
             logger.info("static reservations: reserved %s for %s (%s)",
                         r["ip"], r["mac"], r["source"])
             totals["reserved"].append({"tenant": tid, "ip": r["ip"],

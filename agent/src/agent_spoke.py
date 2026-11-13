@@ -634,14 +634,15 @@ def _local_service_addresses() -> list:
 
 # Container/virtual interfaces whose addresses never belong in a LAN DHCP
 # scope. Virtual link kinds are skipped by type (``ip -d`` linkinfo); NAT
-# bridges look like any bridge, so they are skipped by their usual names. A
-# plain LAN bridge (e.g. Proxmox vmbr0) carries the host's own address and is
-# kept. The hub also refuses any address outside a NetBox DHCP scope.
+# bridges look like any bridge, so only bridge names that container and VM
+# tools create are skipped (tun/tap/wg/veth links are already caught by kind
+# or by not being Ethernet). A plain LAN bridge (e.g. Proxmox vmbr0) carries
+# the host's own address and is kept. A skipped interface only means a missed
+# reservation; the hub also refuses any address outside a NetBox DHCP scope.
 _HOST_ADDRESSING_SKIP_KINDS = {"veth", "tun", "tap", "wireguard", "vxlan", "dummy",
                                "macvlan", "macvtap", "ipvlan", "ipip", "gre", "sit"}
-_HOST_ADDRESSING_SKIP_IFACES = ("docker", "veth", "virbr", "br-", "cni", "flannel",
-                                "cali", "tun", "tap", "wg", "podman", "cbr", "lxc",
-                                "lxdbr", "incusbr", "cilium", "weave", "kube", "zt")
+_HOST_ADDRESSING_SKIP_IFACES = ("docker", "virbr", "br-", "cni", "podman", "cbr",
+                                "lxcbr", "lxdbr", "incusbr", "weave", "kube-")
 
 
 def _host_addressing() -> list:

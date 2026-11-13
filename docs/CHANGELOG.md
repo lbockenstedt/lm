@@ -19,8 +19,8 @@ CI/tooling changes are omitted unless they change what an operator sees.
   Kea lease and an address outside the Kea pools, inside a DHCP-enabled
   prefix, LM marks its NetBox IP as a DHCP
   reservation so Kea never hands that address to another client. Existing
-  reservations for another MAC are never overwritten; they are reported as
-  conflicts in the sync status. See
+  reservations for another MAC, in NetBox or directly in Kea, are never
+  overwritten; they are reported as conflicts in the sync status. See
   [dhcp.md](dhcp.md#static-hosts-become-reservations).
 
 ### Firewalls
