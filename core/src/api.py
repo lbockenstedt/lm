@@ -1711,6 +1711,7 @@ def create_app(hub):
                 path.startswith("/api/pxmx/agents/")      # revoke/rename/config/cs-command/delete/decommission/restore/ack-change
                 or path == "/api/pxmx/agent-install-cmd"  # reveals the add-a-server install command
                 or path == "/api/pxmx/server"             # delete a hypervisor host
+                or path == "/api/pxmx/server/maintenance" # HA maintenance on a hypervisor node
             )
             if _pxmx_admin_only and not _is_admin(sess):
                 return JSONResponse(status_code=403,
