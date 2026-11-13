@@ -262,7 +262,7 @@ def test_pass_skips_when_lease_read_is_not_strict():
         hub = _Hub(agent_addresses=_agent_static(), leases_reply=reply)
         st = _run(hub)
         assert hub.writes() == []
-        assert st["errors"] and st["status"] == "error"
+        assert st["errors"] and st["status"] == "degraded"
 
 
 def test_pass_dynamic_lease_and_conflict_write_nothing():
@@ -495,7 +495,7 @@ def test_a_failed_agent_poll_holds_back_its_tenants_sweep_hosts():
         st = _run(hub, now)
         assert hub.writes() == []
         assert st["errors"] == [{"tenant": "t-b", "error": "agent poll failed; tenant waits"}]
-        assert st["status"] == "error"
+        assert st["status"] == "degraded"
     # An agent too old to know the command is like a host with no agent.
     hub = _sweep_hub_with_agent_reply(
         {"status": "ERROR", "message": "Unknown agent command 'GET_HOST_ADDRESSING'. "}, now)
@@ -526,7 +526,7 @@ def test_a_failed_kea_subnet_read_is_an_error_not_a_quiet_skip():
                subnets_reply={"status": "ERROR", "message": "kea down"})
     st = _run(hub, now)
     assert hub.writes() == []
-    assert st["status"] == "error"
+    assert st["status"] == "degraded"
     assert st["errors"] == [{"tenant": "t-b", "error": "no strict kea subnet read"}]
 
 
@@ -536,12 +536,12 @@ def test_a_tenant_whose_own_kea_is_offline_is_an_error(monkeypatch):
     hub = _Hub(agent_addresses=_agent_static())
     monkeypatch.setattr(sir, "tenant_has_own_spoke", lambda h, t, m: True)
     st = _run(hub)
-    assert st["status"] == "error"
+    assert st["status"] == "degraded"
     assert st["errors"] == [{"tenant": "t-a", "error": "own kea not connected"}]
     # No Kea of its own and none shared: nothing to protect, not an error.
     monkeypatch.setattr(sir, "tenant_has_own_spoke", lambda h, t, m: False)
     st = _run(_Hub(agent_addresses=_agent_static()))
-    assert st["status"] == "ok" and st["errors"] == []
+    assert st["status"] == "skipped" and st["errors"] == []
 
 
 def test_a_failed_agent_holds_back_its_tenants_other_agents_too():
@@ -672,3 +672,22 @@ def test_a_subnet_without_a_reservations_key_has_none():
              "reservations": [{"ip-address": "10.30.0.5", "hw-address": MAC_A}]}
     plan = _plan(_pfx(), rows, [], [_static("10.20.0.50")], [bare, other])
     assert _reasons(plan, "conflicts") == {"10.20.0.50": "mac reserved in kea at another address"}
+
+
+def test_a_declined_lease_without_a_mac_is_its_own_conflict():
+    """Kea keeps a declined address as a lease with an empty hw-address: still
+    no write, but not reported as another client's lease."""
+    rows = _ips(_ip("10.20.0.50/24", 7))
+    declined = [{"ip-address": "10.20.0.50", "hw-address": "", "state": 1}]
+    plan = _plan(_pfx(), rows, declined, [_static("10.20.0.50")])
+    assert plan["reserve"] == []
+    assert _reasons(plan, "conflicts") == {"10.20.0.50": "address declined in kea"}
+
+
+def test_a_strict_reply_whose_rows_are_not_a_list_is_unknown():
+    for rows in (None, "x", {"10.20.0.60": MAC_B}):
+        hub = _Hub(agent_addresses=_agent_static(), leases_reply={
+            "status": "SUCCESS", "strict": True, "leases": rows})
+        st = _run(hub)
+        assert hub.writes() == []
+        assert st["errors"] == [{"tenant": "t-a", "error": "no strict kea lease read"}]

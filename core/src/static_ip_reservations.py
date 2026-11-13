@@ -381,6 +381,10 @@ def plan_static_reservations(pfx_data: Dict[str, Any], ips_data: Dict[str, Any],
         if lease_macs:
             if lease_macs == {mac}:
                 skipped.append({"ip": ip, "reason": "dynamic lease"})
+            elif "" in lease_macs:
+                # A declined (or parked) lease has no MAC: not another client.
+                conflicts.append({"ip": ip, "mac": mac,
+                                  "reason": "address declined in kea"})
             else:
                 conflicts.append({"ip": ip, "mac": mac,
                                   "reason": "leased to another mac"})
@@ -585,7 +589,8 @@ async def _run_pass(hub, now: float) -> Dict[str, Any]:
                          for t in sorted(failed_tids) if not tenant_is_shared(t)]}
     if not by_tid:
         return hub._record_status("static_reservations",
-                                  status="error" if totals["errors"] else "ok", **totals)
+                                  status=_pass_status(set(), totals["errors"]),
+                                  clean=[], **totals)
 
     # Step 2: Kea DHCP spokes grouped by the tenant scope they serve.
     groups, _skipped = hub._scope_groups(hub._get_dhcp_spokes())
@@ -605,6 +610,8 @@ async def _run_pass(hub, now: float) -> Dict[str, Any]:
     # Forget failures older than the backoff so the map stays small.
     for k in [k for k, at in failed_writes.items() if now - at >= _WRITE_BACKOFF]:
         del failed_writes[k]
+    # Tenants that reached the planner this pass.
+    evaluated = set()
     for tid, candidates in sorted(by_tid.items()):
         # The tenant's NetBox scope; no mapping → never touch it.
         scope = netbox_tenant_scope(hub, tid)
@@ -638,6 +645,7 @@ async def _run_pass(hub, now: float) -> Dict[str, Any]:
         read_key = hub._filters_key(filters)
         reads[read_key] = (pfx_data, ips_data)
         plan = plan_static_reservations(pfx_data, ips_data, leases, candidates, kea_subnets)
+        evaluated.add(tid)
         totals["tenants"] += 1
         totals["skipped"] += len(plan["skipped"])
         # Step 3: log MAC vetoes; report conflicts, never resolve them automatically.
@@ -651,7 +659,7 @@ async def _run_pass(hub, now: float) -> Dict[str, Any]:
         # Step 4: write the reservations, capped per pass.
         for r in plan["reserve"]:
             # Over the cap: counted, and written by a later pass.
-            if writes >= _MAX_WRITES_PER_PASS or not ipam:
+            if writes >= _MAX_WRITES_PER_PASS:
                 totals["deferred"] += 1
                 continue
             if r.get("ip_id") is None:
@@ -688,8 +696,19 @@ async def _run_pass(hub, now: float) -> Dict[str, Any]:
     hub._hand_over_netbox_reads(reads)
     if totals["reserved"]:
         hub.refresh_module_cache("netbox_ips")
+    clean = sorted(evaluated - {e.get("tenant") for e in totals["errors"]})
     return hub._record_status("static_reservations",
-                              status="error" if totals["errors"] else "ok", **totals)
+                              status=_pass_status(clean, totals["errors"]),
+                              clean=clean, **totals)
+
+
+def _pass_status(clean, errors) -> str:
+    """Pass status: ``ok`` only when some tenant was evaluated without error
+    (``error`` if others failed); with none, ``degraded`` when tenants
+    errored and ``skipped`` when there was nothing to evaluate."""
+    if clean:
+        return "error" if errors else "ok"
+    return "degraded" if errors else "skipped"
 
 
 def status_for_tenant(status: Dict[str, Any], tid: Optional[str]) -> Dict[str, Any]:
@@ -698,16 +717,26 @@ def status_for_tenant(status: Dict[str, Any], tid: Optional[str]) -> Dict[str, A
     The pass is fleet-wide, so its reserved/conflict/error lists name every
     tenant's IPs and MACs. A viewer sees only ``tid``'s entries; ``tid`` None
     or ``""`` (a global admin who has not switched into a tenant, or a user
-    with no tenant) sees none. The fleet-wide counters are left out and
-    ``status`` reflects only the viewer's own errors.
+    with no tenant) sees none, and only the pass-wide ``status`` word
+    (``ok``/``error``/``degraded``/``skipped``), which names no tenant. The
+    fleet-wide counters and the list of clean tenants are left out. A
+    tenant's ``status`` is its own: ``error`` with its own errors, ``ok``
+    when it was evaluated cleanly, else ``skipped``.
     """
     if not isinstance(status, dict):
         return status
-    # Keep only this tenant's rows; drop counters that span tenants.
-    out = {k: v for k, v in status.items() if k not in ("tenants", "skipped", "deferred")}
+    # Keep only this tenant's rows; drop counters and lists that span tenants.
+    out = {k: v for k, v in status.items()
+           if k not in ("tenants", "skipped", "deferred", "clean")}
     for key in ("reserved", "conflicts", "errors"):
         out[key] = [r for r in status.get(key) or []
                     if isinstance(r, dict) and tid and same_tenant(r.get("tenant"), tid)]
-    if out.get("status") in ("ok", "error"):
-        out["status"] = "error" if out["errors"] else "ok"
+    # A tenant viewer's status comes from its own outcome only.
+    if tid and out.get("status") in ("ok", "error", "degraded", "skipped"):
+        if out["errors"]:
+            out["status"] = "error"
+        elif any(same_tenant(t, tid) for t in status.get("clean") or []):
+            out["status"] = "ok"
+        else:
+            out["status"] = "skipped"
     return out

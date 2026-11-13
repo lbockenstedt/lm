@@ -104,3 +104,19 @@ def test_subnet_reads_are_strict_on_request(monkeypatch):
     good = DhcpWorkerOps(_mgr(monkeypatch)).list_subnets({"strict": True})
     assert good["status"] == "SUCCESS" and good["strict"] is True and good["subnets"]
     assert "strict" not in DhcpWorkerOps(_mgr(monkeypatch)).list_subnets({})
+
+
+def test_ha_strict_needs_a_real_list_from_every_node():
+    """A strict SUCCESS reply whose list is missing, null or not a list is a
+    failed node, not an empty Kea."""
+    ok = {"status": "SUCCESS", "leases": [LEASE], "strict": True}
+    for bad in ({"status": "SUCCESS", "strict": True},
+                {"status": "SUCCESS", "strict": True, "leases": None},
+                {"status": "SUCCESS", "strict": True, "leases": "x"}):
+        reply = _ha({"a": ok, "b": bad}, {"strict": True})
+        assert reply["strict"] is False
+        assert reply["member_errors"] == {"b": "no leases list"}
+        assert reply["leases"] == [LEASE]
+    # Both nodes with an honest empty list stay strict.
+    empty = {"status": "SUCCESS", "leases": [], "strict": True}
+    assert _ha({"a": empty, "b": empty}, {"strict": True})["strict"] is True

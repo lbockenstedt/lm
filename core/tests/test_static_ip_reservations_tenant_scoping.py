@@ -9,7 +9,7 @@ into it). All data is RFC 1918 example data.
 from static_ip_reservations import status_for_tenant
 from test_static_ip_reservations import _Hub, _agent_static, _run
 
-_STATUS = {"status": "ok", "tenants": 2, "skipped": 3,
+_STATUS = {"status": "error", "tenants": 2, "skipped": 3, "clean": ["t-b"],
            "reserved": [{"tenant": "t-a", "ip": "10.20.0.50"},
                         {"tenant": "t-b", "ip": "10.20.0.51"}],
            "conflicts": [{"tenant": "t-b", "ip": "10.20.0.52"}],
@@ -28,7 +28,7 @@ def test_tenant_view_sees_only_its_own_rows_and_no_fleet_counters():
     view = status_for_tenant(_STATUS, "t-a")
     assert [r["ip"] for r in view["reserved"]] == ["10.20.0.50"]
     assert view["conflicts"] == [] and len(view["errors"]) == 1
-    assert "tenants" not in view and "skipped" not in view
+    assert "tenants" not in view and "skipped" not in view and "clean" not in view
 
 
 def test_tenant_status_reflects_only_its_own_errors():
@@ -76,3 +76,21 @@ def test_sync_status_route_needs_the_dhcp_right_to_show_rows():
     assert [r["ip"] for r in _sync_status_rows(with_right)] == ["10.20.0.50"]
     assert _sync_status_rows(without) == []
     assert _sync_status_rows({"is_admin": True, "permissions": {"admin": True}}) == []
+
+
+def test_pass_status_words_name_no_tenant():
+    """``ok`` needs a tenant evaluated without error; no tenants → skipped;
+    every tenant errored → degraded. A viewer's word is its own outcome; an
+    unswitched admin sees the pass-wide word and no tenant ids."""
+    hub = _Hub()
+    assert _run(hub)["status"] == "skipped"
+    hub = _Hub(agent_addresses=_agent_static(), leases_reply={"status": "ERROR"})
+    st = _run(hub)
+    assert st["status"] == "degraded" and st["clean"] == []
+    assert status_for_tenant(st, "t-a")["status"] == "error"
+    hub = _Hub(agent_addresses=_agent_static())
+    st = _run(hub)
+    assert st["status"] == "ok" and st["clean"] == ["t-a"]
+    admin = status_for_tenant(st, None)
+    assert admin["status"] == "ok" and "clean" not in admin
+    assert status_for_tenant(st, "t-b")["status"] == "skipped"

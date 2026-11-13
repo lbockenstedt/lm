@@ -1007,8 +1007,16 @@ class DHCPSpoke(BaseSpoke):
                 continue
             if not reply.get("strict"):
                 strict = False
+            # A strict answer must carry a real list; a missing or malformed
+            # one is a failed node, never "nothing here".
+            items = reply.get(list_key)
+            if not isinstance(items, list):
+                if payload.get("strict"):
+                    errors[member_id] = "no %s list" % list_key
+                    strict = False
+                continue
             # Deduplicate by address/subnet, or by full content when neither is present.
-            for item in reply.get(list_key) or []:
+            for item in items:
                 if isinstance(item, dict):
                     key = (item.get("ip") or item.get("ip-address")
                            or item.get("address") or item.get("subnet")
