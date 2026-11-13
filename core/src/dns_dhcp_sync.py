@@ -232,6 +232,25 @@ def apply_kea_leases(records: List[Dict[str, Any]], leases: List[Dict[str, Any]]
     return out
 
 
+def is_dhcp_scope(prefix: Dict[str, Any]) -> bool:
+    """Whether a NetBox prefix row becomes a Kea scope (see ``build_dhcp_payload``).
+
+    It needs a prefix value, a status other than ``container`` and a truthy
+    ``custom_fields.dhcp_enabled``.
+    """
+    # Rows without a prefix value are never scopes.
+    if not isinstance(prefix, dict) or not prefix.get("prefix"):
+        return False
+    # Aggregate/parent blocks are never scopes themselves.
+    status = prefix.get("status")
+    if isinstance(status, dict):
+        status = status.get("value")
+    if str(status or "").lower() == "container":
+        return False
+    # Only prefixes explicitly opted in with the checkbox.
+    return bool((prefix.get("custom_fields") or {}).get("dhcp_enabled"))
+
+
 def build_dhcp_payload(pfx_data: Dict[str, Any],
                        ips_data: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """NetBox prefixes + IPs → (subnets, reservations) Kea sync payload.
@@ -277,16 +296,12 @@ def build_dhcp_payload(pfx_data: Dict[str, Any],
     # Build one Kea subnet per eligible prefix.
     subnets: List[Dict[str, Any]] = []
     for p in (pfx_data.get("prefixes") or []):
-        # Skip prefixes with no prefix value.
-        prefix_str = p.get("prefix", "")
-        if not prefix_str:
+        # Skip prefixes that are not opted-in DHCP scopes.
+        if not is_dhcp_scope(p):
             continue
-        if (p.get("status") or "").lower() == "container":
-            continue  # aggregate/parent block — never a DHCP scope itself
+        prefix_str = p.get("prefix", "")
         # Custom fields hold the DHCP options.
         cf = p.get("custom_fields") or {}
-        if not cf.get("dhcp_enabled"):
-            continue  # not opted in — carve child prefixes with the checkbox on
         # Translate NetBox custom fields into the spoke's subnet shape.
         subnets.append({
             "subnet":              prefix_str,
@@ -929,6 +944,13 @@ class DnsDhcpSyncMixin:
                 logger.warning("DNS hook reconcile failed: %s", e)
             if not self._dds_cfg()["enabled"]:
                 return
+            # Mark statically addressed hosts as reservations first, so this
+            # tick's sync already pushes them to Kea.
+            from static_ip_reservations import reserve_static_hosts_once
+            try:
+                await reserve_static_hosts_once(self)
+            except Exception as e:  # noqa: BLE001 — never block the sync
+                logger.warning("static IP reservations pass failed: %s", e)
             # Single NetBox fetch + skip-if-unchanged (see
             # _sync_dns_dhcp_once). The manual /api/dns|dhcp/sync buttons
             # still call the per-side methods directly (they re-fetch,

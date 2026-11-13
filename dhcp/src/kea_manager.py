@@ -970,14 +970,16 @@ class KeaManager:
 
     # ── Lease queries ─────────────────────────────────────────────────
 
-    def list_leases(self, subnet: str = None) -> list:
+    def list_leases(self, subnet: str = None, strict: bool = False) -> list:
         """List active DHCPv4 leases.
 
         Args:
             subnet: Optional CIDR to filter by.
+            strict: Re-raise on failure instead of returning [], so a caller
+                can tell "no leases" from "could not read the lease database".
 
         Returns:
-            Kea lease dicts, or [] on failure.
+            Kea lease dicts, or [] on failure (non-strict only).
         """
         try:
             # ``lease4-get-all`` has no "all leases" sentinel value, and per
@@ -990,16 +992,22 @@ class KeaManager:
             # currently-configured subnet ID for "all", or the one matching
             # ``subnet`` when filtering.
             # Collect subnet ids: all, or only the one matching the filter.
-            kea_subnets = self.list_subnets()
+            # Strict reads the config directly; list_subnets() hides errors.
+            if strict:
+                kea_subnets = self.get_config().get("subnet4", []) or []
+            else:
+                kea_subnets = self.list_subnets()
             ids = [s["id"] for s in kea_subnets if "id" in s]
             if subnet:
                 ids = [s["id"] for s in kea_subnets if s.get("subnet") == subnet]
             # Fetch the leases.
             data = self._rpc("dhcp4", "lease4-get-all", {"subnets": ids})
             return data.get("leases", [])
-        # On failure, log it and return none.
+        # On failure, log it; re-raise only in strict mode.
         except Exception as e:
             logger.error("list_leases failed: %s", e)
+            if strict:
+                raise
             return []
 
     def delete_lease(self, ip: str) -> dict:

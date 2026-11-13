@@ -13,6 +13,7 @@ Covers the blockers fixed when extending ``_ROLE_MAP`` from 2 → 10 roles:
      packages a role needs (certbot + DNS-01 plugins for le).
 """
 import asyncio
+import json
 import importlib
 import sys
 import types
@@ -1047,3 +1048,40 @@ def test_agent_advertises_zabbix_server_capability(monkeypatch):
     assert AgentControlPlane._extra_auth_fields(object()).get("zabbix_server") is True
     monkeypatch.setattr(agent_spoke, "is_zabbix_web_host", lambda: False)
     assert "zabbix_server" not in AgentControlPlane._extra_auth_fields(object())
+
+
+def test_host_addressing_reports_static_dhcp_and_unknown(monkeypatch):
+    """GET_HOST_ADDRESSING: kernel "dynamic" = DHCP, permanent primary = static,
+    secondary (VIP) = unknown; loopback and container bridges are left out."""
+    rows = [
+        {"ifname": "lo", "link_type": "loopback", "address": "00:00:00:00:00:00",
+         "addr_info": [{"family": "inet", "local": "127.0.0.1", "scope": "host"}]},
+        {"ifname": "eth0", "link_type": "ether", "address": "02:00:00:00:00:0A",
+         "addr_info": [
+             {"family": "inet", "local": "10.20.0.50", "scope": "global"},
+             {"family": "inet", "local": "10.20.0.99", "scope": "global",
+              "secondary": True}]},
+        {"ifname": "eth1", "link_type": "ether", "address": "02:00:00:00:00:0b",
+         "addr_info": [{"family": "inet", "local": "10.30.0.7", "scope": "global",
+                        "dynamic": True, "valid_life_time": 3600}]},
+        {"ifname": "docker0", "link_type": "ether", "address": "02:00:00:00:00:0c",
+         "addr_info": [{"family": "inet", "local": "172.17.0.1", "scope": "global"}]},
+    ]
+    monkeypatch.setattr(
+        agent_spoke.subprocess, "run",
+        lambda *args, **kwargs: types.SimpleNamespace(
+            returncode=0, stdout=json.dumps(rows)))
+
+    assert agent_spoke._host_addressing() == [
+        {"ip": "10.20.0.50", "mac": "02:00:00:00:00:0a", "mode": "static",
+         "interface": "eth0"},
+        {"ip": "10.20.0.99", "mac": "02:00:00:00:00:0a", "mode": "unknown",
+         "interface": "eth0"},
+        {"ip": "10.30.0.7", "mac": "02:00:00:00:00:0b", "mode": "dhcp",
+         "interface": "eth1"},
+    ]
+    # A failing "ip" command reports nothing rather than guessing.
+    monkeypatch.setattr(
+        agent_spoke.subprocess, "run",
+        lambda *args, **kwargs: types.SimpleNamespace(returncode=1, stdout=""))
+    assert agent_spoke._host_addressing() == []

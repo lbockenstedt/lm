@@ -1003,9 +1003,21 @@ class DhcpWorkerOps:
         return {"status": "SUCCESS", "subnets": self.mgr.list_subnets()}
 
     def list_leases(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """``KEAW_LIST_LEASES`` — return DHCPv4 leases, optionally for one subnet."""
-        return {"status": "SUCCESS",
-                "leases": self.mgr.list_leases(data.get("subnet") or None)}
+        """``KEAW_LIST_LEASES`` — return DHCPv4 leases, optionally for one subnet.
+
+        With ``strict`` a failed read is an ERROR (not an empty list) and the
+        reply echoes ``strict: True`` so the caller knows it was honoured.
+        """
+        # Non-strict keeps the old "empty list on failure" behaviour.
+        subnet = data.get("subnet") or None
+        if not data.get("strict"):
+            return {"status": "SUCCESS", "leases": self.mgr.list_leases(subnet)}
+        # Strict: surface a failed read as an ERROR.
+        try:
+            leases = self.mgr.list_leases(subnet, strict=True)
+        except Exception as e:  # noqa: BLE001
+            return {"status": "ERROR", "message": f"lease read failed: {e}"}
+        return {"status": "SUCCESS", "leases": leases, "strict": True}
 
     def list_reservations(self, _data: Dict[str, Any]) -> Dict[str, Any]:
         """``KEAW_LIST_RES`` — return the DHCPv4 host reservations on this node."""

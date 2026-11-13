@@ -12,6 +12,16 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ## Week of 2026-11-09
 
+### DHCP
+
+- **Static hosts are reserved automatically.** When a tenant's agent reports
+  a static address, or the network sweep sees a host with a live MAC and no
+  Kea lease, inside a DHCP-enabled prefix, LM marks its NetBox IP as a DHCP
+  reservation so Kea never hands that address to another client. Existing
+  reservations for another MAC are never overwritten; they are reported as
+  conflicts in the sync status. See
+  [dhcp.md](dhcp.md#static-hosts-become-reservations).
+
 ### Firewalls
 
 - **Firewall performance history.** Firewalls → Overview now has History

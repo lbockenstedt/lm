@@ -991,11 +991,17 @@ class DHCPSpoke(BaseSpoke):
         merged: List[Any] = []
         seen = set()
         errors: Dict[str, str] = {}
+        results = fan.get("results") or {}
+        # Strict holds only when asked for and every node honoured it.
+        strict = bool(payload.get("strict")) and bool(results)
         # Record failed nodes and skip them.
-        for member_id, reply in (fan.get("results") or {}).items():
+        for member_id, reply in results.items():
             if not isinstance(reply, dict) or reply.get("status") != "SUCCESS":
                 errors[member_id] = (reply or {}).get("message") or "no response"
+                strict = False
                 continue
+            if not reply.get("strict"):
+                strict = False
             # Deduplicate by address/subnet, or by full content when neither is present.
             for item in reply.get(list_key) or []:
                 if isinstance(item, dict):
@@ -1008,8 +1014,11 @@ class DHCPSpoke(BaseSpoke):
                     continue
                 seen.add(key)
                 merged.append(item)
-        return {"status": "SUCCESS", list_key: merged, "cluster": True,
-                "member_errors": errors}
+        out = {"status": "SUCCESS", list_key: merged, "cluster": True,
+               "member_errors": errors}
+        if payload.get("strict"):
+            out["strict"] = strict
+        return out
 
     async def _ha_reservation(self, cmd: str, data: Dict[str, Any]) -> Dict[str, Any]:
         """Reservation CRUD in HA mode = re-render + re-apply BOTH nodes.
@@ -1275,8 +1284,10 @@ class DHCPSpoke(BaseSpoke):
             if cmd == "DHCP_LIST_SUBNETS":
                 return await self._ha_list("KEAW_LIST_SUBNETS", {}, "subnets")
             if cmd == "DHCP_LIST_LEASES":
-                return await self._ha_list("KEAW_LIST_LEASES",
-                                           {"subnet": data.get("subnet")}, "leases")
+                return await self._ha_list(
+                    "KEAW_LIST_LEASES",
+                    {"subnet": data.get("subnet"), "strict": bool(data.get("strict"))},
+                    "leases")
             # Delete a v4 lease on every node.
             if cmd == "DHCP_DEL_LEASE":
                 ip = data.get("ip") or data.get("ip-address")
@@ -1341,8 +1352,16 @@ class DHCPSpoke(BaseSpoke):
 
         if cmd == "DHCP_LIST_LEASES":
             subnet = data.get("subnet")
-            leases = await asyncio.to_thread(self.mgr.list_leases, subnet)
-            return {"status": "SUCCESS", "leases": leases}
+            # Non-strict: an unreadable Kea shows as an empty list (old behaviour).
+            if not data.get("strict"):
+                leases = await asyncio.to_thread(self.mgr.list_leases, subnet)
+                return {"status": "SUCCESS", "leases": leases}
+            # Strict: a failed read is an ERROR; echo strict so callers know it was honoured.
+            try:
+                leases = await asyncio.to_thread(self.mgr.list_leases, subnet, True)
+            except Exception as e:  # noqa: BLE001
+                return {"status": "ERROR", "message": f"lease read failed: {e}"}
+            return {"status": "SUCCESS", "leases": leases, "strict": True}
 
         # Delete one v4 lease.
         if cmd == "DHCP_DEL_LEASE":
