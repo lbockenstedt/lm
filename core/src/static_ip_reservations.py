@@ -583,12 +583,12 @@ def status_for_tenant(status: Dict[str, Any], tid: Optional[str]) -> Dict[str, A
     """The ``static_reservations`` status as tenant ``tid`` may see it.
 
     The pass is fleet-wide, so its reserved/conflict/error lists name every
-    tenant's IPs and MACs. ``tid`` None (a global admin who has not switched
-    into a tenant) sees it all; anyone else sees only ``tid``'s entries (none
-    for ``""``), the fleet-wide counters are left out and ``status`` reflects
-    only the viewer's own errors.
+    tenant's IPs and MACs. A viewer sees only ``tid``'s entries; ``tid`` None
+    or ``""`` (a global admin who has not switched into a tenant, or a user
+    with no tenant) sees none. The fleet-wide counters are left out and
+    ``status`` reflects only the viewer's own errors.
     """
-    if tid is None or not isinstance(status, dict):
+    if not isinstance(status, dict):
         return status
     # Keep only this tenant's rows; drop counters that span tenants.
     out = {k: v for k, v in status.items() if k not in ("tenants", "skipped")}

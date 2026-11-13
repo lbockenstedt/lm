@@ -1740,8 +1740,8 @@ def register(app, hub, ctx):
         """Last-run status + config for the NetBox→Unbound/Kea auto-sync loop
         (fuels the DNS/DHCP status tiles). Read-only, authed (under /api/).
         ``static_reservations`` lists every tenant's IPs and MACs, so it is cut
-        down to the caller's effective tenant; only a global admin who has
-        not switched into a tenant sees all of it. This path is outside the
+        down to the caller's effective tenant (a global admin sees a tenant's
+        rows only after switching into it). This path is outside the
         ``/api/dhcp/`` gate, so a user without the ``dhcp`` right sees no rows."""
         from static_ip_reservations import status_for_tenant
         hub = app.state.hub
@@ -1753,7 +1753,7 @@ def register(app, hub, ctx):
         if "static_reservations" in status:
             sess = _session_user(request)
             tid = _effective_tenant(request, tenant)
-            if (tid is None and not _is_admin(sess)) or not access.has_module_access(sess, "dhcp"):
+            if not access.has_module_access(sess, "dhcp"):
                 tid = ""
             status["static_reservations"] = status_for_tenant(status["static_reservations"], tid)
         # Last-run status plus the effective settings.

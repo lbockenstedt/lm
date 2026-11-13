@@ -603,11 +603,11 @@ async function loadStaticResConfig() {
 
 // Save the card's on/off switch and interval (minutes → seconds) into global_config.
 async function saveStaticResConfig() {
-    const r0 = await setupFetch('/setup/config');
-    const prev = r0.ok ? (((await r0.json()).global_config || {}).static_ip_reservations || {}) : {};
     const enabled = !!document.getElementById('static-res-enabled')?.checked;
     const minutes = Math.max(5, parseInt(document.getElementById('static-res-interval')?.value, 10) || 15);
     try {
+        const r0 = await setupFetch('/setup/config');
+        const prev = r0.ok ? (((await r0.json()).global_config || {}).static_ip_reservations || {}) : {};
         const r = await setupFetch('/setup/config', {
             method: 'POST',
             body: JSON.stringify({ config: { static_ip_reservations: { ...prev, enabled, interval: minutes * 60 } } })

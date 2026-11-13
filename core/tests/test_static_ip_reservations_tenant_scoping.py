@@ -2,8 +2,8 @@
 
 The pass is fleet-wide, so these check it never reads or writes outside a
 tenant's own NetBox scope, and that its status shows each viewer only their
-own tenant's rows (a global admin sees everything only before switching into
-a tenant). All data is RFC 1918 example data.
+own tenant's rows (a global admin sees a tenant's rows only after switching
+into it). All data is RFC 1918 example data.
 """
 
 from static_ip_reservations import status_for_tenant
@@ -16,8 +16,10 @@ _STATUS = {"status": "ok", "tenants": 2, "skipped": 3,
            "errors": [{"tenant": "t-a", "error": "no strict kea lease read"}]}
 
 
-def test_global_admin_without_a_tenant_sees_every_tenant():
-    assert status_for_tenant(_STATUS, None) == _STATUS
+def test_global_admin_without_a_tenant_sees_no_tenant_rows():
+    view = status_for_tenant(_STATUS, None)
+    assert view["reserved"] == view["conflicts"] == view["errors"] == []
+    assert "tenants" not in view
 
 
 def test_tenant_view_sees_only_its_own_rows_and_no_fleet_counters():
@@ -73,4 +75,4 @@ def test_sync_status_route_needs_the_dhcp_right_to_show_rows():
     without = {"tenant_id": "t-a", "permissions": {"nw": True}}
     assert [r["ip"] for r in _sync_status_rows(with_right)] == ["10.20.0.50"]
     assert _sync_status_rows(without) == []
-    assert len(_sync_status_rows({"is_admin": True, "permissions": {"admin": True}})) == 2
+    assert _sync_status_rows({"is_admin": True, "permissions": {"admin": True}}) == []
