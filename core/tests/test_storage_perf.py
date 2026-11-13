@@ -203,3 +203,32 @@ def test_firewall_history_falls_back_when_the_spoke_lacks_the_command(monkeypatc
     now = int(__import__("time").time())
     body = client.get(f"/api/firewall/fw-1/performance/history?start={now - 3600}&end={now}").json()
     assert body["source"] == "hub" and len(body["data"]) == 1
+
+
+def test_spoke_history_gaps_are_filled_from_the_hub_copy(monkeypatch):
+    """A spoke that lost buckets (restart before a save, or its file
+    overwritten) still shows the full range: the hub's copy fills the gap,
+    and the spoke's own row wins a bucket both have."""
+    now = (int(__import__("time").time()) // 300) * 300
+    reply = {"status": "SUCCESS", "data": [{"ts": now - 300, "samples": 5, "metrics": {"x": 1}}]}
+    client, hub = _fw_route_app(monkeypatch, reply)
+    hub.storage_perf.add("opnsense", [_sample("fw-1", now - 3000, 3)])
+    for t in list(hub.storage_perf._file._tasks):
+        t.cancel()
+    body = client.get(f"/api/firewall/fw-1/performance/history?start={now - 3600}&end={now}").json()
+    assert body["source"] == "spoke"
+    assert [r["ts"] for r in body["data"]] == [now - 3000, now - 300]
+    assert body["data"][1]["metrics"] == {"x": 1}
+
+
+def test_truenas_spoke_history_gaps_are_filled_from_the_hub_copy(monkeypatch):
+    import access
+    monkeypatch.setattr(access, "is_admin", lambda s: True)
+    client, hub = _route_app(connected=True)
+    now = (int(__import__("time").time()) // 300) * 300
+    hub.storage_perf.add("truenas", [_sample("a1", now - 3000, 7)])
+    for t in list(hub.storage_perf._file._tasks):
+        t.cancel()
+    body = client.get(f"/api/truenas/a1/performance/history?start={now - 3600}&end={now}").json()
+    assert body["source"] == "spoke"
+    assert [r["ts"] for r in body["data"]] == [1, now - 3000]

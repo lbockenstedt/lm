@@ -97,6 +97,35 @@ def test_load_role_class_resolves_relative_import_without_init(tmp_path, monkeyp
     sys.modules.pop("lm_role_fake", None)
 
 
+def test_load_role_class_logs_a_module_borrowed_from_another_role(tmp_path, monkeypatch, caplog):
+    """truenas and opnsense both had src/perf_store.py; hosted by one agent,
+    the second role silently got the first one's store (and its data file)."""
+    first, second = tmp_path / "first", tmp_path / "second"
+    for d in (first, second):
+        d.mkdir()
+        (d / "shared_store.py").write_text(f"WHERE = {d.name!r}\nclass Store: pass\n")
+    (second / "second_spoke.py").write_text(
+        "import shared_store\nfrom shared_store import Store\nclass SecondSpoke: pass\n")
+    monkeypatch.syspath_prepend(str(first))
+    import shared_store
+    assert shared_store.WHERE == "first"
+    monkeypatch.setitem(_ROLE_MAP, "second",
+                        ("second/second_spoke.py", "SecondSpoke", "second", None))
+    agent = GenericAgent("agent-x", {})
+    monkeypatch.setattr(agent, "_lm_root", lambda: tmp_path)
+    try:
+        with caplog.at_level("ERROR"):
+            assert agent._load_role_class("second") is not None
+        assert "Role 'second' imported 'shared_store'" in caplog.text
+        assert GenericAgent._warn_borrowed_modules(
+            "second", sys.modules["lm_role_second"], str(second)) == ["shared_store"]
+    finally:
+        sys.modules.pop("lm_role_second", None)
+        sys.modules.pop("shared_store", None)
+        if str(second) in sys.path:
+            sys.path.remove(str(second))
+
+
 def test_load_role_class_returns_none_for_unknown_role():
     agent = GenericAgent("agent-x", {})
     assert agent._load_role_class("does-not-exist") is None
