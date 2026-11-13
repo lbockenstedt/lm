@@ -740,6 +740,32 @@ def dns_members_from_instances(instances, spoke_id):
     return members
 
 
+# When each (tenant, source) scan-source failure was last logged. A source that
+# keeps failing (e.g. a ClearPass API client without endpoint read rights) is
+# logged once an hour instead of on every scan pass.
+_SCAN_SOURCE_WARNED = {}
+_SCAN_SOURCE_WARN_EVERY = 3600
+
+
+def _scan_source_error(data):
+    """Return the spoke's error message when a scan-source reply is a failure
+    (status ERROR or FAILED), else None."""
+    if isinstance(data, dict) and str(data.get("status", "")).upper() in ("ERROR", "FAILED"):
+        return str(data.get("message") or data.get("error") or "spoke returned an error")[:300]
+    return None
+
+
+def _should_warn_scan_source(tenant_id, source, now=None):
+    """True at most once every _SCAN_SOURCE_WARN_EVERY seconds for each (tenant, source)."""
+    now = time.time() if now is None else now
+    key = (tenant_id, source)
+    last = _SCAN_SOURCE_WARNED.get(key)
+    if last is not None and now - last < _SCAN_SOURCE_WARN_EVERY:
+        return False
+    _SCAN_SOURCE_WARNED[key] = now
+    return True
+
+
 async def sync_dns_instance_topology(hub, instances, spoke_id,
                                      worker_secret=""):
     """Push Setup's DNS server list to its connected DNS Management spoke."""
@@ -1982,6 +2008,13 @@ def register(app, hub, ctx):
                 data = access.unwrap_spoke(result)
             except Exception as e:
                 logger.warning("scan aggregate tenant=%s %s skipped: %s", tenant_id, source, e)
+                return
+            # A spoke error (e.g. 403 from the vendor API) is not "zero rows": warn once an hour.
+            err = _scan_source_error(data)
+            if err:
+                if _should_warn_scan_source(tenant_id, source):
+                    logger.warning("scan aggregate tenant=%s %s spoke=%s failed (repeats hidden for 1h): %s",
+                                   tenant_id, source, sid, err)
                 return
             # Find the row list under whichever key this spoke uses.
             rows = []
