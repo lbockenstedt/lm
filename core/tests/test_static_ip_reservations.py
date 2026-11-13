@@ -114,7 +114,7 @@ def test_out_of_scope_unknown_mac_and_missing_ip_are_skipped():
     assert plan["reserve"] == []
     assert _reasons(plan, "skipped") == {
         "10.30.0.5": "outside any dhcp scope", "10.40.0.5": "outside any dhcp scope",
-        "10.20.0.51": "mac unknown or ambiguous", "10.20.0.52": "no netbox ip"}
+        "10.20.0.51": "malformed mac", "10.20.0.52": "no netbox ip"}
 
 
 def test_mac_seen_at_two_addresses_is_skipped():
@@ -138,19 +138,29 @@ class _Hub(DnsDhcpSyncMixin):
     """Hub stand-in: tenant-bound agents, one Kea spoke, one NetBox spoke."""
 
     def __init__(self, *, leases_reply=None, agent_addresses=None, live_arp=None,
-                 seen=None, spoke_tenants=None, ips=None):
+                 seen=None, spoke_tenants=None, ips=None, dhcp_spokes=None,
+                 leases_by_spoke=None, subnets_reply=None, module_metadata=None):
         tenants = {"t-a": {"netbox_tenant_slug": "tenant-a"},
                    "t-b": {"netbox_tenant_slug": "tenant-b"},
                    "shared": {"netbox_tenant_slug": "shared"}}
         self.state = FakeState(
-            system_state={"global_config": {"nw_seen_hosts": seen or {}}},
+            system_state={"global_config": {"nw_seen_hosts": seen or {}},
+                          "module_metadata": module_metadata or {}},
             tenants=tenants,
             spoke_tenants=spoke_tenants if spoke_tenants is not None
             else {"agent-1": "t-a"})
-        self.active_connections = {"agent-1", "agent-2", "dhcp-1", "netbox-1"}
-        self.approved_modules = {"dhcp-1": True}
+        self._dhcp = dhcp_spokes or ["dhcp-1"]
+        self.active_connections = {"agent-1", "agent-2", "netbox-1", *self._dhcp}
+        self.approved_modules = {s: True for s in self._dhcp}
+        self.spoke_module_types = {"agent-1": "agent", "agent-2": "agent",
+                                   "netbox-1": "ipam", **{s: "dhcp" for s in self._dhcp}}
         self._leases_reply = leases_reply if leases_reply is not None else {
             "status": "SUCCESS", "leases": [], "strict": True}
+        self._leases_by_spoke = leases_by_spoke or {}
+        # Default Kea pool .100-.200, so 10.20.0.50 is outside it.
+        self._subnets_reply = subnets_reply if subnets_reply is not None else {
+            "status": "SUCCESS", "strict": True, "subnets": [
+                {"subnet": "10.20.0.0/24", "pools": [{"pool": "10.20.0.100 - 10.20.0.200"}]}]}
         self._agent_addresses = agent_addresses or {}
         self._ips = ips if ips is not None else _ips(_ip("10.20.0.50/24", 7))
         if live_arp is not None:
@@ -162,7 +172,7 @@ class _Hub(DnsDhcpSyncMixin):
         return {"ipam": "netbox-1", "dhcp": "dhcp-1"}.get(module_type)
 
     def get_all_spokes_by_type(self, module_type):
-        return {"agent": ["agent-1", "agent-2"], "dhcp": ["dhcp-1"],
+        return {"agent": ["agent-1", "agent-2"], "dhcp": list(self._dhcp),
                 "ipam": ["netbox-1"]}.get(module_type, [])
 
     def refresh_module_cache(self, key):
@@ -174,7 +184,9 @@ class _Hub(DnsDhcpSyncMixin):
             return {"payload": {"data": {"status": "SUCCESS",
                                          "addresses": self._agent_addresses.get(spoke_id, [])}}}
         if command == "DHCP_LIST_LEASES":
-            return {"payload": {"data": self._leases_reply}}
+            return {"payload": {"data": self._leases_by_spoke.get(spoke_id, self._leases_reply)}}
+        if command == "DHCP_LIST_SUBNETS":
+            return {"payload": {"data": self._subnets_reply}}
         if command == "NETBOX_GET_PREFIXES":
             return {"payload": {"data": _pfx()}}
         if command == "NETBOX_GET_IPS":
@@ -277,3 +289,110 @@ def test_discovery_keeps_unambiguous_live_arp_per_tenant():
         {"ip": "10.20.0.52", "mac": ""}]})
     assert hub._nw_live_arp["t-a"]["macs"] == {"10.20.0.50": MAC_A}
     assert hub._nw_live_arp["t-a"]["at"] > 0
+
+
+# ── review fixes ────────────────────────────────────────────────────────────
+
+def _vrf_pfx(*prefixes):
+    """DHCP-enabled prefixes given as (cidr, vrf)."""
+    return {"prefixes": [{"prefix": p, "status": "active", "vrf": v,
+                          "custom_fields": {"dhcp_enabled": True}} for p, v in prefixes]}
+
+
+def _vrf_ip(vrf):
+    """10.20.0.50 as a NetBox IP row in ``vrf``."""
+    return _ips({"id": 7, "address": "10.20.0.50/24", "status": "active",
+                 "vrf": vrf, "custom_fields": {}})
+
+
+def test_vrf_must_match_exactly():
+    """The scope is the DHCP prefix in exactly the IP's VRF; overlapping space
+    in another VRF, or one side global, never counts."""
+    # Overlap: a more specific prefix in another VRF must not hide the IP's own scope.
+    pfx = _vrf_pfx(("10.20.0.0/24", "red"), ("10.20.0.0/25", "blue"))
+    plan = plan_static_reservations(pfx, _vrf_ip("red"), [], [_static("10.20.0.50")])
+    assert [r["ip"] for r in plan["reserve"]] == ["10.20.0.50"]
+    # Nested VRF objects normalise (dict → id) on both sides.
+    pfx = _vrf_pfx(("10.20.0.0/24", {"id": 3, "name": "red"}))
+    plan = plan_static_reservations(pfx, _vrf_ip({"id": 3, "name": "red"}), [],
+                                    [_static("10.20.0.50")])
+    assert [r["ip"] for r in plan["reserve"]] == ["10.20.0.50"]
+    # One-sided empty: VRF prefix with a global IP, global prefix with a VRF IP.
+    for pfx_vrf, ip_vrf in (("red", None), ("", "red")):
+        plan = plan_static_reservations(_vrf_pfx(("10.20.0.0/24", pfx_vrf)),
+                                        _vrf_ip(ip_vrf), [], [_static("10.20.0.50")])
+        assert plan["reserve"] == []
+        assert _reasons(plan, "skipped") == {"10.20.0.50": "vrf differs from scope"}
+
+
+def test_malformed_or_conflicting_mac_vetoes_the_candidate():
+    """A bad MAC from one source is never dropped in favour of the other."""
+    rows = _ips(_ip("10.20.0.50/24", 7), _ip("10.20.0.51/24", 8))
+    cands = [_static("10.20.0.50", mac="gg:gg:gg:gg:gg:gg", source="sweep"),
+             _static("10.20.0.50"),
+             _static("10.20.0.51", mac=MAC_B), _static("10.20.0.51", mac="02:00:00:00:00:0c",
+                                                       source="sweep")]
+    plan = plan_static_reservations(_pfx(), rows, [], cands)
+    assert plan["reserve"] == []
+    assert _reasons(plan, "skipped") == {"10.20.0.50": "malformed mac",
+                                         "10.20.0.51": "conflicting macs"}
+
+
+def test_sweep_only_host_needs_an_ip_outside_every_kea_pool():
+    """A sweep-seen host inside a pool may be an offline DHCP client; outside
+    the pools it cannot be one. Agent-reported static needs no pool check."""
+    subnets = [{"subnet": "10.20.0.0/24", "pools": [{"pool": "10.20.0.10 - 10.20.0.99"}]}]
+    rows = _ips(_ip("10.20.0.50/24", 7), _ip("10.20.0.150/24", 8), _ip("10.20.0.60/24", 9))
+    cands = [_static("10.20.0.50", source="sweep"),
+             _static("10.20.0.150", mac=MAC_B, source="sweep"),
+             _static("10.20.0.60", mac="02:00:00:00:00:0c")]
+    plan = plan_static_reservations(_pfx(), rows, [], cands, subnets)
+    assert sorted(r["ip"] for r in plan["reserve"]) == ["10.20.0.150", "10.20.0.60"]
+    assert _reasons(plan, "skipped") == {"10.20.0.50": "inside a dhcp pool"}
+    # Pools unknown: sweep-only candidates are skipped.
+    plan = plan_static_reservations(_pfx(), rows, [], cands[1:2])
+    assert _reasons(plan, "skipped") == {"10.20.0.150": "kea pools unknown"}
+
+
+def test_pass_sweep_host_inside_kea_pool_is_not_reserved():
+    now = 1_000_000.0
+    seen = {"t-b": {"10.20.0.150": {"address": "10.20.0.150", "last_seen": now - 60}}}
+    arp = {"t-b": {"at": now - 60, "macs": {"10.20.0.150": MAC_A}}}
+    hub = _Hub(spoke_tenants={}, seen=seen, live_arp=arp,
+               ips=_ips(_ip("10.20.0.150/24", 8)))
+    st = _run(hub, now)
+    assert hub.writes() == [] and st["reserved"] == []
+    assert ("dhcp-1", "DHCP_LIST_SUBNETS", {"strict": True}) in hub.log
+
+
+def test_pass_uses_the_tenants_own_kea_not_the_shared_one():
+    """Own Kea beats shared: shared Kea down, or holding another tenant's lease
+    for the same address, does not affect a tenant with its own Kea."""
+    md = {"dhcp-a": {"tenant_id": "t-a", "module_type": "dhcp"}}
+    for shared_reply in ({"status": "ERROR", "message": "kea down"},
+                         {"status": "SUCCESS", "strict": True, "leases": [
+                             {"ip-address": "10.20.0.50", "hw-address": MAC_B}]}):
+        hub = _Hub(agent_addresses=_agent_static(), dhcp_spokes=["dhcp-1", "dhcp-a"],
+                   spoke_tenants={"agent-1": "t-a", "dhcp-a": "t-a"}, module_metadata=md,
+                   leases_by_spoke={"dhcp-1": shared_reply})
+        st = _run(hub)
+        assert [r["ip"] for r in st["reserved"]] == ["10.20.0.50"]
+        assert not st["errors"] and not st["conflicts"]
+        kea_reads = {s for s, c, _p in hub.log if c == "DHCP_LIST_LEASES"}
+        assert kea_reads == {"dhcp-a"}
+
+
+def test_failed_pass_is_not_throttled():
+    """The throttle is stamped only after a pass completes."""
+    hub = _Hub(agent_addresses=_agent_static())
+
+    def _boom(_spokes):
+        raise RuntimeError("scope read failed")
+    hub._scope_groups = _boom
+    try:
+        asyncio.run(reserve_static_hosts_once(hub, now=1000.0))
+    except RuntimeError:
+        pass
+    del hub._scope_groups
+    st = asyncio.run(reserve_static_hosts_once(hub, now=1100.0))
+    assert [r["ip"] for r in st["reserved"]] == ["10.20.0.50"]

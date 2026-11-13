@@ -83,3 +83,16 @@ def test_ha_strict_only_when_every_node_honoured_it():
     assert reply["strict"] is False and reply["member_errors"]
     # Non-strict callers see no new key.
     assert "strict" not in _ha({"a": ok}, {})
+
+
+def test_subnet_reads_are_strict_on_request(monkeypatch):
+    """``KEAW_LIST_SUBNETS {"strict": true}`` errors instead of reading an
+    unreachable Kea as "no subnets" (the hub needs real pools)."""
+    mgr = _mgr(monkeypatch, fail=True)
+    assert mgr.list_subnets() == []
+    with pytest.raises(RuntimeError):
+        mgr.list_subnets(strict=True)
+    assert DhcpWorkerOps(mgr).list_subnets({"strict": True})["status"] == "ERROR"
+    good = DhcpWorkerOps(_mgr(monkeypatch)).list_subnets({"strict": True})
+    assert good["status"] == "SUCCESS" and good["strict"] is True and good["subnets"]
+    assert "strict" not in DhcpWorkerOps(_mgr(monkeypatch)).list_subnets({})

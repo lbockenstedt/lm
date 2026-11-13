@@ -998,9 +998,21 @@ class DhcpWorkerOps:
         """``KEAW_STATUS`` — return the local Kea status."""
         return {"status": "SUCCESS", **self.mgr.status()}
 
-    def list_subnets(self, _data: Dict[str, Any]) -> Dict[str, Any]:
-        """``KEAW_LIST_SUBNETS`` — return the DHCPv4 subnets configured on this node."""
-        return {"status": "SUCCESS", "subnets": self.mgr.list_subnets()}
+    def list_subnets(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """``KEAW_LIST_SUBNETS`` — return the DHCPv4 subnets configured on this node.
+
+        With ``strict`` a failed read is an ERROR (not an empty list) and the
+        reply echoes ``strict: True``.
+        """
+        # Non-strict keeps the old "empty list on failure" behaviour.
+        if not (data or {}).get("strict"):
+            return {"status": "SUCCESS", "subnets": self.mgr.list_subnets()}
+        # Strict: surface a failed read as an ERROR.
+        try:
+            subnets = self.mgr.list_subnets(strict=True)
+        except Exception as e:  # noqa: BLE001
+            return {"status": "ERROR", "message": f"subnet read failed: {e}"}
+        return {"status": "SUCCESS", "subnets": subnets, "strict": True}
 
     def list_leases(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """``KEAW_LIST_LEASES`` — return DHCPv4 leases, optionally for one subnet.

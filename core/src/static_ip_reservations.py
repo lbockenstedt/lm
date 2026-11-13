@@ -15,14 +15,19 @@ Candidates come from two places, per tenant:
   agent's ``dhcp`` answer vetoes the address.
 * **Network sweep** — hosts the sweep saw answering in the last day
   (``nw_seen_hosts``) whose MAC the latest nw discovery cycle saw in a live
-  ARP table (``_nw_live_arp``). No live MAC, no candidate.
+  ARP table (``_nw_live_arp``). No live MAC, no candidate. A sweep-only
+  candidate also needs positive evidence: its IP must lie outside every Kea
+  pool of its subnet (a DHCP client always gets a pool address, so a host
+  outside the pools cannot be an offline DHCP client whose lease expired).
 
 Every candidate goes through ``plan_static_reservations``, which is
 deliberately conservative: it only marks an IP that NetBox already records in
-the tenant's scope, inside a DHCP-enabled prefix, with no Kea lease for the IP
-or the MAC, and it never overwrites a reservation or MAC that differs — those
-are reported as conflicts instead. Kea leases are read strictly (an unreadable
-Kea skips the whole pass rather than reading as "no leases").
+the tenant's scope, inside a DHCP-enabled prefix of exactly the IP's VRF, with
+one well-formed MAC, no Kea lease for the IP or the MAC, and it never
+overwrites a reservation or MAC that differs — those are reported as
+conflicts instead. Leases and pools come from the tenant's OWN Kea when it
+has one, else from the shared Kea, and are read strictly (an unreadable Kea
+skips the tenant rather than reading as "no leases").
 
 Config: ``global_config.static_ip_reservations`` ``{enabled: true,
 interval: 900}``. Status: ``GET /api/dns-dhcp/sync-status`` →
@@ -42,6 +47,8 @@ import asyncio
 import ipaddress
 # Standard-library logging for pass results and conflicts.
 import logging
+# re validates MAC addresses.
+import re
 # time stamps and throttles each pass.
 import time
 # Type hints only.
@@ -49,7 +56,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 # Tenant scoping, spoke ownership and MAC normalisation.
 from access import (get_netbox_spoke, netbox_tenant_scope, norm_mac,
-                    spoke_owner_tenant, tenant_is_shared, unwrap_spoke)
+                    spoke_owner_tenant, tenant_is_shared,
+                    tenant_shared_fallback_blocked, unwrap_spoke)
 # The one rule for "this prefix is a Kea scope".
 from dns_dhcp_sync import is_dhcp_scope
 
@@ -66,6 +74,29 @@ _ARP_MAX_AGE = 2 * 3600
 _AGENT_CONCURRENCY = 8
 _AGENT_TIMEOUT = 15.0
 _MAX_WRITES_PER_PASS = 25
+# A normalised MAC: six hex octets.
+_MAC_RE = re.compile(r"[0-9a-f]{2}(:[0-9a-f]{2}){5}")
+
+
+def _mac(value: Any) -> Optional[str]:
+    """Normalised MAC; ``""`` when absent, ``None`` when present but malformed."""
+    # Absent is not an observation.
+    if value is None or not str(value).strip():
+        return ""
+    # Present: it must be six hex octets after normalisation.
+    mac = norm_mac(value)
+    return mac if _MAC_RE.fullmatch(mac or "") else None
+
+
+def _vrf(value: Any) -> str:
+    """A NetBox VRF as one comparable string: dict → id (else name),
+    anything else → its name; None/"" → ``""`` (the global table)."""
+    # A nested VRF object: prefer the id.
+    if isinstance(value, dict):
+        key = value.get("id")
+        return str(key) if key not in (None, "") else str(value.get("name") or "")
+    # A name, or nothing.
+    return str(value or "").strip()
 
 
 def _host(address: Any) -> str:
@@ -90,14 +121,46 @@ def _scopes(pfx_data: Dict[str, Any]) -> List[Tuple[Any, str]]:
         except ValueError:
             continue
         if net.version == 4:
-            out.append((net, str(p.get("vrf") or "")))
+            out.append((net, _vrf(p.get("vrf"))))
     # Most specific first so a nested scope wins.
+    return sorted(out, key=lambda s: -s[0].prefixlen)
+
+
+def _kea_pools(kea_subnets: Optional[Iterable[Dict[str, Any]]]) -> List[Tuple[Any, Optional[List[Tuple[int, int]]]]]:
+    """Kea v4 subnets as ``[(network, [(first, last)] or None)]``, most
+    specific first. ``None`` pools means a pool could not be parsed."""
+    out = []
+    for sub in kea_subnets or []:
+        # The subnet itself.
+        try:
+            net = ipaddress.ip_network(str(sub.get("subnet") or ""), strict=False)
+        except ValueError:
+            continue
+        # Each pool is "a - b" or a CIDR; anything else makes the pools unknown.
+        ranges: Optional[List[Tuple[int, int]]] = []
+        for p in sub.get("pools") or []:
+            text = str((p or {}).get("pool") if isinstance(p, dict) else p or "")
+            try:
+                if "/" in text:
+                    pn = ipaddress.ip_network(text.strip(), strict=False)
+                    ranges.append((int(pn.network_address), int(pn.broadcast_address)))
+                else:
+                    a, b = text.split("-")
+                    ranges.append((int(ipaddress.ip_address(a.strip())),
+                                   int(ipaddress.ip_address(b.strip()))))
+            except ValueError:
+                ranges = None
+                break
+        out.append((net, ranges))
+    # Most specific first.
     return sorted(out, key=lambda s: -s[0].prefixlen)
 
 
 def plan_static_reservations(pfx_data: Dict[str, Any], ips_data: Dict[str, Any],
                              leases: Iterable[Dict[str, Any]],
-                             candidates: Iterable[Dict[str, Any]]) -> Dict[str, List]:
+                             candidates: Iterable[Dict[str, Any]],
+                             kea_subnets: Optional[Iterable[Dict[str, Any]]] = None
+                             ) -> Dict[str, List]:
     """Decide which candidates become reservations. Pure; no I/O.
 
     Args:
@@ -106,6 +169,9 @@ def plan_static_reservations(pfx_data: Dict[str, Any], ips_data: Dict[str, Any],
         leases: Kea v4 lease dicts (``ip-address``, ``hw-address``).
         candidates: ``{ip, mac, mode, source}``; ``mode`` is ``static``,
             ``dhcp`` (agent saw a lease: veto) or ``unknown``.
+        kea_subnets: Kea v4 subnets (``subnet``, ``pools``) from the same
+            Kea; a sweep-only candidate must sit outside every pool. None →
+            pools unknown, so sweep-only candidates are skipped.
 
     Returns:
         ``{"reserve": [{ip_id, ip, mac, source}], "conflicts": [{ip, mac,
@@ -115,6 +181,7 @@ def plan_static_reservations(pfx_data: Dict[str, Any], ips_data: Dict[str, Any],
     conflicts: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
     scopes = _scopes(pfx_data)
+    kea_nets = _kea_pools(kea_subnets)
 
     # Index NetBox IPs by host address; existing reservations by MAC.
     nb_rows: Dict[str, List[Dict[str, Any]]] = {}
@@ -143,11 +210,15 @@ def plan_static_reservations(pfx_data: Dict[str, Any], ips_data: Dict[str, Any],
     # Merge candidates per IP: an agent "dhcp" answer vetoes; MACs must agree.
     merged: Dict[str, Dict[str, Any]] = {}
     for c in candidates or []:
-        ip, mac = _host(c.get("ip")), norm_mac(c.get("mac"))
+        ip, mac = _host(c.get("ip")), _mac(c.get("mac"))
         if not ip:
             continue
-        m = merged.setdefault(ip, {"ip": ip, "macs": set(), "modes": set(), "sources": set()})
-        if mac:
+        m = merged.setdefault(ip, {"ip": ip, "macs": set(), "modes": set(),
+                                   "sources": set(), "bad_mac": False})
+        # A malformed MAC from any source vetoes the IP (never dropped silently).
+        if mac is None:
+            m["bad_mac"] = True
+        elif mac:
             m["macs"].add(mac)
         m["modes"].add(str(c.get("mode") or "unknown"))
         m["sources"].add(str(c.get("source") or ""))
@@ -158,12 +229,17 @@ def plan_static_reservations(pfx_data: Dict[str, Any], ips_data: Dict[str, Any],
             mac_ip_count[mac] = mac_ip_count.get(mac, 0) + 1
 
     for ip, m in sorted(merged.items()):
-        # Step 1: exactly one valid, known MAC, used at no other candidate IP.
-        macs = {x for x in m["macs"] if len(x) == 17}
-        if len(macs) != 1:
-            skipped.append({"ip": ip, "reason": "mac unknown or ambiguous"})
+        # Step 1: exactly one well-formed MAC, used at no other candidate IP.
+        if m["bad_mac"]:
+            skipped.append({"ip": ip, "reason": "malformed mac"})
             continue
-        mac = next(iter(macs))
+        if len(m["macs"]) > 1:
+            skipped.append({"ip": ip, "reason": "conflicting macs"})
+            continue
+        if not m["macs"]:
+            skipped.append({"ip": ip, "reason": "mac unknown"})
+            continue
+        mac = next(iter(m["macs"]))
         if mac_ip_count.get(mac, 0) > 1:
             skipped.append({"ip": ip, "reason": "mac seen at several addresses"})
             continue
@@ -174,25 +250,26 @@ def plan_static_reservations(pfx_data: Dict[str, Any], ips_data: Dict[str, Any],
         if m["modes"] != {"static"}:
             skipped.append({"ip": ip, "reason": "not known to be static"})
             continue
-        # Step 3: inside a Kea-served prefix of this tenant.
+        # Step 3: inside some Kea-served prefix of this tenant.
         addr = ipaddress.ip_address(ip)
-        scope = next((s for s in scopes if addr in s[0]), None)
-        if scope is None:
+        if not any(addr in s[0] for s in scopes):
             skipped.append({"ip": ip, "reason": "outside any dhcp scope"})
             continue
-        net, scope_vrf = scope
-        if addr in (net.network_address, net.broadcast_address):
-            skipped.append({"ip": ip, "reason": "network or broadcast address"})
-            continue
-        # Step 4: exactly one NetBox IP object, in the scope's VRF.
+        # Step 4: exactly one NetBox IP object.
         rows = nb_rows.get(ip) or []
         if len(rows) != 1:
             skipped.append({"ip": ip, "reason": "no netbox ip" if not rows
                             else "several netbox ips"})
             continue
         row = rows[0]
-        if scope_vrf and str(row.get("vrf") or "") and str(row.get("vrf")) != scope_vrf:
+        # Step 4b: the scope is the most specific DHCP prefix in EXACTLY the IP's VRF.
+        scope = next((s for s in scopes if addr in s[0] and s[1] == _vrf(row.get("vrf"))), None)
+        if scope is None:
             skipped.append({"ip": ip, "reason": "vrf differs from scope"})
+            continue
+        net = scope[0]
+        if addr in (net.network_address, net.broadcast_address):
+            skipped.append({"ip": ip, "reason": "network or broadcast address"})
             continue
         if str(row.get("status") or "").lower() == "dhcp":
             skipped.append({"ip": ip, "reason": "netbox status is dhcp"})
@@ -226,6 +303,16 @@ def plan_static_reservations(pfx_data: Dict[str, Any], ips_data: Dict[str, Any],
         if mac in leased_macs:
             skipped.append({"ip": ip, "reason": "mac holds a lease"})
             continue
+        # Step 7: a sweep-only host needs positive evidence — an IP outside
+        # every Kea pool (a DHCP client always holds a pool address).
+        if "agent" not in m["sources"]:
+            kea = next((k for k in kea_nets if addr in k[0]), None)
+            if kea is None or kea[1] is None:
+                skipped.append({"ip": ip, "reason": "kea pools unknown"})
+                continue
+            if any(lo <= int(addr) <= hi for lo, hi in kea[1]):
+                skipped.append({"ip": ip, "reason": "inside a dhcp pool"})
+                continue
         # Static, unclaimed and in scope: reserve it.
         reserve.append({"ip_id": row.get("id"), "ip": ip, "mac": mac,
                         "source": ",".join(sorted(x for x in m["sources"] if x))})
@@ -255,7 +342,7 @@ def _sweep_candidates(hub, tid: str, now: float) -> List[Dict[str, Any]]:
     for ip, entry in seen.items():
         if now - float((entry or {}).get("last_seen") or 0) > _SEEN_WINDOW:
             continue
-        mac = norm_mac(macs.get(ip))
+        mac = macs.get(ip)
         if mac:
             out.append({"ip": ip, "mac": mac, "mode": "static", "source": "sweep"})
     return out
@@ -304,27 +391,44 @@ async def _agent_candidates(hub) -> Dict[str, List[Dict[str, Any]]]:
     return out
 
 
-async def _strict_leases(hub, spokes: List[str]) -> Optional[List[Dict[str, Any]]]:
-    """Every v4 lease from ``spokes``, or None unless EVERY spoke answered a
-    strict read (old spokes, Kea errors and HA member errors all → None)."""
+async def _strict_read(hub, spokes: List[str], command: str,
+                      key: str) -> Optional[List[Dict[str, Any]]]:
+    """Every ``key`` row (leases or subnets) from ``spokes``, or None unless
+    EVERY spoke answered a strict read (old spokes, Kea errors and HA member
+    errors all → None)."""
     if not spokes:
         return None
-    # Ask each spoke for a strict lease list.
+    # Ask each spoke for a strict list.
     replies = await asyncio.gather(*[
-        hub.request_response(sid, "DHCP_LIST_LEASES", {"strict": True}, timeout=30.0)
+        hub.request_response(sid, command, {"strict": True}, timeout=30.0)
         for sid in spokes], return_exceptions=True)
-    leases: List[Dict[str, Any]] = []
+    rows: List[Dict[str, Any]] = []
     for sid, raw in zip(spokes, replies):
         reply = None if isinstance(raw, BaseException) else unwrap_spoke(raw)
-        # Anything short of a clean strict answer makes the lease view untrustworthy.
+        # Anything short of a clean strict answer makes the Kea view untrustworthy.
         if not isinstance(reply, dict) or reply.get("status") != "SUCCESS" \
                 or reply.get("strict") is not True or reply.get("member_errors") \
-                or not isinstance(reply.get("leases"), list):
-            logger.warning("static reservations: no strict lease read from %s; "
-                           "pass skipped", sid)
+                or not isinstance(reply.get(key), list):
+            logger.warning("static reservations: no strict %s from %s; "
+                           "tenant skipped", command, sid)
             return None
-        leases.extend(x for x in reply["leases"] if isinstance(x, dict))
-    return leases
+        rows.extend(x for x in reply[key] if isinstance(x, dict))
+    return rows
+
+
+def _tenant_kea_spokes(hub, tid: str, key: str, groups: Dict[str, Any]) -> List[str]:
+    """The Kea spokes whose leases count for ``tid``: its OWN Kea when it has
+    one (even if offline → none), else the shared/unbound Kea (fleet "own
+    instance beats shared" rule, ``tenant_shared_fallback_blocked``)."""
+    # The tenant's own connected Kea spokes.
+    own = list((groups.get("tenant:" + key) or ({}, []))[1])
+    if own:
+        return own
+    # It owns one that is offline, or may not use shared: nothing to read.
+    if tenant_shared_fallback_blocked(hub, tid, "dhcp"):
+        return []
+    # Otherwise the shared Kea.
+    return list((groups.get("") or ({}, []))[1])
 
 
 async def reserve_static_hosts_once(hub, now: Optional[float] = None,
@@ -342,9 +446,16 @@ async def reserve_static_hosts_once(hub, now: Optional[float] = None,
         return {"status": "disabled"}
     if not force and now - float(getattr(hub, "_static_res_last", 0) or 0) < cfg["interval"]:
         return {"status": "throttled"}
+    # Step 2: run the pass; stamp the throttle only once it completed, so a
+    # pass that raised is retried on the next tick.
+    result = await _run_pass(hub, now)
     hub._static_res_last = now
+    return result
 
-    # Step 2: gather candidates per real (non-shared) tenant.
+
+async def _run_pass(hub, now: float) -> Dict[str, Any]:
+    """The body of ``reserve_static_hosts_once`` (no throttle)."""
+    # Step 1: gather candidates per real (non-shared) tenant.
     by_tid = await _agent_candidates(hub)
     for tid in list((getattr(hub, "_nw_live_arp", None) or {}).keys()):
         by_tid.setdefault(tid, [])
@@ -355,7 +466,7 @@ async def reserve_static_hosts_once(hub, now: Optional[float] = None,
     if not by_tid:
         return hub._record_status("static_reservations", status="ok", **totals)
 
-    # Step 3: Kea DHCP spokes grouped by the tenant scope they serve.
+    # Step 2: Kea DHCP spokes grouped by the tenant scope they serve.
     groups, _skipped = hub._scope_groups(hub._get_dhcp_spokes())
     ipam = get_netbox_spoke(hub)
     writes = 0
@@ -365,30 +476,35 @@ async def reserve_static_hosts_once(hub, now: Optional[float] = None,
         filters = {k: scope[k] for k in ("tenant", "tenant_group") if scope.get(k)}
         if not filters:
             continue
-        # Only the Kea spokes that would serve this tenant's scopes.
-        spokes = list((groups.get("tenant:" + str(scope.get("key"))) or ({}, []))[1]) \
-            + list((groups.get("") or ({}, []))[1])
-        # No Kea serves this tenant: nothing to protect.
+        # The tenant's own Kea, else the shared one; none → nothing to protect.
+        spokes = _tenant_kea_spokes(hub, tid, str(scope.get("key")), groups)
         if not spokes:
             continue
-        leases = await _strict_leases(hub, spokes)
+        leases = await _strict_read(hub, spokes, "DHCP_LIST_LEASES", "leases")
         if leases is None:
             totals["errors"].append({"tenant": tid, "error": "no strict kea lease read"})
             continue
+        # Pools are only needed for sweep-only candidates; unknown → those skip.
+        kea_subnets = None
+        if any(c.get("source") == "sweep" for c in candidates):
+            kea_subnets = await _strict_read(hub, spokes, "DHCP_LIST_SUBNETS", "subnets")
         try:
             pfx_data, ips_data = await hub._netbox_prefixes_and_ips(filters)
         except Exception as e:  # noqa: BLE001
             totals["errors"].append({"tenant": tid, "error": f"netbox read: {e}"})
             continue
-        plan = plan_static_reservations(pfx_data, ips_data, leases, candidates)
+        plan = plan_static_reservations(pfx_data, ips_data, leases, candidates, kea_subnets)
         totals["tenants"] += 1
         totals["skipped"] += len(plan["skipped"])
-        # Step 4: report conflicts; never resolve them automatically.
+        # Step 3: log MAC vetoes; report conflicts, never resolve them automatically.
+        for sk in plan["skipped"]:
+            if sk["reason"] in ("malformed mac", "conflicting macs"):
+                logger.warning("static reservations: %s skipped: %s", sk["ip"], sk["reason"])
         for c in plan["conflicts"]:
             logger.warning("static reservations: conflict %s (%s): %s",
                            c["ip"], c["mac"], c["reason"])
             totals["conflicts"].append({"tenant": tid, **c})
-        # Step 5: write the reservations, capped per pass.
+        # Step 4: write the reservations, capped per pass.
         for r in plan["reserve"]:
             if writes >= _MAX_WRITES_PER_PASS or not ipam or r.get("ip_id") is None:
                 break
@@ -410,7 +526,7 @@ async def reserve_static_hosts_once(hub, now: Optional[float] = None,
             totals["reserved"].append({"tenant": tid, "ip": r["ip"],
                                        "mac": r["mac"], "source": r["source"]})
 
-    # Step 6: refresh cached IPs and record the pass.
+    # Step 5: refresh cached IPs and record the pass.
     if totals["reserved"]:
         hub.refresh_module_cache("netbox_ips")
     return hub._record_status("static_reservations",

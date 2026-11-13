@@ -1282,7 +1282,8 @@ class DHCPSpoke(BaseSpoke):
                 return await self._ha_reservation(cmd, data)
             # v4 list queries merged across nodes.
             if cmd == "DHCP_LIST_SUBNETS":
-                return await self._ha_list("KEAW_LIST_SUBNETS", {}, "subnets")
+                return await self._ha_list(
+                    "KEAW_LIST_SUBNETS", {"strict": bool(data.get("strict"))}, "subnets")
             if cmd == "DHCP_LIST_LEASES":
                 return await self._ha_list(
                     "KEAW_LIST_LEASES",
@@ -1347,8 +1348,16 @@ class DHCPSpoke(BaseSpoke):
 
         # Single-node v4 list queries.
         if cmd == "DHCP_LIST_SUBNETS":
-            subnets = await asyncio.to_thread(self.mgr.list_subnets)
-            return {"status": "SUCCESS", "subnets": subnets}
+            # Non-strict: an unreadable Kea shows as an empty list (old behaviour).
+            if not data.get("strict"):
+                subnets = await asyncio.to_thread(self.mgr.list_subnets)
+                return {"status": "SUCCESS", "subnets": subnets}
+            # Strict: a failed read is an ERROR; echo strict so callers know it was honoured.
+            try:
+                subnets = await asyncio.to_thread(self.mgr.list_subnets, True)
+            except Exception as e:  # noqa: BLE001
+                return {"status": "ERROR", "message": f"subnet read failed: {e}"}
+            return {"status": "SUCCESS", "subnets": subnets, "strict": True}
 
         if cmd == "DHCP_LIST_LEASES":
             subnet = data.get("subnet")

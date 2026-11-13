@@ -765,7 +765,7 @@ class KeaManager:
 
     # ── Subnet (scope) management ─────────────────────────────────────
 
-    def list_subnets(self) -> list:
+    def list_subnets(self, strict: bool = False) -> list:
         """Configured subnet4 scopes, straight from the running config.
 
         Deliberately NOT the ``subnet4-list`` command — that RPC requires
@@ -787,9 +787,11 @@ class KeaManager:
         # Read subnet4 from the running config.
         try:
             return self.get_config().get("subnet4", []) or []
-        # On failure, log it and return no subnets.
+        # On failure, log it; re-raise only in strict mode.
         except Exception as e:
             logger.error("list_subnets failed: %s", e)
+            if strict:
+                raise
             return []
 
     def get_config(self) -> dict:
@@ -992,11 +994,7 @@ class KeaManager:
             # currently-configured subnet ID for "all", or the one matching
             # ``subnet`` when filtering.
             # Collect subnet ids: all, or only the one matching the filter.
-            # Strict reads the config directly; list_subnets() hides errors.
-            if strict:
-                kea_subnets = self.get_config().get("subnet4", []) or []
-            else:
-                kea_subnets = self.list_subnets()
+            kea_subnets = self.list_subnets(strict=strict)
             ids = [s["id"] for s in kea_subnets if "id" in s]
             if subnet:
                 ids = [s["id"] for s in kea_subnets if s.get("subnet") == subnet]
