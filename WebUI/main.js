@@ -255,6 +255,7 @@ const ROUTES = {
     showLDAPModal:          { m: 'POST|PUT', p: '/api/ldap/{users|groups}',   api: 'create/update_ldap_user, create_ldap_group', via: 'saveLDAPUser/saveLDAPGroup' }, // (modal)
     showLDAPMembersModal:   { m: 'POST|DELETE', p: '/api/ldap/groups/members', api: 'add/remove_ldap_member', via: 'addLDAPMember/removeLDAPMember' }, // (modal)
     showLDAPPasswordModal:  { m: 'POST', p: '/api/ldap/users/password',       api: 'set_ldap_user_password (local only)', via: 'changeUserPassword' }, // (modal)
+    directoryEntra:         { m: 'GET|POST|DELETE', p: '/api/ldap/entra{/users|/groups|/groups/members}', api: 'get_entra, create/delete_entra_user, create/delete_entra_group, add/remove_entra_member' }, // js/views/directory-entra.js
 
     // ── Instances (multi-instance Setup tabs) ──
     loadInstances:          { m: 'GET',  p: '/setup/{nac|ipam|ldap|dns|dhcp}-instances', api: 'list_instances (_instance_crud)' },
@@ -796,6 +797,9 @@ function _lmIsAuthSubmitEndpoint(input) {
 }
 function handleSessionExpired() {
     if (!currentUser) return;              // already sent to login / not logged in
+    // Signing out does not reload the page: take a shown one-time password
+    // off the screen (it stays only for the user who made it).
+    lmViews.directoryHideEntra?.();
     currentUser = null;
     const errEl = document.getElementById('login-error');
     if (errEl) { errEl.textContent = 'Your session has expired. Please sign in again.'; errEl.classList.remove('hidden'); }
@@ -2232,7 +2236,7 @@ const VIEW_SUBMENUS = {
     setup: ['Spokes & Agents', 'Module Management', 'Directory (LDAP)', 'Simulations', 'Remote Console', 'Test Data Feed'],
     opnsense: ['Overview', 'Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'Impairment', 'DHCP Leases', 'Interfaces'],
     pxmx: ['Overview', 'Virtual Machines', 'Diagnostics', 'Settings'],
-    ldap: ['Users', 'Groups'],
+    ldap: ['Users', 'Groups', 'Entra'],
     cppm: ['NAC Status', 'Access Tracker', 'My Devices', 'Unknown Devices', 'My Users'],
     cs: ['Dashboard', 'Clients', 'Central', 'Central On-Prem', 'Mist', 'VM Server', 'Config', 'Setup', 'Spoke Management', 'Assistant'],
     netbox: ['Overview', 'Devices', 'Racks', 'Rack Placement', 'Prefixes', 'IP Addresses'],
