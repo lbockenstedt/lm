@@ -71,9 +71,12 @@ _ALLOW: Dict[str, Set[str]] = {
     "vault.automation_get": {
         "instance_vault", "henet_sync", "le_cache",
         "routes.console", "routes.net_services",
+        # ldap-server cert auto-issue: the HE.NET login for the ACME DNS-01 challenge.
+        "routes.agents",
     },
     # routes.monitoring: the Zabbix sync resolves each tenant's SNMP community.
-    "vault.automation_list_by_type": {"routes.console", "routes.monitoring"},
+    # endpoint_sync: ClearPass NAD registration reads the tenant's RADIUS secret.
+    "vault.automation_list_by_type": {"routes.console", "routes.monitoring", "endpoint_sync"},
     # Interactive PSK reveal — the human-facing cred-vault route only.
     "vault.reveal_secret": {"routes.cred_vault"},
 }
