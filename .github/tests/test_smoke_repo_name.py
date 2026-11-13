@@ -22,7 +22,7 @@ def _git_env():
     return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 
 
-def _smoke_in(dirname, origin):
+def _smoke_in(dirname, origin, extra_env=None):
     """Run smoke.sh in an empty git repo called `dirname` and return its output.
 
     The helpers directory is empty, so the script stops at its first check,
@@ -38,7 +38,7 @@ def _smoke_in(dirname, origin):
             ["bash", str(SMOKE_SH), "--no-fleet-rules", "--no-fetch"],
             cwd=repo, capture_output=True, text=True, timeout=60,
             env={"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
-                 "SMOKE_HELPERS": tmp + "/no-helpers"})
+                 "SMOKE_HELPERS": tmp + "/no-helpers", **(extra_env or {})})
         return result.stdout + result.stderr
 
 
@@ -67,6 +67,17 @@ class SmokeRepoName(unittest.TestCase):
             config = (real / ".git" / "config").read_text()
             self.assertIn("bare = false", config)
             self.assertNotIn("[remote", config)
+
+    def test_every_step_runs_against_the_repo_it_is_in_not_the_hooks_git_dir(self):
+        """The promotion self-test's `branch -M main` and `push origin` followed
+        a worktree hook's GIT_DIR into the real repo. smoke.sh drops it, so the
+        origin is read from the repo smoke.sh runs in."""
+        with tempfile.TemporaryDirectory() as tmp:
+            other = pathlib.Path(tmp) / "other"
+            subprocess.run(["git", "init", "-q", str(other)], check=True, env=_git_env())
+            out = _smoke_in("repo", "https://github.com/lbockenstedt/lm.git",
+                            {"GIT_DIR": str(other / ".git")})
+            self.assertIn("next to lm)", out)
 
 
 if __name__ == "__main__":
