@@ -134,6 +134,27 @@ Without SSO the list is empty with `configured: false` and writes return 503.
 All routes take the tenant like the LDAP routes (`tenant_id`; only an admin may
 name another tenant) and need the tenant-admin tier to write.
 
+**WebUI: Directory → Entra.** The left panel lists the tenant's Entra groups
+(**All accounts** plus each `LM-<tenant>-*` group with its member count);
+pick one to filter the table. A **cached** badge next to the heading means
+the list is more than 5 minutes old (hover for when it was last read, and
+whether Entra could not be refreshed). **+ Account** opens a form for the UPN, display
+name, password (leave it blank to have one generated) and the groups to
+join. A generated password is shown above the table until you click
+**Done**; if you leave or reload the tab first, it is shown again when you
+next open Directory → Entra for that tenant (it is kept in the page's memory
+only, so a browser reload loses it). If you leave while the account is still
+being created, a toast says so and the password is shown when you next open
+Directory → Entra for that tenant (several such passwords are shown one
+after another, each after **Done**); it also stays shown if the list then
+fails to load. While a password is shown, **+ Account** and **+ Group** are
+disabled until you click **Done**. **+ Group** creates `LM-<tenant>-<name>`;
+the panel's **Delete** removes the picked group (its accounts stay). Each
+row has **+ Group** (add to one of the tenant's groups), or **Remove** while
+a group is picked, and **Delete**; Remove and both Deletes ask for
+confirmation first. Write controls appear only for tenant admins. When Entra
+is not set up (Settings → Single sign-on) the tab says so.
+
 ## Active Directory (read-only stub)
 
 `src/ad_directory.py` reads users from an AD domain, so the Directory view can

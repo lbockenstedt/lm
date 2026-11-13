@@ -44,7 +44,11 @@ so a change is exercised on lm dev before the other repos pick it up from main.
   vault, the WebUI ratchet, UUIDs in UI text, docstrings and step comments,
   docs updated for new routes/fields, and more. Rule text is in
   `lm/.github/fleet-rules.md`. Error-level findings fail the run; warnings show as
-  annotations.
+  annotations. A WebUI password input with no vault picker is an error, except
+  an `<input … data-account-password>`: the password of a directory account
+  (LDAP, Entra, AD) that is sent to that directory once and never stored by LM.
+  Put the marker on the same line as `type="password"`, and never on an input
+  whose value LM saves.
 - **Ruff, new errors only**: `.github/scripts/ruff_new.py` lints each changed
   `.py` file at the base and at HEAD (E9, F63, F7, F82) and fails only on
   findings the change adds. Inherited findings are warnings, so touching an
