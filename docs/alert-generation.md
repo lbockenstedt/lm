@@ -69,6 +69,55 @@ override per-quota.
 
 ---
 
+## Rogue DNS (static IP + fixed DNS) — `rogue_dns`
+
+**Alert: none.** This wireless-only Linux/Windows simulation exercises browsing
+through a user-supplied local DNS server; it does not install that server or
+need alert linkage, adaptive learning, or new quota levers. It is catalogued as
+an exclusive failure sim (`multi_capable: false`), not a shareable traffic sim.
+Requires the companion cs client update (cs#257); ship the LM catalog first.
+
+In **Simulations → Config**, use the engine's simulation-conf editor to set
+`rogue_dns_server` under **Address**, and enable `rogue_dns` in the target
+`[s0]`–`[s9]` buckets (or per-client overrides). For example, configure five
+wireless clients this way. The local DNS server must already exist and answer
+queries at the supplied IP.
+
+| Section | Key | Default | Purpose |
+|---|---|---|---|
+| `[s0]`–`[s9]` | `rogue_dns` | `off` | Enable the repeating cycle for these clients |
+| `[address]` | `rogue_dns_server` | blank | Single local DNS server IP |
+| `[simulation]` | `rogue_dns_dhcp_interval` | `1800` | Seconds browsing on DHCP before each static phase |
+| `[simulation]` | `rogue_dns_duration` | `3600` | Seconds holding the static IP and fixed DNS |
+| `[simulation]` | `rogue_dns_browse_interval` | `60` | Seconds between static-phase web requests |
+
+The client first connects to its SSID and obtains a DHCP lease. For 30 minutes
+it browses like `www_traffic`: the same pacing and `websites.txt`, even with
+only `rogue_dns=on`. That fallback runs while the rogue script is not running;
+explicitly enabling `www_traffic` keeps its existing behaviour unchanged.
+When due, the script captures the wireless IPv4 address/prefix, gateway and
+DHCP DNS, then keeps the same IP/mask/gateway as a static configuration with
+DNS set to `rogue_dns_server`. A blank/invalid server or missing lease skips
+the change without altering the network. During the 60-minute static phase,
+it opens one random `websites.txt` URL in headless Firefox every 60 seconds.
+It then restores DHCP, restarts the 30-minute DHCP window and exits; normal
+flag-gated dispatch and DHCP-phase browsing resume. The cycle repeats.
+
+The phase-start epoch and captured network values live in persistent state:
+`/usr/local/scripts/rogue_dns.state` on Linux and `C:\Scripts\rogue_dns.state`
+on Windows, not temporary storage. The first invocation records the DHCP
+start; invocations before the interval elapses exit immediately. Restoration
+runs in a trap/finally. A stale static phase after a kill, reboot or update
+restores DHCP on the next start and resets the DHCP window; Windows also
+restores at orchestrator startup because its static settings persist.
+Linux applies runtime-only `nmcli device modify` settings (never the saved
+profile) and restores via device reapply/reconnect. Windows disables DHCP,
+sets the captured IP/gateway and fixed DNS, then re-enables DHCP, removes the
+static IP/gateway and resets DNS server addresses. The orchestrator owns the
+single-instance guard; the rogue script never kills itself.
+
+---
+
 ## The two levers in detail
 
 ### 1. Config (`simulation.conf`) — the per-client break

@@ -632,6 +632,67 @@ def _local_service_addresses() -> list:
     return addresses
 
 
+# Container/virtual interfaces whose addresses never belong in a LAN DHCP
+# scope. Virtual link kinds are skipped by type (``ip -d`` linkinfo); NAT
+# bridges look like any bridge, so only bridge names that container and VM
+# tools create are skipped (tun/tap/wg/veth links are already caught by kind
+# or by not being Ethernet). A plain LAN bridge (e.g. Proxmox vmbr0) carries
+# the host's own address and is kept. A skipped interface only means a missed
+# reservation; the hub also refuses any address outside a NetBox DHCP scope.
+_HOST_ADDRESSING_SKIP_KINDS = {"veth", "tun", "tap", "wireguard", "vxlan", "dummy",
+                               "macvlan", "macvtap", "ipvlan", "ipip", "gre", "sit"}
+_HOST_ADDRESSING_SKIP_IFACES = ("docker", "virbr", "br-", "cni", "podman", "cbr",
+                                "lxcbr", "lxdbr", "incusbr", "weave", "kube-")
+
+
+def _host_addressing() -> list:
+    """IPv4 addressing mode per interface address, from ``ip -j -d -4 address``.
+
+    Returns ``[{ip, mac, mode, interface}]``. ``mode`` is ``dhcp`` when the
+    kernel marks the address ``dynamic`` (a DHCP lease with a finite
+    lifetime), ``static`` for a permanent primary address and ``unknown`` for
+    secondary addresses (VIPs move between hosts). Loopback, non-Ethernet and
+    container interfaces are left out. Raises nothing; None when ``ip``
+    fails, so the hub can tell "no addresses" from "could not read them".
+    """
+    # Read every up interface's IPv4 addresses as JSON.
+    try:
+        result = subprocess.run(
+            ["ip", "-j", "-d", "-4", "address", "show", "up"],
+            capture_output=True, text=True, check=False, timeout=10)
+        if result.returncode != 0:
+            return None
+        interfaces = json.loads(getattr(result, "stdout", "") or "[]")
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        return None
+    out = []
+    for interface in interfaces if isinstance(interfaces, list) else []:
+        # Only physical-style Ethernet links with a MAC.
+        name = str(interface.get("ifname") or "")
+        mac = str(interface.get("address") or "").lower()
+        kind = str((interface.get("linkinfo") or {}).get("info_kind") or "")
+        if interface.get("link_type") != "ether" or not mac \
+                or kind in _HOST_ADDRESSING_SKIP_KINDS \
+                or name.startswith(_HOST_ADDRESSING_SKIP_IFACES):
+            continue
+        for info in interface.get("addr_info") or []:
+            # Global IPv4 addresses only.
+            if info.get("family") != "inet" or info.get("scope") != "global":
+                continue
+            ip = str(info.get("local") or "")
+            if not ip:
+                continue
+            # dynamic = DHCP lease; secondary = unknown; else static.
+            if info.get("dynamic"):
+                mode = "dhcp"
+            elif info.get("secondary"):
+                mode = "unknown"
+            else:
+                mode = "static"
+            out.append({"ip": ip, "mac": mac, "mode": mode, "interface": name})
+    return out
+
+
 def _retire_sidecar(unit: str) -> list:
     """Stop and disable a retired sidecar that is still enabled, active or
     failed. Returns the action taken (empty when it is already off)."""
@@ -2299,6 +2360,14 @@ class GenericAgent(BaseSpoke):
             # then restarts NetBox. Reuses the LM hub's Entra app (tenant +
             # client_id) with a client secret the hub supplies.
             return await self._apply_netbox_sso(data)
+
+        # Read-only: each IPv4 address with its MAC and static/DHCP mode, so
+        # the hub can reserve statically addressed hosts in DHCP.
+        if cmd == "GET_HOST_ADDRESSING":
+            addresses = await asyncio.to_thread(_host_addressing)
+            if addresses is None:
+                return {"status": "ERROR", "message": "could not read host addresses"}
+            return {"status": "SUCCESS", "addresses": addresses}
 
         # Available, installed and active roles and deploy status.
         if cmd == "GET_AVAILABLE_ROLES":

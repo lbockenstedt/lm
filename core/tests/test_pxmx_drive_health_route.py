@@ -315,3 +315,56 @@ def test_webui_main_js_submenus_and_diagnostics_renderer():
     assert "Serial Number" in content
     assert "Wear Level" in content
     assert "Health Status" in content
+
+
+def _ilo_client(hub, user):
+    """A client whose session is ``user`` (real permission/tenant shape)."""
+    app = FastAPI()
+    app.state.hub = hub
+    ctx = _create_ctx(admin=bool(user.get("permissions", {}).get("admin")))
+    ctx._session_user = lambda request: {"user": user}
+    ctx._resolve_tenant = lambda request, explicit=None: explicit or user.get("tenant_id")
+    pxmx.register(app, hub, ctx)
+    return TestClient(app)
+
+
+def test_drive_health_attaches_linked_ilo_hardware_health_in_tenant_scope():
+    """Each node gets its linked iLO's cached hardware health (no spoke call),
+    only when the controller is in the caller's effective tenant scope; a
+    non-admin can't reach another tenant's iLO with a crafted ?tenant=."""
+    hub = _MockHub(bound_spoke="pxmx-spoke-1")
+    hub.heartbeat = SimpleNamespace(last_seen={})
+    hub.state.system_state["global_config"] = {"nw_devices": [
+        {"id": "c1", "name": "ilo-pve1", "address": "192.0.2.10", "object_type": "ipmi",
+         "tenant_id": "acme", "host_link": {"kind": "agent", "id": "g1", "name": "pve1"}}]}
+    hub.nw_device_cache = {"c1": {"hw_health": {
+        "overall": "ok", "source": "snmp", "polled_at": time.time(), "components": {}}}}
+    admin = {"username": "a", "permissions": {"admin": True}}
+    url = "/api/pxmx/drive-health?refresh=true&tenant="
+
+    def node(user, tenant):
+        """The first node of a fresh drive-health answer."""
+        pxmx._DRIVE_HEALTH_CACHE.clear()
+        return _ilo_client(hub, user).get(url + tenant).json()["nodes"][0]
+
+    got = node(admin, "acme")["hw_health"]
+    assert got["controller"]["id"] == "c1" and got["health"]["overall"] == "ok"
+    assert not any(c["cmd"].startswith("NW") for c in hub.calls)
+    assert "hw_health" not in node(admin, "other")
+    assert "hw_health" not in node({"username": "u", "tenant_id": "other", "permissions": {}}, "acme")
+    assert "hw_health" in node({"username": "u", "tenant_id": "acme", "permissions": {}}, "acme")
+    # An admin with no tenant resolved is held to the ADMIN scope, not "everything".
+    assert "hw_health" not in node(admin, "")
+
+
+def test_drive_health_marks_hw_health_unavailable_when_the_lookup_fails(monkeypatch):
+    """A failing iLO lookup leaves drive data intact and says so per node,
+    instead of looking like "no controller linked"."""
+    hub = _MockHub(bound_spoke="pxmx-spoke-1")
+    hub.heartbeat = SimpleNamespace(last_seen={})
+    monkeypatch.setattr(pxmx.hw_serial_links, "hw_health_for_nodes",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    pxmx._DRIVE_HEALTH_CACHE.clear()
+    admin = {"username": "a", "permissions": {"admin": True}}
+    n = _ilo_client(hub, admin).get("/api/pxmx/drive-health?refresh=true&tenant=acme").json()["nodes"][0]
+    assert n["hw_health"] == {"unavailable": True} and "drives" in n

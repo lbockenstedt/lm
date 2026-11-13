@@ -25,6 +25,42 @@ from routes.role_pool import PRODUCT_ROLE, ensure_role_loaded, maybe_unload_orph
 # fetch. This trades a bounded staleness window for an instant, poll-free UI.
 _NW_SERVE_MAX_AGE_S = 60.0
 
+# The map's NetBox inventory (whole fleet, unfiltered) is reused for this long:
+# the full device list takes ~6 s, and every map load used to wait on it.
+# Each reader's tenant filter still runs on every request.
+_NW_NETBOX_INV_TTL_S = 120.0
+
+
+def _nb_rows(resp, key):
+    """The ``key`` list from a NetBox reply, or None when the call failed
+    (an exception or an error reply, as opposed to an empty list)."""
+    if isinstance(resp, BaseException):
+        return None
+    data = access.unwrap_spoke(resp)
+    rows = data.get(key) if isinstance(data, dict) else None
+    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else None
+
+
+async def _nw_netbox_inventory(hub, netbox):
+    """(devices, cables) from NetBox, fetched together and cached on the hub.
+    A list whose call failed comes back empty, and nothing is cached then."""
+    cached = getattr(hub, "_nw_netbox_inv", None)
+    if cached and time.monotonic() - cached[0] < _NW_NETBOX_INV_TTL_S:
+        return cached[1], cached[2]
+    rr, cr = await asyncio.gather(
+        hub.request_response(netbox, "NETBOX_GET_DEVICES", {}, timeout=60.0),
+        hub.request_response(netbox, "NETBOX_GET_CABLES", {}, timeout=60.0),
+        return_exceptions=True)
+    rows, crows = _nb_rows(rr, "devices"), _nb_rows(cr, "cables")
+    if rows is not None and crows is not None:
+        hub._nw_netbox_inv = (time.monotonic(), rows, crows)
+    elif isinstance(rr, BaseException) or isinstance(cr, BaseException):
+        logger.info("nw_topology: NetBox inventory partly unavailable (%s / %s)",
+                    rr if isinstance(rr, BaseException) else "ok",
+                    cr if isinstance(cr, BaseException) else "ok")
+    return rows or [], crows or []
+
+
 # In-flight guard so rapid navigation coalesces to at most one background
 # revalidate per key (fleet: "__fleet__"; device: "<id>:<endpoint>"). The task
 # set keeps a strong ref so the fire-and-forget tasks aren't GC'd mid-flight.
@@ -740,6 +776,32 @@ def dns_members_from_instances(instances, spoke_id):
     return members
 
 
+# When each (tenant, source) scan-source failure was last logged. A source that
+# keeps failing (e.g. a ClearPass API client without endpoint read rights) is
+# logged once an hour instead of on every scan pass.
+_SCAN_SOURCE_WARNED = {}
+_SCAN_SOURCE_WARN_EVERY = 3600
+
+
+def _scan_source_error(data):
+    """Return the spoke's error message when a scan-source reply is a failure
+    (status ERROR or FAILED), else None."""
+    if isinstance(data, dict) and str(data.get("status", "")).upper() in ("ERROR", "FAILED"):
+        return str(data.get("message") or data.get("error") or "spoke returned an error")[:300]
+    return None
+
+
+def _should_warn_scan_source(tenant_id, source, now=None):
+    """True at most once every _SCAN_SOURCE_WARN_EVERY seconds for each (tenant, source)."""
+    now = time.time() if now is None else now
+    key = (tenant_id, source)
+    last = _SCAN_SOURCE_WARNED.get(key)
+    if last is not None and now - last < _SCAN_SOURCE_WARN_EVERY:
+        return False
+    _SCAN_SOURCE_WARNED[key] = now
+    return True
+
+
 async def sync_dns_instance_topology(hub, instances, spoke_id,
                                      worker_secret=""):
     """Push Setup's DNS server list to its connected DNS Management spoke."""
@@ -1403,19 +1465,15 @@ def register(app, hub, ctx):
         try:
             netbox = hub.get_spoke_by_type("ipam")
             if netbox:
-                rr = await hub.request_response(netbox, "NETBOX_GET_DEVICES", {},
-                                                timeout=60.0)
-                rows = (access.unwrap_spoke(rr) or {}).get("devices") or []
-                netbox_devices = [r for r in rows if isinstance(r, dict)]
                 # Cables carry no IP of their own and are resolved purely by
                 # device NAME against nodes already on the map, so a cable
                 # whose end was filtered out below (another tenant's gear)
                 # harmlessly fails to resolve rather than needing its own
                 # tenant filter.
-                cr = await hub.request_response(netbox, "NETBOX_GET_CABLES", {},
-                                                timeout=60.0)
-                crows = (access.unwrap_spoke(cr) or {}).get("cables") or []
-                netbox_cables = [r for r in crows if isinstance(r, dict)]
+                rows, crows = await _nw_netbox_inventory(hub, netbox)
+                # Copies: the rows are shared by every reader for the window.
+                netbox_devices = [dict(r) for r in rows]
+                netbox_cables = [dict(r) for r in crows]
         except Exception as e:
             logger.info("nw_topology: NetBox inventory unavailable (%s)", e)
 
@@ -1982,6 +2040,13 @@ def register(app, hub, ctx):
                 data = access.unwrap_spoke(result)
             except Exception as e:
                 logger.warning("scan aggregate tenant=%s %s skipped: %s", tenant_id, source, e)
+                return
+            # A spoke error (e.g. 403 from the vendor API) is not "zero rows": warn once an hour.
+            err = _scan_source_error(data)
+            if err:
+                if _should_warn_scan_source(tenant_id, source):
+                    logger.warning("scan aggregate tenant=%s %s spoke=%s failed (repeats hidden for 1h): %s",
+                                   tenant_id, source, sid, err)
                 return
             # Find the row list under whichever key this spoke uses.
             rows = []

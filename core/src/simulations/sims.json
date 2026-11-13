@@ -1,6 +1,7 @@
 {
   "dns_fail": {"category": "failure", "multi_capable": false, "media": "any"},
   "dns_latency": {"category": "failure", "multi_capable": false, "media": "any"},
+  "rogue_dns": {"category": "failure", "multi_capable": false, "media": "wireless"},
   "dhcp_fail": {"category": "failure", "multi_capable": false, "media": "any"},
   "assoc_fail": {"category": "failure", "multi_capable": false, "media": "wireless"},
   "auth_fail": {"category": "failure", "multi_capable": false, "media": "any"},

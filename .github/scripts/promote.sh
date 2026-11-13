@@ -135,6 +135,9 @@ stage_to() {
 picked=""
 picked_idx=0
 conflicted=0
+# Index of the first unit that conflicted in isolation and was batched forward:
+# the picked endpoint carries it, so it is where the carried work starts.
+carry_from=""
 # The code returned by the LAST endpoint tried (the tip of $SRC when nothing
 # is picked). Only that one decides whether an unpicked run is a real
 # divergence: an early unit may conflict in isolation while the full merge is
@@ -167,6 +170,7 @@ for i in "${!units[@]}"; do
     # ("CONFLICT (content): Merge conflict in .github/workflows/promote.yml")
     # while `git merge origin/qa` into main succeeded by hand.
     conflicted=1
+    [ -n "$carry_from" ] || carry_from="$i"
     echo "::warning::unit ${units[$i]} conflicts against $TGT in isolation --" \
          "batching it forward with the following unit(s)"
     continue
@@ -210,6 +214,14 @@ fi
 # over any later unit that touches a file this promotion already touches, and
 # carry them together. Units that touch nothing in common are still left
 # behind, so promotions stay small and reviewable.
+#
+# The oldest unit still names the promotion, and every carried unit is listed in
+# the units_carried output. Naming only one of them made the PR's stated intent
+# disagree with its diff, and the review panel rightly denied it (lm#1906).
+# Units batched forward after a conflict are carried too, so the oldest of
+# those names it when there is one.
+first_idx="${carry_from:-$picked_idx}"
+first="${units[$first_idx]}"
 if [ "$SPLIT" = "1" ]; then
   ext_idx="$picked_idx"
   changed="$(git diff --name-only "origin/$TGT...${units[$picked_idx]}" | sort -u)"
@@ -263,17 +275,36 @@ if [ "$SPLIT" = "1" ]; then
   fi
 fi
 
-# Identify the unit for the PR title/body. A merge commit names its PR in the
+# Identify a unit for the PR title/body. A merge commit names its PR in the
 # subject and carries the PR's own title on the first line of the body, which
 # is far more useful than "Merge pull request #123 from user/branch".
-unit_subject="$(git log -1 --format=%s "$picked")"
-unit_pr="$(printf '%s' "$unit_subject" | sed -n 's/^Merge pull request #\([0-9][0-9]*\) .*/\1/p')"
-if [ -n "$unit_pr" ]; then
-  body_first="$(git log -1 --format=%b "$picked" | sed -n '/./{p;q;}')"
-  [ -n "$body_first" ] && unit_subject="$body_first"
-else
-  # Squash merges land as "feat: thing (#123)".
-  unit_pr="$(printf '%s' "$unit_subject" | sed -n 's/.*(#\([0-9][0-9]*\))[[:space:]]*$/\1/p')"
+# Prints "<pr>\x1f<subject>"; <pr> is empty for a direct push. Not a tab: read
+# folds whitespace separators, so an empty <pr> would swallow the subject.
+describe_unit() {
+  local subj pr body_first
+  subj="$(git log -1 --format=%s "$1")"
+  pr="$(printf '%s' "$subj" | sed -n 's/^Merge pull request #\([0-9][0-9]*\) .*/\1/p')"
+  if [ -n "$pr" ]; then
+    body_first="$(git log -1 --format=%b "$1" | sed -n '/./{p;q;}')"
+    [ -n "$body_first" ] && subj="$body_first"
+  else
+    # Squash merges land as "feat: thing (#123)".
+    pr="$(printf '%s' "$subj" | sed -n 's/.*(#\([0-9][0-9]*\))[[:space:]]*$/\1/p')"
+  fi
+  printf '%s\x1f%s\n' "$pr" "$subj"
+}
+
+# Name the OLDEST unit. When later units were carried with it, say so and list
+# every one: naming only one of them made the PR's stated intent cover a
+# fraction of its diff, and the review panel rejected it for exactly that.
+IFS=$'\x1f' read -r unit_pr unit_subject < <(describe_unit "$first")
+units_carried=""
+if [ "$picked_idx" -ne "$first_idx" ]; then
+  unit_subject="$unit_subject (+$(( picked_idx - first_idx )) more)"
+  for (( k = first_idx; k <= picked_idx; k++ )); do
+    IFS=$'\x1f' read -r k_pr k_subject < <(describe_unit "${units[$k]}")
+    units_carried+="- ${k_pr:+#$k_pr }$k_subject"$'\n'
+  done
 fi
 
 # Upper bound: the units behind this one are not re-examined here, and any of
@@ -291,8 +322,12 @@ if [ "$SPLIT" = "1" ]; then
     echo "unit_subject<<PROMOTE_EOF"
     echo "$unit_subject"
     echo "PROMOTE_EOF"
+    echo "units_carried<<PROMOTE_EOF"
+    printf '%s' "$units_carried"
+    echo "PROMOTE_EOF"
   } >> "$out"
   echo "Promoting the oldest of ${#units[@]} un-promoted unit(s): ${unit_pr:+#$unit_pr }$unit_subject"
+  [ -n "$units_carried" ] && printf 'Units carried together:\n%s' "$units_carried"
   echo "  up to $remaining further unit(s) will follow in later runs"
 fi
 

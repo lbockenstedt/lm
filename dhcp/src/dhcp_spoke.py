@@ -991,13 +991,32 @@ class DHCPSpoke(BaseSpoke):
         merged: List[Any] = []
         seen = set()
         errors: Dict[str, str] = {}
+        results = fan.get("results") or {}
+        # Strict holds only when asked for and every node honoured it.
+        strict = bool(payload.get("strict")) and bool(results)
+        # A configured member with no reply at all is a failed node too.
+        for member_id in getattr(self._transport, "member_ids", lambda: [])() or []:
+            if member_id not in results:
+                errors[member_id] = "no response"
+                strict = False
         # Record failed nodes and skip them.
-        for member_id, reply in (fan.get("results") or {}).items():
+        for member_id, reply in results.items():
             if not isinstance(reply, dict) or reply.get("status") != "SUCCESS":
                 errors[member_id] = (reply or {}).get("message") or "no response"
+                strict = False
+                continue
+            if not reply.get("strict"):
+                strict = False
+            # A strict answer must carry a real list; a missing or malformed
+            # one is a failed node, never "nothing here".
+            items = reply.get(list_key)
+            if not isinstance(items, list):
+                if payload.get("strict"):
+                    errors[member_id] = "no %s list" % list_key
+                    strict = False
                 continue
             # Deduplicate by address/subnet, or by full content when neither is present.
-            for item in reply.get(list_key) or []:
+            for item in items:
                 if isinstance(item, dict):
                     key = (item.get("ip") or item.get("ip-address")
                            or item.get("address") or item.get("subnet")
@@ -1008,8 +1027,11 @@ class DHCPSpoke(BaseSpoke):
                     continue
                 seen.add(key)
                 merged.append(item)
-        return {"status": "SUCCESS", list_key: merged, "cluster": True,
-                "member_errors": errors}
+        out = {"status": "SUCCESS", list_key: merged, "cluster": True,
+               "member_errors": errors}
+        if payload.get("strict"):
+            out["strict"] = strict
+        return out
 
     async def _ha_reservation(self, cmd: str, data: Dict[str, Any]) -> Dict[str, Any]:
         """Reservation CRUD in HA mode = re-render + re-apply BOTH nodes.
@@ -1273,10 +1295,13 @@ class DHCPSpoke(BaseSpoke):
                 return await self._ha_reservation(cmd, data)
             # v4 list queries merged across nodes.
             if cmd == "DHCP_LIST_SUBNETS":
-                return await self._ha_list("KEAW_LIST_SUBNETS", {}, "subnets")
+                return await self._ha_list(
+                    "KEAW_LIST_SUBNETS", {"strict": bool(data.get("strict"))}, "subnets")
             if cmd == "DHCP_LIST_LEASES":
-                return await self._ha_list("KEAW_LIST_LEASES",
-                                           {"subnet": data.get("subnet")}, "leases")
+                return await self._ha_list(
+                    "KEAW_LIST_LEASES",
+                    {"subnet": data.get("subnet"), "strict": bool(data.get("strict"))},
+                    "leases")
             # Delete a v4 lease on every node.
             if cmd == "DHCP_DEL_LEASE":
                 ip = data.get("ip") or data.get("ip-address")
@@ -1336,13 +1361,29 @@ class DHCPSpoke(BaseSpoke):
 
         # Single-node v4 list queries.
         if cmd == "DHCP_LIST_SUBNETS":
-            subnets = await asyncio.to_thread(self.mgr.list_subnets)
-            return {"status": "SUCCESS", "subnets": subnets}
+            # Non-strict: an unreadable Kea shows as an empty list (old behaviour).
+            if not data.get("strict"):
+                subnets = await asyncio.to_thread(self.mgr.list_subnets)
+                return {"status": "SUCCESS", "subnets": subnets}
+            # Strict: a failed read is an ERROR; echo strict so callers know it was honoured.
+            try:
+                subnets = await asyncio.to_thread(self.mgr.list_subnets, True)
+            except Exception as e:  # noqa: BLE001
+                return {"status": "ERROR", "message": f"subnet read failed: {e}"}
+            return {"status": "SUCCESS", "subnets": subnets, "strict": True}
 
         if cmd == "DHCP_LIST_LEASES":
             subnet = data.get("subnet")
-            leases = await asyncio.to_thread(self.mgr.list_leases, subnet)
-            return {"status": "SUCCESS", "leases": leases}
+            # Non-strict: an unreadable Kea shows as an empty list (old behaviour).
+            if not data.get("strict"):
+                leases = await asyncio.to_thread(self.mgr.list_leases, subnet)
+                return {"status": "SUCCESS", "leases": leases}
+            # Strict: a failed read is an ERROR; echo strict so callers know it was honoured.
+            try:
+                leases = await asyncio.to_thread(self.mgr.list_leases, subnet, True)
+            except Exception as e:  # noqa: BLE001
+                return {"status": "ERROR", "message": f"lease read failed: {e}"}
+            return {"status": "SUCCESS", "leases": leases, "strict": True}
 
         # Delete one v4 lease.
         if cmd == "DHCP_DEL_LEASE":

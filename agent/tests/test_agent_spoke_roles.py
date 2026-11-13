@@ -13,6 +13,7 @@ Covers the blockers fixed when extending ``_ROLE_MAP`` from 2 → 10 roles:
      packages a role needs (certbot + DNS-01 plugins for le).
 """
 import asyncio
+import json
 import importlib
 import sys
 import types
@@ -1047,3 +1048,68 @@ def test_agent_advertises_zabbix_server_capability(monkeypatch):
     assert AgentControlPlane._extra_auth_fields(object()).get("zabbix_server") is True
     monkeypatch.setattr(agent_spoke, "is_zabbix_web_host", lambda: False)
     assert "zabbix_server" not in AgentControlPlane._extra_auth_fields(object())
+
+
+def test_host_addressing_reports_static_dhcp_and_unknown(monkeypatch):
+    """GET_HOST_ADDRESSING: kernel "dynamic" = DHCP, permanent primary = static,
+    secondary (VIP) = unknown; loopback, container bridges and virtual link
+    kinds are left out, a LAN bridge is kept."""
+    rows = [
+        {"ifname": "lo", "link_type": "loopback", "address": "00:00:00:00:00:00",
+         "addr_info": [{"family": "inet", "local": "127.0.0.1", "scope": "host"}]},
+        {"ifname": "eth0", "link_type": "ether", "address": "02:00:00:00:00:0A",
+         "addr_info": [
+             {"family": "inet", "local": "10.20.0.50", "scope": "global"},
+             {"family": "inet", "local": "10.20.0.99", "scope": "global",
+              "secondary": True}]},
+        {"ifname": "eth1", "link_type": "ether", "address": "02:00:00:00:00:0b",
+         "addr_info": [{"family": "inet", "local": "10.30.0.7", "scope": "global",
+                        "dynamic": True, "valid_life_time": 3600}]},
+        {"ifname": "docker0", "link_type": "ether", "address": "02:00:00:00:00:0c",
+         "addr_info": [{"family": "inet", "local": "172.17.0.1", "scope": "global"}]},
+        {"ifname": "podman0", "link_type": "ether", "address": "02:00:00:00:00:0d",
+         "linkinfo": {"info_kind": "bridge"},
+         "addr_info": [{"family": "inet", "local": "10.88.0.1", "scope": "global"}]},
+        # A renamed virtual link is caught by its kind, not its name.
+        {"ifname": "uplink9", "link_type": "ether", "address": "02:00:00:00:00:0e",
+         "linkinfo": {"info_kind": "macvlan"},
+         "addr_info": [{"family": "inet", "local": "10.40.0.5", "scope": "global"}]},
+        # A tunnel named like a NIC is still caught by its kind ...
+        {"ifname": "zt0", "link_type": "ether", "address": "02:00:00:00:00:10",
+         "linkinfo": {"info_kind": "tun"},
+         "addr_info": [{"family": "inet", "local": "10.60.0.3", "scope": "global"}]},
+        # ... and a real NIC whose name merely starts like one is kept.
+        {"ifname": "tap-lan", "link_type": "ether", "address": "02:00:00:00:00:11",
+         "addr_info": [{"family": "inet", "local": "10.70.0.4", "scope": "global"}]},
+        # A LAN bridge holding the host's own address is kept.
+        {"ifname": "vmbr0", "link_type": "ether", "address": "02:00:00:00:00:0f",
+         "linkinfo": {"info_kind": "bridge"},
+         "addr_info": [{"family": "inet", "local": "10.50.0.2", "scope": "global"}]},
+    ]
+    argv = []
+
+    def _run(cmd, *args, **kwargs):
+        argv.append(cmd)
+        return types.SimpleNamespace(returncode=0, stdout=json.dumps(rows))
+
+    monkeypatch.setattr(agent_spoke.subprocess, "run", _run)
+
+    assert agent_spoke._host_addressing() == [
+        {"ip": "10.20.0.50", "mac": "02:00:00:00:00:0a", "mode": "static",
+         "interface": "eth0"},
+        {"ip": "10.20.0.99", "mac": "02:00:00:00:00:0a", "mode": "unknown",
+         "interface": "eth0"},
+        {"ip": "10.30.0.7", "mac": "02:00:00:00:00:0b", "mode": "dhcp",
+         "interface": "eth1"},
+        {"ip": "10.70.0.4", "mac": "02:00:00:00:00:11", "mode": "static",
+         "interface": "tap-lan"},
+        {"ip": "10.50.0.2", "mac": "02:00:00:00:00:0f", "mode": "static",
+         "interface": "vmbr0"},
+    ]
+    # linkinfo (the link kind) is only in ip's detailed output.
+    assert argv == [["ip", "-j", "-d", "-4", "address", "show", "up"]]
+    # A failing "ip" command is a failure, not "no addresses".
+    monkeypatch.setattr(
+        agent_spoke.subprocess, "run",
+        lambda *args, **kwargs: types.SimpleNamespace(returncode=1, stdout=""))
+    assert agent_spoke._host_addressing() is None
