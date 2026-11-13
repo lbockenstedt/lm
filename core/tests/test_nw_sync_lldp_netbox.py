@@ -115,3 +115,41 @@ def test_hub_push_groups_by_tenant_with_its_netbox_slug():
     hub.calls.clear()
     asyncio.run(hub.push_lldp_links_to_netbox("acme"))
     assert [c[2]["tenant_slug"] for c in hub.calls] == ["acme-nb"]
+
+
+async def test_a_failing_background_refresh_is_not_resent_on_every_page_poll():
+    # nw#233: a failed fetch never stamps the cache, so each poll re-sent it.
+    from routes import nw as nw_routes
+    calls = []
+
+    async def failing_arp():
+        calls.append(1)
+        raise Exception("NW_GET_ARP timed out")
+
+    key = "dev-233:arp"
+    for _ in range(5):
+        nw_routes._nw_spawn_refresh(key, failing_arp, min_gap_s=nw_routes._NW_SERVE_MAX_AGE_S)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+    assert calls == [1]
+    # Once the floor has passed it is retried.
+    nw_routes._NW_BG_LAST_START[key] -= nw_routes._NW_SERVE_MAX_AGE_S
+    nw_routes._nw_spawn_refresh(key, failing_arp, min_gap_s=nw_routes._NW_SERVE_MAX_AGE_S)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert calls == [1, 1]
+
+
+async def test_a_queue_drain_is_never_held_back_by_the_refresh_floor():
+    # seen-push / discovery-poll drains must run again as soon as the last one ends.
+    from routes import nw as nw_routes
+    calls = []
+
+    async def drain():
+        calls.append(1)
+
+    for _ in range(3):
+        nw_routes._nw_spawn_refresh("seen-push:t233", drain)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+    assert calls == [1, 1, 1]

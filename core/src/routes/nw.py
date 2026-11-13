@@ -32,6 +32,10 @@ _NW_BG_INFLIGHT: set = set()
 # tenant -> IPs waiting for the seen-hosts NetBox push (drained by one task).
 _NW_SEEN_PENDING: dict = {}
 _NW_BG_TASKS: set = set()
+# key -> when its last background revalidate started. A failed fetch never
+# stamps the cache, so without this every page poll of a device whose ARP keeps
+# failing re-sent the command (nw#233: ~770 NW_GET_ARP/h to one spoke).
+_NW_BG_LAST_START: dict = {}
 # Per-device background cache refreshes running against the nw spoke at once.
 _NW_BG_REFRESH_AT_ONCE = 4
 
@@ -41,13 +45,16 @@ def _nw_truthy(v) -> bool:
     return str(v or "").strip().lower() in ("1", "true", "yes", "on")
 
 
-def _nw_spawn_refresh(key, coro_factory) -> None:
+def _nw_spawn_refresh(key, coro_factory, min_gap_s: float = 0.0) -> None:
     """Fire ONE background revalidate for ``key`` (deduped). ``coro_factory`` is
     a zero-arg callable returning the coroutine — built INSIDE the guard so a
     skipped spawn never leaves an un-awaited coroutine. No running loop (sync
-    test path) → no-op."""
-    # A refresh for this key is already running.
+    test path) → no-op. ``min_gap_s`` > 0 (cache revalidates only) also skips
+    a key whose last refresh started less than that many seconds ago."""
+    # A refresh for this key is already running, or one started too recently.
     if key in _NW_BG_INFLIGHT:
+        return
+    if min_gap_s and time.time() - _NW_BG_LAST_START.get(key, 0.0) < min_gap_s:
         return
     # No running event loop (sync test path): do nothing.
     try:
@@ -56,6 +63,7 @@ def _nw_spawn_refresh(key, coro_factory) -> None:
         return
     # Mark the key as in flight before starting.
     _NW_BG_INFLIGHT.add(key)
+    _NW_BG_LAST_START[key] = time.time()
 
     async def _run():
         """Run the refresh, log any failure, and always clear the in-flight mark."""
@@ -1129,7 +1137,8 @@ def register(app, hub, ctx):
                 # Spoke online: refresh in the background if the snapshot is getting old.
                 age = time.time() - float(cached.get("fetched_at") or 0.0)
                 if age > _NW_SERVE_MAX_AGE_S:
-                    _nw_spawn_refresh("__fleet__", lambda: _nw_bg_refresh_fleet(hub))
+                    _nw_spawn_refresh("__fleet__", lambda: _nw_bg_refresh_fleet(hub),
+                                      min_gap_s=_NW_SERVE_MAX_AGE_S)
             return out
 
         if not spokes:
@@ -1382,7 +1391,8 @@ def register(app, hub, ctx):
                 _nw_spawn_refresh(
                     f"{did}:{endpoint}",
                     (lambda d=did, e=endpoint, c=cmd, s=spoke_by_id[did], p=payload:
-                     _nw_bg_refresh_device(hub, d, e, s, c, p, 30.0)))
+                     _nw_bg_refresh_device(hub, d, e, s, c, p, 30.0)),
+                    min_gap_s=_NW_SERVE_MAX_AGE_S)
 
         # NetBox inventory: gear the nw fleet never logs into (PDUs, patch
         # panels, APs) still belongs on the map. Best-effort — no IPAM spoke, a
@@ -1616,7 +1626,8 @@ def register(app, hub, ctx):
                 _nw_spawn_refresh(
                     f"{device_id}:{endpoint}",
                     lambda: _nw_bg_refresh_device(hub, device_id, endpoint,
-                                                  spoke_id, spoke_cmd, relay_payload, timeout))
+                                                  spoke_id, spoke_cmd, relay_payload, timeout),
+                    min_gap_s=_NW_SERVE_MAX_AGE_S)
             return filtered
 
         if not spoke_id:
