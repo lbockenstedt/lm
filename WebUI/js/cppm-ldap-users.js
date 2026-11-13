@@ -659,6 +659,8 @@ function _updateLDAPOuHint() {
 function onLDAPTenantChange() {
     const sel = document.getElementById('ldap-tenant-select');
     if (sel) window._ldapTenant = sel.value;
+    // The OU panel still holds the old tenant; hide it until the new one loads.
+    lmViews.directoryHideOus?.();
     _updateLDAPOuHint();
     loadLDAPData(currentSubView || 'Users');
 }
@@ -667,14 +669,22 @@ function _ldapTenantQuery() {
     return window._ldapTenant ? ('?tenant=' + encodeURIComponent(window._ldapTenant)) : '';
 }
 
+// Bumped by every loadLDAPData call. A reply that comes back after a newer load
+// started (tenant picker change, Users/Groups switch) is dropped, so one
+// tenant's rows are never drawn, or acted on, under another tenant.
+let _ldapLoadSeq = 0;
+
 async function loadLDAPData(subMenu) {
     subMenu = (subMenu === 'Groups') ? 'Groups' : 'Users';
     const headEl = document.getElementById('ldap-table-head');
     const bodyEl = document.getElementById('ldap-table-body');
     if (!headEl || !bodyEl) return;
+    const seq = ++_ldapLoadSeq;
 
     await ensureLDAPTenants();
-    if (!window._ldapTenant) {
+    if (seq !== _ldapLoadSeq) return;
+    const tenant = window._ldapTenant;
+    if (!tenant) {
         headEl.innerHTML = '';
         bodyEl.innerHTML = `<tr><td colspan="100%" class="px-4 py-8 text-center text-slate-500 italic">No tenant available to manage.</td></tr>`;
         return;
@@ -682,50 +692,44 @@ async function loadLDAPData(subMenu) {
     const canWrite = isAdmin() || isTenantAdmin();
 
     try {
+        // Groups have no OU tree; hide it before the fetch so a failed fetch can't leave it up.
+        if (subMenu === 'Groups') lmViews.directoryHideOus?.();
         const endpoint = (subMenu === 'Groups' ? '/api/ldap/groups' : '/api/ldap/users') + _ldapTenantQuery();
         const headers = (subMenu === 'Groups')
             ? ['Group', 'Members', 'Actions']
-            : ['Username', 'Name', 'Auth', 'Email / UPN', 'Actions'];
+            : ['Username', 'Name', 'Auth', 'Email / UPN', 'OU', 'Actions'];
         headEl.innerHTML = headers.map(h => `<th class="px-4 py-3 font-bold">${h}</th>`).join('');
         bodyEl.innerHTML = `<tr><td colspan="100%" class="px-4 py-8 text-center text-slate-500 italic">Fetching ${subMenu.toLowerCase()}…</td></tr>`;
 
         const data = await apiJson(endpoint);
+        if (seq !== _ldapLoadSeq) return;
         const items = (data && (data.users || data.groups || data.data)) || (Array.isArray(data) ? data : []);
         window._ldapRows = items;
 
+        // Users (with the OU tree) are drawn by js/views/directory-users.js.
+        if (subMenu === 'Users') {
+            await lmViews.directoryUsers({
+                tenant, users: items, canWrite, isCurrent: () => seq === _ldapLoadSeq });
+            return;
+        }
         if (!items.length) {
             bodyEl.innerHTML = `<tr><td colspan="100%" class="px-4 py-8 text-center text-slate-500 italic">No ${subMenu.toLowerCase()} in this tenant.</td></tr>`;
             return;
         }
 
         bodyEl.innerHTML = items.map(it => {
-            if (subMenu === 'Groups') {
-                const cn = escapeHtml(it.cn || it.name || '');
-                const members = it.members || it.member || [];
-                const memCount = Array.isArray(members) ? members.length : (it.member_count || 0);
-                const eCn = String(it.cn || it.name || '').replace(/'/g, "\\'");
-                const actions = canWrite ? `<td class="px-4 py-3 text-right whitespace-nowrap">
-                    <button onclick="showLDAPMembersModal('${eCn}')" title="Manage group members" class="p-1 text-slate-500 hover:text-blue-600 transition-colors">${LDAP_ICONS.mem}</button>
-                    <button onclick="deleteLDAPGroup('${eCn}')" title="Delete group" class="p-1 text-slate-500 hover:text-red-600 transition-colors">${LDAP_ICONS.del}</button>
-                </td>` : '<td></td>';
-                return `<tr class="hover:bg-slate-50 transition-colors"><td class="px-4 py-3 font-medium text-slate-700">${cn}</td><td class="px-4 py-3 text-slate-500 text-xs">${memCount} members</td>${actions}</tr>`;
-            }
-            const uid = escapeHtml(it.uid || it.username || '');
-            const eUid = String(it.uid || it.username || '').replace(/'/g, "\\'");
-            const isEntra = it.auth_mode === 'entra';
-            const name = escapeHtml(it.name || [it.first_name, it.last_name].filter(Boolean).join(' ') || '');
-            const email = escapeHtml(it.email || it.upn || '');
-            const badge = isEntra
-                ? '<span title="Authenticates via Entra — no local password" class="px-2 py-0.5 rounded-full text-xs font-bold bg-blue-100 text-blue-700">Entra</span>'
-                : '<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-600">Local</span>';
+            const cn = escapeHtml(it.cn || it.name || '');
+            const members = it.members || it.member || [];
+            const memCount = Array.isArray(members) ? members.length : (it.member_count || 0);
+            const eCn = String(it.cn || it.name || '').replace(/'/g, "\\'");
             const actions = canWrite ? `<td class="px-4 py-3 text-right whitespace-nowrap">
-                <button onclick="editLDAPUser('${eUid}')" title="Edit user details" class="p-1 text-slate-500 hover:text-blue-600 transition-colors">${LDAP_ICONS.edit}</button>
-                ${isEntra ? '' : `<button onclick="showLDAPPasswordModal('${eUid}')" title="Reset user password" class="p-1 text-slate-500 hover:text-blue-600 transition-colors">${LDAP_ICONS.pw}</button>`}
-                <button onclick="deleteLDAPUser('${eUid}')" title="Delete user" class="p-1 text-slate-500 hover:text-red-600 transition-colors">${LDAP_ICONS.del}</button>
+                <button onclick="showLDAPMembersModal('${eCn}')" title="Manage group members" class="p-1 text-slate-500 hover:text-blue-600 transition-colors">${LDAP_ICONS.mem}</button>
+                <button onclick="deleteLDAPGroup('${eCn}')" title="Delete group" class="p-1 text-slate-500 hover:text-red-600 transition-colors">${LDAP_ICONS.del}</button>
             </td>` : '<td></td>';
-            return `<tr class="hover:bg-slate-50 transition-colors"><td class="px-4 py-3 font-medium text-slate-700">${uid}</td><td class="px-4 py-3 text-slate-600">${name}</td><td class="px-4 py-3">${badge}</td><td class="px-4 py-3 text-slate-600">${email}</td>${actions}</tr>`;
+            return `<tr class="hover:bg-slate-50 transition-colors"><td class="px-4 py-3 font-medium text-slate-700">${cn}</td><td class="px-4 py-3 text-slate-500 text-xs">${memCount} members</td>${actions}</tr>`;
         }).join('');
     } catch (err) {
+        if (seq !== _ldapLoadSeq) return;
         bodyEl.innerHTML = `<tr><td colspan="100%" class="px-4 py-8 text-center text-red-500">${escapeHtml(err.message || String(err))}</td></tr>`;
     }
 }
@@ -805,6 +809,9 @@ async function saveLDAPUser(editing) {
         email: document.getElementById('ldap-user-email')?.value.trim() || '',
     };
     const body = { tenant_id: window._ldapTenant, uid, attrs };
+    // A new user goes into the OU picked in the tree (top level when none).
+    const ouPath = editing ? [] : lmViews.directoryOuPath();
+    if (ouPath.length) body.ou_path = ouPath;
     if (!editing) {
         body.auth_mode = authMode;
         if (authMode === 'entra') {
@@ -827,6 +834,11 @@ async function saveLDAPUser(editing) {
         });
         if (res.ok) {
             const result = await res.json().catch(() => ({}));
+            if (result.warning) {
+                // Toasts are green or red only; the user did not land in the
+                // picked OU, so this one is red.
+                showToast(result.warning, 'error');
+            }
             if (!editing && result.password) {
                 showToast(`User created!\n\nGenerated password: ${result.password}\n\nPlease record this — it will not be shown again.`, 'success');
             } else {

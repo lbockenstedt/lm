@@ -4853,11 +4853,14 @@ function _viewTemplate(viewId) {
       <span id="entra-health-label" class="text-slate-500">checking…</span>
     </div>
   </div>
-  <div class="${card} p-0 overflow-hidden">
-    <table class="w-full text-left text-sm">
-      <thead class="bg-slate-100 text-slate-600 text-xs"><tr id="ldap-table-head"></tr></thead>
-      <tbody id="ldap-table-body" class="divide-y divide-slate-200"><tr><td class="px-4 py-8 text-center text-slate-500 italic">Loading…</td></tr></tbody>
-    </table>
+  <div class="flex gap-4 items-start">
+    <div id="ldap-ou-panel" class="${card} w-60 shrink-0 hidden" title="OUs (folders) inside this tenant"></div>
+    <div class="${card} p-0 overflow-x-auto flex-1">
+      <table class="w-full text-left text-sm">
+        <thead class="bg-slate-100 text-slate-600 text-xs"><tr id="ldap-table-head"></tr></thead>
+        <tbody id="ldap-table-body" class="divide-y divide-slate-200"><tr><td class="px-4 py-8 text-center text-slate-500 italic">Loading…</td></tr></tbody>
+      </table>
+    </div>
   </div>
 </div>`;
 

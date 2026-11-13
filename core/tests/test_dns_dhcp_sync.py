@@ -591,6 +591,26 @@ async def test_tenant_without_netbox_mapping_is_skipped_never_given_everything()
     assert "dhcp-nomap" not in hub.pushed()
 
 
+class _LrbKeaDownHub(_TenantHub):
+    """The lrb tenant's own Kea rejects its push."""
+    async def request_response(self, spoke_id, command, payload, timeout=30.0):
+        if command == "DHCP_SYNC" and spoke_id == "dhcp-lrb":
+            raise RuntimeError("kea down")
+        return await super().request_response(spoke_id, command, payload, timeout)
+
+
+@pytest.mark.asyncio
+async def test_delivered_dhcp_scopes_exclude_a_failed_push_and_survive_unchanged_ticks():
+    hub = _LrbKeaDownHub({"dhcp-shared": None, "dhcp-lrb": "lrb"}, _TENANTS)
+    await hub._sync_dns_dhcp_once()
+    assert hub._dhcp_delivered == {""}
+    await hub._sync_dns_dhcp_once()                 # shared unchanged: still delivered
+    assert hub._dhcp_delivered == {""}
+    hub._spokes["ipam"] = None                      # no NetBox: nothing delivered
+    await hub._sync_dns_dhcp_once()
+    assert hub._dhcp_delivered == set()
+
+
 @pytest.mark.asyncio
 async def test_per_scope_hash_only_repushes_the_changed_tenant():
     hub = _TenantHub({"dhcp-shared": None, "dhcp-lrb": "lrb"}, _TENANTS)

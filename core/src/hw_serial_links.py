@@ -243,3 +243,53 @@ def controller_link_for(device_cfg: Dict[str, Any], serial: str = "") -> Dict[st
     if ser and link.get("serial") and link["serial"] != ser:
         return {}
     return {"kind": link.get("kind", ""), "name": link["name"], "serial": link.get("serial", "")}
+
+
+# A reading older than this is shown as stale. The nw spoke polls an iLO every
+# 6h by default (jittered up to 9h), so a day means several missed polls.
+HW_HEALTH_STALE_S = 24 * 3600.0
+
+
+def hw_health_for_nodes(hub: Any, node_names: Iterable[str],
+                        visible: Any = None, now: Optional[float] = None) -> Dict[str, Dict[str, Any]]:
+    """The iLO hardware health for each hypervisor node, from the hub caches only.
+
+    A node is matched to the controller whose persisted ``host_link`` (made by
+    ``refresh_hw_serial_links`` from the chassis serial) points at an agent with
+    the same short host name. ``visible(tenant_id)`` filters controllers the
+    caller may see. Returns ``{node: entry}`` for linked nodes only, where entry
+    is ``{"controller": {id, name, address}, "health": {overall, components,
+    polled_at, source} | None, "error"?, "error_at"?, "stale"?}``; ``health`` is
+    None until a spoke reports it (SNMP not set up, or an nw spoke that
+    predates hardware health)."""
+    wanted = {_short(n): n for n in node_names or [] if _short(n)}
+    gc = hub.state.system_state.get("global_config", {}) or {}
+    cache = getattr(hub, "nw_device_cache", {}) or {}
+    now = time.time() if now is None else now
+    out: Dict[str, Dict[str, Any]] = {}
+    # Sorted by name so two controllers claiming one node resolve the same way every time.
+    ctls = sorted((d for d in gc.get("nw_devices", []) or [] if isinstance(d, dict)
+                   and str(d.get("object_type") or "").lower() == "ipmi"),
+                  key=lambda d: str(d.get("name") or d.get("id") or ""))
+    for d in ctls:
+        link = d.get("host_link") or {}
+        node = wanted.get(_short(link.get("name"))) if link.get("kind") == "agent" else None
+        if not node or node in out or (visible is not None and not visible(d.get("tenant_id"))):
+            continue
+        entry: Dict[str, Any] = {"controller": _brief(d, ("id", "name", "address")), "health": None}
+        hh = (cache.get(str(d.get("id"))) or {}).get("hw_health")
+        if isinstance(hh, dict):
+            if hh.get("overall") or hh.get("components"):
+                entry["health"] = {k: hh.get(k) for k in ("overall", "components", "polled_at", "source")}
+                # Spoke data is untrusted: a bad timestamp only affects this node.
+                try:
+                    polled = float(hh.get("polled_at") or 0)
+                except (TypeError, ValueError):
+                    polled = 0
+                # No usable timestamp means the age is unknown: flag it like stale.
+                if not polled or now - polled > HW_HEALTH_STALE_S:
+                    entry["stale"] = True
+            if hh.get("error"):
+                entry["error"], entry["error_at"] = hh["error"], hh.get("error_at")
+        out[node] = entry
+    return out

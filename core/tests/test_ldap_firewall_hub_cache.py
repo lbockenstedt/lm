@@ -23,6 +23,12 @@ class _State:
         self.tenant_state = {"tenants": dict(tenants or {})}
         self.system_state = system_state or {}
 
+    def get_global_config(self):
+        return self.system_state.get("global_config", {})
+
+    def _mark_dirty(self):
+        pass
+
     def get_tenant(self, tid):
         return self.tenant_state["tenants"].get(tid)
 
@@ -34,6 +40,7 @@ class _Hub(WarmCacheMixin):
         self.warm_cache_init()
         self.replies = replies        # (spoke, cmd) -> reply, or callable(payload)
         self.calls = []
+        self.sent = []
         self.active_connections = {s: object() for s in (spokes or [])}
         self._dir_spokes = {}
 
@@ -42,6 +49,13 @@ class _Hub(WarmCacheMixin):
 
     def get_directory_spoke_for_tenant(self, tid):
         return self._dir_spokes.get(tid)
+
+    async def send_to_spoke(self, msg):
+        self.sent.append((msg.header.destination_id, msg.payload.type, msg.payload.data))
+
+    async def opn_config_for_spoke(self, sid):
+        from main import LabManagerHub
+        return await LabManagerHub.opn_config_for_spoke(self, sid)
 
     async def request_response(self, sid, cmd, payload, timeout=30.0, **kw):
         self.calls.append((sid, cmd, dict(payload or {})))
@@ -119,8 +133,8 @@ def test_ldap_feed_covers_tenants_with_a_directory_spoke_only():
     hub.state.tenant_state["tenants"]["c"] = {}     # no directory spoke
     _ldap_client(hub, _ADMIN)
     keys = {(j.ns, j.key) for j in hub._cache_collect_jobs()}
-    assert keys == {("ldap_list_users", "a|a"), ("ldap_list_groups", "a|a"),
-                    ("ldap_list_users", "b|b"), ("ldap_list_groups", "b|b")}
+    assert keys == {(ns, f"{t}|{t}") for t in "ab"
+                    for ns in ("ldap_list_users", "ldap_list_groups", "ldap_list_ous")}
 
 
 def test_two_tenants_with_the_same_ou_slug_never_share_an_entry():
@@ -256,3 +270,142 @@ def test_impairment_on_shared_firewall_must_be_inside_tenant_subnet():
     finally:
         access.write_scope, access.resolve_owned_prefixes, access.fw_rule_in_tenant_scope = saved
     assert [cmd for _, cmd, _ in hub.calls] == ["OPNSENSE_ADD_IMPAIRMENT"]
+
+
+def test_two_firewalls_on_one_spoke_each_name_their_firewall():
+    """Both boxes of an HA pair share one spoke; every command must carry its
+    firewall_id or the spoke runs it on the first box."""
+    hub = _Hub({("sp-1", "OPNSENSE_ADD_IMPAIRMENT"): lambda p: {"status": "SUCCESS", "uuid": "i1"},
+                ("sp-1", "OPNSENSE_GET_ALL_RULES"): lambda p: {"status": "SUCCESS", "data": []}},
+               system_state={"global_config": {"firewalls": [
+                   {"id": "fw-a", "spoke_id": "sp-1"}, {"id": "fw-b", "spoke_id": "sp-1"}]}},
+               spokes=["sp-1"])
+    c = _fw_client(hub, _ADMIN)
+    assert c.post("/api/firewall/fw-b/impair", json={"target": "10.0.0.5"}).status_code == 200
+    c.get("/api/firewall/fw-a/rules")
+    c.get("/api/firewall/fw-b/rules")
+    sent = [(cmd, p.get("firewall_id")) for _, cmd, p in hub.calls]
+    assert ("OPNSENSE_ADD_IMPAIRMENT", "fw-b") in sent
+    assert ("OPNSENSE_GET_ALL_RULES", "fw-a") in sent and ("OPNSENSE_GET_ALL_RULES", "fw-b") in sent
+
+
+def test_impairment_reply_without_success_is_an_error():
+    """A timeout or an unrecognised reply must not be shown as 'added'."""
+    hub, _ = _fw_hub()
+    hub.replies[("sp-1", "OPNSENSE_ADD_IMPAIRMENT")] = lambda p: None
+    c = _fw_client(hub, _ADMIN)
+    r = c.post("/api/firewall/fw-1/impair", json={"target": "10.0.0.5"})
+    assert r.status_code == 400
+
+
+def _pair_hub():
+    """Two boxes of a pair bound to sp-1, one on sp-2; sp-1 and sp-2 online."""
+    return _Hub({}, system_state={"global_config": {"firewalls": [
+        {"id": "fw-a", "spoke_id": "sp-1", "model": "opnsense", "host": "10.0.0.5",
+         "api_key": "k", "api_secret": "s"},
+        {"id": "fw-b", "spoke_id": "sp-1", "model": "opnsense", "host": "10.0.0.6",
+         "api_key": "k", "api_secret": "s"},
+        {"id": "fw-c", "spoke_id": "sp-2", "model": "opnsense", "host": "10.0.0.7",
+         "api_key": "k", "api_secret": "s"}]}}, spokes=["sp-1", "sp-2"])
+
+
+def _pushed_lists(hub):
+    """Spoke -> firewall ids in each UPDATE_CONFIG the hub sent."""
+    return [(sid, [f["id"] for f in d["firewalls"]]) for sid, t, d in hub.sent if t == "UPDATE_CONFIG"]
+
+
+def test_editing_one_box_of_a_pair_pushes_both():
+    """A Setup save must send the spoke its whole list, not just the edited
+    box, or the spoke forgets the other one until it reconnects."""
+    hub = _pair_hub()
+    r = _fw_client(hub, _ADMIN).put("/setup/firewalls/fw-b", json={"config": {"name": "B2"}})
+    assert r.json()["pushed"] is True
+    assert _pushed_lists(hub) == [("sp-1", ["fw-a", "fw-b"])]
+
+
+def test_moving_a_box_to_another_spoke_updates_both_spokes():
+    """The old spoke drops the box and the new spoke picks it up."""
+    hub = _pair_hub()
+    _fw_client(hub, _ADMIN).put("/setup/firewalls/fw-b", json={"config": {"spoke_id": "sp-2"}})
+    assert _pushed_lists(hub) == [("sp-1", ["fw-a"]), ("sp-2", ["fw-b", "fw-c"])]
+
+
+def test_deleting_one_box_of_a_pair_repushes_its_spoke():
+    """The spoke drops the deleted box (and its credentials)."""
+    hub = _pair_hub()
+    assert _fw_client(hub, _ADMIN).delete("/setup/firewalls/fw-a").status_code == 200
+    assert _pushed_lists(hub) == [("sp-1", ["fw-b"])]
+
+
+def test_moving_the_last_box_off_a_spoke_clears_that_spoke():
+    """The old spoke gets an empty list (it forgets the box and its
+    credentials) instead of nothing."""
+    hub = _pair_hub()
+    _fw_client(hub, _ADMIN).put("/setup/firewalls/fw-c", json={"config": {"spoke_id": "sp-1"}})
+    assert _pushed_lists(hub) == [("sp-2", []), ("sp-1", ["fw-a", "fw-b", "fw-c"])]
+
+
+def test_unbinding_a_box_repushes_its_spoke_and_reports_pushed():
+    """Unbinding leaves no new spoke to push: the old spoke's smaller list is
+    the whole push, so the save is "ok", not "partial_success"."""
+    hub = _pair_hub()
+    r = _fw_client(hub, _ADMIN).put("/setup/firewalls/fw-b", json={"config": {"spoke_id": ""}})
+    assert r.json()["pushed"] is True
+    assert _pushed_lists(hub) == [("sp-1", ["fw-a"])]
+
+
+def _frame(data):
+    """A reply as the real hub returns it: the whole COMMAND_RESULT frame."""
+    return {"header": {}, "payload": {"type": "COMMAND_RESULT", "data": data}}
+
+
+def test_impairment_result_is_read_inside_the_real_reply_envelope():
+    """The spoke's status sits in payload.data: a SUCCESS there is a 200 and an
+    ERROR there is a 400 carrying the spoke's own message."""
+    hub, _ = _fw_hub()
+    c = _fw_client(hub, _ADMIN)
+    hub.replies[("sp-1", "OPNSENSE_ADD_IMPAIRMENT")] = lambda p: _frame({"status": "SUCCESS", "uuid": "i1"})
+    assert c.post("/api/firewall/fw-1/impair", json={"target": "10.0.0.5"}).status_code == 200
+    hub.replies[("sp-1", "OPNSENSE_ADD_IMPAIRMENT")] = lambda p: _frame(
+        {"status": "ERROR", "message": "pipe add failed"})
+    r = c.post("/api/firewall/fw-1/impair", json={"target": "10.0.0.5"})
+    assert r.status_code == 400 and r.json()["detail"] == "pipe add failed"
+
+
+def test_cached_read_surfaces_an_enveloped_spoke_error():
+    """A spoke ERROR inside the frame is a 502, never cached as data."""
+    hub, _ = _fw_hub()
+    hub.replies[("sp-1", "OPNSENSE_GET_ALL_RULES")] = lambda p: _frame(
+        {"status": "ERROR", "message": "no API scope"})
+    r = _fw_client(hub, _ADMIN).get("/api/firewall/fw-1/rules")
+    assert r.status_code == 502 and "no API scope" in r.text
+
+
+def test_unbinding_the_last_box_clears_its_spoke():
+    """Once bindings are in use an unbound box was unbound on purpose: the
+    legacy unbound fallback must not send it straight back to the old spoke."""
+    hub = _pair_hub()
+    r = _fw_client(hub, _ADMIN).put("/setup/firewalls/fw-c", json={"config": {"spoke_id": ""}})
+    assert r.json()["pushed"] is True
+    assert _pushed_lists(hub) == [("sp-2", [])]
+
+
+def test_unbinding_does_not_redeploy_certs(monkeypatch):
+    """An unbind has no new spoke; a cert re-deploy for spoke "" would hit
+    every firewall spoke. A move still re-deploys to the new spoke."""
+    import asyncio
+    real, redeploys = asyncio.create_task, []
+
+    def _create_task(coro, *a, **k):
+        if "_redeploy_certs_soon" in coro.__qualname__:
+            redeploys.append(coro.cr_frame.f_locals.get("spoke_id"))
+            coro.close()
+            return None
+        return real(coro, *a, **k)
+    monkeypatch.setattr(asyncio, "create_task", _create_task)
+    hub = _pair_hub()
+    c = _fw_client(hub, _ADMIN)
+    c.put("/setup/firewalls/fw-b", json={"config": {"spoke_id": ""}})
+    assert redeploys == []
+    c.put("/setup/firewalls/fw-a", json={"config": {"spoke_id": "sp-2"}})
+    assert redeploys == ["sp-2"]

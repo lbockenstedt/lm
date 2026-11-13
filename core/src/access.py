@@ -2418,7 +2418,7 @@ async def _fw_alias_map(hub, firewall_id) -> "dict | None":
         if memo and (now - memo[0]) < _FW_ALIAS_TTL:
             return memo[1]
         # Fetch aliases from the spoke, build the map, and memoize it.
-        result = await hub.request_response(spoke_id, "OPNSENSE_GET_ALIASES", {})
+        result = await hub.request_response(spoke_id, "OPNSENSE_GET_ALIASES", {"firewall_id": firewall_id})
         data = unwrap_spoke(result)
         # OPNSENSE_GET_ALIASES → {status, data: [{name, type, content}, ...]}
         aliases = []
