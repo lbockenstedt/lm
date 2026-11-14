@@ -28,7 +28,7 @@ OPNsense, NetBox, ClearPass, LDAP, Kea, Unbound, switches, TrueNAS, certbot) and
 | `console/`, `proxy/`, `statuspage/`, `henet/`, `collab_sink/` | Supporting hub-side services. |
 | `dns/`, `dhcp/`, `qa/`, `client_sim/`, `clearpass/` | Hub-side installers / thin wrappers; the real source lives in the sibling repo. |
 | `scripts/` | Operator tooling — `lmctl`, `set-version.sh`, watchdog, load tests. |
-| `provisioning_repos/` | Recipes for lab services LM can stand up (kea, ldap, netbox, pihole, graylog, iperf, consolepi). |
+| `provisioning_repos/` | Recipes for lab services LM can stand up (kea, ldap, netbox, pihole, iperf, consolepi). Syslog collection/archive is the `syslog` spoke with the `syslog-collector`/`syslog-graylog` agent roles (docs/syslog.md). |
 
 ## Key reading
 

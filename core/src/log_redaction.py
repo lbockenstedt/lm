@@ -72,6 +72,8 @@ _LOGSAFE_COMMANDS = frozenset({
 # agent-command relay's user-supplied types too (e.g. NETBOX_RESET_ADMIN_PASSWORD).
 _FULLY_REDACT_COMMANDS = frozenset({
     "SET_PASSWORD", "SET_USER_PASSWORD", "RESET_PASSWORD", "CONSOLE_PUSH_CONFIG",
+    # The AD connection (with its bind password) rides nested in ``ad``.
+    "AD_DISCOVER", "AD_TEST", "AD_SEARCH_USERS",
 })
 # Command-name fragments that also trigger full redaction (catches user-supplied types).
 _FULLY_REDACT_SUBSTRINGS = ("PASSWORD", "PUSH_CONFIG")

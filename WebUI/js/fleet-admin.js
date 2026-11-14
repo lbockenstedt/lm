@@ -3487,7 +3487,10 @@ async function showLoadRoleModal(spokeId) {
     list.innerHTML = rows || '<p class="text-xs text-slate-500 italic col-span-3">All available roles are already loaded.</p>';
     const loadedControls = document.getElementById('loaded-role-controls');
     // Deploy roles that own a background service (stop = Unload, purge = Uninstall).
-    const SERVICE_DEPLOY_ROLES = ['dns-server', 'dhcp-server', 'zabbix-server', 'zbxproxy', 'zbxagent'];
+    const SERVICE_DEPLOY_ROLES = ['dns-server', 'dhcp-server', 'zabbix-server', 'zbxproxy', 'zbxagent', 'syslog-collector', 'syslog-graylog'];
+    // The management module a server's Unload waits for (default: drop "-server").
+    const SERVER_MODULE = { 'syslog-collector': 'syslog' };
+    const serverModule = id => SERVER_MODULE[id] || id.replace(/-server$/, '');
     const stoppableServers = [...activeDeployRoleIds]
         .filter(id => SERVICE_DEPLOY_ROLES.includes(id)
             && !(roleState.deploy?.state === 'running' && roleState.deploy?.role === id));
@@ -3511,7 +3514,7 @@ async function showLoadRoleModal(spokeId) {
             <p class="text-xs font-semibold text-slate-600 mb-2">Loaded roles and server services</p>
             <div class="flex flex-wrap gap-2">${loadedControlIds.map(id => {
                 const isServer = SERVICE_DEPLOY_ROLES.includes(id);
-                const moduleLoaded = isServer && loadedRoleIds.has(id.replace(/-server$/, ''));
+                const moduleLoaded = isServer && loadedRoleIds.has(serverModule(id));
                 const running = activeDeployRoleIds.has(id);
                 const installed = installedDeployRoleIds.has(id);
                 const stateNote = (isServer && installed && !running)
@@ -3522,7 +3525,7 @@ async function showLoadRoleModal(spokeId) {
                     ${(!isServer || running) ? `<button onclick="unloadRole('${spokeId}','${id}')"
                         ${moduleLoaded ? 'disabled title="Unload the management module first"' : ''}
                         class="text-xs font-bold text-red-600 hover:text-red-700 disabled:text-slate-400 disabled:cursor-not-allowed">Unload</button>` : ''}
-                    ${(isServer && installed) ? `<button onclick="uninstallRole('${spokeId}','${id}',${moduleLoaded ? `'${id.replace(/-server$/, '')}'` : 'null'})"
+                    ${(isServer && installed) ? `<button onclick="uninstallRole('${spokeId}','${id}',${moduleLoaded ? `'${serverModule(id)}'` : 'null'})"
                         ${moduleLoaded ? 'title="Also unloads the management module, which is using this server"' : ''}
                         class="text-xs font-bold text-red-700 hover:text-red-800 underline">Uninstall</button>` : ''}
                 </div>`;

@@ -10,6 +10,10 @@ from static_ip_reservations import status_for_tenant
 from test_static_ip_reservations import _Hub, _agent_static, _run
 
 _STATUS = {"status": "error", "tenants": 2, "skipped": 3, "clean": ["t-b"],
+           "skipped_reasons": {"no netbox ip": 3, "no kea subnet": 1},
+           "skipped_by_tenant": [{"tenant": "t-a", "reasons": {"no netbox ip": 2}},
+                                 {"tenant": "t-b", "reasons": {"no netbox ip": 1,
+                                                               "no kea subnet": 1}}],
            "reserved": [{"tenant": "t-a", "ip": "10.20.0.50"},
                         {"tenant": "t-b", "ip": "10.20.0.51"}],
            "conflicts": [{"tenant": "t-b", "ip": "10.20.0.52"}],
@@ -91,5 +95,8 @@ def test_sync_status_route_says_why_rows_are_hidden_or_missing():
     assert _sync_status(_WITH_RIGHT)["visibility_reason"] == "tenant"
     admin = {"is_admin": True, "permissions": {"admin": True}}
     assert _sync_status(admin) == {"status": "error", "visibility_reason": "no_tenant"}
+    # A tenant sees only its own skip counts, never the pass-wide ones.
+    view = _sync_status(_WITH_RIGHT)
+    assert view["skipped_reasons"] == {"no netbox ip": 2} and "skipped_by_tenant" not in view
     # Never ran: no status word, but still a reason.
     assert _sync_status(_WITH_RIGHT, stored=None) == {"visibility_reason": "tenant"}

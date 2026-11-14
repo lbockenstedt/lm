@@ -18,13 +18,14 @@ import pytest
 from cache_core import StalenessPolicy
 from le_cache import LeCacheMixin
 from nw_cache import NwCacheMixin
+from syslog_cache import SyslogCacheMixin
 from truenas_cache import TruenasCacheMixin
 from warm_cache import WarmCacheMixin
 
 pytestmark = pytest.mark.asyncio
 
 
-class _Hub(NwCacheMixin, TruenasCacheMixin, LeCacheMixin, WarmCacheMixin):
+class _Hub(NwCacheMixin, TruenasCacheMixin, SyslogCacheMixin, LeCacheMixin, WarmCacheMixin):
     """Every cache mixin on one object, exactly as ``LabManagerHub`` composes
     them — this also proves the four don't collide on any attribute name."""
 
@@ -32,6 +33,7 @@ class _Hub(NwCacheMixin, TruenasCacheMixin, LeCacheMixin, WarmCacheMixin):
         self.cache_dir = cache_dir
         self.nw_cache_init()
         self.truenas_cache_init()
+        self.syslog_cache_init()
         self.le_cache_init()
         self.warm_cache_init()
 
@@ -51,6 +53,13 @@ _CASES = {
         lambda h: h.truenas_cache_load(),
         lambda h: h.truenas_cache_get_fleet()["appliances"]["data"][0]["id"],
         "n1",
+    ),
+    "syslog": (
+        lambda h: h.syslog_cache_set("lab", {"fetched_at": 1.0, "collectors": [{"name": "c1"}]}),
+        lambda h: h.syslog_cache_flush_now(),
+        lambda h: h.syslog_cache_load(),
+        lambda h: h.syslog_cache_get("lab")["collectors"][0]["name"],
+        "c1",
     ),
     "le": (
         lambda h: h.le_cache_set("certs", {"domain": "lab.example"}),
@@ -97,6 +106,7 @@ async def test_write_is_debounced_into_a_single_file_write(tmp_path, name):
     hub = _Hub(str(tmp_path))
     files = {
         "nw": hub._nw_cache_file, "truenas": hub._truenas_cache_file,
+        "syslog": hub._syslog_cache_file,
         "le": hub._le_cache_file, "warm": hub._warm_cache_file,
     }
     cf = files[name]
@@ -147,6 +157,7 @@ async def test_all_modules_share_one_staleness_policy(tmp_path, name):
     hub = _Hub(str(tmp_path))
     policies = {
         "nw": hub.nw_policy, "truenas": hub.truenas_policy,
+        "syslog": hub.syslog_policy,
         "le": hub.le_policy, "warm": hub.warm_policy,
     }
     p = policies[name]
@@ -161,6 +172,7 @@ async def test_flush_now_is_safe_with_nothing_to_write(tmp_path):
     hub = _Hub(str(tmp_path))
     await hub.nw_cache_flush_now()
     await hub.truenas_cache_flush_now()
+    await hub.syslog_cache_flush_now()
     await hub.le_cache_flush_now()
     await hub.warm_cache_flush_now()
 
@@ -182,9 +194,10 @@ async def test_shutdown_flushes_every_cache_even_if_one_fails():
         nw_cache_flush_now = staticmethod(_flush("nw", fail=True))
         le_cache_flush_now = staticmethod(_flush("le"))
         truenas_cache_flush_now = staticmethod(_flush("truenas"))
+        syslog_cache_flush_now = staticmethod(_flush("syslog"))
         storage_perf = type("_P", (), {"flush_now": staticmethod(_flush("storage_perf"))})()
         warm_cache_flush_now = staticmethod(_flush("warm"))
         state = type("_S", (), {"_flush_if_dirty": staticmethod(_flush("state"))})()
 
     await api.persist_on_shutdown(_Hub())
-    assert flushed == ["nw", "le", "truenas", "storage_perf", "warm", "state"]
+    assert flushed == ["nw", "le", "truenas", "syslog", "storage_perf", "warm", "state"]
