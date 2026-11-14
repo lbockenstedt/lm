@@ -31,7 +31,7 @@ Lab Manager (LM) is a unified "single pane of glass" datacenter and laboratory i
 | `WebUI/` | The browser UI the hub serves (plain JavaScript, no build). |
 | `agent/`, `console/`, `client_sim/`, `henet/`, `proxy/`, `statuspage/`, `dhcp/`, `dns/` | Components that run as their own processes: generic agent, serial console, client simulation, HE.NET DNS, edge proxy, status page, Kea DHCP, DNS. Each has `src/`, `tests/` where present, and its installer. |
 | `collab_sink/`, `clearpass/`, `qa/` | Small helpers: collaboration pcap sink, ClearPass context-server actions, QA mock spoke. |
-| `provisioning_repos/` | Installers for lab services the hub provisions (Kea, Graylog, iperf, ...). |
+| `provisioning_repos/` | Installers for lab services the hub provisions (Kea, iperf, ...); syslog is the `syslog` spoke + agent roles, see `docs/syslog.md`. |
 | `scripts/` | Operator and maintenance scripts (watchdog, Tailwind build, code scans). |
 | `docs/` | Canonical fleet documentation (copied into each module repo). |
 | `.github/workflows/` | CI (`ci.yml`), branch flow, and the fleet's shared `*-reusable.yml` workflows. |

@@ -881,7 +881,7 @@ function _ldapTenantQuery() {
 let _ldapLoadSeq = 0;
 
 async function loadLDAPData(subMenu) {
-    subMenu = ['Groups', 'Entra'].includes(subMenu) ? subMenu : 'Users';
+    subMenu = ['Groups', 'Entra', 'AD'].includes(subMenu) ? subMenu : 'Users';
     const headEl = document.getElementById('ldap-table-head');
     const bodyEl = document.getElementById('ldap-table-body');
     if (!headEl || !bodyEl) return;
@@ -908,6 +908,13 @@ async function loadLDAPData(subMenu) {
             headEl.innerHTML = ['UPN', 'Name', 'Status', 'Groups', 'Actions']
                 .map(h => `<th class="px-4 py-3 font-bold">${h}</th>`).join('');
             await lmViews.directoryEntra({ tenant, canWrite, isCurrent: () => seq === _ldapLoadSeq });
+            return;
+        }
+        // Active Directory accounts (read-only) are drawn by js/views/directory-ad.js.
+        if (subMenu === 'AD') {
+            headEl.innerHTML = ['Login', 'Name', 'UPN / Email', 'Status']
+                .map(h => `<th class="px-4 py-3 font-bold">${h}</th>`).join('');
+            await lmViews.directoryAd({ tenant, isCurrent: () => seq === _ldapLoadSeq });
             return;
         }
         const endpoint = (subMenu === 'Groups' ? '/api/ldap/groups' : '/api/ldap/users') + _ldapTenantQuery();
@@ -959,6 +966,8 @@ function editLDAPUser(uid) {
 function showLDAPModal(subMenu, editItem) {
     // On the Entra subview "+ Add" opens its inline account form instead.
     if (subMenu === 'Entra') { lmViews.directoryEntraAdd?.(); return; }
+    // Active Directory is read-only in LM.
+    if (subMenu === 'AD') { showToast('Active Directory accounts are read-only here.', 'info'); return; }
     subMenu = (subMenu === 'Groups') ? 'Groups' : 'Users';
     const editing = !!editItem;
     const modal = document.createElement('div');

@@ -42,6 +42,13 @@ def test_diagnostics_navigation_requires_global_admin():
     assert "m === 'Diagnostics' && !isAdmin()" in render_top_nav
 
 
+def test_only_syslog_diagnostics_is_open_to_tenant_admins():
+    # Syslog collector diagnostics are tenant-scoped; System stays global-only.
+    assert "TENANT_ADMIN_DIAGNOSTICS = new Set(['syslog'])" in _src()
+    assert "!tenantDiagnosticsAllowed(currentView)" in _function("async function setSubView(")
+    assert "!tenantDiagnosticsAllowed(viewId)" in _function("function renderTopNav(")
+
+
 def test_diagnostics_status_shortcut_requires_global_admin():
     indicators = _function("function renderSpokeIndicators(")
     assert "_mdWrap && isAdmin() && !_mdWrap._diagBound" in indicators

@@ -152,7 +152,9 @@ function _vaultCredSelectHtml(elId) {
 //
 // ``vaultOnly`` = {inputIds, required}: when the hub's cloud vault is enabled
 // the server rejects inline secrets, so those inputs are hidden (and skipped on
-// save), and with ``required`` a vault credential must be picked.
+// save), and with ``required`` a vault credential must be picked. ``always``
+// applies that even with no cloud vault (a vault-only product such as AD,
+// whose secret is never accepted inline).
 async function _fillVaultCredSelect(elId, current, vaultOnly) {
     const el = document.getElementById(elId);
     if (!el) return;
@@ -174,10 +176,11 @@ async function _fillVaultCredSelect(elId, current, vaultOnly) {
     } else {
         el.value = curIdx;
     }
-    if (vaultOnly && opts.vaultAvailable) _vaultOnlyForm(el, opts, vaultOnly);
+    if (vaultOnly && (opts.vaultAvailable || vaultOnly.always)) _vaultOnlyForm(el, opts, vaultOnly);
 }
 
-function _vaultOnlyForm(el, opts, { inputIds = [], required = false }) {
+// Switch a vault picker to vault-only: hide the inline secret inputs and relabel it (required or not).
+function _vaultOnlyForm(el, opts, { inputIds = [], required = false, always = false }) {
     inputIds.forEach(id => {
         const input = document.getElementById(id);
         if (!input) return;
@@ -191,7 +194,8 @@ function _vaultOnlyForm(el, opts, { inputIds = [], required = false }) {
     if (none) none.textContent = required ? '— select a vault credential —' : '— none —';
     const hint = box.querySelector('p');
     if (hint) hint.textContent = (opts.length ? '' : 'No automation-readable secrets yet — add one in Credential Vault first. ')
-        + 'The Credential Vault is enabled, so connection secrets come from the vault and are not entered here.';
+        + (always ? 'This connection\'s secret only ever comes from the Credential Vault.'
+            : 'The Credential Vault is enabled, so connection secrets come from the vault and are not entered here.');
     el.dataset.required = required ? '1' : '';
 }
 
@@ -199,7 +203,7 @@ function _vaultOnlyForm(el, opts, { inputIds = [], required = false }) {
 function _vaultCredMissing(elId) {
     const el = document.getElementById(elId);
     if (!el || el.dataset.required !== '1' || _collectVaultCred(elId)) return false;
-    showToast('Select a Credential Vault credential — the vault is enabled, so secrets cannot be entered inline.', 'error');
+    showToast('Select a Credential Vault credential — this secret cannot be entered inline.', 'error');
     return true;
 }
 
