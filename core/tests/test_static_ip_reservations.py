@@ -297,6 +297,36 @@ def test_the_spokes_report_is_stored_per_tenant_with_before_and_after():
     assert hub._static_res_pending["changes"] == [_change()]
 
 
+def test_skip_reasons_are_stored_and_logged_and_an_older_spoke_sends_none(caplog):
+    reasons = {"no netbox ip": 30, "outside any dhcp scope": 12}
+    reply = {"status": "SUCCESS", "changes": [], "conflicts": [], "errors": [],
+             "evaluated": ["0"], "skipped": 42, "skipped_reasons": reasons,
+             "skipped_by_ref": {"0": reasons, "9": {"no netbox ip": 1}}}
+    with caplog.at_level("INFO", logger="Hub"):
+        st = _run(_Hub(agent_addresses=_agent_static(), spoke_reply=reply))
+    assert st["skipped_reasons"] == reasons
+    # Per tenant by ref; an unknown ref is dropped.
+    assert st["skipped_by_tenant"] == [{"tenant": "t-a", "reasons": reasons}]
+    assert ("static reservations: 0 reserved, 0 replaced, 0 conflicts, 0 errors; "
+            "skipped: no netbox ip=30, outside any dhcp scope=12") in caplog.messages
+    del reply["skipped_reasons"], reply["skipped_by_ref"]
+    assert _run(_Hub(agent_addresses=_agent_static(), spoke_reply=reply))["skipped_reasons"] == {}
+
+
+def test_a_pass_with_no_tenant_to_check_logs_why(caplog):
+    with caplog.at_level("INFO", logger="Hub"):
+        st = _run(_Hub(agent_addresses=_agent_static(),
+                       subnets_reply={"status": "ERROR", "message": "kea down"}))
+        _run(_Hub())
+        _run(_Hub(agent_addresses=_agent_static(), agent_reply=TimeoutError("no reply")))
+    assert st["skipped_reasons"] == {}
+    assert caplog.messages.count("static reservations: no tenant to check; "
+                                 "no strict kea read=1") == 1
+    assert ("static reservations: no tenant to check; "
+            "no agent or sweep rows=1") in caplog.messages
+    assert "static reservations: no tenant to check; agent poll failed=1" in caplog.messages
+
+
 def test_errors_take_precedence_over_conflicts_and_conflicts_over_ok():
     conflict = {"ref": "0", "ip": "10.20.0.50", "mac": MAC_A, "reason": "leased to another mac"}
     err = {"ref": "0", "ip": "10.20.0.51", "error": "netbox 500"}
