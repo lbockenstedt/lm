@@ -314,7 +314,8 @@ function _impairFields(item, input, label) {
     return `
         <div class="grid grid-cols-2 gap-4">
             <div class="space-y-1"><label class="${label}">Target Type</label><select id="add-opn-ttype" class="${input}" title="What to impair: addresses or subnets, a firewall alias, or LM devices">${topt('ip', 'IP / CIDR')}${topt('alias', 'Alias')}${topt('device', 'Device')}</select></div>
-            <div class="space-y-1"><label class="${label}">Interface</label><input type="text" id="add-opn-iface" value="${v('interface') || 'lan'}" placeholder="lan" class="${input}" title="OPNsense interface the targets sit on (e.g. lan, opt1)"></div>
+            <div class="space-y-1"><label class="${label}">Interface</label><select id="add-opn-iface" class="${input}" title="The firewall interface the targets sit on (read from the firewall)">${item.interface ? `<option value="${v('interface')}" selected>${v('interface')}</option>` : '<option value="">Loading…</option>'}</select>
+                <p id="add-opn-iface-note" class="text-xs text-amber-700 hidden"></p></div>
         </div>
         <div class="space-y-1" data-impair-for="ip"><label class="${label}">Hosts or Subnets</label><input type="text" id="add-opn-target" value="${ipText.replace(/"/g, '&quot;')}" placeholder="192.0.2.5 or 192.0.2.0/24; several separated by commas" class="${input}" title="IP addresses or CIDR subnets, comma-separated. Scheduled: one per window, in order; always on: all at once."></div>
         <div class="space-y-1 hidden" data-impair-for="alias"><label class="${label}">Aliases</label><select id="add-opn-alias" multiple size="4" class="${input}" title="Firewall aliases; their member addresses are copied in when saved (save again after changing an alias)"></select>
@@ -396,7 +397,66 @@ function _impairWire(item, fwId) {
         });
         fill($('add-opn-device'), devices);
     };
-    if ($('add-opn-fw')) $('add-opn-fw').addEventListener('change', loadAliases);
+    // Interfaces: the keys the firewall accepts on a shaper rule, shown as
+    // "<description> (<key>)". An edited impairment's interface stays selected,
+    // or is flagged when the firewall no longer has it. Only a spoke too old to
+    // list them (501) gets a text field; any other failure leaves the stored
+    // interface (or nothing) and says why. A slower answer for a firewall that
+    // is no longer selected is ignored.
+    let ifaceRequest = 0;
+    const loadInterfaces = async () => {
+        const id = ($('add-opn-fw') && $('add-opn-fw').value) || fwId;
+        const request = ++ifaceRequest;
+        const note = $('add-opn-iface-note');
+        const want = $('add-opn-iface').value || item.interface || '';
+        note.classList.add('hidden');
+        let list = null, detail = '', status = 0;
+        try {
+            const r = await fetch(`/api/firewall/${encodeURIComponent(id)}/impair/options` + _taTenantQuery());
+            const d = await r.json().catch(() => ({}));
+            status = r.status;
+            if (r.ok && Array.isArray(d.interfaces)) list = d.interfaces;
+            else detail = d.detail || r.statusText;
+        } catch (e) { detail = e.message; }
+        if (request !== ifaceRequest || $('add-opn-iface-note') !== note) return;  // newer request, or modal closed
+        const current = $('add-opn-iface');
+        const say = text => { note.textContent = text; note.classList.remove('hidden'); };
+        if (status === 501) {
+            const text = document.createElement('input');
+            text.type = 'text';
+            text.id = 'add-opn-iface';
+            text.className = current.className;
+            text.value = want || 'lan';
+            text.title = 'OPNsense interface key (e.g. lan, opt1)';
+            current.replaceWith(text);
+            say("This firewall's spoke is too old to list its interfaces; enter the interface key (lan, opt1…).");
+            return;
+        }
+        const sel = current.tagName === 'SELECT' ? current : document.createElement('select');
+        if (sel !== current) { sel.id = 'add-opn-iface'; sel.className = current.className; current.replaceWith(sel); }
+        if (!list) {
+            sel.replaceChildren(item.interface ? new Option(item.interface, item.interface) : new Option('Could not load interfaces', ''));
+            say(`Could not read the firewall's interfaces: ${detail || 'no answer'}.`);
+            return;
+        }
+        const keys = list.map(i => i.key);
+        const options = list.map(i => new Option(i.description ? `${i.description} (${i.key})` : i.key, i.key));
+        const stale = !!item.interface && want === item.interface && !keys.includes(want);
+        if (stale) {
+            options.unshift(new Option(`${want} (no longer on this firewall)`, want));
+            say(`The stored interface "${want}" is no longer on this firewall; pick another.`);
+        } else if (!keys.length) {
+            say('The firewall has no enabled interface a shaper rule can use.');
+        }
+        if (!options.length) options.push(new Option('No interfaces available', ''));
+        sel.replaceChildren(...options);
+        sel.value = keys.includes(want) || stale ? want : (keys.includes('lan') ? 'lan' : (keys[0] || ''));
+    };
+    if ($('add-opn-fw')) {
+        $('add-opn-fw').addEventListener('change', loadAliases);
+        $('add-opn-fw').addEventListener('change', loadInterfaces);
+    }
+    loadInterfaces();
     loadAliases();
     loadDevices();
 }
@@ -420,7 +480,7 @@ function _impairBody(g) {
     const membersBox = document.getElementById('add-opn-alias-members');
     return { target_type: type, targets, labels, target: _impairLegacyTarget(type, targets, schedule),
              alias_members: type === 'alias' && !!(membersBox && membersBox.checked),
-             schedule, interface: g('add-opn-iface') || 'lan',
+             schedule, interface: g('add-opn-iface'),
              direction: g('add-opn-direction') || 'both', delay: g('add-opn-delay') || '0',
              loss: g('add-opn-loss') || '0', enabled: g('add-opn-enabled') || '1',
              bandwidth: g('add-opn-bw') || '', bandwidth_unit: g('add-opn-bw-unit') || 'Mbit',
@@ -443,6 +503,7 @@ function _impairError(body) {
             || 'Host or subnet is required.';
     }
     if (body.alias_members && body.targets.length !== 1) return 'One member at a time needs exactly one alias.';
+    if (!body.interface) return 'Pick an interface.';
     const s = body.schedule;
     if (s) {
         if (!Number.isInteger(s.every_hours) || s.every_hours < 1 || s.every_hours > 720) return 'Every must be 1 to 720 hours.';
