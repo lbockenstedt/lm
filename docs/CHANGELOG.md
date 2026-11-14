@@ -14,6 +14,13 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ### Firewalls
 
+- **Adding an impairment no longer fails with "rule.interface: Option [] not
+  in list."** The Interface field was free text (default `lan`), and the
+  firewall refuses a shaper rule on an interface it doesn't have or hasn't
+  enabled. Interface is now a dropdown filled from the firewall (description
+  and key), and the spoke refuses any other interface before creating
+  anything. Editing an impairment whose interface is gone says so. See
+  [opnsense](opnsense.md).
 - **Impairments can target aliases and devices, and run on a schedule.**
   Pick IP / CIDR (one or more), a firewall alias (optionally one member at a
   time) or LM devices, and choose Always on or Scheduled ("every 3 h for
