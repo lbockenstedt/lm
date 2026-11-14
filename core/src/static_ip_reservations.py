@@ -322,25 +322,26 @@ async def reserve_static_hosts_once(hub, now: Optional[float] = None, force: boo
 async def _tenant_entry(hub, tid: str, rows: List[Dict[str, Any]], now: float,
                         groups: Dict[str, Any], kea: Dict[str, Any],
                         kea_keys: Dict[Tuple[str, ...], Optional[str]], ref: str
-                        ) -> Tuple[Optional[Dict[str, Any]], str, Optional[str]]:
-    """The spoke's entry for tenant ``tid``: ``(entry, Kea scope key, error)``.
+                        ) -> Tuple[Optional[Dict[str, Any]], str, Optional[str], str]:
+    """The spoke's entry for tenant ``tid``: ``(entry, Kea scope key, error,
+    skip reason)``.
 
     ``entry`` is None when the tenant is skipped, with ``error`` saying why
-    when the status should show it. Each Kea is read once per pass: ``kea``
+    when the status should show it and the skip reason always (for the log). Each Kea is read once per pass: ``kea``
     collects the reads under short keys, ``kea_keys`` maps Kea spokes to them.
     """
     sweep = _sweep_rows(hub, tid, now)
     if not rows and not sweep:
-        return None, "", None
+        return None, "", None, "no agent or sweep rows"
     # The tenant's NetBox scope; no mapping → never touch it.
     scope = netbox_tenant_scope(hub, tid)
     filters = {k: scope[k] for k in ("tenant", "tenant_group") if scope.get(k)}
     if not filters:
-        return None, "", None
+        return None, "", None, "no netbox scope mapping"
     skey, spokes = _tenant_kea_spokes(hub, tid, str(scope.get("key")), groups)
     if not spokes:
         return None, "", ("own kea not connected"
-                          if tenant_has_own_spoke(hub, tid, "dhcp") else None)
+                          if tenant_has_own_spoke(hub, tid, "dhcp") else None), "no kea"
     ck = tuple(sorted(spokes))
     if ck not in kea_keys:
         leases = await _strict_read(hub, spokes, "DHCP_LIST_LEASES", "leases")
@@ -350,9 +351,9 @@ async def _tenant_entry(hub, tid: str, rows: List[Dict[str, Any]], now: float,
         if kea_keys[ck]:
             kea[kea_keys[ck]] = {"leases": leases, "subnets": subnets}
     if kea_keys[ck] is None:
-        return None, "", "no strict kea read"
+        return None, "", "no strict kea read", "no strict kea read"
     return ({"ref": ref, "filters": filters, "agent_addresses": rows, "sweep": sweep,
-             "kea": kea_keys[ck]}, skey, None)
+             "kea": kea_keys[ck]}, skey, None, "")
 
 
 def _replace_watch(hub, tid: str, now: float) -> List[Dict[str, Any]]:
@@ -416,15 +417,20 @@ async def _run_pass(hub, now: float, auto_replace: bool = True) -> Dict[str, Any
     scopes: Dict[str, str] = {}
     kea: Dict[str, Any] = {}
     kea_keys: Dict[Tuple[str, ...], Optional[str]] = {}
-    for tid in sorted(t for t in tids if t):
+    left_out: Dict[str, int] = {}
+    # A tenant whose only agent failed is in failed_tids, not tids.
+    for tid in sorted(t for t in tids | failed_tids if t):
         if tid in failed_tids or tenant_is_shared(tid):
+            why = "shared tenant" if tenant_is_shared(tid) else "agent poll failed"
+            left_out[why] = left_out.get(why, 0) + 1
             continue
         ref = str(len(tenants))
-        entry, skey, err = await _tenant_entry(hub, tid, agents.get(tid, []), now, groups,
-                                               kea, kea_keys, ref)
+        entry, skey, err, why = await _tenant_entry(hub, tid, agents.get(tid, []), now,
+                                                    groups, kea, kea_keys, ref)
         if err:
             errors.append({"tenant": tid, "error": err})
         if entry is None:
+            left_out[why] = left_out.get(why, 0) + 1
             continue
         if auto_replace:
             entry["replace_watch"] = _replace_watch(hub, tid, now)
@@ -434,9 +440,11 @@ async def _run_pass(hub, now: float, auto_replace: bool = True) -> Dict[str, Any
     if not tenants:
         # Nothing is pending now: the waits restart when a tenant returns.
         hub._static_res_watch = {}
+        logger.info("static reservations: no tenant to check; %s",
+                    _breakdown(left_out) or "no tenant has agent or sweep data")
         return _record(hub, status=_pass_status([], errors, []), clean=[], reserved=[],
-                       conflicts=[], errors=errors, tenants=0, skipped=0, deferred=0,
-                       auto_replace=auto_replace)
+                       conflicts=[], errors=errors, tenants=0, skipped=0,
+                       skipped_reasons={}, deferred=0, auto_replace=auto_replace)
 
     # Step 2: the spoke plans and writes. Reads and writes go to the IPAM
     # spoke the sync reads first, so a reservation lands where the sync looks.
@@ -444,7 +452,7 @@ async def _run_pass(hub, now: float, auto_replace: bool = True) -> Dict[str, Any
     if not ipam:
         errors.append({"tenant": None, "error": "netbox spoke not connected"})
         return _record(hub, status="error", clean=[], reserved=[], conflicts=[],
-                       errors=errors, tenants=0, skipped=0, deferred=0,
+                       errors=errors, tenants=0, skipped=0, skipped_reasons={}, deferred=0,
                        auto_replace=auto_replace)
     try:
         reply = unwrap_spoke(await hub.request_response(
@@ -457,13 +465,14 @@ async def _run_pass(hub, now: float, auto_replace: bool = True) -> Dict[str, Any
         hub._static_res_watch = {}
         return _record(hub, status="unsupported", clean=[], reserved=[], conflicts=[],
                        errors=[{"tenant": None, "error": _TOO_OLD}],
-                       tenants=0, skipped=0, deferred=0, replace_supported=False)
+                       tenants=0, skipped=0, skipped_reasons={}, deferred=0,
+                       replace_supported=False)
     if not isinstance(reply, dict) or not isinstance(reply.get("changes"), list):
         msg = (reply or {}).get("message") if isinstance(reply, dict) else None
         errors.append({"tenant": None, "error": f"netbox spoke: {msg or 'no report'}"})
         hub._static_res_watch = {}
         return _record(hub, status="error", clean=[], reserved=[], conflicts=[],
-                       errors=errors, tenants=0, skipped=0, deferred=0,
+                       errors=errors, tenants=0, skipped=0, skipped_reasons={}, deferred=0,
                        auto_replace=auto_replace)
 
     # Step 3: map the spoke's opaque refs back to tenants and store the report.
@@ -492,14 +501,22 @@ async def _run_pass(hub, now: float, auto_replace: bool = True) -> Dict[str, Any
         # The raw rows (opaque refs, no tenant ids) for a later rollback.
         hub._static_res_pending = {"ipam": ipam, "refs": refs, "scopes": scopes,
                                    "changes": raw}
-    logger.info("static reservations: %d reserved, %d replaced, %d conflicts, %d errors",
-                len(reserved), len(replaced), len(conflicts), len(errors))
+    # An older netbox spoke sends no skipped_reasons.
+    skipped_reasons = _counts(reply.get("skipped_reasons"))
+    by_ref = reply.get("skipped_by_ref")
+    skipped_by_tenant = _tenant_rows(
+        [{"ref": r, "reasons": _counts(c)} for r, c in by_ref.items()]
+        if isinstance(by_ref, dict) else [], refs, "skipped_by_ref")
+    logger.info("static reservations: %d reserved, %d replaced, %d conflicts, %d errors%s",
+                len(reserved), len(replaced), len(conflicts), len(errors),
+                f"; skipped: {_breakdown(skipped_reasons)}" if skipped_reasons else "")
     return _record(hub, status=_pass_status(clean, errors, conflicts), clean=clean,
                    reserved=reserved, replaced=replaced, pending_replace=pending,
                    conflicts=conflicts, errors=errors,
                    rolled_back=_rows("rolled_back"), rollback_kept=_rows("rollback_kept"),
                    rollback_failed=_rows("rollback_failed"),
                    tenants=len(evaluated), skipped=int(reply.get("skipped") or 0),
+                   skipped_reasons=skipped_reasons, skipped_by_tenant=skipped_by_tenant,
                    deferred=int(reply.get("deferred") or 0),
                    auto_replace=auto_replace, replace_supported=supported)
 
@@ -542,7 +559,7 @@ async def use_new_mac(hub, tid: str, ip: str, old_mac: str, new_mac: str,
     groups, _skipped = hub._scope_groups(hub._get_dhcp_spokes())
     kea: Dict[str, Any] = {}
     rows = [r for t, rs in agents.items() for r in rs]
-    entry, skey, err = await _tenant_entry(hub, tid, rows, now, groups, kea, {}, "m")
+    entry, skey, err, _why = await _tenant_entry(hub, tid, rows, now, groups, kea, {}, "m")
     if entry is None:
         return {"status": "error", "error": err or "no source sees this tenant's hosts now"}
     ipam = next(iter(hub._ipam_spoke_candidates()), None)
@@ -709,6 +726,18 @@ async def _undo(hub, ipam: str, refs: Dict[str, str],
     return st
 
 
+def _counts(raw: Any) -> Dict[str, int]:
+    """The spoke's ``{reason: count}``, keeping only integer counts."""
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): v for k, v in raw.items() if isinstance(v, int) and not isinstance(v, bool)}
+
+
+def _breakdown(counts: Dict[str, Any]) -> str:
+    """``counts`` as ``"reason=n, ..."``, largest first."""
+    return ", ".join(f"{k}={v}" for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
 def _pass_status(clean, errors, conflicts) -> str:
     """``error`` beats ``conflicts`` beats ``ok`` (some tenant evaluated
     cleanly); ``skipped`` when nothing was evaluated."""
@@ -725,7 +754,8 @@ def status_for_tenant(status: Dict[str, Any], tid: Optional[str]) -> Dict[str, A
     The pass is fleet-wide, so its rows name every tenant's IPs and MACs. A
     viewer sees only ``tid``'s rows; ``tid`` None or ``""`` sees none, only
     the pass-wide ``status`` word. Fleet-wide counters and the clean-tenant
-    list are dropped. A tenant's ``status`` is its own: ``error`` with its
+    list are dropped; ``skipped_reasons`` becomes ``tid``'s own per-reason
+    skip counts (``{}`` with no ``tid``). A tenant's ``status`` is its own: ``error`` with its
     own errors, else ``conflicts`` with its own conflicts, ``ok`` when it was
     evaluated cleanly, else ``skipped``. Pass-wide rows with no tenant (the
     netbox spoke unreachable or too old) are kept for everyone, since they
@@ -734,7 +764,8 @@ def status_for_tenant(status: Dict[str, Any], tid: Optional[str]) -> Dict[str, A
     if not isinstance(status, dict):
         return status
     out = {k: v for k, v in status.items()
-           if k not in ("tenants", "skipped", "deferred", "clean")}
+           if k not in ("tenants", "skipped", "deferred", "clean", "skipped_reasons",
+                        "skipped_by_tenant")}
     def _visible(key: str, row: Any) -> bool:
         """A row is shown to its own tenant; a pass-wide error to everyone."""
         if not isinstance(row, dict):
@@ -747,6 +778,12 @@ def status_for_tenant(status: Dict[str, Any], tid: Optional[str]) -> Dict[str, A
                 "rolled_back", "rollback_kept", "rollback_failed"):
         if key in status:
             out[key] = [r for r in status.get(key) or [] if _visible(key, r)]
+    if "skipped_reasons" in status:
+        out["skipped_reasons"] = {}
+        for row in status.get("skipped_by_tenant") or []:
+            if tid and isinstance(row, dict) and same_tenant(row.get("tenant"), tid):
+                for k, v in (row.get("reasons") or {}).items():
+                    out["skipped_reasons"][k] = out["skipped_reasons"].get(k, 0) + v
     if tid and out.get("status") in ("ok", "error", "conflicts", "skipped"):
         if out.get("errors"):
             out["status"] = "error"
