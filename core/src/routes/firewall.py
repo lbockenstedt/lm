@@ -10,6 +10,7 @@ from api import (
     _FW_WRITE_TIMEOUT, _hub_msg, logger, uuid,
 )
 # Hub data-cache job description.
+from static_ip_reservations import is_unknown_command
 from storage_perf import merge_rows
 from warm_cache import CacheJob
 
@@ -599,6 +600,27 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=400, detail=detail)
         logger.info("%s on firewall %s: %s", command, _fw_name(app.state.hub, firewall_id), reply.get("message"))
         return result
+
+    # The choices for the impairment form (the interfaces a shaper rule accepts).
+    @app.get("/api/firewall/{firewall_id}/impair/options")
+    async def impairment_options(firewall_id: str, request: Request):
+        """The firewall's interfaces a shaper rule accepts, as
+        ``{"interfaces": [{"key", "description"}]}``, read live from the spoke.
+        Same access check as adding an impairment. A spoke from before this
+        command gives 501 (the form then falls back to a text field); any other
+        spoke failure is a 400. On a SHARED firewall a tenant gets the keys
+        only (lan, opt1...): the descriptions may name other tenants' networks."""
+        _fw, scope = _authz_firewall(request, firewall_id, write=True)
+        result = await _fw_spoke_cmd(app.state.hub, firewall_id, "OPNSENSE_GET_IMPAIRMENT_OPTIONS", {})
+        reply = _spoke_reply(result)
+        if not (isinstance(reply, dict) and reply.get("status") == "SUCCESS"
+                and isinstance(reply.get("interfaces"), list)):
+            detail = (reply.get("message") if isinstance(reply, dict) else None) or "Firewall spoke error"
+            old_spoke = is_unknown_command(reply) or "not supported by opnsense module" in detail
+            raise HTTPException(status_code=501 if old_spoke else 400, detail=detail)
+        keys_only = scope == "constrained"
+        return {"interfaces": [{"key": str(i["key"]), "description": "" if keys_only else str(i.get("description", ""))}
+                               for i in reply["interfaces"] if isinstance(i, dict) and i.get("key")]}
 
     # Add a network impairment.
     @app.post("/api/firewall/{firewall_id}/impair")

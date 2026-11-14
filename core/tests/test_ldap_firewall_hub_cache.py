@@ -334,6 +334,53 @@ def test_shared_firewall_tenant_sees_and_changes_only_impairments_wholly_inside(
     assert len(rows) == 4  # the cached list is not changed
 
 
+def test_impairment_options_route_lists_interfaces_with_write_access():
+    hub, _ = _fw_hub()
+    hub.replies[("sp-1", "OPNSENSE_GET_IMPAIRMENT_OPTIONS")] = lambda p: {
+        "status": "SUCCESS", "interfaces": [{"key": "lan", "description": "LAN"},
+                                            {"key": "opt2", "description": "Lab net"}, {"key": ""}]}
+    r = _fw_client(hub, _ADMIN).get("/api/firewall/fw-1/impair/options")
+    assert r.status_code == 200
+    assert r.json() == {"interfaces": [{"key": "lan", "description": "LAN"},
+                                       {"key": "opt2", "description": "Lab net"}]}
+    assert [cmd for _, cmd, _ in hub.calls] == ["OPNSENSE_GET_IMPAIRMENT_OPTIONS"]
+    # An older spoke does not know the command: 501, the form falls back on a
+    # text field. Any other failure is a 400 (the form keeps the dropdown).
+    hub.replies[("sp-1", "OPNSENSE_GET_IMPAIRMENT_OPTIONS")] = lambda p: {
+        "status": "ERROR", "message": "Command OPNSENSE_GET_IMPAIRMENT_OPTIONS not supported by opnsense module"}
+    assert _fw_client(hub, _ADMIN).get("/api/firewall/fw-1/impair/options").status_code == 501
+    hub.replies[("sp-1", "OPNSENSE_GET_IMPAIRMENT_OPTIONS")] = lambda p: {"status": "ERROR", "code": "UNKNOWN_COMMAND"}
+    assert _fw_client(hub, _ADMIN).get("/api/firewall/fw-1/impair/options").status_code == 501
+    hub.replies[("sp-1", "OPNSENSE_GET_IMPAIRMENT_OPTIONS")] = lambda p: {
+        "status": "ERROR", "message": "Could not read the firewall's interfaces"}
+    r = _fw_client(hub, _ADMIN).get("/api/firewall/fw-1/impair/options")
+    assert r.status_code == 400 and r.json()["detail"] == "Could not read the firewall's interfaces"
+    # Same access as adding one.
+    calls = len(hub.calls)
+    assert _fw_client(hub, None).get("/api/firewall/fw-1/impair/options").status_code == 403
+    other = _fw_client(hub, {"user": {"tenant_id": "t9"}})
+    assert other.get("/api/firewall/fw-1/impair/options").status_code in (403, 404)
+    assert len(hub.calls) == calls
+
+
+def test_impairment_options_on_shared_firewall_give_a_tenant_keys_only():
+    """Interface descriptions on a shared firewall may name other tenants'
+    networks, so a tenant (constrained scope) gets only the keys."""
+    import access
+    hub, _ = _fw_hub()
+    hub.replies[("sp-1", "OPNSENSE_GET_IMPAIRMENT_OPTIONS")] = lambda p: {
+        "status": "SUCCESS", "interfaces": [{"key": "lan", "description": "LAN"},
+                                            {"key": "opt2", "description": "Other tenant lab"}]}
+    saved = access.write_scope
+    access.write_scope = lambda sess, tid: "constrained"
+    try:
+        r = _fw_client(hub, {"user": {"tenant_id": "t1"}}).get("/api/firewall/fw-1/impair/options")
+    finally:
+        access.write_scope = saved
+    assert r.status_code == 200
+    assert r.json() == {"interfaces": [{"key": "lan", "description": ""}, {"key": "opt2", "description": ""}]}
+
+
 def test_impairment_writes_need_firewall_write_access():
     hub, _ = _fw_hub()
     body = {"target_type": "ip", "targets": ["192.0.2.5"], "delay": 50}
