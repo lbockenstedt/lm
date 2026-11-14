@@ -126,6 +126,7 @@ from nw_discovery_sync import NwDiscoverySyncMixin
 from truenas_discovery_sync import TruenasDiscoverySyncMixin
 from nw_cache import NwCacheMixin
 from truenas_cache import TruenasCacheMixin
+from syslog_cache import SyslogCacheMixin
 from storage_perf import PERF_DEVICE_LISTS, StoragePerfStore
 from le_cache import LeCacheMixin
 from warm_cache import WarmCacheMixin
@@ -295,6 +296,7 @@ _PUSH_CONFIG_MODULE_KEY = {
     "certificates": "le",
     "storage":    "truenas",
     "monitoring": "monitoring",
+    "logging":    "syslog",
 }
 
 # spoke_id substring → push_config branch tag. NOTE: the prefix-fallback loop
@@ -307,7 +309,7 @@ _PUSH_CONFIG_MODULE_KEY = {
 _PUSH_CONFIG_PREFIX_MAP = {
     'pxmx': 'pxmx', 'opn': 'opn', 'cs': 'cs',
     'cppm': 'cppm', 'netbox': 'netbox', 'ldap': 'ldap', 'nw': 'nw',
-    'le': 'le', 'truenas': 'truenas',
+    'le': 'le', 'truenas': 'truenas', 'syslog': 'syslog',
 }
 
 # _UPDATE_SOURCE_MODULE_KEY / _UPDATE_SOURCE_PREFIX_MAP moved to
@@ -603,7 +605,7 @@ class _SpokeConn:
     mtls_enroll_only: bool = False
 
 
-class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, TruenasDiscoverySyncMixin, NwCacheMixin, TruenasCacheMixin, LeCacheMixin, WarmCacheMixin, DnsDhcpSyncMixin, HenetSyncMixin, RealtimeIpamNacSyncMixin, SearchIndexMixin, StalenessSweepMixin, SelfBackupMixin, KeyVaultSchedulerMixin, SpokeAlertMixin, FleetHealthAlertMixin, InstanceRelocateMixin, RepoSyncMixin, HubVncConsoleMixin, HubCertDistributionMixin, HubMtlsEnforcementMixin, HubIdentityMixin, HubBugStoreMixin, SpokeRegistryMixin, StatusPageMixin):
+class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, TruenasDiscoverySyncMixin, NwCacheMixin, TruenasCacheMixin, SyslogCacheMixin, LeCacheMixin, WarmCacheMixin, DnsDhcpSyncMixin, HenetSyncMixin, RealtimeIpamNacSyncMixin, SearchIndexMixin, StalenessSweepMixin, SelfBackupMixin, KeyVaultSchedulerMixin, SpokeAlertMixin, FleetHealthAlertMixin, InstanceRelocateMixin, RepoSyncMixin, HubVncConsoleMixin, HubCertDistributionMixin, HubMtlsEnforcementMixin, HubIdentityMixin, HubBugStoreMixin, SpokeRegistryMixin, StatusPageMixin):
     """The LM Hub — central node of the zero-trust Hub-Spoke mesh.
 
     Owns the WebSocket control plane, the JSON state store, mutual auth/key
@@ -1424,6 +1426,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Initialise and load the TrueNAS cache.
         self.truenas_cache_init()
         self.truenas_cache_load()
+        self.syslog_cache_init()
+        self.syslog_cache_load()
         # 7 days of 5-minute storage performance averages pushed by spokes.
         self.storage_perf = StoragePerfStore(lambda: getattr(self, "cache_dir", "."))
         self.storage_perf.load()
@@ -3605,6 +3609,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     # Every configured instance belongs to a DIFFERENT spoke —
                     # nothing here is this spoke's to receive.
                     config = {}
+            elif module_key == 'syslog':
+                # Syslog collector: its tenant's settings + archive (password
+                # resolved here, at push time only; never logged).
+                import syslog_archive
+                tenant = self.state.get_spoke_tenant(pk) or "default"
+                config = await syslog_archive.spoke_config(self, tenant)
             else:
                 # Any other module: use its global config section.
                 config = self.state.get_global_config().get(module_key, {})
@@ -12797,6 +12807,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # from RAM instead of live-polling each spoke per request (a wedged
         # console host used to block the whole page). See routes/console.py.
         console_ports_refresh_task = asyncio.create_task(self.run_console_ports_refresh_loop())
+        # Syslog overview cache (SyslogCacheMixin): every 60 s asks each
+        # tenant's collectors for SYSLOG_STATUS + SYSLOG_SOURCES so
+        # /api/syslog/overview renders from RAM. See docs/syslog.md.
+        syslog_cache_task = asyncio.create_task(self.run_syslog_cache_loop())
         # Per-module health heartbeat for the Hub itself. Emits a greppable
         # [heartbeat] line into self.logs (module="hub" in collect_all_logs)
         # every ~60s so AppBuilder can confirm the Hub is alive and triage when

@@ -45,10 +45,8 @@ from typing import Any, Dict, Iterable, List, Optional
 import access
 # Entra ID user management via Graph, and password generation.
 import cloud_nac
-# Cloud vault (Azure Key Vault / OCI Vault) for storing passwords when enabled.
-import cloud_vault
-# The hub's Fernet key; passwords are always encrypted with it before storing.
-from security.encryption import hub_encryption
+# Hub-generated secret storage (cloud vault when enabled, else encrypted hub state).
+import hub_secret_store
 
 # Dedicated logger for this feature.
 logger = logging.getLogger("Dot1xJit")
@@ -190,57 +188,22 @@ def _lock(key: str) -> asyncio.Lock:
 
 def _vault_on(hub) -> bool:
     """Return True if a cloud vault is enabled."""
-    # Any error counts as "no vault".
-    try:
-        return cloud_vault.active_provider(hub) is not None
-    except Exception:  # noqa: BLE001
-        return False
+    return hub_secret_store.vault_on(hub)
 
 
 async def _secret_put(hub, key: str, rec: Dict[str, Any], password: str) -> None:
     """Encrypt and store ``password`` for account ``key``, updating ``rec``'s storage fields."""
-    # Always encrypt with the hub key first.
-    token = hub_encryption.encrypt(password).decode("ascii")
-    # Existing vault secret name, if the account already lives in the vault.
-    old_kv = rec.get("kv_name") if rec.get("store") == "kv" else None
-    # Vault enabled: write there (reusing the name) and drop any local copy.
-    if _vault_on(hub):
-        name = old_kv or (_KV_PREFIX + uuid.uuid4().hex)
-        await cloud_vault.set_secret(hub, name, token)
-        _blobs(hub).pop(key, None)
-        rec["store"], rec["kv_name"] = "kv", name
-    # No vault: store locally and remove any old vault copy.
-    else:
-        _blobs(hub)[key] = token
-        rec["store"] = "local"
-        rec.pop("kv_name", None)
-        if old_kv:
-            await cloud_vault.delete_secret(hub, old_kv)
+    await hub_secret_store.put(hub, _blobs(hub), key, rec, password, _KV_PREFIX)
 
 
 async def _secret_get(hub, key: str, rec: Dict[str, Any]) -> Optional[str]:
     """Return the decrypted password for account ``key``, or None if missing/unreadable."""
-    # Read from the vault or the local map, then decrypt.
-    try:
-        if rec.get("store") == "kv":
-            token = await cloud_vault.get_secret(hub, rec.get("kv_name") or "")
-        else:
-            token = _blobs(hub).get(key)
-        if not token:
-            return None
-        return hub_encryption.decrypt(token.encode("ascii"))
-    # Any failure is logged and treated as "no password".
-    except Exception as e:  # noqa: BLE001
-        logger.warning("dot1x_jit: secret read for %s failed: %s", key, e)
-        return None
+    return await hub_secret_store.get(hub, _blobs(hub), key, rec)
 
 
 async def _secret_del(hub, key: str, rec: Dict[str, Any]) -> None:
     """Delete the stored password for account ``key`` (local copy and any vault copy)."""
-    # Remove the local copy, then the vault copy if present.
-    _blobs(hub).pop(key, None)
-    if rec.get("store") == "kv" and rec.get("kv_name"):
-        await cloud_vault.delete_secret(hub, rec["kv_name"])
+    await hub_secret_store.delete(hub, _blobs(hub), key, rec)
 
 
 # ── backends ─────────────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 ---
 summary: "Mandatory caching contract: every cache uses core/src/cache_core.py — one debounced atomic writer (JsonCacheFile) and one staleness ladder (StalenessPolicy), so 'cached' means the same thing on every page."
-keywords: [cache, cache_core, caching, contract, debounce, JsonCacheFile, le_cache, lm, nw_cache, persistence, stale, StalenessPolicy, truenas_cache, warm_cache]
+keywords: [cache, cache_core, caching, contract, debounce, JsonCacheFile, le_cache, lm, nw_cache, persistence, stale, StalenessPolicy, truenas_cache, syslog_cache, warm_cache]
 ---
 
 # Caching Contract (every module)
@@ -88,6 +88,7 @@ data. Clock skew (a `fetched_at` in the future) is clamped rather than trusted.
 ## Modules on the contract
 
 `nw_cache` (fleet + per-device), `truenas_cache` (fleet + per-appliance),
+`syslog_cache` (per-tenant collector status + sources, refreshed every 60 s),
 `le_cache` (certs/status), and `warm_cache` (generic, namespaced — used by the
 console port list and Proxmox VM list). Each exposes `*_cache_load()`,
 `*_cache_flush_now()` and a `*_state()`/`*_cache_*_state()` staleness verdict.

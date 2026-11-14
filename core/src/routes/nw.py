@@ -11,6 +11,7 @@ from api import (
 )
 from nw_topology import build_topology, netbox_lldp_links
 from nw_discovery_sync import nw_short_name
+from routes import directory_ad
 from routes.role_pool import PRODUCT_ROLE, ensure_role_loaded, maybe_unload_orphaned_role
 
 
@@ -3720,7 +3721,7 @@ def register(app, hub, ctx):
 
     def _instance_crud(route_prefix: str, storage_key: str, payload_fn=None,
                        legacy_key: str = None, legacy_to_instance=None,
-                       topology_sync=None):
+                       topology_sync=None, validate=None, present=None):
         """Register GET/POST/PUT/DELETE /setup/<route_prefix>[/id] for one
         multi-instance product, mirroring the firewalls CRUD. Each instance is
         a dict with an `id` and `spoke_id`; on add/update the config is pushed
@@ -3731,10 +3732,18 @@ def register(app, hub, ctx):
         into the instance list so deployments that configured CPPM/NetBox
         before the refactor still see their server on Setup → NAC /
         IPAM. The migrated entry is deduped by host/url and persisted so it
-        becomes a normal editable instance."""
+        becomes a normal editable instance.
+
+        ``validate(record)`` (optional) checks the full record on add and on
+        update (after the merge) and raises an HTTPException to refuse it.
+        ``present(record)`` (optional) shapes each record the list and add
+        replies return (e.g. to hide credential-reference details)."""
         # The hub, and an id-safe form of the route prefix for operation ids.
         hub = app.state.hub
         op = route_prefix.replace("-", "_")
+        # A product with nothing to push (DNS/DHCP, scan credentials, AD) is
+        # save-only: a save is simply "ok", never "spoke not connected".
+        save_only = not payload_fn and not topology_sync
 
         @app.get(f"/setup/{route_prefix}", operation_id=f"list_{op}")
         async def list_instances(request: Request):
@@ -3797,6 +3806,8 @@ def register(app, hub, ctx):
                              if isinstance(i, dict) and access.in_tenant_scope(i.get("tenant_id"), scope)]
                 if storage_key == "nw_scan_credentials":
                     instances = instances + _vault_scan_sets(hub, req_tenant)
+            if present:
+                instances = [present(i) for i in instances if isinstance(i, dict)]
             return {"instances": instances}
 
         @app.post(f"/setup/{route_prefix}", operation_id=f"add_{op}")
@@ -3820,6 +3831,9 @@ def register(app, hub, ctx):
                     role, module_type = PRODUCT_ROLE[route_prefix]
                     new_inst["spoke_id"] = await ensure_role_loaded(
                         hub, new_inst["spoke_id"], role, module_type)
+                # Product-specific checks on the whole record.
+                if validate:
+                    validate(new_inst)
                 # Validate any Credential Vault reference up-front, then strip
                 # inline secrets so only the {bucket,name} reference is stored.
                 await instance_vault.validate_ref(
@@ -3845,9 +3859,11 @@ def register(app, hub, ctx):
                 hub.state.system_state["global_config"] = global_config
                 hub.state._mark_dirty()
                 # Report whether it was pushed.
-                status = "ok" if pushed else "partial_success"
-                msg = "Instance added and pushed to spoke." if pushed else "Instance added; spoke not connected."
-                return {"status": status, "message": msg, "pushed": pushed, "instance": new_inst}
+                status = "ok" if pushed or save_only else "partial_success"
+                msg = ("Instance added." if save_only else
+                       "Instance added and pushed to spoke." if pushed else "Instance added; spoke not connected.")
+                return {"status": status, "message": msg, "pushed": pushed,
+                        "instance": present(new_inst) if present else new_inst}
             # Pass HTTP errors through; anything else is logged and returned as a 500.
             except HTTPException:
                 raise
@@ -3878,6 +3894,9 @@ def register(app, hub, ctx):
                 # Merge the changes into a copy of the instance.
                 updated = dict(instances[idx])
                 updated.update(update_data)
+                # Product-specific checks on the merged record.
+                if validate:
+                    validate(updated)
                 # Validate/strip a Credential Vault reference on the merged record.
                 await instance_vault.validate_ref(
                     hub, updated, _session_user(request),
@@ -3906,6 +3925,8 @@ def register(app, hub, ctx):
                     role, _mt = PRODUCT_ROLE[route_prefix]
                     await maybe_unload_orphaned_role(hub, old_spoke, role, instances)
                 # Report whether it was pushed.
+                if save_only:
+                    return {"status": "ok", "message": "Instance saved.", "pushed": False}
                 if pushed:
                     return {"status": "ok", "message": "Instance updated and pushed to spoke.", "pushed": True}
                 return {"status": "partial_success", "message": "Instance saved; associated spoke not connected.", "pushed": False}
@@ -3985,6 +4006,13 @@ def register(app, hub, ctx):
     # payload_fn) — never pushed to a spoke as config; overlaid on demand at
     # scan time by /setup/nw-scan/run.
     _instance_crud("nw-scan-credentials", "nw_scan_credentials")
+    # Active Directory connections: one tenant's read-only AD source for the
+    # Directory (tenant_id set by the Global Admin; /setup is admin-only).
+    # Save-only like the scan sets: never pushed as spoke config; routes/
+    # directory_ad.py sends it, with the vault password, inside each AD_*
+    # command.
+    _instance_crud("ad-connections", "ad_connections", validate=directory_ad.check_connection,
+                   present=directory_ad.present)
 
     @app.post("/setup/ipam/apply-schema", operation_id="ipam_apply_schema")
     async def ipam_apply_schema():

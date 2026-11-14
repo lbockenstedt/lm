@@ -13,6 +13,7 @@ from role_listeners import (
 )
 # Let's Encrypt certificate access helpers (used for the ldap-server certificate).
 import le_cert_access as _lca
+import syslog_archive
 
 
 def _agent_role_preflight(hub, spoke_id):
@@ -284,6 +285,10 @@ async def _load_roles_impl(hub, spoke_id, data):
                     rcfg = _zbxproxy_load_config(hub, rcfg, spoke_id)
                 elif rname == "zbxagent":
                     rcfg = await _zbxagent_load_config(hub, rcfg, spoke_id)
+                else:
+                    # Syslog collector/archive: tenant, cert, generated passwords.
+                    # An ArchiveConflict becomes this role's ERROR result below.
+                    rcfg = await syslog_archive.pre_load_role(hub, spoke_id, rname, rcfg)
                 # Ask the agent to load the role (120 s: a first load may git-clone the role repo).
                 res = await hub.request_response(spoke_id, "LOAD_ROLE",
                                                  {"role": rname, "config": rcfg,
@@ -303,6 +308,8 @@ async def _load_roles_impl(hub, spoke_id, data):
                     await _zbxagent_register(hub, rcfg)
                 if rname == "ldap-server" and isinstance(pl, dict) and pl.get("status") == "SUCCESS":
                     await _auto_request_ldap_server_cert(hub, spoke_id, rcfg)
+                # Syslog: load the syslog spoke role / register the archive.
+                await syslog_archive.post_load_role(hub, spoke_id, rname, pl)
                 # Record this role's result (the agent's dict, or the raw value wrapped).
                 results.append({"role": rname,
                                 **(pl if isinstance(pl, dict) else {"result": pl})})
@@ -326,6 +333,12 @@ async def _load_roles_impl(hub, spoke_id, data):
         config = _zbxproxy_load_config(hub, config, spoke_id)
     elif role == "zbxagent":
         config = await _zbxagent_load_config(hub, config, spoke_id)
+    else:
+        # Syslog collector/archive: tenant, cert, generated passwords.
+        try:
+            config = await syslog_archive.pre_load_role(hub, spoke_id, role, config)
+        except syslog_archive.ArchiveConflict as e:
+            raise HTTPException(status_code=400, detail=str(e))
     # LOAD_ROLE on the multi-role agent shallow-clones the role's sibling repo on
     # first load — a network git clone that routinely exceeds the 5s default.
     result = await hub.request_response(spoke_id, "LOAD_ROLE",
@@ -356,6 +369,8 @@ async def _load_roles_impl(hub, spoke_id, data):
             await _zbxproxy_register(hub, config)
         if role == "zbxagent":
             await _zbxagent_register(hub, config)
+        # Syslog: load the syslog spoke role / register the archive.
+        await syslog_archive.post_load_role(hub, spoke_id, role, payload)
     # Return the agent's reply to the caller.
     return payload
 
@@ -839,8 +854,11 @@ def register(app, hub, ctx):
                 result = await hub.request_response(spoke_id, command, payload, timeout=180.0)
             else:
                 result = await hub.request_response(spoke_id, command, payload)
-            # Return the unwrapped agent reply.
-            return result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            # Unwrap; an unloaded/uninstalled syslog archive is disconnected.
+            reply = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            if command in ("UNLOAD_ROLE", "UNINSTALL_ROLE") and isinstance(payload, dict):
+                await syslog_archive.on_role_removed(hub, spoke_id, payload.get("role"), reply)
+            return reply
         # Our own HTTP errors pass through; anything else is logged and returned as a 500.
         except HTTPException:
             raise
@@ -921,8 +939,10 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=400, detail="role is required")
             result = await hub.request_response(spoke_id, "UNLOAD_ROLE",
                                                 {"role": role}, timeout=60.0)
-            # Return the unwrapped agent reply.
-            return result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            # Unwrap; an unloaded syslog archive is disconnected from the collectors.
+            reply = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            await syslog_archive.on_role_removed(hub, spoke_id, role, reply)
+            return reply
         # Our own HTTP errors pass through; anything else is logged and returned as a 500.
         except HTTPException:
             raise
@@ -953,8 +973,10 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=400, detail="role is required")
             result = await hub.request_response(spoke_id, "UNINSTALL_ROLE",
                                                 {"role": role}, timeout=1260.0)
-            # Return the unwrapped agent reply.
-            return result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            # Unwrap; an uninstalled syslog archive is disconnected from the collectors.
+            reply = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            await syslog_archive.on_role_removed(hub, spoke_id, role, reply)
+            return reply
         # Our own HTTP errors pass through; anything else is logged and returned as a 500.
         except HTTPException:
             raise

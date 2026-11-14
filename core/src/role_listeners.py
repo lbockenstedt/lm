@@ -23,6 +23,10 @@ Who binds what:
 Roles absent from this table (dns, dhcp, ldap, netbox, le, cppm, ...) bind
 nothing and stack freely, including alongside one listener role.
 
+The syslog deploy roles do bind ports (``syslog-collector``: UDP/TCP 514 and
+TCP 6514; ``syslog-graylog``: TCP 1514 and 9000) but no other role uses those
+ports, so they cannot collide with anything here and are not listed.
+
 Ports here are the DEFAULTS. Some roles can be pointed at another port
 (``LM_STATUS_PORT``, ``AGENT_WSS_PORT``), but the table deliberately reflects
 what a stock install actually does — an operator stacking two of these gets a
@@ -63,6 +67,8 @@ DEPLOY_ROLES = frozenset({
     "zabbix-server",
     "zbxproxy",
     "zbxagent",
+    "syslog-collector",
+    "syslog-graylog",
 })
 
 
