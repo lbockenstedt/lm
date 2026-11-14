@@ -45,6 +45,10 @@ CASES = [
         ROWS, status="error", errors=[{"error": "no strict kea read"}])}}, "error", "no strict kea read"),
     (ON, {"status": {"static_reservations": dict(ROWS, status="ok")}}, "ok", "reserved 1"),
     (ON, {"status": {"static_reservations": {"status": "skipped"}}}, "muted", "nothing to check"),
+    (ON, {"status": {"static_reservations": {"status": "ok", "visibility_reason": "tenant",
+                                             "skipped_reasons": {"outside any dhcp scope": 12,
+                                                                 "no netbox ip": 30}}}},
+     "ok", "Skipped: no netbox ip × 30, outside any dhcp scope × 12"),
     (ON, {"status": {"static_reservations": {"status": "degraded"}}}, "error", "Unexpected status reply"),
 ]
 

@@ -584,6 +584,14 @@ async function saveDhcpDeclineConfig() {
 const _STATIC_RES_TONES = { muted: 'text-slate-500', ok: 'text-green-700',
                             warn: 'text-amber-700', error: 'text-red-600' };
 
+// The viewer's "Skipped: reason × n, …" suffix (counts only), largest first.
+function _staticResSkipped(p) {
+    const r = p && p.skipped_reasons && typeof p.skipped_reasons === 'object' ? p.skipped_reasons : {};
+    const parts = Object.entries(r).filter(([, n]) => Number(n) > 0)
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([k, n]) => `${k} × ${n}`);
+    return parts.length ? ` · Skipped: ${parts.join(', ')}` : '';
+}
+
 // What the status line says, as {text, tone}. A pure function of the two
 // fetches so every state is covered in one place: each argument is
 // undefined while loading, 'failed' when the fetch failed, else the parsed
@@ -607,7 +615,7 @@ function staticResStatusView(cfg, sync) {
         return { text: `Last pass: ${p.status}${when}. Switch into a tenant to see its hosts.`, tone };
     }
     const n = k => (Array.isArray(p[k]) ? p[k] : []).length;
-    const counts = ` · reserved ${n('reserved')} · conflicts ${n('conflicts')} · errors ${n('errors')}`;
+    const counts = ` · reserved ${n('reserved')} · conflicts ${n('conflicts')} · errors ${n('errors')}${_staticResSkipped(p)}`;
     const first = (p.errors || []).find(e => e && e.error);
     switch (p.status) {
     case 'disabled': return { text: `Off${p.reason ? ` (${p.reason})` : ''}${when}.`, tone: 'muted' };
@@ -615,7 +623,7 @@ function staticResStatusView(cfg, sync) {
     case 'error': return { text: `Last pass failed${when}${counts}${first ? ` · ${first.error}` : ''}`, tone: 'error' };
     case 'conflicts': return { text: `Last pass found conflicts${when}${counts}`, tone: 'warn' };
     case 'ok': return { text: `Last pass OK${when}${counts}`, tone: 'ok' };
-    case 'skipped': return { text: `Last pass had nothing to check${when}.`, tone: 'muted' };
+    case 'skipped': return { text: `Last pass had nothing to check${when}${_staticResSkipped(p)}.`, tone: 'muted' };
     default: return { text: 'Unexpected status reply.', tone: 'error' };
     }
 }
