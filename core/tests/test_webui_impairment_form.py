@@ -34,9 +34,11 @@ def test_impairment_bandwidth_over_4_gbit_is_refused_in_the_form(hub_url_and_ses
                 route.fulfill(content_type="application/json", body=json.dumps({"status": "SUCCESS"}))
 
             page.route("**/api/firewall/fw-1/impair*", impair)
+            _options(page)
             page.goto(base + "/")
             page.wait_for_function("window._lmClickFeedbackInstalled === true")
             page.evaluate("_opnFirewalls = [{id: 'fw-1', name: 'fw'}]; showOpnsenseAddModal('Impairment')")
+            page.wait_for_function("document.getElementById('add-opn-iface').value === 'lan'")
             page.fill("#add-opn-target", "192.0.2.5")
             page.fill("#add-opn-delay", "50")
 
@@ -60,6 +62,11 @@ def test_impairment_bandwidth_over_4_gbit_is_refused_in_the_form(hub_url_and_ses
             browser.close()
 
 
+def _options(page, fw="fw-1", interfaces=({"key": "lan", "description": "LAN"},)):
+    page.route(f"**/api/firewall/{fw}/impair/options*", lambda r: r.fulfill(
+        content_type="application/json", body=json.dumps({"interfaces": list(interfaces)})))
+
+
 def _page(p, base, token):
     browser = p.chromium.launch()
     context = browser.new_context()
@@ -80,6 +87,7 @@ def test_impairment_alias_device_and_schedule_are_sent(hub_url_and_session):  # 
                 route.fulfill(content_type="application/json", body=json.dumps({"status": "SUCCESS"}))
 
             page.route("**/api/firewall/fw-1/impair*", impair)
+            _options(page)
             page.route("**/api/firewall/fw-1/aliases*", lambda r: r.fulfill(
                 content_type="application/json",
                 body=json.dumps({"data": [{"name": "lab_hosts"}, {"name": "web_servers"}]})))
@@ -171,6 +179,97 @@ def test_impairment_list_shows_schedule_and_toggles(hub_url_and_session):  # noq
             body = puts[0][1]
             assert body["enabled"] == "0" and body["targets"] == ["192.0.2.5", "192.0.2.6"]
             assert body["schedule"]["start"] == 1900000000 and body["target"] == ""
+            assert errors == []
+        finally:
+            browser.close()
+
+
+def test_impairment_interface_is_a_dropdown_from_the_firewall(hub_url_and_session):  # noqa: F811
+    """The interface comes from the firewall (its shaper rule options) and
+    the key is sent; an edited impairment whose interface is gone says so."""
+    base, token = hub_url_and_session
+    with sync_api.sync_playwright() as p:
+        browser, page = _page(p, base, token)
+        try:
+            errors, sent = [], []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            page.route("**/api/firewall/fw-1/impair/options*", lambda r: r.fulfill(
+                content_type="application/json",
+                body=json.dumps({"interfaces": [{"key": "wan", "description": "WAN"},
+                                                {"key": "opt2", "description": "Lab net"}]})))
+
+            def impair(route):
+                sent.append(json.loads(route.request.post_data or "{}"))
+                route.fulfill(content_type="application/json", body=json.dumps({"status": "SUCCESS"}))
+
+            page.route("**/api/firewall/fw-1/impair", impair)
+            page.goto(base + "/")
+            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.evaluate("_opnFirewalls = [{id: 'fw-1', name: 'fw'}]; showOpnsenseAddModal('Impairment')")
+            page.wait_for_function("document.querySelectorAll('#add-opn-iface option').length === 2")
+            texts = page.eval_on_selector_all("#add-opn-iface option", "os => os.map(o => [o.value, o.text])")
+            assert texts == [["wan", "WAN (wan)"], ["opt2", "Lab net (opt2)"]]
+            page.select_option("#add-opn-iface", "opt2")
+            page.fill("#add-opn-target", "192.0.2.5")
+            page.fill("#add-opn-delay", "50")
+            page.click("#opn-add-modal button[title^=Submit]")
+            page.wait_for_function("!document.getElementById('opn-add-modal')")
+            assert [b["interface"] for b in sent] == ["opt2"]
+
+            # Edit: the stored interface is preselected, or flagged when gone.
+            row = {"uuid": "i1", "target": "192.0.2.5", "target_type": "ip", "targets": ["192.0.2.5"],
+                   "interface": "opt2", "direction": "both", "delay": 50, "loss": 0, "enabled": True}
+            page.evaluate("r => { _opnCurrentItems = [r]; showOpnsenseEditModal('fw-1', 'Impairment', 0); }", row)
+            page.wait_for_function("document.querySelectorAll('#add-opn-iface option').length === 2")
+            assert page.input_value("#add-opn-iface") == "opt2"
+            page.evaluate("r => { _opnCurrentItems = [r]; showOpnsenseEditModal('fw-1', 'Impairment', 0); }",
+                          {**row, "interface": "lan"})
+            page.wait_for_function("document.querySelectorAll('#add-opn-iface option').length === 3")
+            assert page.input_value("#add-opn-iface") == "lan"
+            assert "no longer on this firewall" in page.inner_text("#add-opn-iface-note")
+            assert errors == []
+        finally:
+            browser.close()
+
+
+def test_impairment_interface_fallbacks_and_a_late_answer(hub_url_and_session):  # noqa: F811
+    """Only a spoke too old to list interfaces (501) gets a text field; any
+    other failure keeps the dropdown and says why. An answer for a firewall
+    that is no longer selected is ignored."""
+    base, token = hub_url_and_session
+    with sync_api.sync_playwright() as p:
+        browser, page = _page(p, base, token)
+        try:
+            errors, held = [], []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            page.route("**/api/firewall/fw-1/impair/options*", lambda r: r.fulfill(
+                status=501, content_type="application/json", body=json.dumps({"detail": "not supported"})))
+            page.route("**/api/firewall/fw-2/impair/options*", lambda r: r.fulfill(
+                status=400, content_type="application/json", body=json.dumps({"detail": "API key refused"})))
+            page.goto(base + "/")
+            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.evaluate("_opnFirewalls = [{id: 'fw-1', name: 'a'}, {id: 'fw-2', name: 'b'}, {id: 'fw-3', name: 'c'}];"
+                          "showOpnsenseAddModal('Impairment')")
+            page.wait_for_function("document.getElementById('add-opn-iface').tagName === 'INPUT'")
+            assert page.input_value("#add-opn-iface") == "lan"
+            assert "too old" in page.inner_text("#add-opn-iface-note")
+
+            page.select_option("#add-opn-fw", "fw-2")
+            page.wait_for_function("document.getElementById('add-opn-iface').tagName === 'SELECT'")
+            assert page.input_value("#add-opn-iface") == ""
+            assert "API key refused" in page.inner_text("#add-opn-iface-note")
+
+            # fw-3 answers late; fw-2 is picked again meanwhile and wins.
+            page.route("**/api/firewall/fw-3/impair/options*", lambda r: held.append(r))
+            page.select_option("#add-opn-fw", "fw-3")
+            page.wait_for_timeout(200)
+            assert held
+            page.select_option("#add-opn-fw", "fw-2")
+            page.wait_for_function("document.getElementById('add-opn-iface-note').textContent.includes('API key refused')")
+            held[0].fulfill(content_type="application/json",
+                            body=json.dumps({"interfaces": [{"key": "opt9", "description": "C"}]}))
+            page.wait_for_timeout(300)
+            assert page.eval_on_selector_all("#add-opn-iface option", "os => os.map(o => o.value)") == [""]
             assert errors == []
         finally:
             browser.close()
