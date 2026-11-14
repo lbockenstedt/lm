@@ -1240,6 +1240,9 @@ function initView(viewId, subView) {
         case 'security':
             loadSecurityData();
             break;
+        case 'syslog':
+            lmViews.syslog(document.getElementById('syslog-content'), subView || 'Search');
+            break;
         case 'osupdates':
             lmViews.osupdates(document.getElementById('osupdates-content'));
             break;

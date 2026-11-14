@@ -333,7 +333,9 @@ def test_purge_recipes_are_well_formed():
     for role, spec in agent_spoke._DEPLOY_ROLE_PURGE.items():
         assert role in agent_spoke._DEPLOY_ROLE_MARKERS, \
             f"{role}: no marker, so the uninstall could never be verified"
-        assert spec["packages"], f"{role}: nothing to purge"
+        # A role on a base package (rsyslog for syslog-collector) purges only
+        # its own files; it must still have something to remove.
+        assert spec["packages"] or spec["paths"], f"{role}: nothing to purge"
         for raw in spec["paths"]:
             # Guard against a recipe that would wipe the host.
             assert raw.startswith("/") and raw.count("/") >= 2, f"{role}: unsafe path {raw}"

@@ -442,6 +442,7 @@ const MODULE_CLASSES = {
     'Certificates': ['le'],
     'Storage': ['truenas'],
     'Monitoring': ['zabbix', 'zabbix-server', 'zbxproxy', 'zbxagent'],
+    'Syslog': ['syslog'],
     'Console': ['console']
 };
 
@@ -538,6 +539,9 @@ const AGENT_ROLES = {
     'truenas':    { name: 'Storage (TrueNAS)', desc: 'Polls and manages TrueNAS appliances over the official WebSocket JSON-RPC client — pools, datasets, shares (SMB/NFS), disks, alerts, services, capacity; gated management actions (create/delete datasets, create shares, take snapshots, run scrubs). Reports health + capacity and syncs into NetBox.', deploy: false },
     'statuspage': { name: 'Simulation Status Page', desc: 'Public, read-only status page for one tenant — cloud-provider style (overall banner, per-component status, 90-day uptime history) plus a Clients view whose demo dropdown lets visitors trigger a live 2h simulation. Bind it to a tenant; the hub pushes that tenant\'s redacted dashboard down. Serves its own HTTPS page (cert via the le role).', deploy: false },
     'proxy':      { name: 'Edge Proxy (per-tenant front door)', desc: 'Serves a local :443 WebUI front door with an LE server cert (no client-cert prompt) and reverse-proxies every request to the hub over mTLS. A dumb forwarding edge — all logic stays on the hub. Also load the "Certificate Management (Let\'s Encrypt)" role on this host so it can obtain/serve its HTTPS cert (proxy is a cert-distribution target).', deploy: false },
+    'syslog-collector': { name: 'Syslog Collector', desc: 'Syslog Collector — receives device syslog (UDP 514, TCP 514, TLS 6514) and keeps 24 h locally. The "Syslog" module role is loaded on the same host automatically right after it installs; devices are pointed at this host by hand (see Syslog → Settings).', deploy: true },
+    'syslog-graylog':   { name: 'Syslog Archive (Graylog)', desc: 'Syslog Archive (Graylog) — long-term storage; LM connects collectors automatically. One per tenant. Collectors forward a copy over TLS (port 1514); search older messages from the LM Syslog page. Runs as its own service; does NOT create a spoke.', deploy: true },
+    'syslog':     { name: 'Syslog', desc: 'Syslog module for a Syslog Collector on this host: search, live tail, sources, drop rules and archive forwarding, shown on the LM Syslog page. Must run on the same host as the Syslog Collector role (loaded automatically after it).', deploy: false },
     'ab':   { name: 'AppBuilder', desc: 'Autonomous GitHub issue bot. Installs as a systemd service on this host and connects to the Hub as its own agent.', deploy: true },
 };
 
@@ -595,6 +599,7 @@ const PRODUCT_MAP = {
     'console': 'console',
     'truenas': 'truenas',
     'zabbix': 'zabbix',
+    'syslog': 'syslog',
 };
 
 // module_type -> nav product. A spoke's REGISTERED module_type is the
@@ -622,6 +627,7 @@ const MODULE_TYPE_PRODUCT = {
     directory: 'ldap',
     storage: 'truenas',
     monitoring: 'zabbix',
+    logging: 'syslog',
 };
 
 // spoke_id prefix -> product, used ONLY as a fallback when a spoke's module_type
@@ -637,7 +643,7 @@ const _ID_PREFIX_PRODUCT = {
     pxmx: 'pxmx', opn: 'opnsense', opnsense: 'opnsense', pfsense: 'opnsense',
     cppm: 'cppm', ise: 'cppm', cs: 'cs', netbox: 'netbox', phpipam: 'netbox',
     dns: 'dns', dhcp: 'dhcp', nw: 'nw', le: 'le', truenas: 'truenas',
-    henet: 'henet', zabbix: 'zabbix',
+    henet: 'henet', zabbix: 'zabbix', syslog: 'syslog',
 };
 function _productFromIdPrefix(sid) {
     for (const [prefix, product] of Object.entries(_ID_PREFIX_PRODUCT)) {
@@ -672,6 +678,7 @@ const MODULE_LABELS = {
     agent:      'Agent',
     qa:         'QA',
     certificates: 'Certificate Management',
+    logging:    'Syslog',
 };
 function moduleLabel(mt) {
     mt = String(mt || '').toLowerCase();
@@ -2236,7 +2243,7 @@ const VIEW_SUBMENUS = {
     setup: ['Spokes & Agents', 'Module Management', 'Directory (LDAP)', 'Simulations', 'Remote Console', 'Test Data Feed'],
     opnsense: ['Overview', 'Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'Impairment', 'DHCP Leases', 'Interfaces'],
     pxmx: ['Overview', 'Virtual Machines', 'Diagnostics', 'Settings'],
-    ldap: ['Users', 'Groups', 'Entra'],
+    ldap: ['Users', 'Groups', 'Entra', 'AD'],
     cppm: ['NAC Status', 'Access Tracker', 'My Devices', 'Unknown Devices', 'My Users'],
     cs: ['Dashboard', 'Clients', 'Central', 'Central On-Prem', 'Mist', 'VM Server', 'Config', 'Setup', 'Spoke Management', 'Assistant'],
     netbox: ['Overview', 'Devices', 'Racks', 'Rack Placement', 'Prefixes', 'IP Addresses'],
@@ -2245,7 +2252,18 @@ const VIEW_SUBMENUS = {
     nw: ['Overview', 'Gateways', 'Switches', 'Firewalls', 'IPMI', 'Other', 'Topology', 'Scan'],
     truenas: ['Overview', 'Appliances', 'Pools', 'Datasets', 'Shares', 'Disks', 'Alerts', 'Capacity'],
     zabbix: ['Overview'],
+    syslog: ['Search', 'Live Tail', 'Sources', 'Drop Rules', 'Collectors & Archive', 'Settings', 'Diagnostics'],
 };
+
+// Diagnostics tabs are Global Admin only, except Syslog's: nobody has shell
+// access to a collector, so a Tenant Admin troubleshoots their own collectors
+// there (GET /api/syslog/diagnostics allows tenant admins too).
+const TENANT_ADMIN_DIAGNOSTICS = new Set(['syslog']);
+// True when a tenant admin may open the Diagnostics tab of `viewId` (only
+// views whose diagnostics are tenant-scoped, e.g. Syslog collectors).
+function tenantDiagnosticsAllowed(viewId) {
+    return isTenantAdmin() && TENANT_ADMIN_DIAGNOSTICS.has(viewId);
+}
 
 // Two-tier horizontal nav: child tabs that appear in #top-nav-secondary under
 // a primary. Only cs (Simulations) uses this today — its primaries mirror the
@@ -3989,6 +4007,9 @@ function _rebuildMainNav(allSpokes, connections) {
             icon = '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m-6-8h6M5 21h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M14.5 19.5l1.5 1.5 2.5-2.5"></path></svg>';
         } else if (className === 'Monitoring') {
             icon = '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>';
+        } else if (className === 'Syslog') {
+            // Document with text lines — a stream of log messages.
+            icon = '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"></path></svg>';
         } else if (className === 'Storage') {
             icon = '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7m0 0a3 3 0 01-3 3m0 3h.008v.008h-.008v-.008zm0-6h.008v.008h-.008V8.25zm-3 6h.008v.008h-.008v-.008zm0-6h.008v.008h-.008V8.25z"></path></svg>';
         } else if (firstProduct && window.VIEWS && window.VIEWS[firstProduct]) {
@@ -4502,6 +4523,7 @@ const VIEW_LOADERS = {
     console:  (subMenu) => loadConsoleData(subMenu),
     truenas:  (subMenu) => loadTruenasData(subMenu),
     zabbix:   () => loadMonitoringData(),
+    syslog:   (subMenu) => lmViews.syslog(document.getElementById('syslog-content'), subMenu),
     cs:       (subMenu) => loadCSData(subMenu, currentSubChild),
     setup:    (subMenu) => _renderSetupSection(subMenu),
     settings: (subMenu) => _renderSettingsSection(subMenu),
@@ -4509,7 +4531,7 @@ const VIEW_LOADERS = {
 };
 
 async function setSubView(subMenu) {
-    if (subMenu === 'Diagnostics' && !isAdmin()) return;
+    if (subMenu === 'Diagnostics' && !isAdmin() && !tenantDiagnosticsAllowed(currentView)) return;
     _lmNavigated();
     currentSubView = subMenu;
     // Leaving the Certificates tab: stop the in-flight distribution poller/
@@ -4556,7 +4578,7 @@ function renderTopNav(viewId) {
     // (see logsSubmenu). Every other view uses its fixed VIEW_SUBMENUS list.
     const rawSubmenus = (viewId === 'logs') ? logsSubmenu() : (VIEW_SUBMENUS[viewId] || []);
     const subMenus = rawSubmenus.filter(m => {
-        if (m === 'Diagnostics' && !isAdmin()) return false;
+        if (m === 'Diagnostics' && !isAdmin() && !tenantDiagnosticsAllowed(viewId)) return false;
         if (m === 'Simulations' && !isAdmin()) return false;
         // The NW "Scan" tab lets a tenant configure + run discovery scans on
         // their own NW spoke(s) and set a recurring scan schedule + poll
@@ -4992,6 +5014,9 @@ function _viewTemplate(viewId) {
 
         case 'osupdates':
             return `<div id="osupdates-content"></div>`;
+
+        case 'syslog':
+            return `<div id="syslog-content" class="space-y-4"></div>`;
 
         case 'security':
             return `<div class="space-y-4">

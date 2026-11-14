@@ -344,6 +344,7 @@ async def persist_on_shutdown(hub):
     for name, flush in (("nw-cache", hub.nw_cache_flush_now),
                         ("le-cache", hub.le_cache_flush_now),
                         ("truenas-cache", hub.truenas_cache_flush_now),
+                        ("syslog-cache", hub.syslog_cache_flush_now),
                         ("storage-perf", hub.storage_perf.flush_now),
                         ("data-cache", hub.warm_cache_flush_now),
                         ("state", hub.state._flush_if_dirty)):
@@ -2247,9 +2248,9 @@ def create_app(hub):
 
     # ── Register relocated route groups (one module per coherent area) ──
     from routes import (
-        setup, firewall, nw, cppm, pxmx, ws_transport, console, pxmx_vm, dashboard, setup_admin, ldap, netbox, tenants_users, auth, setup_misc, agents, net_services, admin_cache, help_assistant, sim_assistant, request_assistant, exec as exec_routes, os_updates as os_updates_routes, self_backup, tenant_devices, oidc, templates, azure_nsg, oci_nsg as oci_nsg_routes, cloud_nac as cloud_nac_routes, nac_users as nac_users_routes, directory_entra as directory_entra_routes, key_vault as key_vault_routes, oci_vault as oci_vault_routes, cred_vault as cred_vault_routes, notifications as notifications_routes, collab, truenas, onboarding, test_feed as test_feed_routes,
+        setup, firewall, nw, cppm, pxmx, ws_transport, console, pxmx_vm, dashboard, setup_admin, ldap, netbox, tenants_users, auth, setup_misc, agents, net_services, admin_cache, help_assistant, sim_assistant, request_assistant, exec as exec_routes, os_updates as os_updates_routes, self_backup, tenant_devices, oidc, templates, azure_nsg, oci_nsg as oci_nsg_routes, cloud_nac as cloud_nac_routes, nac_users as nac_users_routes, directory_entra as directory_entra_routes, directory_ad as directory_ad_routes, key_vault as key_vault_routes, oci_vault as oci_vault_routes, cred_vault as cred_vault_routes, notifications as notifications_routes, collab, truenas, onboarding, test_feed as test_feed_routes,
     hub_watchdog as hub_watchdog_routes, hub_tls_verify as hub_tls_verify_routes, netbox_sso as netbox_sso_routes, security as security_routes, client_debug as client_debug_routes, admin_ops as admin_ops_routes,
-    cert_monitor as cert_monitor_routes, monitoring as monitoring_routes, vm_snapshots as vm_snapshots_routes,
+    cert_monitor as cert_monitor_routes, syslog as syslog_routes, monitoring as monitoring_routes, vm_snapshots as vm_snapshots_routes,
     )
     # Each route module registers its routes using the shared context.
     security_routes.register(app, hub, ctx)
@@ -2270,6 +2271,7 @@ def create_app(hub):
     setup_admin.register(app, hub, ctx)
     ldap.register(app, hub, ctx)
     directory_entra_routes.register(app, hub, ctx)
+    directory_ad_routes.register(app, hub, ctx)
     netbox.register(app, hub, ctx)
     tenants_users.register(app, hub, ctx)
     auth.register(app, hub, ctx)
@@ -2301,6 +2303,7 @@ def create_app(hub):
     admin_ops_routes.register(app, hub, ctx)
     test_feed_routes.register(app, hub, ctx)
     cert_monitor_routes.register(app, hub, ctx)
+    syslog_routes.register(app, hub, ctx)
 
     # ── Operator site extensions (optional; absent on a stock checkout) ──────
     # Import any locally-provisioned register(app, hub, ctx) modules from the

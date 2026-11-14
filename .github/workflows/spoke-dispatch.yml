@@ -31,7 +31,7 @@ jobs:
           set -u
           # Repos whose ci.yml checks out lbockenstedt/lm as _lm (dhcp and dns are
           # archived; their code now lives in lm).
-          spokes="ab cppm cs ldap le netbox opnsense pxmx qa truenas zabbix"
+          spokes="ab cppm cs ldap le netbox opnsense pxmx qa syslog truenas zabbix"
           failed=""
           for s in $spokes; do
             if gh api -X POST "repos/lbockenstedt/$s/dispatches" \

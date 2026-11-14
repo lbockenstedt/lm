@@ -313,14 +313,17 @@ def test_delete_ou_asks_first_and_only_for_an_empty_leaf(hub_url_and_session):  
             panel.locator("button[title='Ops/Night']").click()
             assert delete.is_enabled()
             delete.click()
-            toast = page.locator(".lm-toast", has_text="Ops/Night")
+            # Match the confirm text, not just the OU: the click-feedback
+            # "Loading Ops/Night…" toast also names it and, on a busy runner,
+            # can land after the confirm toast and be picked by `.last`.
+            toast = page.locator(".lm-toast", has_text="Delete OU Ops/Night")
             toast.locator("button", has_text="Cancel").click()
             page.wait_for_timeout(200)
             assert deletes == []
 
             delete.click()
             # The cancelled toast may still be fading out; answer the new one.
-            page.locator(".lm-toast", has_text="Ops/Night").last.locator(
+            page.locator(".lm-toast", has_text="Delete OU Ops/Night").last.locator(
                 "button", has_text="Confirm").click()
             while not deletes:
                 page.wait_for_timeout(50)

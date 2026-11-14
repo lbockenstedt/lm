@@ -655,6 +655,22 @@ class SpokeRegistryMixin:
         bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
         return bound[0] if bound else None
 
+    def get_logging_spokes_for_tenant(self, tenant_id: str) -> list:
+        """Every connected, approved syslog (``logging``) spoke bound to
+        ``tenant_id``. A tenant may run several collectors, so this is a list.
+        Never returns another tenant's collector and has no unassigned or
+        admin fallback: syslog data is always read per tenant."""
+        # No tenant means nothing to return.
+        if not tenant_id:
+            return []
+        # Candidates are connected, approved logging spokes.
+        from access import same_tenant
+        md = self.state.system_state.get("module_metadata", {})
+        return [sid for sid in (self.get_all_spokes_by_type("logging") or [])
+                if sid in self.active_connections
+                and self.approved_modules.get(sid, False)
+                and same_tenant(md.get(sid, {}).get("tenant_id"), tenant_id)]
+
     def get_truenas_spoke_for_shared(self) -> Optional[str]:
         """The storage spoke that owns the SHARED-tenant TrueNAS appliances.
         Mirrors ``get_nw_spoke_for_shared``."""

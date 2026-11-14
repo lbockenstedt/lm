@@ -51,7 +51,7 @@ place. Accounts live in one of three locations:
 | **LDAP** (most accounts) | Directory → Users, organised in OUs | Local password in LDAP |
 | **LDAP → Entra** (linked) | Directory → Users, Auth = Entra, with its UPN | LDAP bind with `userPassword: {SASL}<upn>`; saslauthd checks the password against Entra (ROPC). No local password is kept |
 | **Entra only** | Directory → Entra, the tenant's `LM-<tenant>-*` groups | Entra |
-| **Active Directory** | Not built yet (see below) | AD |
+| **Active Directory** | Directory → AD (read-only), one block per AD connection | AD |
 
 A linked LDAP user is the link: its UPN is stored in the `{SASL}` marker and
 returned as `upn` with `auth_mode: entra` in the tenant's user list. Linked sign-in works
@@ -65,10 +65,8 @@ and fails while Entra is unreachable.
   list (no extra Graph calls).
 - **Link / unlink an existing user**, and **import** an Entra account as a
   linked LDAP user. Linking removes the local password.
-- **AD in the hub and WebUI:** push the `ad` block to the spoke (with
-  `bind_password` in the Credential Vault), relay `AD_*` reads, and show AD
-  accounts in the Directory. Which tenant owns an AD connection is still to
-  be decided.
+- **Writes to AD** (create, disable, move) and an AD tab in the Setup
+  wizard. AD is read-only in LM for now.
 
 ## OUs inside a tenant
 
@@ -184,21 +182,47 @@ a group is picked, and **Delete**; Remove and both Deletes ask for
 confirmation first. Write controls appear only for tenant admins. When Entra
 is not set up (Settings → Single sign-on) the tab says so.
 
-## Active Directory (planned; read-only stub on a branch)
+## Active Directory (read-only)
 
-> **Not on `dev`.** The stub lives on the ldap branch
-> `feat/ad-readonly-stub`. It was taken off `dev` because its
-> `bind_password` must go through the Credential Vault from day one
-> (fleet rule 5.1), and it returns together with that hub wiring.
-> Until then a spoke answers the `AD_*` commands with "Unknown command".
+Directory → AD lists a tenant's Active Directory accounts (login, name,
+UPN or email, and Enabled / Disabled / Unknown). It is read-only.
 
-`src/ad_directory.py` reads users from an AD domain, so the Directory view can
-later show LDAP, Entra and AD accounts together. It is read-only for now:
-`AD_DISCOVER`, `AD_TEST` and `AD_SEARCH_USERS`. The `ad` block of the spoke
-config holds `domain`, `forest`, `site`, `discover`, `use_global_catalog`,
-`use_ssl`, `dns_servers`, `servers`, `bind_user`, `bind_password`, `base_dn` and
-`timeout`. The hub push, the WebUI form and the Credential Vault wiring for
-`bind_password` are not built yet.
+**Setup (Global Admin only).** Setup → Module Management → Add Device →
+*Active Directory Connection*. Each connection belongs to exactly one tenant,
+picked in the form (for example `ssplm`); a connection with no tenant is
+refused. The fields are the domain, an optional primary and backup server,
+discovery (on by default), global catalog vs. domain controllers, LDAPS vs.
+StartTLS, the AD site and forest, the DNS servers that hold the AD zones
+(comma-separated), the base DN, and a bind user and password. The bind
+password must be a Credential Vault reference (an automation-readable secret,
+fleet rule 5.1) stored in the connection's **own tenant's** vault bucket; a
+secret from another tenant or from the Global Admin slot is refused (400), so
+a tenant's spoke only ever receives that tenant's password. The form's **Test** button binds and reports which server
+answered; **Discover** lists the servers that would be tried, in order.
+
+**How it runs.** The hub keeps the connections in `ad_connections`
+(`/setup/ad-connections`, admin-only). For each AD command it resolves the
+tenant's directory spoke (its own spoke, or a shared one; never another
+tenant's), fills `bind_password` from the vault, and sends the connection as
+the `ad` field of `AD_DISCOVER`, `AD_TEST` or `AD_SEARCH_USERS`. The spoke
+never stores the AD connection or password. The AD commands are fully
+redacted in the hub's logs. The Setup list shows each connection's vault
+credential by name only (`bind_password_set`), never its bucket. The tab
+reads a tenant's connections side by side (up to 4 at once), so one
+unreachable AD does not hold up the others. That spoke must reach the AD DNS servers and
+domain controllers.
+
+| Route | Who | What |
+| :--- | :--- | :--- |
+| `GET /api/ldap/ad?tenant=` | tenant users (Directory read scope) | `{configured, connections: [{name, domain, users, truncated, server, error?}]}`, from the hub cache (refreshed every 5 minutes in the background) |
+| `POST /setup/ad-connections/{id}/test` | Global Admin | bind test |
+| `POST /setup/ad-connections/{id}/discover` | Global Admin | server discovery |
+
+A connection that can't be read shows its error in its own block; the
+tenant's other connections still list their accounts. With no connection the
+tab says how to add one. An old ldap spoke that does not know the `AD_*`
+commands gives a 501 "update the spoke"; a vault secret that can't be read
+gives a 503.
 
 Which server the spoke uses, in order:
 
