@@ -93,6 +93,50 @@ class _Hub:
         assert self.response_cache == {}
 
 
+def test_payload_logging_only_redacts_when_debug_enabled(monkeypatch, caplog):
+    """Disabled DEBUG skips payload work; enabled DEBUG still masks secrets."""
+    import logging
+
+    original_redact = main._redact
+    calls = []
+
+    def tracked_redact(command, data):
+        """Count payload traversals while retaining the real redaction policy."""
+        calls.append(command)
+        return original_redact(command, data)
+
+    monkeypatch.setattr(main, "_redact", tracked_redact)
+    # Exercise both request and response through the real RPC implementation.
+    for level, expected_calls in ((logging.INFO, 0), (logging.DEBUG, 2)):
+        caplog.set_level(level, logger=main.logger.name)
+        caplog.clear()
+        calls.clear()
+        hub = _Hub()
+        request = {"token": "request-secret-sentinel", "marker": "request-visible"}
+        reply = {"status": "SUCCESS", "token": "reply-secret-sentinel",
+                 "marker": "reply-visible"}
+
+        async def reply_inside_send(msg):
+            """Deliver a reply while the request is registered."""
+            await hub.deliver(msg.header.message_id, data=reply)
+
+        hub.on_send = reply_inside_send
+        result = asyncio.run(hub.request_response(
+            "spoke-1", "NETBOX_GET_IPS", request, timeout=5))
+        assert len(calls) == expected_calls
+        assert result["payload"]["data"] == reply
+        assert request["token"] == "request-secret-sentinel"
+        assert "request-secret-sentinel" not in caplog.text
+        assert "reply-secret-sentinel" not in caplog.text
+        if level == logging.DEBUG:
+            assert "request-visible" in caplog.text
+            assert "reply-visible" in caplog.text
+        else:
+            assert "request-visible" not in caplog.text
+            assert "reply-visible" not in caplog.text
+        hub.assert_clean()
+
+
 def test_reply_wakes_waiter_immediately():
     hub = _Hub()
 
