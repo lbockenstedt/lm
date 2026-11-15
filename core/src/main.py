@@ -2184,7 +2184,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     "updating": True, "draining": True}
         # New message id; log the request with secrets redacted.
         msg_id = str(uuid.uuid4())
-        logger.debug(f"Request: {msg_id} -> {spoke_id} [{command_type}] data={_redact(command_type, data)}")
+        # Avoid copying and formatting payloads when DEBUG is disabled.
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Request: %s -> %s [%s] data=%s",
+                         msg_id, spoke_id, command_type, _redact(command_type, data))
         # Build the request message.
         msg = Message(
             header=MessageHeader(
@@ -2263,7 +2266,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # Reply arrived: take it, log it and return it.
                 if msg_id in self.response_cache:
                     result = self.response_cache.pop(msg_id)
-                    logger.debug(f"Response: {msg_id} received from {spoke_id}: {_redact(command_type, result)}")
+                    # Bulk replies can be large: disabled DEBUG must not walk
+                    # or stringify them on the hub's event loop.
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug("Response: %s received from %s: %s",
+                                     msg_id, spoke_id, _redact(command_type, result))
                     settled = True
                     # Single choke point for the durable agent→role registry:
                     # EVERY hub-issued LOAD_ROLE / UNLOAD_ROLE flows through here
