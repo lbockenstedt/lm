@@ -13470,18 +13470,48 @@ window.csClaimSpoke = async function () {
 // this UI never writes code or files anything on its own initiative.
 window._csAssistantMessages = window._csAssistantMessages || [];
 
+// Tailwind preflight strips heading sizes, list bullets and margins, so the
+// help renderer's bare tags get explicit classes inside a chat bubble.
+const _CS_ASST_MD_CLASSES = {
+    h1: 'text-base font-bold mt-3 mb-1 first:mt-0', h2: 'text-base font-bold mt-3 mb-1 first:mt-0',
+    h3: 'text-sm font-bold mt-2 mb-1 first:mt-0', h4: 'text-sm font-semibold mt-2 mb-1 first:mt-0',
+    h5: 'text-sm font-semibold mt-2 mb-1 first:mt-0', h6: 'text-sm font-semibold mt-2 mb-1 first:mt-0',
+    p: 'my-1.5 first:mt-0 last:mb-0', ul: 'list-disc pl-5 my-1.5 space-y-0.5 first:mt-0 last:mb-0',
+    ol: 'list-decimal pl-5 my-1.5 space-y-0.5 first:mt-0 last:mb-0', hr: 'my-3 border-slate-200',
+    table: 'block overflow-x-auto my-2 text-xs border-collapse',
+    th: 'border border-slate-200 bg-slate-50 px-2 py-1 text-left font-semibold',
+    td: 'border border-slate-200 px-2 py-1 align-top', a: 'text-primary-text underline',
+};
+
+// Give rendered markdown readable styles: a dark, horizontally scrolling
+// monospace box for code blocks, a tinted chip for inline code, real heading
+// sizes and list bullets.
+function _csAsstStyleMarkdown(html) {
+    return String(html)
+        .replace(/<pre><code>/g, '<pre class="bg-slate-800 text-slate-100 p-3 rounded-lg overflow-x-auto text-xs my-2 font-mono"><code class="whitespace-pre">')
+        .replace(/<code>/g, '<code class="font-mono text-xs px-1 py-0.5 rounded bg-slate-100 text-slate-800 break-words">')
+        .replace(/<(h[1-6]|p|ul|ol|hr|table|th|td|a)(?=[\s>])/g,
+            (m, tag) => '<' + tag + ' class="' + _CS_ASST_MD_CLASSES[tag] + '"');
+}
+
+// One chat turn. The user's own text sits on the right in a solid green
+// bubble labelled "You" (shown verbatim, line breaks kept); an assistant
+// reply sits on the left in a white card labelled "Assistant", with its
+// markdown rendered.
 function _csAssistantBubble(role, text) {
-    const isUser = role === 'user';
-    const bg = isUser ? 'bg-primary text-white' : 'bg-white border border-slate-200 text-slate-800';
-    const align = isUser ? 'justify-end' : 'justify-start';
-    let body = window.renderHelpMarkdown ? window.renderHelpMarkdown(text) :
-        '<p>' + csEscape(text) + '</p>';
-    body = body.replace(/<pre><code/g, '<pre class="bg-slate-800 text-slate-100 p-3 rounded-lg overflow-x-auto text-xs my-2"><code');
-    return `<div class="flex ${align} mb-3">
-        <div class="max-w-[75%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${bg} shadow-sm">
-            <div class="cs-assistant-msg">${body}</div>
-        </div>
-    </div>`;
+    if (role === 'user') {
+        return '<div class="flex flex-col items-end mt-3 first:mt-0" data-role="user">' +
+            '<div class="text-xs font-semibold text-slate-600 mb-0.5 mr-2">You</div>' +
+            '<div class="max-w-[85%] rounded-2xl rounded-tr-sm px-3.5 py-2 text-sm leading-relaxed bg-primary text-white shadow-sm">' +
+            '<div class="cs-assistant-msg whitespace-pre-wrap break-words">' + csEscape(text) + '</div></div></div>';
+    }
+    const body = window.renderHelpMarkdown ? _csAsstStyleMarkdown(window.renderHelpMarkdown(text))
+        : '<p class="whitespace-pre-wrap">' + csEscape(text) + '</p>';
+    return '<div class="flex flex-col items-start mt-3 first:mt-0" data-role="assistant">' +
+        '<div class="flex items-center gap-1.5 text-xs font-semibold text-primary-text mb-0.5 ml-2">' +
+        '<span class="inline-block w-2 h-2 rounded-full bg-brand"></span>Assistant</div>' +
+        '<div class="max-w-[92%] min-w-0 rounded-2xl rounded-tl-sm px-3.5 py-2 text-sm leading-relaxed bg-white border border-slate-300 text-slate-900 shadow-sm">' +
+        '<div class="cs-assistant-msg break-words">' + body + '</div></div></div>';
 }
 
 function _csAssistantScrollToBottom() {
@@ -13489,10 +13519,19 @@ function _csAssistantScrollToBottom() {
     if (log) log.scrollTop = log.scrollHeight;
 }
 
+// Grow the reply textarea with its content, from one row up to a cap, then
+// scroll inside it. The legacy page's single-line <input> is left alone.
+function _csAsstAutoGrow(input) {
+    if (!input || input.tagName !== 'TEXTAREA') return;
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight + 2, 192) + 'px';
+}
+
 function csAssistantSetInput(text) {
     const input = csEl('cs-assistant-input');
     if (input) {
         input.value = text;
+        _csAsstAutoGrow(input);
         input.focus();
     }
 }
@@ -13531,8 +13570,8 @@ async function csAssistantSend() {
     _csAssistantRenderLog();
     const log = csEl('cs-assistant-log');
     if (log) log.insertAdjacentHTML('beforeend',
-        '<div id="cs-assistant-thinking" class="flex justify-start mb-3">' +
-        '<div class="rounded-2xl px-4 py-2.5 text-sm bg-white border border-slate-200 text-slate-500 shadow-sm">Thinking…</div></div>');
+        '<div id="cs-assistant-thinking" class="flex justify-start mt-3">' +
+        '<div class="rounded-2xl px-3.5 py-2 text-sm bg-white border border-slate-300 text-slate-600 shadow-sm">Thinking…</div></div>');
     _csAssistantScrollToBottom();
 
     try {
@@ -13649,11 +13688,13 @@ function _csAsstEventHtml(e) {
     const t = e.text || '';
     if (e.kind === 'user') return _csAssistantBubble('user', t);
     if (e.kind === 'assistant') return _csAssistantBubble('assistant', t);
-    if (e.kind === 'tool') return '<div class="text-xs font-mono text-slate-500 ml-2 mb-1 truncate" title="' +
+    // Tool and status lines are the agent's working notes: small, muted and
+    // indented under a rule, so they read as neither party's message.
+    if (e.kind === 'tool') return '<div class="text-xs font-mono text-slate-500 ml-4 pl-2 border-l-2 border-slate-300 py-0.5 truncate" title="' +
         csEscape(t) + '">› ' + csEscape(t) + '</div>';
-    if (e.kind === 'status') return '<div class="text-xs italic text-slate-500 ml-2 mb-2">' + csEscape(t) + '</div>';
-    if (e.kind === 'error') return '<div class="text-xs text-red-700 bg-red-50 border border-red-200 rounded-md px-3 py-2 mb-3">⚠️ ' + csEscape(t) + '</div>';
-    if (e.kind === 'submit') return '<div class="text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-md px-3 py-2 mb-3">✅ ' + csEscape(t) + '</div>';
+    if (e.kind === 'status') return '<div class="text-xs italic text-slate-500 ml-4 pl-2 border-l-2 border-slate-300 py-0.5">' + csEscape(t) + '</div>';
+    if (e.kind === 'error') return '<div class="text-xs text-red-700 bg-red-50 border border-red-200 rounded-md px-3 py-1.5 mt-2">⚠️ ' + csEscape(t) + '</div>';
+    if (e.kind === 'submit') return '<div class="text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-md px-3 py-1.5 mt-2">✅ ' + csEscape(t) + '</div>';
     return '';
 }
 
@@ -13668,11 +13709,11 @@ function _csAsstRenderLog() {
     }
     let html = a.events.map(_csAsstEventHtml).join('');
     if (_csAsstBusy(a.state)) {
-        html += '<div class="flex items-center gap-2 text-xs text-slate-500 ml-2 mb-2">' +
+        html += '<div class="flex items-center gap-2 text-xs text-slate-500 ml-4 mt-2">' +
             '<span class="inline-block w-3 h-3 border-2 border-slate-300 border-t-brand rounded-full animate-spin"></span>' +
             (a.state === 'submitting' ? 'Handing off to AppBuilder…' : 'Working…') + '</div>';
     } else if (a.choices && a.choices.length && !(a.submitted || []).length) {
-        html += '<div class="flex flex-wrap gap-2 mb-3 ml-2">' + a.choices.map((c, i) =>
+        html += '<div class="flex flex-wrap gap-2 mt-2 ml-2">' + a.choices.map((c, i) =>
             '<button onclick="csAssistantChoose(' + i + ')" class="px-3 py-1.5 text-xs rounded-full border border-brand text-primary-text bg-white hover:bg-emerald-50">' +
             csEscape(c) + '</button>').join('') + '</div>';
     }
@@ -13680,87 +13721,135 @@ function _csAsstRenderLog() {
     _csAssistantScrollToBottom();
 }
 
-function _csAsstSpecRow(label, ok, valueHtml) {
-    return '<div class="mb-2"><div class="flex items-center gap-1.5 text-xs font-semibold text-slate-700">' +
-        '<span class="' + (ok ? 'text-emerald-600' : 'text-slate-500') + '">' + (ok ? '●' : '○') + '</span>' +
-        csEscape(label) + '</div>' + (valueHtml ? '<div class="text-xs text-slate-600 ml-4 mt-0.5 break-words">' + valueHtml + '</div>' : '') + '</div>';
+// One short spec field as a label/value pair in the panel's two-column grid.
+function _csAsstSpecRow(label, valueHtml) {
+    return '<dt class="text-slate-500 whitespace-nowrap">' + csEscape(label) + '</dt>' +
+        '<dd class="text-slate-800 min-w-0 break-words">' + valueHtml + '</dd>';
 }
 
+// One long spec field, clamped to three lines; clicking it shows the rest.
+function _csAsstSpecLong(label, valueHtml) {
+    return '<details class="group mt-2 text-xs">' +
+        '<summary class="cursor-pointer list-none [&::-webkit-details-marker]:hidden" title="Click to show more or less">' +
+        '<span class="block text-slate-500">' + csEscape(label) + '</span>' +
+        '<span class="text-slate-800 break-words whitespace-pre-line line-clamp-3 group-open:line-clamp-none">' + valueHtml + '</span>' +
+        '</summary></details>';
+}
+
+// The spec fields the assistant has not filled in yet, named on one line.
+// Once AB marks the spec ready they are no longer "needed", only unset.
+function _csAsstMissingLine(missing, ready) {
+    if (!missing.length) return '';
+    const label = ready ? '<span class="font-semibold text-slate-600">Not set:</span> '
+        : '<span class="font-semibold text-amber-700">Still needed:</span> ';
+    return '<div class="mt-2 text-xs text-slate-600">' + label + missing.map(csEscape).join(' · ') + '</div>';
+}
+
+// What the spec's client_ip answer means for the user: does the simulation
+// leave its clients with a working IP address?
+function _csAsstClientIpLabel(v) {
+    if (v === 'keeps' || v === true) return 'Yes';
+    if (v === 'loses' || v === false) return 'No (by design)';
+    return v ? String(v) : '';
+}
+
+// Right-hand spec panel. Filled short fields form a two-column grid, long
+// text is clamped and expandable, and every empty field is named once on a
+// single "Still needed" line instead of taking a row of its own. Only fields
+// the request actually needs go on that line: optional ones (Alert, Config
+// knobs) and fields a removal does not use are simply left out when empty.
 function _csAsstRenderSpec() {
     const el = csEl('cs-assistant-spec');
     const a = window._csAsst;
     if (!el || !a) return;
     const s = a.spec || {};
-    const short = v => csEscape(String(v || '').length > 220 ? String(v).slice(0, 220) + '…' : String(v || ''));
     const intent = a.intent || s.intent || '';
     const explain = intent === 'explain';
     const intentLabel = { ui: 'UI change', create: 'New simulation', modify: 'Change existing', remove: 'Remove simulation', explain: 'Explain only' }[intent] || '';
     const badge = explain ? '<span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-sky-100 text-sky-800">Explain only</span>'
         : a.ready ? '<span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">Ready to build</span>'
         : '<span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">Gathering</span>';
-    let html = '<div class="flex items-center justify-between mb-3"><h3 class="text-sm font-bold text-slate-800">Spec</h3>' + badge + '</div>';
-    html += _csAsstSpecRow('Request', !!intent, csEscape(intentLabel) +
-        (s.target ? ' · <code>' + csEscape(s.target) + '</code>' : ''));
+    // Each field lands in exactly one place: the grid, a long block, or the missing line.
+    const rows = [], longs = [], missing = [];
+    const field = (label, ok, valueHtml, needed = true) => { if (ok) rows.push(_csAsstSpecRow(label, valueHtml)); else if (needed) missing.push(label); };
+    const long = (label, ok, text, needed = true) => { if (ok) longs.push(_csAsstSpecLong(label, csEscape(text))); else if (needed) missing.push(label); };
+    const grid = () => rows.length ? '<dl class="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-xs">' + rows.join('') + '</dl>' : '';
+    const premium = a.premium ? '<div class="mt-3 text-xs text-slate-500">Copilot premium requests used: ' + csEscape(a.premium) + '</div>' : '';
+    let html = '<div class="flex items-center justify-between mb-2"><h3 class="text-sm font-bold text-slate-800">Spec</h3>' + badge + '</div>';
+    field('Request', !!intent, csEscape(intentLabel) + (s.target ? ' · <code>' + csEscape(s.target) + '</code>' : ''));
     if (explain) {
-        html += '<div class="mt-2 text-xs text-slate-500">Read-only walkthrough of how this simulation works — nothing is filed or built. Ask to change it to get a buildable spec.</div>';
-        if (a.premium) html += '<div class="mt-4 text-xs text-slate-500">Copilot premium requests used: ' + csEscape(a.premium) + '</div>';
-        el.innerHTML = html;
+        el.innerHTML = html + grid() + '<div class="mt-2 text-xs text-slate-500">Read-only walkthrough of how this simulation works — nothing is filed or built. Ask to change it to get a buildable spec.</div>' + premium;
         return;
     }
+    // Intent-specific warning or note, then the intent-specific fields.
     if (intent === 'modify') {
-        html += '<div class="mt-2 mb-2 rounded-md border border-amber-300 bg-amber-50 px-2 py-1.5 text-xs text-amber-900">' +
+        html += '<div class="mb-2 rounded-md border border-amber-300 bg-amber-50 px-2 py-1 text-xs leading-snug text-amber-900">' +
             '<b>Changing a working simulation</b> affects every client running it. Duplicating it and changing the copy is recommended. ' +
             'In-place changes ship as their own PR, recorded with your LM login.</div>';
-        html += _csAsstSpecRow('Edit confirmed', !!s.modify_confirmed, s.modify_confirmed ? 'Yes' : '');
-        html += _csAsstSpecRow('Diagnosis', !!s.diagnosis, short(s.diagnosis));
+        field('Edit confirmed', !!s.modify_confirmed, 'Yes');
+        long('Diagnosis', !!s.diagnosis, s.diagnosis);
         const why = s.verified_broken ? 'Verified defect — patch'
-            : (s.override_reason ? 'Works as built — user override: ' + short(s.override_reason) : '');
-        html += _csAsstSpecRow('Why change in place', !!why, s.verified_broken ? csEscape(why) : why);
+            : (s.override_reason ? 'Works as built — user override: ' + s.override_reason : '');
+        long('Why change in place', !!why, why);
     } else if (intent === 'remove') {
-        html += '<div class="mt-2 mb-2 rounded-md border border-rose-300 bg-rose-50 px-2 py-1.5 text-xs text-rose-900">' +
+        html += '<div class="mb-2 rounded-md border border-rose-300 bg-rose-50 px-2 py-1 text-xs leading-snug text-rose-900">' +
             '<b>Removing a simulation</b> takes it away from every client running it. ' +
             'Removals ship as their own PR, recorded with your LM login and reason.</div>';
-        html += _csAsstSpecRow('Removal confirmed', !!s.remove_confirmed, s.remove_confirmed ? 'Yes' : '');
-        html += _csAsstSpecRow('Reason', !!s.remove_reason, short(s.remove_reason));
+        field('Removal confirmed', !!s.remove_confirmed, 'Yes');
+        long('Reason', !!s.remove_reason, s.remove_reason);
     } else if (intent === 'ui') {
-        html += '<div class="mt-2 mb-2 text-xs text-slate-500">Cosmetic change to the Simulations pages only — no simulation is changed or duplicated.</div>';
+        html += '<div class="mb-2 text-xs text-slate-500">Cosmetic change to the Simulations pages only — no simulation is changed or duplicated.</div>';
     } else if (s.duplicate_of) {
-        html += _csAsstSpecRow('Duplicated from', true, '<code>' + csEscape(s.duplicate_of) + '</code>');
+        field('Duplicated from', true, '<code>' + csEscape(s.duplicate_of) + '</code>');
     }
-    html += _csAsstSpecRow('Name', !!s.name, s.name ? '<code>' + csEscape(s.name) + '</code>' : '');
-    html += _csAsstSpecRow('Summary', !!s.summary, short(s.summary));
-    html += _csAsstSpecRow('Behavior', !!s.behavior, short(s.behavior));
+    // Fields every buildable request shares; a removal only needs the name.
+    const buildable = intent !== 'remove';
+    field('Name', !!s.name, '<code>' + csEscape(s.name || '') + '</code>');
+    long('Summary', !!s.summary, s.summary, buildable);
+    long('Behavior', !!s.behavior, s.behavior, buildable);
     if (intent !== 'ui') {
-        html += _csAsstSpecRow('Platforms', !!(s.platforms && s.platforms.length), csEscape((s.platforms || []).join(', ')));
-        html += _csAsstSpecRow('Alert', !!s.alert, csEscape(s.alert || ''));
-        html += _csAsstSpecRow('Config knobs', !!(s.config_knobs && s.config_knobs.length),
-            (s.config_knobs || []).map(k => '<code>' + csEscape(k.key) + '</code>' + (k.default ? '=' + csEscape(k.default) : '')).join(', '));
+        field('Platforms', !!(s.platforms && s.platforms.length), csEscape((s.platforms || []).join(', ')), buildable);
+        field('Alert', !!s.alert, csEscape(s.alert || ''), false);
+        // An older AB never sends client_ip, so only ask for it when the key exists.
+        const ip = _csAsstClientIpLabel(s.client_ip);
+        field('Clients keep an IP', !!ip, csEscape(ip), buildable && 'client_ip' in s);
+        field('Config knobs', !!(s.config_knobs && s.config_knobs.length),
+            (s.config_knobs || []).map(k => '<code>' + csEscape(k.key) + '</code>' + (k.default ? '=' + csEscape(k.default) : '')).join(', '), false);
     }
     const tps = s.touchpoints || [];
-    html += _csAsstSpecRow('Touch-points (' + tps.length + ')', tps.length > 0,
-        tps.map(t => '<div class="truncate" title="' + csEscape(t.change || '') + '"><span class="text-slate-500">' + csEscape(t.repo) + ':</span> ' + csEscape(t.path) + '</div>').join(''));
+    let tpsHtml = '';
+    if (tps.length) {
+        tpsHtml = '<details class="mt-2 text-xs"><summary class="cursor-pointer text-slate-500">Touch-points (' + tps.length + ')</summary>' +
+            '<div class="mt-1 ml-3 space-y-0.5 text-slate-800">' +
+            tps.map(t => '<div class="truncate" title="' + csEscape(t.change || '') + '"><span class="text-slate-500">' + csEscape(t.repo) + ':</span> ' + csEscape(t.path) + '</div>').join('') +
+            '</div></details>';
+    } else {
+        missing.push('Touch-points');
+    }
+    html += grid() + longs.join('') + tpsHtml + _csAsstMissingLine(missing, a.ready);
+    // Guardrails, open questions, build links and usage.
     const probs = a.problems || [];
     if (probs.length) {
-        html += '<div class="mt-3 text-xs font-semibold text-rose-700">Blocked by guardrails</div><ul class="list-disc ml-5 text-xs text-rose-800">' +
+        html += '<div class="mt-2 text-xs font-semibold text-rose-700">Blocked by guardrails</div><ul class="list-disc ml-5 text-xs text-rose-800">' +
             probs.map(q => '<li>' + csEscape(q) + '</li>').join('') + '</ul>';
     }
     const oq = s.open_questions || [];
     if (oq.length) {
-        html += '<div class="mt-3 text-xs font-semibold text-amber-700">Open questions</div><ul class="list-disc ml-5 text-xs text-amber-800">' +
+        html += '<div class="mt-2 text-xs font-semibold text-amber-700">Open questions</div><ul class="list-disc ml-5 text-xs text-amber-800">' +
             oq.map(q => '<li>' + csEscape(q) + '</li>').join('') + '</ul>';
     }
     const builds = a.builds || [];
     if (builds.length) {
         const label = { queued: 'Queued for AppBuilder', feature_needs_info: 'AppBuilder needs info',
             feature_built: 'PR opened', feature_flagged: 'Needs a human (boundary)', feature_failed: 'Build failed' };
-        html += '<div class="mt-4 pt-3 border-t border-slate-200 text-xs font-semibold text-slate-700 mb-1">Build</div>' +
+        const short = v => csEscape(String(v || '').length > 220 ? String(v).slice(0, 220) + '…' : String(v || ''));
+        html += '<div class="mt-3 pt-2 border-t border-slate-200 text-xs font-semibold text-slate-700 mb-1">Build</div>' +
             builds.map(b => '<div class="text-xs mb-1"><a class="text-primary-text hover:underline" target="_blank" rel="noopener" href="' +
                 csEscape(b.url || '#') + '">' + csEscape(b.repo + '#' + b.number) + '</a> — ' + csEscape(label[b.status] || b.status) +
                 (b.pr_url ? ' · <a class="text-primary-text hover:underline" target="_blank" rel="noopener" href="' + csEscape(b.pr_url) + '">PR</a>' : '') +
                 (b.reason ? '<div class="text-slate-500">' + short(b.reason) + '</div>' : '') + '</div>').join('');
     }
-    if (a.premium) html += '<div class="mt-4 text-xs text-slate-500">Copilot premium requests used: ' + csEscape(a.premium) + '</div>';
-    el.innerHTML = html;
+    el.innerHTML = html + premium;
 }
 
 function _csAsstRenderControls() {
@@ -13775,7 +13864,7 @@ function _csAsstRenderControls() {
     if (input) {
         input.disabled = busy || done;
         input.placeholder = done ? 'Submitted — start a new conversation to scope something else.'
-            : 'Reply, paste a script, or describe what you want… (Enter to send, Shift+Enter for a new line)';
+            : 'Reply or paste a script… (Shift+Enter for a new line)';
     }
     if (send) send.disabled = busy || done;
     if (stop) stop.classList.toggle('hidden', !(a.state === 'running' || a.state === 'preparing'));
@@ -13940,6 +14029,7 @@ function csAssistantSessionSend() {
     const text = (input.value || '').trim();
     if (!text) return;
     input.value = '';
+    _csAsstAutoGrow(input);
     _csAsstSend(text);
 }
 
@@ -13953,36 +14043,39 @@ async function _csRenderAssistantSessions(caps) {
     window._csAsst.canSubmit = !!caps.can_submit;
     // Starter prompts (shared with the legacy empty state) fill the input.
     window.csAssistantSetInput = csAssistantSetInput;
+    // Full-width page sized to the viewport: a one-line header, then the chat
+    // beside the spec panel (stacked under it below the lg breakpoint).
+    const about = 'Make a cosmetic change to the Simulations pages, create (or duplicate) a simulation, change or remove an existing one, or ask how one works. An AppBuilder agent reads the real cs + lm code, asks what it needs, and builds a complete spec; AppBuilder then builds it (PRs to dev → qa → main). Other requests are declined.';
     csSet(`
-        <div class="flex flex-col h-[calc(100vh-14rem)] max-w-6xl mx-auto">
-            <div class="flex items-center justify-between mb-3">
-                <div>
-                    <h2 class="text-lg font-bold text-slate-800">Simulation Build Assistant</h2>
-                    <p class="text-xs text-slate-500">Make a cosmetic change to the Simulations pages, create (or duplicate) a simulation, change or remove an existing one, or ask how one works. An AppBuilder agent reads the real cs + lm code, asks what it needs, and builds a complete spec; AppBuilder then builds it (PRs to dev → qa → main). Other requests are declined.</p>
-                </div>
-                <div class="flex gap-2">
+        <div class="flex flex-col gap-2 h-[calc(100vh-17rem)] min-h-[28rem]">
+            <div class="flex items-center gap-3 min-w-0">
+                <h2 class="text-lg font-bold text-navy whitespace-nowrap">Simulation Build Assistant</h2>
+                <p class="flex-1 min-w-0 truncate text-xs text-slate-500" title="${csEscape(about)}">${csEscape(about)}</p>
+                <div class="flex gap-2 shrink-0">
                     <button onclick="csAssistantNewSession()"
-                        class="text-xs px-3 py-1.5 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50">New conversation</button>
+                        class="text-xs px-3 py-1.5 rounded-full bg-slate-100 text-slate-700 hover:bg-slate-200">New conversation</button>
                     <button id="cs-assistant-submit" onclick="csAssistantSubmitSession()" disabled
                         class="text-xs px-3 py-1.5 rounded-full bg-primary text-white font-semibold hover:bg-primary-hover opacity-50">Submit to AppBuilder</button>
                 </div>
             </div>
-            <div class="flex-1 flex gap-3 min-h-0">
-                <div class="flex-1 flex flex-col min-w-0">
-                    <div id="cs-assistant-log" class="flex-1 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 p-4"></div>
-                    <form class="flex gap-2 mt-3 items-end" onsubmit="event.preventDefault(); csAssistantSessionSend();">
-                        <textarea id="cs-assistant-input" rows="2" onkeydown="_csAsstInputKey(event)"
-                            class="flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm outline-none focus:border-brand resize-y"></textarea>
+            <div class="flex-1 flex flex-col lg:flex-row gap-2 min-h-0">
+                <div class="flex-1 flex flex-col gap-2 min-w-0 min-h-0">
+                    <div id="cs-assistant-log" class="flex-1 min-h-0 overflow-y-auto rounded-lg border border-slate-200 bg-slate-100 px-3 py-2"></div>
+                    <form class="flex gap-2 items-end" onsubmit="event.preventDefault(); csAssistantSessionSend();">
+                        <textarea id="cs-assistant-input" rows="1" onkeydown="_csAsstInputKey(event)"
+                            class="flex-1 border border-slate-300 rounded-2xl px-3 py-2 text-sm bg-white outline-none focus:border-brand resize-none overflow-y-auto"></textarea>
                         <button id="cs-assistant-stop" type="button" onclick="csAssistantStop()"
-                            class="hidden border border-slate-300 text-slate-600 rounded-full px-3 py-2 text-sm hover:bg-slate-50">Stop</button>
+                            class="hidden bg-slate-100 text-slate-700 rounded-full px-4 py-2 text-sm hover:bg-slate-200">Stop</button>
                         <button id="cs-assistant-send" type="submit"
                             class="bg-primary text-white rounded-full px-4 py-2 text-sm font-semibold hover:bg-primary-hover">Send</button>
                     </form>
                 </div>
-                <div id="cs-assistant-spec" class="w-72 shrink-0 overflow-y-auto rounded-lg border border-slate-200 bg-white p-4"></div>
+                <div id="cs-assistant-spec" class="w-full lg:w-80 xl:w-96 max-h-44 lg:max-h-none shrink-0 overflow-y-auto rounded-lg border border-slate-200 bg-white px-3 py-2"></div>
             </div>
         </div>
     `);
+    const box = csEl('cs-assistant-input');
+    if (box) box.addEventListener('input', () => _csAsstAutoGrow(box));
     _csAsstRender();
     if (window._csAsst.sid) await _csAsstPoll();
     const input = csEl('cs-assistant-input');
@@ -14021,15 +14114,13 @@ async function csRenderAssistant() {
         return;
     }
     csSet(`
-        <div class="flex flex-col h-[calc(100vh-14rem)] max-w-3xl mx-auto">
-            <div class="flex items-center justify-between mb-3">
-                <div>
-                    <h2 class="text-lg font-bold text-slate-800">Simulation Build Assistant</h2>
-                    <p class="text-xs text-slate-500">Describe what you want to build, or ask to copy/vary an existing sim (e.g. "dns_fail" for one deployment) — I can look up the real source and ask for anything missing.</p>
-                </div>
-                <div class="flex gap-2">
+        <div class="flex flex-col gap-2 h-[calc(100vh-17rem)] min-h-[28rem]">
+            <div class="flex items-center gap-3 min-w-0">
+                <h2 class="text-lg font-bold text-navy whitespace-nowrap">Simulation Build Assistant</h2>
+                <p class="flex-1 min-w-0 truncate text-xs text-slate-500" title="Describe what you want to build, or ask to copy/vary an existing sim (e.g. &quot;dns_fail&quot; for one deployment) — I can look up the real source and ask for anything missing.">Describe what you want to build, or ask to copy/vary an existing sim (e.g. "dns_fail" for one deployment) — I can look up the real source and ask for anything missing.</p>
+                <div class="flex gap-2 shrink-0">
                     <button onclick="csAssistantNewConversation()"
-                        class="text-xs px-3 py-1.5 rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50">
+                        class="text-xs px-3 py-1.5 rounded-full bg-slate-100 text-slate-700 hover:bg-slate-200">
                         New conversation
                     </button>
                     <button onclick="csAssistantSubmitFeatureRequest()"
@@ -14038,10 +14129,10 @@ async function csRenderAssistant() {
                     </button>
                 </div>
             </div>
-            <div id="cs-assistant-log" class="flex-1 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 p-4"></div>
-            <form id="cs-assistant-form" class="flex gap-2 mt-3" onsubmit="event.preventDefault(); csAssistantSend();">
+            <div id="cs-assistant-log" class="flex-1 min-h-0 overflow-y-auto rounded-lg border border-slate-200 bg-slate-100 px-3 py-2"></div>
+            <form id="cs-assistant-form" class="flex gap-2" onsubmit="event.preventDefault(); csAssistantSend();">
                 <input id="cs-assistant-input" type="text" placeholder="e.g. I want a simulation that runs this script… or: copy dns_fail for the LRB deployment"
-                    class="flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm outline-none focus:border-brand">
+                    class="flex-1 border border-slate-300 rounded-full px-4 py-2 text-sm bg-white outline-none focus:border-brand">
                 <button id="cs-assistant-send" type="submit"
                     class="bg-primary text-white rounded-full px-4 py-2 text-sm font-semibold hover:bg-primary-hover">
                     Send
