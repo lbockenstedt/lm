@@ -105,7 +105,12 @@ FastAPI dashboard on **8000** (HTTP). No WS listener — it is a WS **client** t
   per-repo touch-points, open questions, `ready`, optional answer `choices`).
   Each turn runs on its own thread; the browser polls `SIM_SESSION_POLL` for
   events (tool activity such as "Viewing file: cs/clients/linux/dns_fail.sh",
-  assistant messages, the spec). Sessions persist as JSON under
+  assistant messages, the spec). The page (`_csRenderAssistantSessions` in
+  `WebUI/sim-views.js`, mirrored in cs `lm-spoke/static/sim-views.js`) shows
+  the chat beside a compact spec panel: filled fields on one line each, long
+  text clamped (click to expand), touch-points collapsible, and every empty
+  field the request still needs named once on a "Still needed" line
+  (optional fields such as Alert and Config knobs are left out). Sessions persist as JSON under
   `/etc/ab/sim_sessions/sessions/` (30-day TTL, 20 per user), are owner-scoped
   (user + tenant stamped by the hub), and a turn interrupted by a restart is
   marked so the user can resend. **Submit** is allowed only once the spec is
