@@ -77,6 +77,18 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ### Simulations
 
+- **The Simulation Build Assistant uses the whole screen.** Simulations →
+  Assistant now fills the window width and height, with a one-line header.
+  Your messages are green bubbles on the right labelled "You"; the
+  assistant's replies are white cards on the left labelled "Assistant", with
+  headings, lists and code blocks formatted. The agent's working notes
+  ("› Reading …") are small grey lines under its turn. The spec panel shows
+  each filled field on one line, shortens long text (click to expand), puts
+  touch-points in a collapsible list, names the fields still to fill on one
+  "Still needed" line, and adds **Clients keep an IP** (Yes / No (by
+  design)). The reply box grows as you type. On narrow screens the spec
+  panel moves under the chat. See [appbuilder](appbuilder.md).
+
 - **Rogue DNS (static IP + fixed DNS)** (`rogue_dns`) adds a default-off
   wireless Linux/Windows simulation to the catalog, client controls and bucket
   editor, with a DNS server IP field and three timing fields. Clients browse
