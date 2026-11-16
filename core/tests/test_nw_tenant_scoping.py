@@ -880,6 +880,37 @@ def test_scheduled_scan_checks_known_ips_and_pushes_every_responder(monkeypatch,
     assert seen["10.7.0.5"]["hostname"] == "pdu-a"
 
 
+def test_own_agent_scan_skips_same_vrf_foreign_hosts_but_keeps_relocatable(monkeypatch, tmp_path):
+    _client, hub = _build(monkeypatch, tmp_path)
+
+    async def prefixes(_hub, _tid):
+        return ["10.0.0.0/29"]
+    monkeypatch.setattr(access_mod, "fetch_tenant_prefixes", prefixes)
+    calls = []
+
+    async def foreign(_hub, _tid, ips, own_vrf_only=False):
+        calls.append(own_vrf_only)
+        return {ip for ip in ips if ip in ("10.0.0.3", "10.0.0.5")}
+    monkeypatch.setattr(access_mod, "foreign_tenant_ips", foreign)
+    monkeypatch.setattr(access_mod, "spoke_owner_tenant", lambda _h, sid: "acme")
+    # othercorp's switch at 10.0.0.3 is unanchored: its agent moved to acme.
+    hub.nw_relocatable = lambda d, t: d.get("id") == "other-sw" and t == "acme"
+
+    async def rr(spoke_id, cmd, data, timeout=30.0):
+        hub.calls.append((spoke_id, cmd, data))
+        return {"payload": {"data": {"status": "SUCCESS", "scanned": 0, "alive": []}}}
+    hub.request_response = rr
+    for name in ("get_dns_spoke_for_tenant", "get_dhcp_spoke_for_tenant",
+                 "get_cppm_spoke_for_tenant"):
+        setattr(hub, name, lambda *_a, **_k: None)
+    hub.get_spoke_by_type = lambda t: "ipam-spoke" if t == "ipam" else "nw-acme"
+
+    asyncio.run(hub.run_nw_scheduled_scan("acme"))
+    scan = next(d for _s, c, d in hub.calls if c == "NW_SCAN")
+    assert calls[0] is True
+    assert "10.0.0.3" in scan["targets"] and "10.0.0.5" not in scan["targets"]
+
+
 def test_sweep_on_shared_agent_never_records_another_tenants_hosts(monkeypatch, tmp_path):
     _client, hub = _build(monkeypatch, tmp_path)
 
@@ -888,7 +919,7 @@ def test_sweep_on_shared_agent_never_records_another_tenants_hosts(monkeypatch, 
     monkeypatch.setattr(access_mod, "fetch_tenant_prefixes", prefixes)
     monkeypatch.setattr(access_mod, "spoke_owner_tenant", lambda *_a: None)
 
-    async def foreign(_hub, _tid, ips):
+    async def foreign(_hub, _tid, ips, **_k):
         return {ip for ip in ips if ip == "10.9.3.8"}
     monkeypatch.setattr(access_mod, "foreign_tenant_ips", foreign)
 
@@ -910,8 +941,11 @@ def test_sweep_on_shared_agent_never_records_another_tenants_hosts(monkeypatch, 
         for _ in range(5):
             await asyncio.sleep(0)
     asyncio.run(run())
-    seen = hub.state.system_state["global_config"]["nw_seen_hosts"]["acme"]
+    gc = hub.state.system_state["global_config"]
+    seen = gc["nw_seen_hosts"]["acme"]
     assert "10.9.3.7" in seen and "10.9.3.8" not in seen
+    found = {d["address"] for d in gc["nw_sweep"]["acme"]["discovered"]}
+    assert "10.9.3.7" in found and "10.9.3.8" not in found
 
 
 def test_sweep_skips_space_the_directed_scan_covers(monkeypatch, tmp_path):
