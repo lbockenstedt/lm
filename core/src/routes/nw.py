@@ -2627,12 +2627,21 @@ def register(app, hub, ctx):
             data.get("subnets") or saved.get("subnets") or [],
             data.get("targets") or [], _NW_SCAN_MAX_TOTAL)
         # Shared DNS/DHCP/NAC spokes list every tenant's addresses; never probe
-        # (or adopt) an address NetBox assigns to another tenant — unless the
-        # scan runs on the tenant's own agent, which only reaches its own VRF
-        # (the same IP can exist in several tenants' VRFs).
+        # (or adopt) an address NetBox assigns to another tenant. The tenant's
+        # own agent only reaches its own VRFs, so there only another tenant's
+        # prefix in one of those VRFs counts (the same IP can exist in several
+        # tenants' VRFs; tenants of different groups can share one VRF).
         scan_owner = access.spoke_owner_tenant(hub, spoke_id)
         own_agent = bool(scan_owner) and access.tenant_in(scan_owner, tenant_id)
-        foreign = set() if own_agent else await access.foreign_tenant_ips(hub, tenant_id, targets)
+        foreign = await access.foreign_tenant_ips(hub, tenant_id, targets, own_vrf_only=own_agent)
+        # Still scan a device another tenant recorded whose agent has moved
+        # here, so the scan can verify and relocate it.
+        _relocatable = getattr(hub, "nw_relocatable", None)
+        if foreign and callable(_relocatable):
+            foreign -= {str(a or "").strip()
+                        for d in hub.state.system_state.get("global_config", {}).get("nw_devices") or []
+                        if isinstance(d, dict) and _relocatable(d, tenant_id)
+                        for a in [d.get("address")] + list(d.get("alt_addresses") or [])}
         if foreign:
             targets = [t for t in targets if t not in foreign]
             per_source["other_tenant"] = len(foreign)
@@ -2788,8 +2797,9 @@ def register(app, hub, ctx):
         # LLDP crawling can reach past the targets: never add an address NetBox
         # assigns to another tenant (a just-relocated device is still recorded
         # there until its next NetBox push).
-        foreign = set() if own_agent else await access.foreign_tenant_ips(hub, tenant_id, {
-            str(d.get("address") or "").strip() for d in identified + reachable}) - moved_addrs
+        foreign = await access.foreign_tenant_ips(hub, tenant_id, {
+            str(d.get("address") or "").strip() for d in identified + reachable},
+            own_vrf_only=own_agent) - moved_addrs
         identified = [d for d in identified if str(d.get("address") or "").strip() not in foreign]
         reachable = [d for d in reachable if str(d.get("address") or "").strip() not in foreign]
 
@@ -3145,10 +3155,20 @@ def register(app, hub, ctx):
         # A scan that failed (busy, timed out) is retried rather than skipped.
         if alive and str((res or {}).get("status", "")).upper() not in ("SUCCESS", "PARTIAL"):
             raise RuntimeError("nw scan failed: " + str((res or {}).get("message") or res)[:200])
-        # Merge what answered into the discovered list, keyed by address.
+        # Drop another tenant's hosts (an agent can reach another tenant's
+        # nested prefix; a tenant's own agent only within its own VRFs), from
+        # what answered and from what was found before.
         now = time.time()
         found = {str(d.get("address")): d for d in (st.get("discovered") or []) if isinstance(d, dict)}
-        for r in ((res or {}).get("reachable") or []) + ((res or {}).get("identified") or []):
+        heard = ((res or {}).get("reachable") or []) + ((res or {}).get("identified") or [])
+        owner = access.spoke_owner_tenant(hub, spoke_id)
+        foreign = await access.foreign_tenant_ips(
+            hub, tid, set(found) | {str(h.get("address") or "").strip() for h in heard},
+            own_vrf_only=bool(owner) and access.tenant_in(owner, tid))
+        heard = [h for h in heard if str(h.get("address") or "").strip() not in foreign]
+        found = {ip: d for ip, d in found.items() if ip not in foreign}
+        # Merge what answered into the discovered list, keyed by address.
+        for r in heard:
             ip = str((r or {}).get("address") or "").strip()
             if not ip:
                 continue
@@ -3161,14 +3181,6 @@ def register(app, hub, ctx):
         # Every fleet address (not pushed to NetBox as a sighting).
         fleet = {str(a or "").strip() for d in (gc.get("nw_devices") or []) if isinstance(d, dict)
                  for a in [d.get("address")] + list(d.get("alt_addresses") or [])}
-        # Everything that answered.
-        heard = ((res or {}).get("reachable") or []) + ((res or {}).get("identified") or [])
-        owner = access.spoke_owner_tenant(hub, spoke_id)
-        if heard and not (owner and access.tenant_in(owner, tid)):
-            # A shared agent can reach another tenant's nested prefix.
-            foreign = await access.foreign_tenant_ips(
-                hub, tid, {str(h.get("address") or "").strip() for h in heard})
-            heard = [h for h in heard if str(h.get("address") or "").strip() not in foreign]
         # Record the responders.
         await _nw_note_responders(tid, heard, fleet)
         # Save progress, counting a completed pass when the cursor wraps.
