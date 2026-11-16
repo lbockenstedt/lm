@@ -1488,7 +1488,8 @@ def spoke_owner_tenant(hub, spoke_id) -> Optional[str]:
     """The tenant ``spoke_id`` is dedicated to, or None when it is unassigned
     or bound to the shared tenant. Everything a dedicated spoke/agent reports
     belongs to its tenant: the same IP can exist in several tenants' VRFs, so
-    IP/prefix filtering and attribution only apply to shared/unassigned spokes."""
+    attribution only applies to shared/unassigned spokes (nw scans on a
+    dedicated agent still skip other tenants' prefixes in its own VRFs)."""
     if not spoke_id:
         return None
     try:
@@ -2015,6 +2016,40 @@ def clear_prefix_cache(hub) -> None:
         cache.clear()
 
 
+def _note_prefix_vrfs(hub, key, rows) -> None:
+    """Remember the NetBox VRF id of each prefix row under scope ``key``
+    (``{prefix: {vrf id}}``; "" is the global table). Rows without
+    ``vrf_id`` (an older netbox spoke) leave the VRF unknown: VRF names
+    need not be unique."""
+    vrfs: Dict[str, set] = {}
+    for p in rows or []:
+        if not (isinstance(p, dict) and p.get("prefix") and "vrf_id" in p):
+            continue
+        vrf = str(p["vrf_id"] or "")
+        # Key by the normalized prefix.
+        try:
+            net = str(ipaddress.ip_network(str(p["prefix"]), strict=False))
+        except ValueError:
+            continue
+        vrfs.setdefault(net, set()).add(vrf)
+    # Store them on the hub.
+    try:
+        vars(hub).setdefault("_tenant_prefix_vrfs", {})[key] = vrfs
+    except TypeError:
+        pass
+
+
+def tenant_prefix_vrfs(hub, tenant_id) -> Dict[str, set]:
+    """``{prefix: {vrf ids}}`` last fetched for ``tenant_id`` by
+    ``fetch_tenant_prefixes``; empty when unknown."""
+    scope = netbox_tenant_scope(hub, tenant_id)
+    key = scope.get("tenant") or ("group:" + str(scope.get("tenant_group")))
+    try:
+        return vars(hub).get("_tenant_prefix_vrfs", {}).get(key) or {}
+    except TypeError:
+        return {}
+
+
 async def fetch_tenant_prefixes(hub, tenant_id) -> list:
     """NetBox prefixes for an arbitrary tenant id (by slug), no admin no-op —
     the fetch shared by ``resolve_prefixes`` (session tenant) and
@@ -2064,7 +2099,9 @@ async def fetch_tenant_prefixes(hub, tenant_id) -> list:
             data = unwrap_spoke(cached) if cached is not None else None
             if isinstance(data, dict) and "data" in data and "prefixes" not in data:
                 data = data["data"]
-            return [p["prefix"] for p in ((data or {}).get("prefixes") or []) if p.get("prefix")]
+            rows = (data or {}).get("prefixes") or []
+            _note_prefix_vrfs(hub, key, rows)
+            return [p["prefix"] for p in rows if p.get("prefix")]
         except Exception:
             return []
 
@@ -2077,7 +2114,10 @@ async def fetch_tenant_prefixes(hub, tenant_id) -> list:
         # Ask the spoke and pull out the prefix strings.
         result = await hub.request_response(spoke_id, "NETBOX_GET_PREFIXES", payload, timeout=30.0)
         data = unwrap_spoke(result)
-        out = [p["prefix"] for p in (data.get("prefixes", []) if isinstance(data, dict) else []) if p.get("prefix")]
+        rows = data.get("prefixes", []) if isinstance(data, dict) else []
+        out = [p["prefix"] for p in rows if p.get("prefix")]
+        if out:
+            _note_prefix_vrfs(hub, key, rows)
         if not out:
             # A SUCCESS reply with an empty list is a tenant that simply has no
             # prefixes in NetBox — normal, so INFO. Anything else (error
@@ -2211,11 +2251,16 @@ async def attribute_by_prefix(hub, records: List[Dict[str, Any]]
     return buckets, dropped
 
 
-async def foreign_tenant_ips(hub, tenant_id, ips) -> set:
+async def foreign_tenant_ips(hub, tenant_id, ips, own_vrf_only: bool = False) -> set:
     """The ``ips`` NetBox assigns to a tenant other than ``tenant_id`` (most
     specific prefix wins; on a tie — the same prefix in two tenants' VRFs —
     ``tenant_id`` keeps it). Unowned IPs, IPs of the shared tenant and, for a
-    tenant group, IPs of its member tenants are not foreign. Empty when NetBox is unreachable."""
+    tenant group, IPs of its member tenants are not foreign. Empty when NetBox is unreachable.
+
+    ``own_vrf_only`` is for a scan on the tenant's own agent, which reaches
+    only the VRFs its tenant's prefixes are in: another tenant's prefix in a
+    different VRF is an overlap the agent can't reach, so it is ignored. When
+    either VRF is unknown the prefix still counts."""
     # Tenant networks, this tenant, and its group members.
     nets_by_tid = await _tenant_networks(hub)
     mine = str(tenant_id or ADMIN_TENANT_ID)
@@ -2225,6 +2270,22 @@ async def foreign_tenant_ips(hub, tenant_id, ips) -> set:
     def _own(tid):
         """True if ``tid`` is this tenant or one of its group members."""
         return same_tenant(tid, mine) or _norm_tenant_id(tid) in members
+
+    vrfs_by_tid = {tid: tenant_prefix_vrfs(hub, tid) for tid in nets_by_tid}
+    own_vrfs = {v for tid, by_net in vrfs_by_tid.items() if _own(tid)
+                for vs in by_net.values() for v in vs}
+    own_vrfs |= {v for vs in tenant_prefix_vrfs(hub, mine).values() for v in vs}
+    # Any own prefix with an unknown VRF makes ours unknown: use the ordinary filter.
+    if any(str(net) not in vrfs_by_tid[tid] for tid, nets in nets_by_tid.items()
+           if _own(tid) for net in nets):
+        own_vrfs = set()
+
+    def _counts(tid, net):
+        """False for another tenant's prefix known to be outside our VRFs (own-agent scans)."""
+        if not own_vrf_only or _own(tid):
+            return True
+        theirs = vrfs_by_tid[tid].get(str(net))
+        return not (theirs and own_vrfs) or bool(theirs & own_vrfs)
 
     foreign = set()
     # For each IP, find the most specific owning tenant (ties go to us).
@@ -2236,7 +2297,7 @@ async def foreign_tenant_ips(hub, tenant_id, ips) -> set:
         best = None
         for tid, nets in nets_by_tid.items():
             for net in nets:
-                if addr not in net:
+                if addr not in net or not _counts(tid, net):
                     continue
                 if (best is None or net.prefixlen > best[1]
                         or (net.prefixlen == best[1] and _own(tid))):

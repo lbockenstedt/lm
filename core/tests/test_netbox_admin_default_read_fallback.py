@@ -191,3 +191,51 @@ async def test_foreign_tenant_ips_group_owns_member_prefixes():
             "172.16.1.1"}
     finally:
         access._GROUP_MEMBERS = {}
+
+
+@pytest.mark.asyncio
+async def test_own_agent_drops_other_group_tenant_in_shared_vrf():
+    # SOLUTION TME's ra and SSPLM's default share SSPLM-VRF; DXP has its own VRF
+    # whose /12 overlaps ra's /24. An own-agent scan keeps true VRF overlaps
+    # but still drops another group's tenant inside the same VRF.
+    tenants = {"default": {"netbox_tenant_slug": "default", "tenant_group_slug": "ssplm"},
+               "ra": {"netbox_tenant_slug": "ra", "tenant_group_slug": "solution-tme"},
+               "dxp": {"netbox_tenant_slug": "dxp"},
+               "group:ssplm": {"is_tenant_group": True, "netbox_tenant_group_slug": "ssplm"}}
+    # Two VRFs named "VRF" (ids 1 and 2) are different VRFs.
+    rows = {"default": [{"prefix": "172.21.0.0/16", "vrf": "VRF", "vrf_id": 1}],
+            "ra": [{"prefix": "172.16.103.0/24", "vrf": "VRF", "vrf_id": 1}],
+            "dxp": [{"prefix": "172.16.0.0/12", "vrf": "VRF", "vrf_id": 2}]}
+
+    class _VrfHub(_FakeHub):
+        async def request_response(self, spoke_id, command, payload, timeout=30.0):
+            prefixes = rows.get(payload.get("tenant"), [])
+            if payload.get("tenant_group") == "ssplm":
+                prefixes = rows["default"]
+            return {"payload": {"data": {"status": "SUCCESS", "prefixes": prefixes}}}
+
+    hub = _VrfHub(tenants=tenants)
+    access._GROUP_MEMBERS = access._compute_group_members(tenants)
+    try:
+        ips = ["172.16.103.21", "172.21.0.5"]
+        assert await access.foreign_tenant_ips(
+            hub, "group:ssplm", ips, own_vrf_only=True) == {"172.16.103.21"}
+        assert await access.foreign_tenant_ips(hub, "dxp", ips, own_vrf_only=True) == set()
+        assert await access.foreign_tenant_ips(hub, "dxp", ips) == {"172.16.103.21", "172.21.0.5"}
+        # One own prefix with an unknown VRF makes ours unknown.
+        rows["dxp"].append({"prefix": "172.21.0.0/24"})
+        access.clear_prefix_cache(hub)
+        assert await access.foreign_tenant_ips(
+            hub, "dxp", ips, own_vrf_only=True) == {"172.16.103.21"}
+        rows["dxp"].pop()
+        # Unknown VRF ids (an older spoke sends names only) fall back to the
+        # ordinary filter.
+        for r in rows.values():
+            for p in r:
+                p.pop("vrf_id", None)
+        access.clear_prefix_cache(hub)
+        hub._tenant_prefix_vrfs = {}
+        assert await access.foreign_tenant_ips(
+            hub, "dxp", ips, own_vrf_only=True) == {"172.16.103.21", "172.21.0.5"}
+    finally:
+        access._GROUP_MEMBERS = {}
