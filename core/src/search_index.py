@@ -345,8 +345,9 @@ class SearchIndexMixin:
         if nb_slug:
             try:
                 import access
-                prefixes = await access.resolve_prefixes_for_tenant(
-                    self, scope.get("resolved")) or []
+                tid = scope.get("resolved")
+                prefixes = await access.resolve_prefixes_for_tenant(self, tid) or []
+                prefixes = access.firewall_dhcp_prefixes(self, tid, prefixes)
             except Exception as e:  # noqa: BLE001 - best-effort warm-up
                 logger.debug("search-index: prefix fetch for '%s' failed: %s",
                              scope.get("resolved"), e)

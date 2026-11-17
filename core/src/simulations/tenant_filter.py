@@ -199,7 +199,7 @@ def _filter_list(lst: list, keep) -> list:
 def filter_items_by_prefixes(
     items: Any, prefixes: Sequence[str], ip_fields: Sequence[str],
     drop_no_ip: bool = True, tenant_category: Optional[str] = None,
-    category_field: str = "category",
+    category_field: str = "category", empty_keeps_all: bool = True,
 ) -> Any:
     """Drop items whose concrete IPs all fall outside ``prefixes``.
 
@@ -222,13 +222,18 @@ def filter_items_by_prefixes(
     categories (the tenant's display name, slug, netbox slug, id — the caller
     passes whichever apply). Only pass it for modules that use categories
     (rules/nat/aliases); ``None`` (default) disables the check.
+
+    ``empty_keeps_all=False`` is for a tenant whose prefixes were all cut (its
+    own VRF, ``access.shared_slice_prefixes``): no prefixes then match nothing,
+    but the tenant's own-source and category rows are still kept. A record list
+    must exist; the caller handles data without one.
     """
-    # No prefixes means show everything.
-    if not prefixes:
+    # No prefixes means show everything (unless the caller asked otherwise).
+    if not prefixes and empty_keeps_all:
         return items
     # Parse the prefixes; if none are valid there is nothing to filter against.
     nets = _nets(prefixes)
-    if not nets:
+    if not nets and empty_keeps_all:
         return items
 
     def keep(item: dict) -> bool:
@@ -269,7 +274,8 @@ def filter_items_by_prefixes(
 
 def filter_firewall_rules(data: Any, prefixes: Sequence[str], alias_map: Any = None,
                           tenant_category: Optional[str] = None,
-                          category_field: str = "category") -> Any:
+                          category_field: str = "category",
+                          empty_keeps_all: bool = True) -> Any:
     """Strict firewall-rule filter applied to the record list inside a spoke
     envelope. Locates the list via ``_find_list_slot`` and keeps each rule for
     which ``firewall_rule_in_prefixes`` is True. Empty prefixes → unchanged.
@@ -282,13 +288,16 @@ def filter_firewall_rules(data: Any, prefixes: Sequence[str], alias_map: Any = N
     rule whose ``category_field`` equals ``tenant_category`` is kept regardless
     of its source/destination (the admin explicitly tagged it to this tenant).
     ``None`` (default) disables the category check.
+
+    ``empty_keeps_all=False`` is for a tenant whose prefixes were all cut (its
+    own VRF): no address matches, but category-tagged rules are still kept.
     """
-    # No prefixes means show everything.
-    if not prefixes:
+    # No prefixes means show everything (unless the caller asked otherwise).
+    if not prefixes and empty_keeps_all:
         return data
     # Parse the prefixes; if none are valid there is nothing to filter against.
     nets = _nets(prefixes)
-    if not nets:
+    if not nets and empty_keeps_all:
         return data
     # Find where the rule list lives; return the input unchanged if there is none.
     container, key = _find_list_slot(data)
@@ -299,7 +308,8 @@ def filter_firewall_rules(data: Any, prefixes: Sequence[str], alias_map: Any = N
         container if key is None else container[key],
         lambda r: firewall_rule_in_prefixes(r, prefixes, alias_map,
                                              tenant_category=tenant_category,
-                                             category_field=category_field),
+                                             category_field=category_field,
+                                             empty_keeps_all=empty_keeps_all),
     )
     # Bare list: return the filtered copy directly.
     if key is None:
@@ -361,7 +371,8 @@ def _vm_tags(vm: dict) -> set:
 def filter_hypervisor_vms(data: Any, prefixes: Sequence[str], *,
                            template_pools: Optional[Sequence[str]] = None,
                            tenant_tags: Optional[Sequence[str]] = None,
-                           drop_no_ip: bool = True) -> Any:
+                           drop_no_ip: bool = True,
+                           empty_keeps_all: bool = True) -> Any:
     """Hypervisor-VM tenant filter with template-pool + tag overrides.
 
     A VM is kept when ANY of these hold:
@@ -377,15 +388,15 @@ def filter_hypervisor_vms(data: Any, prefixes: Sequence[str], *,
     Otherwise the ``filter_items_by_prefixes`` rules apply: a VM with concrete
     off-prefix IPs is dropped; a VM with no concrete IP (and no override) is
     dropped when ``drop_no_ip=True`` (the default — err on hiding). Empty
-    prefixes → unchanged (nothing to filter against; overrides irrelevant).
+    prefixes → unchanged (nothing to filter against; overrides irrelevant),
+    unless ``empty_keeps_all=False``: then no VM matches by subnet and only the
+    template-pool and tag overrides keep a VM (a tenant whose prefixes are all
+    in its own VRF, on a shared hypervisor).
     Comparison is case-insensitive and whitespace-trimmed.
     """
-    # No prefixes means show everything.
-    if not prefixes:
-        return data
-    # Parse the prefixes; if none are valid there is nothing to filter against.
-    nets = _nets(prefixes)
-    if not nets:
+    # No prefixes means show everything (unless the caller asked for overrides only).
+    nets = _nets(prefixes) if prefixes else []
+    if not nets and empty_keeps_all:
         return data
     # Normalised sets of template pools and tenant tags for override checks.
     tp = {str(p).strip().lower() for p in (template_pools or []) if str(p).strip()}
@@ -610,7 +621,8 @@ def _side_qualifies(val: Any, nets: Sequence[ipaddress._BaseNetwork],
 
 def firewall_rule_in_prefixes(rule: Any, prefixes: Sequence[str], alias_map: Any = None,
                               tenant_category: Optional[str] = None,
-                              category_field: str = "category") -> bool:
+                              category_field: str = "category",
+                              empty_keeps_all: bool = True) -> bool:
     """Firewall-rule tenant-prefix check (with OPNsense alias + category resolution).
 
     A rule is shown to a tenant when EITHER side carries an address that belongs
@@ -635,9 +647,13 @@ def firewall_rule_in_prefixes(rule: Any, prefixes: Sequence[str], alias_map: Any
     tagged to this tenant by the admin — the escape hatch). It may be a single
     string or an iterable of acceptable categories. ``None`` disables both the
     alias-category and rule-category checks.
+
+    ``empty_keeps_all=False``: empty prefixes match no address, so only the
+    category paths can keep the rule (a tenant whose prefixes are all in its
+    own VRF).
     """
-    # No prefixes means show everything.
-    if not prefixes:
+    # No prefixes means show everything (unless the caller asked otherwise).
+    if not prefixes and empty_keeps_all:
         return True
     # Non-dict entries cannot be judged, so they are shown.
     if not isinstance(rule, dict):
@@ -646,7 +662,7 @@ def firewall_rule_in_prefixes(rule: Any, prefixes: Sequence[str], alias_map: Any
         return True  # rule explicitly attributed to this tenant via its category
     # Parse the prefixes; if none are valid there is nothing to filter against.
     nets = _nets(prefixes)
-    if not nets:
+    if not nets and empty_keeps_all:
         return True
     # The two sides of the rule that may carry tenant addresses or aliases.
     src_raw = rule.get("source")
