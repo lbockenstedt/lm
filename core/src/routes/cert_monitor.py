@@ -7,7 +7,13 @@ evaluates the alert rules (cert_monitor_alerts) after every check and tick.
 Per-cert ignores (global_config["cert_monitor_ignored"], keyed host:port) keep
 a cert listed but drop it from the counts and the alert evaluation.
 Before a check, the built-in Mist / Central host list is refreshed from the
-vendor pages once a day (cert_monitor.refresh_sources)."""
+vendor pages once a day (cert_monitor.refresh_sources).
+
+LE deployment verification: every Let's Encrypt cert the hub has pushed to a
+target is auto-added (from the hub's le_cache) and its served cert compared
+with the issued one. These LE endpoints are checked even while the monitor is
+disabled (an "le"-scope run), so a cert that never reached its host can't go
+unnoticed; a new cert or push state triggers a check on the next tick."""
 # Locks, background tasks and thread offloading for the blocking checks.
 import asyncio
 # Current time and expiry-date maths.
@@ -15,6 +21,8 @@ import datetime as _dt
 # Logging under the shared "Hub" logger.
 import logging
 
+# Tenant scoping helpers.
+import access
 # Cert check engine (config, host lists, TLS checks, results file) and its alert rules.
 import cert_monitor as cm
 import cert_monitor_alerts as cma
@@ -62,6 +70,57 @@ def register(app, hub, ctx):
             except Exception as e:  # noqa: BLE001
                 logger.warning("[certmon] state save failed: %s", e)
 
+    def _le_entries():
+        """Host entries for the LE certs the hub has pushed (from the le cache),
+        or None when the cert list can't be read. None is not "no certs": the
+        last LE rows are then held (keep_le_results), never cleared."""
+        try:
+            getter = getattr(hub, "le_cache_get", None)
+            certs = cm.le_cert_holder(getter("certs") if getter else None)
+            if certs is None:
+                return None
+            return cm.le_hosts([c for c in certs if isinstance(c, dict)], _target_names())
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[cert-verify] could not read the LE cert list: %s", e)
+            return None
+
+    def _target_names():
+        """Spoke and agent ids → display names, for the LE target labels."""
+        names = dict(hub.state.system_state.get("module_names", {}) or {})
+        # An agent is known by its key and its raw agent_id; show its hostname.
+        for pk, info in (getattr(hub, "agent_info", None) or {}).items():
+            host = (info or {}).get("hostname") or (info or {}).get("agent_id")
+            if host:
+                names.setdefault(pk, host)
+                names.setdefault((info or {}).get("agent_id") or pk, host)
+        return names
+
+    def _due_reason(data, le):
+        """Why a check is due now (None if not): the schedule, a full check owed
+        after LE-only runs while the monitor was off, an LE change, or the
+        hourly re-check of a failing LE endpoint. ``le`` None (the cert list
+        is unreadable) is never an LE change and leaves nothing to re-check."""
+        enabled = _cfg()["enabled"]
+        # The LE set changed since the last run (including to empty, so rows
+        # for certs no longer pushed are cleared). Old results have no
+        # fingerprint: treat them as checked with no LE certs.
+        le_changed = (le is not None and
+                      data.get("le_fingerprint", cm.le_fingerprint([])) != cm.le_fingerprint(le))
+        # Nothing to check while off with no LE certs.
+        if not enabled and not le and not le_changed:
+            return None
+        # Owed a full check after LE-only runs.
+        if enabled and data.get("scope") == "le":
+            return "enabled"
+        if cm.is_due(data, ignored=_ignored()):
+            return "scheduled"
+        # A new LE cert or push state: verify it promptly.
+        if le_changed:
+            return "le-change"
+        if le and cm.le_retry_due(data, ignored=_ignored()):
+            return "le-retry"
+        return None
+
     def _ignored():
         """Return the normalised per-cert ignore list (keyed host:port)."""
         gc = hub.state.system_state.get("global_config", {}) or {}
@@ -85,7 +144,10 @@ def register(app, hub, ctx):
         return cm.apply_ignored(_refresh_days(results, now), _ignored())
 
     async def _run(reason):
-        """Run one full cert check (``reason`` is logged); False if one is already running."""
+        """Run one cert check (``reason`` is logged); False if one is already running.
+        An LE change or retry while the monitor is enabled probes only the LE
+        endpoints and folds them into the last full results, so a failing LE
+        endpoint never turns the whole scan hourly."""
         # Skip if a check is already in progress.
         if run_lock.locked():
             return False
@@ -98,12 +160,36 @@ def register(app, hub, ctx):
                         await asyncio.to_thread(cm.refresh_sources)
                 except Exception as e:  # noqa: BLE001
                     logger.warning("[certmon] host list refresh failed: %s", e)
+                # Hosts: built-in + custom while enabled, plus the pushed LE certs always.
+                enabled = _cfg()["enabled"]
+                le = _le_entries()
+                # Unreadable LE cert list: only the full scan can run, and the
+                # last LE results are held.
+                held = le is None
+                if held and not enabled:
+                    logger.warning("[cert-verify] LE cert list unreadable; LE check skipped")
+                    return True
+                hosts = cm.merge_le_hosts(cm.effective_hosts(_cfg()) if enabled else [], le or [])
+                prev = await asyncio.to_thread(cm.load_results)
+                le_only = (not held and enabled and reason in ("le-change", "le-retry")
+                           and prev.get("scope") == "all")
+                if le_only:
+                    hosts = [h for h in hosts if h.get("le")]
                 # Check every host in a thread, then save the results with the trigger reason.
-                hosts = cm.effective_hosts(_cfg())
-                logger.info("[certmon] checking %d host(s) (%s)", len(hosts), reason)
+                logger.info("[certmon] checking %d host(s) (%s, %s LE)", len(hosts), reason,
+                            "unreadable" if held else len(le))
                 data = await asyncio.to_thread(cm.run_checks, hosts)
-                data["trigger"] = reason
+                if le_only:
+                    # The run's own reason is recorded; the schedule still keys off last_run.
+                    data = {**cm.merge_le_results(prev, data), "trigger": reason,
+                            "le_fingerprint": cm.le_fingerprint(le)}
+                elif held:
+                    data = {**cm.keep_le_results(prev, data), "trigger": reason, "scope": "all"}
+                else:
+                    data.update({"trigger": reason, "scope": "all" if enabled else "le",
+                                 "le_checked_at": data["last_run"], "le_fingerprint": cm.le_fingerprint(le)})
                 await asyncio.to_thread(cm.save_results, data)
+                cm.log_deploy_problems(cm.apply_ignored(data["results"], _ignored()))
                 # Log the counts (ignored certs left out), then evaluate the alert rules.
                 c = cm.count_statuses(cm.apply_ignored(data["results"], _ignored()))
                 logger.info("[certmon] done in %ss: red=%d yellow=%d green=%d error=%d ignored=%d",
@@ -139,6 +225,7 @@ def register(app, hub, ctx):
                         ts = ts.replace(tzinfo=_dt.timezone.utc)
                     r["days_left"] = int((ts - now).total_seconds() // 86400)
                     r["status"] = cm.classify(r["days_left"])
+                    cm.apply_deploy_status(r)
                 except ValueError:
                     pass
             out.append(r)
@@ -158,7 +245,9 @@ def register(app, hub, ctx):
                 if not data.get("last_run"):
                     return {}
                 results = _view(data.get("results"), _dt.datetime.now(_dt.timezone.utc))
-                return await cma.run_alerts(hub, cm.active_results(results))
+                # Global rules see only shared-tenant LE certs; a tenant's own
+                # LE verdicts alert through its cert_deploy_failed rule instead.
+                return await cma.run_alerts(hub, cm.active_results(cm.scope_le_rows(results)))
             except Exception as e:  # noqa: BLE001
                 logger.warning("[certmon] alert evaluation failed: %s", e)
                 return {}
@@ -187,13 +276,16 @@ def register(app, hub, ctx):
     # Everything the Cert Expiry Monitor page shows.
     @app.get("/api/certmon/overview")
     async def certmon_overview(request: Request):
-        """Return config, host lists, thresholds, run times, counts, results and ignores."""
-        _guard(request)
+        """Return config, host lists, thresholds, run times, counts, results and
+        ignores. LE rows are limited to the tenant in view (``?tenant=``,
+        resolved by access.request_effective_tenant like other scoped routes)."""
+        sess = _guard(request)
         cfg = _cfg()
         # Load stored results and refresh their days left / ignore flags.
         data = await asyncio.to_thread(cm.load_results)
         now = _dt.datetime.now(_dt.timezone.utc)
-        results = _view(data.get("results"), now)
+        results = cm.scope_le_rows(_view(data.get("results"), now),
+                                   access.request_effective_tenant(sess, request))
         counts = cm.count_statuses(results)
         # Work out the next scheduled check from the last run (only while enabled).
         next_run = None
@@ -262,7 +354,7 @@ def register(app, hub, ctx):
         started = False
         if cfg["enabled"] and not was_enabled:
             data = await asyncio.to_thread(cm.load_results)
-            if cm.is_due(data, ignored=_ignored()):
+            if _due_reason(data, _le_entries()):
                 started = _kick("enabled")
         return {"status": "ok", "config": cfg, "check_started": started}
 
@@ -400,25 +492,34 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=404, detail="Rule not found")
         if not rule.get("recipients"):
             raise HTTPException(status_code=400, detail="This rule has no recipients")
-        # Build the current view and send the test; a send failure is a 400.
+        # Build the same view the real evaluation sees (shared-tenant LE rows
+        # only, see _evaluate_alerts) and send the test; a send failure is a 400.
         data = await asyncio.to_thread(cm.load_results)
-        results = _view(data.get("results"), _dt.datetime.now(_dt.timezone.utc))
+        results = cm.scope_le_rows(_view(data.get("results"), _dt.datetime.now(_dt.timezone.utc)))
         if not await cma.send_test(hub, rule, cm.active_results(results)):
             raise HTTPException(status_code=400, detail="Send failed — check Setup → Notifications")
         return {"sent": True, "to": rule["recipients"]}
 
+    async def _tick():
+        """One scheduler tick: run a check when due (the monitor is enabled OR an
+        LE cert has been pushed), otherwise just evaluate the alert rules."""
+        data = await asyncio.to_thread(cm.load_results)
+        reason = _due_reason(data, _le_entries())
+        if reason:
+            await _run(reason)
+        elif _cfg()["enabled"]:
+            await _evaluate_alerts(data)
+
+    # Exposed for tests (and diagnostics) to drive one tick directly.
+    app.state.certmon_tick = _tick
+
     async def _scheduler():
-        """Background loop: run a check when due, otherwise just evaluate alerts."""
+        """Background loop: one ``_tick`` every SCHEDULER_TICK_S."""
         # Give the hub a minute to start up first.
         await asyncio.sleep(60)
         while True:
             try:
-                if _cfg()["enabled"]:
-                    data = await asyncio.to_thread(cm.load_results)
-                    if cm.is_due(data, ignored=_ignored()):
-                        await _run("scheduled")
-                    else:
-                        await _evaluate_alerts(data)
+                await _tick()
             # Cancellation stops the loop; other errors are logged and the loop goes on.
             except asyncio.CancelledError:
                 raise

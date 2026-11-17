@@ -98,6 +98,8 @@ existing named credentials, but new ones should go in the vault.
 
 ## Distribution targets — warnings & gotchas
 
+**Deployment is verified, not trusted.** A target reporting SUCCESS (or DEFERRED) only means the material was handed over. The hub's Cert Monitor auto-adds every pushed cert's domain and compares the cert the site actually serves with the one issued; the **Served** chip beside the cert, the `cert_deploy_failed` alert (item `<domain>/served`) and `[cert-verify]` hub log lines report a site that still serves an old cert or can't be reached. See [cert-monitor.md](cert-monitor.md#le-deployment-verification).
+
 These apply to the **agent-hosting** target types (`hypervisor`, `simulation`), where one target can mean a whole spoke's worth of Proxmox nodes. The Certificates view enforces the first point with a hover tooltip on the target chips, an inline ⚠ note on the cert row, and a confirm dialog when you add an overlapping target.
 
 - **Pick ONE granularity per module — a group OR individual nodes, not both.** Each agent-hosting spoke offers two kinds of target: a **group** ("`simulation` — all nodes", identifier empty → broadcasts to every pxmx agent on that spoke) and **per-node** ("`simulation/<agent-id>`", identifier = the agent). If a spoke has one agent, the group target and that node's per-node target are the **same deploy**. Selecting both makes the hub push the same cert to the same node twice per sweep, so `pvenode cert set --restart` runs concurrently and the pveproxy restarts contend. Choose per-node targets for clean 1:1 status, or the group target if you want new agents auto-covered — never both.

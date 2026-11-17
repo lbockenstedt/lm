@@ -371,12 +371,22 @@ function _certMonDate(iso) {
     try { return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }); } catch (e) { return iso; }
 }
 
+// LE deployment check (deploy_state) → [chip classes, label, is a failure].
+const _CERTMON_DEPLOY = {
+    verified: ['bg-green-100 text-green-700', 'LE ✓ served', false],
+    stale: ['bg-red-600 text-white', 'LE ✗ old cert served', true],
+    mismatch: ['bg-red-100 text-red-700', 'LE ✗ wrong cert', true],
+    newer: ['bg-green-100 text-green-700', 'LE ✓ newer cert', false],
+    unreachable: ['bg-red-100 text-red-700', 'LE ✗ unreachable', true],
+    unverifiable: ['bg-slate-100 text-slate-500', 'LE wildcard — not checked', false],
+};
+
 async function loadCertMonData() {
     const el = document.getElementById('certmon-content');
     if (!el) return;
     let d;
     try {
-        const r = await setupFetch('/api/certmon/overview');
+        const r = await setupFetch('/api/certmon/overview?tenant=' + encodeURIComponent(currentTenant || ''));
         if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || ('HTTP ' + r.status));
         d = await r.json();
     } catch (e) {
@@ -410,13 +420,18 @@ async function loadCertMonData() {
     const results = (d.results || []).filter(r => !filt || [r.host, r.service, r.region, r.role, r.provider, r.issuer_cn, r.subject_cn].join(' ').toLowerCase().includes(filt));
     const rows = results.map(r => {
         const trust = r.trusted ? '' : (r.verify_error ? `<span class="ml-1 text-xs text-slate-500" title="${escapeHtml(r.verify_error)}">(private CA / untrusted)</span>` : '');
-        const err = r.error ? `<div class="text-xs text-red-600">${escapeHtml(r.error)}</div>` : '';
+        // LE-deployed endpoints: a fixed-label chip for the served-vs-issued check, and
+        // its detail on the error line when it is not verified.
+        const dep = _CERTMON_DEPLOY[r.deploy_state];
+        const depChip = dep ? ` <span class="ml-1 px-1.5 py-0.5 rounded text-xs font-bold ${dep[0]}">${dep[1]}</span>` : '';
+        const errTxt = r.error || (r.deploy_state && r.deploy_state !== 'verified' ? r.deploy_detail : '');
+        const err = errTxt ? `<div class="text-xs ${r.error || dep && dep[2] ? 'text-red-600' : 'text-slate-500'}">${escapeHtml(errTxt)}</div>` : '';
         const san = r.san_count ? `<div class="text-xs text-slate-500" title="${escapeHtml((r.san || []).join(', '))}">CN ${escapeHtml(r.subject_cn || '')} · ${r.san_count} SAN</div>` : (r.subject_cn ? `<div class="text-xs text-slate-500">CN ${escapeHtml(r.subject_cn)}</div>` : '');
         const ignBtn = `<button onclick="certMonSetIgnored(this, ${escapeHtml(JSON.stringify(r.host || ''))}, ${Number(r.port) || 443}, ${r.ignored ? 'false' : 'true'})" class="text-xs px-2 py-0.5 rounded-full border ${r.ignored ? 'border-brand text-primary-text hover:bg-green-50' : 'border-slate-300 text-slate-600 hover:bg-slate-100'}" title="${r.ignored ? 'Count this cert in the status totals and alerts again' : 'Keep listing this cert but leave it out of the status totals and alerts'}">${r.ignored ? 'Un-ignore' : 'Ignore'}</button>`;
         return `<tr class="${r.ignored ? 'bg-slate-50 text-slate-500' : (rowCls[r.status] || '')}">
             <td class="px-3 py-2 whitespace-nowrap">${statusCell(r)}</td>
             <td class="px-3 py-2 font-mono text-xs">${escapeHtml(r.host)}${r.port && r.port !== 443 ? ':' + r.port : ''}${san}${err}</td>
-            <td class="px-3 py-2 text-xs">${escapeHtml(r.service || '')}<div class="text-xs text-slate-500">${escapeHtml([r.region, r.role].filter(Boolean).join(' · '))}</div></td>
+            <td class="px-3 py-2 text-xs">${escapeHtml(r.service || '')}${depChip}<div class="text-xs text-slate-500">${escapeHtml([r.region, r.role].filter(Boolean).join(' · '))}</div></td>
             <td class="px-3 py-2 text-xs">${escapeHtml(r.provider || '')}${trust}<div class="text-xs text-slate-500">${escapeHtml(r.issuer_cn || '')}</div></td>
             <td class="px-3 py-2 text-xs">${escapeHtml(r.cert_type || '')}<div class="text-xs text-slate-500">${escapeHtml(r.key_type || '')}${r.signature_algorithm ? ' · ' + escapeHtml(r.signature_algorithm) : ''}</div></td>
             <td class="px-3 py-2 text-xs whitespace-nowrap">${escapeHtml(_certMonDate(r.not_after))}</td>
@@ -448,7 +463,7 @@ async function loadCertMonData() {
             <tbody class="divide-y divide-slate-200">${rows || `<tr><td colspan="7" class="px-4 py-8 text-center text-slate-500 italic">${d.last_run ? 'No matching hosts' : 'No check has run yet — click <b>Check now</b>.'}</td></tr>`}</tbody>
           </table>
         </div>
-        <p class="text-xs text-slate-500 mt-2">Results file: <span class="font-mono">${escapeHtml(d.results_file || '')}</span>. "Private CA / untrusted" = the endpoint presents a device-CA cert (Mist terminators, Aruba device endpoints) — its expiry is still tracked. <b>Ignore</b> keeps a cert listed (with its real status) but leaves it out of the totals above and every cert alert rule.</p>
+        <p class="text-xs text-slate-500 mt-2">Results file: <span class="font-mono">${escapeHtml(d.results_file || '')}</span>. "Private CA / untrusted" = the endpoint presents a device-CA cert (Mist terminators, Aruba device endpoints) — its expiry is still tracked. <b>Ignore</b> keeps a cert listed (with its real status) but leaves it out of the totals above and every cert alert rule. <b>LE-deployed</b> rows are added automatically for every Let's Encrypt cert pushed to a target: the cert the site serves is compared with the one LE issued (checked even while this monitor is off, and hourly while one fails).</p>
       </div>
       <div class="${card}">
         <h3 class="text-sm font-bold text-slate-500 mb-1">Custom hosts</h3>

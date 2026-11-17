@@ -293,3 +293,30 @@ def test_run_alerts_repeat_hours_and_failed_reminder_retries(tmp_path, monkeypat
     assert len(sent) == 3
     run(13)
     assert len(sent) == 3
+
+
+def test_le_deploy_trigger_flags_stale_and_unreachable_only():
+    """le_deploy breaches on stale/mismatch/unreachable LE rows; non-LE and wildcard rows are undecidable."""
+    rule = cma.clean_rule({"trigger": "le_deploy", "services": [cm.LE_SERVICE]})
+    assert rule["trigger"] == "le_deploy" and rule["services"] == [cm.LE_SERVICE]
+    rows = [dict(_r("stale.example", 60, service=cm.LE_SERVICE), deploy_state="stale"),
+            dict(_r("down.example", None, service=cm.LE_SERVICE, error="timeout"), deploy_state="unreachable"),
+            dict(_r("ok.example", 60, service=cm.LE_SERVICE), deploy_state="verified"),
+            dict(_r("*.wild.example", None, service=cm.LE_SERVICE), deploy_state="unverifiable")]
+    b, _, bad = cma.evaluate_rule(rule, rows, [])
+    assert [x["host"] for x in b] == ["stale.example", "down.example"]
+    assert cma.is_bad(rule, _r("plain", 60)) is None
+    # A redeploy that lands recovers the endpoint, even before the hub's
+    # ledger copy catches up (served cert newer than the issued one); an
+    # unknown verdict holds the alert instead.
+    rows[0]["deploy_state"], rows[1]["deploy_state"] = "newer", "unknown"
+    _, rec, _ = cma.evaluate_rule(rule, rows, bad)
+    assert [x["host"] for x in rec] == ["stale.example"]
+
+
+def test_le_service_filter_matches_merged_le_row():
+    """An endpoint monitored under its own service but LE-verified still matches an LE-deployed rule."""
+    rule = cma.clean_rule({"trigger": "le_deploy", "services": [cm.LE_SERVICE]})
+    row = dict(_r("own.example", 60, service="Custom"), le_domain="own.example", deploy_state="stale")
+    b, _, _ = cma.evaluate_rule(rule, [row, dict(_r("other", 60, service="Custom"), deploy_state="stale")], [])
+    assert [x["host"] for x in b] == ["own.example"]

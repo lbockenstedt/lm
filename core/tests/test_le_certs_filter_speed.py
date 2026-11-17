@@ -49,7 +49,7 @@ def _load(hub, monkeypatch):
         is_admin=lambda _s: True,
         shared_tenant_id=lambda: None,
     )
-    ns = {"hub": hub, "_lca": lca, "access": access, "asyncio": asyncio,
+    ns = {"hub": hub, "_lca": lca, "access": access, "asyncio": asyncio, "_certmon": __import__("cert_monitor"),
           "ipaddress": ipaddress, "time": time,
           "_session_user": lambda _r: {"user": {"tenants": ["ssplm"]}},
           "_effective_tenant": lambda _r, t: t,
