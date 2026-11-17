@@ -15,7 +15,9 @@ Sources (matched against ``store.get_alert_rules``):
   * ``cert_renew_failed``  — a cert RENEWAL failed (ledger last_error); pushed
                              realtime via the LE_CERT_RENEW_FAILED event.
   * ``cert_deploy_failed`` — a cert DEPLOY to a target failed (per-target
-                             last_status == ERROR).
+                             last_status == ERROR), or the live endpoint is not
+                             serving the issued cert (item ``<domain>/served``,
+                             from the Cert Monitor's LE verification).
 
 Emails route through the same provider-aware ``notifications.send_email`` the hub
 alerts + scheduled reports use. State is in-memory: after a restart a still-bad
@@ -29,6 +31,9 @@ import logging
 from typing import Any, Dict
 # Resolves a spoke/agent id to its friendly display name for alert subjects.
 from display_names import node_name  # sibling leaf
+# Cert Monitor engine: the shared le-cache reader and the LE served-vs-issued results.
+import access
+import cert_monitor as cm
 
 # One named logger so alert-engine messages can be filtered together.
 logger = logging.getLogger("AlertEngine")
@@ -310,15 +315,21 @@ async def _eval_tenant(engine: "AlertEngine", service, tenant: str, needed: set)
         # Certificates for this tenant from the hub's cached copy of the LE ledger.
         certs = []
         # Cache problems just mean no certs to check this round.
+        # The cache holds either the flat or the enveloped LE_LIST_CERTS shape.
         try:
             cl = hub.le_cache_get("certs") if hasattr(hub, "le_cache_get") else None
-            clist = cl.get("certs") if isinstance(cl, dict) else None
-            if isinstance(clist, list):
-                # Keep only well-formed certs belonging to this tenant.
-                certs = [c for c in clist if isinstance(c, dict)
-                         and (c.get("tenant_id") or "default") == tenant]
+            certs = [c for c in cm.le_cert_list(cl)
+                     if access.same_tenant(c.get("tenant_id") or "default", tenant)]
         except Exception:  # noqa: BLE001
             certs = []
+        # Served-vs-issued results from the Cert Monitor's LE verification.
+        # None when they can't be read: the served items are then skipped.
+        served = None
+        if certs and "cert_deploy_failed" in needed:
+            try:
+                served = (await asyncio.to_thread(cm.load_results)).get("results") or []
+            except Exception as e:  # noqa: BLE001
+                logger.warning("cert_deploy_failed: Cert Monitor results unreadable: %s", e)
         # Evaluate each certificate.
         for c in certs:
             # Domain is the alert item name.
@@ -350,6 +361,21 @@ async def _eval_tenant(engine: "AlertEngine", service, tenant: str, needed: set)
                     await engine.evaluate(tenant, "cert_deploy_failed", item,
                                           bad, t.get("last_message") or "",
                                           severity="error" if bad else "ok")
+                # The live endpoint check: bad while it serves another cert or
+                # can't be reached, even when every push reported SUCCESS. It
+                # recovers when the site serves the issued (or a newer) cert,
+                # or when the cert is no longer pushed anywhere; it is held
+                # while the verdict is missing or undecidable (results
+                # unreadable, not yet probed, wildcard, unknown expiry).
+                if served is not None:
+                    pushed = any(isinstance(t, dict) and str(t.get("last_status") or "").upper()
+                                 in cm.LE_PUSHED for t in c.get("targets") or [])
+                    r = cm.le_served_verdict(served, c) or {}
+                    bad = cm.deploy_bad(r.get("deploy_state")) if pushed else False
+                    if bad is not None:
+                        await engine.evaluate(tenant, "cert_deploy_failed", f"{domain}/served",
+                                              bad, r.get("deploy_detail") or "",
+                                              severity="error" if bad else "ok")
     # bulk_dongle_failure / single_bus_failing — from each CS spoke's relayed
     # ``qt_state`` (populated by the spoke's dongle-quarantine detection sweep;
     # see sim_quota_engine._quarantine_sweep). The spoke decides; the hub only

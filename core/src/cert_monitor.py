@@ -33,6 +33,8 @@ import re
 import socket
 # ssl performs the TLS handshake (with and without verification).
 import ssl
+# hashlib fingerprints the LE certs so a change triggers a fresh check.
+import hashlib
 # tempfile creates a unique temp file for atomic JSON writes.
 import tempfile
 # urllib fetches the vendor pages that list endpoints.
@@ -394,6 +396,372 @@ def effective_hosts(cfg):
     return hosts
 
 
+# ── LE deployment verification ──────────────────────────────────────────────
+# Every Let's Encrypt cert the hub has pushed to a target is auto-added as a
+# monitored endpoint (its domain, on the port that target type serves). After the probe, the cert the
+# endpoint SERVES is compared with the cert the le spoke ISSUED, so a push
+# that was "delivered" but never installed (or never delivered at all) shows
+# up as stale instead of hiding behind a SUCCESS ledger entry. The probe reads
+# the cert even when TLS verification fails, so it works with verify off.
+
+# Service name for auto-added LE endpoints.
+LE_SERVICE = "LE-deployed"
+# Ledger target statuses that mean a push was attempted.
+LE_PUSHED = ("SUCCESS", "DEFERRED", "ERROR")
+# Deploy states that are failures (alerted on, re-checked hourly).
+DEPLOY_BAD = ("stale", "mismatch", "unreachable")
+# Deploy states that prove the site serves the issued cert (or a newer one).
+DEPLOY_OK = ("verified", "newer")
+# Served and issued expiry within this many seconds = the same cert.
+_SAME_CERT_S = 60
+# Port each target type serves its cert on (default 443): Proxmox nodes
+# install it in pveproxy (8006), the directory spokes in slapd's LDAPS (636).
+_LE_TARGET_PORTS = {"hypervisor": 8006, "simulation": 8006, "directory": 636, "ldap-server": 636}
+
+
+def le_cert_holder(cached):
+    """Return the cert list inside an LE_LIST_CERTS reply as stored (flat
+    ``{"certs": [...]}`` or the spoke envelope ``{"data": {"certs": [...]}}``;
+    the hub caches both shapes), or None when there is no list at either depth."""
+    # Flat shape first, then the spoke envelope.
+    if not isinstance(cached, dict):
+        return None
+    if isinstance(cached.get("certs"), list):
+        return cached["certs"]
+    inner = cached.get("data")
+    if isinstance(inner, dict) and isinstance(inner.get("certs"), list):
+        return inner["certs"]
+    return None
+
+
+def le_cert_list(cached):
+    """The cert dicts in an LE_LIST_CERTS reply (either shape), or []."""
+    return [c for c in le_cert_holder(cached) or [] if isinstance(c, dict)]
+
+
+def le_served_verdict(results, cert):
+    """The worst LE verdict for ``cert`` across Cert Monitor ``results`` (a
+    cert can be checked on several ports) as ``{deploy_state, deploy_detail,
+    checked_at}``, or None. Only a verdict for this cert's tenant and issued
+    expiry counts, so another tenant's cert, or the verdict from before a
+    renewal, is never shown."""
+    # Imported here: access is a large hub module the probe code doesn't need.
+    from access import same_tenant
+    if not isinstance(cert, dict):
+        return None
+    dom = str(cert.get("domain") or "").strip().lower().rstrip(".")
+    tid = cert.get("tenant_id") or "default"
+    found = [{**v, "checked_at": r.get("checked_at")}
+             for r in results or [] if r.get("le_domain") == dom
+             for v in r.get("le_verdicts") or []
+             if same_tenant(v.get("tenant_id"), tid) and v.get("issued_not_after") == cert.get("not_after")]
+    return min(found, key=_rank) if found else None
+
+
+def deploy_bad(state):
+    """Alert verdict for a deploy state: True for a failure, False for a
+    healthy site (verified/newer), None when it can't be told (unknown,
+    unverifiable wildcard, no verdict), so an open alert is held, not
+    recovered, while the telemetry is missing."""
+    if state in DEPLOY_BAD:
+        return True
+    return False if state in DEPLOY_OK else None
+
+
+def _rank(v):
+    """Sort key for verdicts: failures first, then healthy, then undecided."""
+    return {True: 0, False: 1, None: 2}[deploy_bad(v["deploy_state"])]
+
+
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+
+
+def le_target_label(target, names=None):
+    """Display label "module/name" for an LE push target. The identifier is a
+    spoke or agent id, so it is shown by its name from ``names``; a UUID
+    left after that lookup is dropped (no UUIDs in the UI)."""
+    ident = str(target.get("identifier") or "")
+    name = str((names or {}).get(ident) or ident)
+    # A name that is itself a UUID (no hostname known) is not shown either.
+    name = "" if _UUID_RE.match(name) else name
+    return (target.get("module_type") or "") + (f"/{name}" if name else "")
+
+
+def le_hosts(certs, names=None):
+    """LE certs pushed to at least one target → host entries to verify, one
+    per domain and port (the targets of a cert are grouped by the port their
+    type serves on). A wildcard cert has no single host to probe, so it is
+    listed as not verifiable instead of probed. A domain held by several
+    certs (e.g. two tenants) is probed once; the extra certs ride along in
+    ``le["others"]`` and each gets its own verdict (see verify_le).
+    ``names`` maps target identifiers to display names (le_target_label)."""
+    out, seen = [], {}
+    for c in certs or []:
+        # Need a domain, the issued expiry and at least one attempted push.
+        dom = str(c.get("domain") or "").strip().lower().rstrip(".")
+        targets = [t for t in c.get("targets") or [] if isinstance(t, dict)
+                   and str(t.get("last_status") or "").upper() in LE_PUSHED]
+        if not dom or not targets or not c.get("not_after"):
+            continue
+        # Group the targets by the port their type serves the cert on.
+        by_port = {}
+        for t in targets:
+            by_port.setdefault(_LE_TARGET_PORTS.get(t.get("module_type"), 443), []).append(t)
+        for port, group in sorted(by_port.items()):
+            # Target label "module/name", its push status and last message.
+            tl = [{"target": le_target_label(t, names), "id": f"{t.get('module_type')}/{t.get('identifier') or ''}",
+                   "status": str(t.get("last_status") or "").upper(),
+                   "message": str(t.get("last_message") or "")[:200]} for t in group]
+            cert = {"issued_not_after": c["not_after"], "tenant_id": c.get("tenant_id") or "default",
+                    "targets": tl}
+            # Same endpoint already listed: one probe, one more verdict.
+            if (dom, port) in seen:
+                seen[(dom, port)]["le"]["others"].append(cert)
+                continue
+            seen[(dom, port)] = {"host": dom, "port": port, "service": LE_SERVICE, "region": "",
+                                 "role": ", ".join(t["target"] for t in tl)[:120],
+                                 "le": {"domain": dom, "wildcard": dom.startswith("*."),
+                                        "others": [], **cert}}
+            out.append(seen[(dom, port)])
+    return out
+
+
+def merge_le_hosts(hosts, le_entries):
+    """Add the LE entries to ``hosts``; an endpoint already monitored keeps
+    its own entry and just gains the LE comparison."""
+    merged = [dict(h) for h in hosts]
+    by_key = {cert_key(h): h for h in merged}
+    for e in le_entries:
+        if cert_key(e) in by_key:
+            by_key[cert_key(e)]["le"] = e["le"]
+        else:
+            merged.append(e)
+    return merged
+
+
+def le_fingerprint(le_entries):
+    """Short digest of the LE certs and their push states; a change (new
+    cert, new push, new status) triggers a fresh check. Targets are keyed by
+    their raw id, not the display label (which can drop a UUID)."""
+    parts = sorted(f"{cert_key(e)}|{c['tenant_id']}|{c['issued_not_after']}|"
+                   + ",".join(f"{t.get('id', t['target'])}={t['status']}" for t in c["targets"])
+                   for e in le_entries for c in [e["le"], *e["le"].get("others", [])])
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
+
+
+def _iso(s):
+    """Parse an ISO date as aware UTC, or None."""
+    try:
+        ts = _dt.datetime.fromisoformat(str(s))
+    except (TypeError, ValueError):
+        return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=_dt.timezone.utc)
+
+
+def _san_covers(san, dom):
+    """True if a SAN DNS name list covers ``dom`` (exactly or by a one-label wildcard)."""
+    for name in san or []:
+        name = str(name).lower().rstrip(".")
+        if name == dom or (name.startswith("*.") and dom.split(".", 1)[-1] == name[2:]):
+            return True
+    return False
+
+
+def apply_deploy_status(r):
+    """A served cert that is not the issued one is red, whatever its days left."""
+    if r.get("deploy_state") in ("stale", "mismatch") and r.get("status") != "error":
+        r["status"] = "red"
+    return r
+
+
+def _verdict(row, domain, wildcard, cert):
+    """(state, detail) for one issued cert against the probe ``row``:
+    verified (the issued cert), stale (an older cert), newer (a newer cert
+    than the hub's copy of the ledger, which can lag a renewal — not a
+    failure), mismatch (a cert that does not cover the domain), unreachable,
+    unverifiable (wildcard) or unknown."""
+    # Pushes that did not report SUCCESS, quoted in the detail.
+    notes = "; ".join(f"{t['target']} reported {t['status']}"
+                      + (f" ({t['message']})" if t["message"] else "")
+                      for t in cert["targets"] if t["status"] != "SUCCESS")
+    issued, served = _iso(cert["issued_not_after"]), _iso(row.get("not_after"))
+    # Work out the state.
+    if wildcard:
+        state, detail = "unverifiable", "wildcard cert: no single host to probe"
+    elif row.get("error"):
+        state = "unreachable"
+        detail = f"could not reach {row['host']}:{row.get('port', 443)} to check the deployed cert: {row['error']}"
+    elif row.get("not_after") and not _san_covers(row.get("san"), domain):
+        # A cert was read but its SAN (none at all counts: every LE cert has
+        # one) does not cover the domain: a default or someone else's cert.
+        state = "mismatch"
+        detail = f"serving a cert for {row.get('subject_cn') or (row.get('san') or ['an unnamed host'])[0]}, not {domain}"
+    elif not issued or not served:
+        state, detail = "unknown", "issued or served expiry unknown"
+    elif abs((served - issued).total_seconds()) <= _SAME_CERT_S:
+        state, detail = "verified", "serving the issued cert"
+    elif served < issued:
+        state = "stale"
+        detail = (f"serving an older cert (expires {served.date()}); LE issued one expiring "
+                  f"{issued.date()} that was never installed")
+    else:
+        state = "newer"
+        detail = (f"serving a newer cert (expires {served.date()}) than the hub's ledger copy "
+                  f"({issued.date()}); the ledger catches up on its next refresh")
+    # Add the non-SUCCESS push results.
+    if notes and state != "verified":
+        detail = f"{detail}; {notes}"
+    return state, detail[:400]
+
+
+def verify_le(row, le):
+    """Compare a probe ``row`` with every issued LE cert for its endpoint
+    (``le`` plus ``le["others"]``). Each cert's verdict is kept in
+    ``le_verdicts`` (by tenant and issued expiry); the row's own
+    ``deploy_state``/``deploy_detail`` is the worst of them."""
+    row["le_domain"] = le["domain"]
+    # One verdict per cert served at this endpoint, with that cert's own
+    # tenant, issued expiry and push targets.
+    verdicts = []
+    for cert in [le, *le.get("others", [])]:
+        state, detail = _verdict(row, le["domain"], le.get("wildcard"), cert)
+        verdicts.append({"tenant_id": cert.get("tenant_id") or "default",
+                         "issued_not_after": cert["issued_not_after"],
+                         "deploy_state": state, "deploy_detail": detail,
+                         "role": ", ".join(t["target"] for t in cert["targets"])[:120],
+                         "targets": [f"{t['target']}: {t['status']}" for t in cert["targets"]]})
+    return _show_verdicts(row, verdicts)
+
+
+def _show_verdicts(row, verdicts):
+    """Set the row's LE summary from ``verdicts``. The worst one (a failure
+    first) gives the deploy state, tenant, issued expiry and targets, and the
+    colour is rebuilt from the probe, so a row filtered to fewer verdicts
+    (scope_le_rows) carries nothing from the ones it no longer shows."""
+    worst = min(verdicts, key=_rank)
+    row.update({"le_verdicts": verdicts, "deploy_state": worst["deploy_state"],
+                "deploy_detail": worst["deploy_detail"], "le_tenant_id": worst["tenant_id"],
+                "le_issued_not_after": worst["issued_not_after"], "le_targets": worst["targets"]})
+    # An LE-only row is labelled with its targets; a merged row keeps its own role.
+    if row.get("service") == LE_SERVICE:
+        row["role"] = worst["role"]
+    row["status"] = classify(row.get("days_left"), row.get("error"))
+    return apply_deploy_status(row)
+
+
+def check_host(entry, timeout=PROBE_TIMEOUT_S):
+    """Probe one entry (wildcard LE certs are not probed) and run the LE comparison.
+
+    Probing a tenant's LE domain from the hub is deliberate, not an SSRF hole:
+    the probe only sends a TLS ClientHello and reads the certificate (no request
+    data, no response body), the name was validated by Let's Encrypt for that
+    tenant, and custom hosts already probe the same way. Private addresses stay
+    allowed because internal sites are exactly what LE certs get pushed to."""
+    le = entry.get("le")
+    if le and le.get("wildcard"):
+        row = {k: entry.get(k, "") for k in ("host", "service", "region", "role")}
+        row.update({"port": int(entry.get("port") or 443), "checked_at": _dt.datetime.now(_dt.timezone.utc).isoformat(
+            timespec="seconds"), "trusted": False, "verify_error": "", "error": "",
+            "tls_version": "", "days_left": None, "status": "unknown"})
+    else:
+        row = probe_host(entry, timeout=timeout)
+    return verify_le(row, le) if le else row
+
+
+def scope_le_rows(results, tenant=None):
+    """Copy of ``results`` showing only the LE verdicts ``tenant`` may see
+    (its own and the shared tenant's; with no tenant, the shared tenant's
+    only), so the global Cert Monitor page and its rules never show one
+    tenant's domains to another view. A row left with no visible verdict
+    loses its LE fields, and an LE-only row is dropped. Non-LE rows pass."""
+    # Imported here: access is a large hub module the probe code doesn't need.
+    from access import same_tenant, tenant_is_shared
+    out = []
+    for r in results or []:
+        verdicts = r.get("le_verdicts")
+        if not verdicts:
+            out.append(r)
+            continue
+        # Keep the verdicts this view may see.
+        seen = [v for v in verdicts if tenant_is_shared(v.get("tenant_id"))
+                or (tenant and same_tenant(v.get("tenant_id"), tenant))]
+        if seen:
+            out.append(_show_verdicts(dict(r), seen))
+        elif r.get("service") != LE_SERVICE:
+            # A monitored host with no visible LE cert: drop the LE fields, recolour.
+            r = {k: v for k, v in r.items() if not k.startswith(("le_", "deploy_"))}
+            r["status"] = classify(r.get("days_left"), r.get("error"))
+            out.append(r)
+    return out
+
+
+def le_retry_due(data, ignored=None, now=None):
+    """True when an LE endpoint is failing and its last check is an hour old:
+    failures are re-checked hourly (only the LE endpoints, see merge_le_results)."""
+    now = now or _dt.datetime.now(_dt.timezone.utc)
+    # Any non-ignored failing LE row?
+    if not any(r.get("deploy_state") in DEPLOY_BAD and cert_key(r) not in (ignored or {})
+               for r in (data or {}).get("results") or []):
+        return False
+    last = _iso((data or {}).get("le_checked_at") or (data or {}).get("last_run"))
+    return not last or (now - last).total_seconds() >= URGENT_CHECK_S
+
+
+def merge_le_results(prev, le_run):
+    """Fold an LE-only check run into the last full results: re-probed rows
+    replace their old ones, LE-only rows no longer pushed are dropped, and an
+    endpoint no longer pushed loses its stale LE fields. The full run's
+    ``last_run`` (its schedule) is kept; ``le_checked_at`` records this run."""
+    fresh = {cert_key(r): r for r in le_run.get("results") or []}
+    rows = list(fresh.values())
+    # Keep the other rows, minus LE leftovers.
+    for r in (prev or {}).get("results") or []:
+        if cert_key(r) in fresh or r.get("service") == LE_SERVICE:
+            continue
+        rows.append({k: v for k, v in r.items() if not k.startswith(("le_", "deploy_"))})
+    rows = sort_results(rows)
+    return {**(prev or {}), "results": rows, "counts": _row_counts(rows),
+            "duration_s": le_run.get("duration_s"), "le_checked_at": le_run.get("last_run")}
+
+
+def keep_le_results(prev, run):
+    """A full run made while the LE cert list could not be read: the last LE
+    rows, verdicts and fingerprint are held, not cleared, so an unreadable
+    cache never looks like "no certs pushed any more"."""
+    old = {cert_key(r): r for r in (prev or {}).get("results") or []}
+    # Re-probed endpoints keep their last LE fields (and the red they imply).
+    rows = []
+    for r in run.get("results") or []:
+        held = {k: v for k, v in (old.get(cert_key(r)) or {}).items() if k.startswith(("le_", "deploy_"))}
+        rows.append(apply_deploy_status({**r, **held}))
+    # LE-only rows not probed this run are kept as they were.
+    done = {cert_key(r) for r in rows}
+    rows += [r for k, r in old.items() if r.get("service") == LE_SERVICE and k not in done]
+    rows = sort_results(rows)
+    return {**run, "results": rows, "counts": _row_counts(rows),
+            "le_fingerprint": (prev or {}).get("le_fingerprint"),
+            "le_checked_at": (prev or {}).get("le_checked_at")}
+
+
+def _row_counts(rows):
+    """Rows per status (red/yellow/green/error/unknown)."""
+    counts = {s: 0 for s in ("red", "yellow", "green", "error", "unknown")}
+    for r in rows:
+        counts[r.get("status", "unknown")] = counts.get(r.get("status", "unknown"), 0) + 1
+    return counts
+
+
+def log_deploy_problems(results):
+    """Log one WARNING per LE cert that is not served as issued (a shared
+    endpoint logs each failing cert with its own tenant and targets)."""
+    for r in results or []:
+        for v in r.get("le_verdicts") or []:
+            if v["deploy_state"] in DEPLOY_BAD:
+                logger.warning("[cert-verify] %s:%s %s (tenant %s): %s", r.get("le_domain") or r.get("host"),
+                               r.get("port", 443), v["deploy_state"].upper(), v["tenant_id"],
+                               v.get("deploy_detail") or "")
+
+
 # ── probe ───────────────────────────────────────────────────────────────────
 
 def classify(days_left, error=None):
@@ -681,7 +1049,7 @@ def run_checks(hosts, timeout=PROBE_TIMEOUT_S, workers=MAX_WORKERS):
     results = []
     # Probe hosts in a thread pool (I/O-bound).
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-        for r in ex.map(lambda h: probe_host(h, timeout=timeout), hosts):
+        for r in ex.map(lambda h: check_host(h, timeout=timeout), hosts):
             results.append(r)
     # Sort and count by status.
     results = sort_results(results)
@@ -747,13 +1115,18 @@ def _write_json(path, data, prefix):
 
 
 def check_interval(data, ignored=None, now=None):
-    """Seconds between checks: URGENT_CHECK_S while a non-ignored cert expires
-    within URGENT_WINDOW_S (or has expired), else CHECK_INTERVAL_S."""
+    """Seconds between full checks: URGENT_CHECK_S while a non-ignored cert
+    expires within URGENT_WINDOW_S (or has expired), else CHECK_INTERVAL_S.
+    Failing LE endpoints are re-checked on their own (le_retry_due)."""
     # Current time (tests may pass their own).
     now = now or _dt.datetime.now(_dt.timezone.utc)
     # Look for any non-ignored cert expiring soon.
     for r in (data or {}).get("results") or []:
-        if not r.get("not_after") or cert_key(r) in (ignored or {}):
+        if cert_key(r) in (ignored or {}):
+            continue
+        # LE-only rows (auto-added from pushed certs) have their own hourly
+        # retry; an expired served cert there must not make the full scan hourly.
+        if r.get("service") == LE_SERVICE or not r.get("not_after"):
             continue
         # Parse the expiry; skip unparseable dates.
         try:
