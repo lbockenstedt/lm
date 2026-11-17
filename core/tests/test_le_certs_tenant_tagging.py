@@ -62,6 +62,7 @@ def _load(hub, names):
             error=lambda *a, **k: None),
         "hub": hub,
         "_lca": lca,
+        "_certmon": __import__("cert_monitor"),
         "_session_user": lambda request: {"user": {"tenants": [], "tenant_id": "default"}},
         "_le_cert_tenant_store_keys": lambda: sorted(
             (hub.state.system_state.get("global_config", {}) or {}).get(lca.STORE_KEY, {})),
