@@ -190,3 +190,85 @@ def test_pull_branch_no_cache_no_fire(monkeypatch):
     hub = _FakeHub([_rule("cert_deploy_failed")], None)
     _eval(hub, "default", {"cert_deploy_failed"})
     assert sent == []
+
+def test_pull_branch_reads_enveloped_cache(monkeypatch):
+    """The /api/le/certs route caches the spoke envelope; the pull-branch must still see the certs."""
+    sent = _capture_send(monkeypatch)
+    cert = {"domain": "a.com", "tenant_id": "default",
+            "targets": [{"module_type": "firewall", "last_status": "ERROR", "last_message": "boom"}]}
+    hub = _FakeHub([_rule("cert_deploy_failed")], {"status": "SUCCESS", "data": _certs_cache([cert])})
+    _eval(hub, "default", {"cert_deploy_failed"})
+    assert len(sent) == 1 and "a.com/firewall" in sent[0]["body"]
+
+
+def test_pull_branch_flags_stale_served_cert_despite_success(monkeypatch):
+    """A push the ledger calls SUCCESS still alerts when the live site serves an old cert."""
+    sent = _capture_send(monkeypatch)
+    cert = {"domain": "nb.example.com", "tenant_id": "default", "not_after": "2027-02-14",
+            "targets": [{"module_type": "ipam", "last_status": "SUCCESS"}]}
+    hub = _FakeHub([_rule("cert_deploy_failed")], _certs_cache([cert]))
+    def row(state, detail=""):
+        """A result row carrying one verdict for this cert."""
+        return {"host": "nb.example.com", "le_domain": "nb.example.com", "le_verdicts": [
+            {"tenant_id": "default", "issued_not_after": "2027-02-14",
+             "deploy_state": state, "deploy_detail": detail}]}
+    monkeypatch.setattr(ae.cm, "load_results", lambda: {"results": [
+        row("stale", "serving an older cert")]})
+    _eval(hub, "default", {"cert_deploy_failed"})
+    assert len(sent) == 1
+    assert "nb.example.com/served" in sent[0]["body"] and "serving an older cert" in sent[0]["body"]
+    # Once the site serves the issued cert the alert recovers.
+    monkeypatch.setattr(ae.cm, "load_results", lambda: {"results": [row("verified")]})
+    _eval(hub, "default", {"cert_deploy_failed"})
+    assert len(sent) == 2 and "OK" in sent[1]["subject"]
+
+
+def test_pull_branch_served_check_is_tenant_scoped(monkeypatch):
+    """A result checked for another tenant's cert, or for the cert before a
+    renewal, never raises a served alert for this tenant's current cert."""
+    sent = _capture_send(monkeypatch)
+    cert = {"domain": "nb.example.com", "tenant_id": "default", "not_after": "2027-05-01",
+            "targets": [{"module_type": "ipam", "last_status": "SUCCESS"}]}
+    hub = _FakeHub([_rule("cert_deploy_failed")], _certs_cache([cert]))
+    monkeypatch.setattr(ae.cm, "load_results", lambda: {"results": [
+        {"host": "nb.example.com", "le_domain": "nb.example.com", "le_verdicts": [
+            {"tenant_id": "other", "issued_not_after": "2027-05-01", "deploy_state": "stale"},
+            {"tenant_id": "default", "issued_not_after": "2027-02-14", "deploy_state": "stale"}]}]})
+    _eval(hub, "default", {"cert_deploy_failed"})
+    assert sent == []
+
+
+
+def test_pull_branch_served_alert_holds_on_missing_telemetry_recovers_on_health(monkeypatch):
+    """A breached served alert is held while the verdict is unknown, missing
+    or unreadable, and recovers on newer, or once the cert is no longer pushed."""
+    sent = _capture_send(monkeypatch)
+    cert = {"domain": "nb.example.com", "tenant_id": "Default", "not_after": "2027-02-14",
+            "targets": [{"module_type": "ipam", "last_status": "SUCCESS"}]}
+    hub = _FakeHub([_rule("cert_deploy_failed")], _certs_cache([cert]))
+    key = ("default", "cert_deploy_failed", "nb.example.com/served")
+
+    def served(state):
+        """Cert Monitor results with one verdict of ``state`` for this cert (None: no row)."""
+        rows = [] if state is None else [{"host": "nb.example.com", "le_domain": "nb.example.com",
+            "le_verdicts": [{"tenant_id": "default", "issued_not_after": "2027-02-14",
+                             "deploy_state": state}]}]
+        return lambda: {"results": rows}
+
+    def boom():
+        """Unreadable results file."""
+        raise OSError("disk")
+    hub.alert_engine._state[key] = True
+    for load in (served("unknown"), served(None), boom):
+        monkeypatch.setattr(ae.cm, "load_results", load)
+        _eval(hub, "default", {"cert_deploy_failed"})
+    assert sent == []
+    monkeypatch.setattr(ae.cm, "load_results", served("newer"))
+    _eval(hub, "default", {"cert_deploy_failed"})
+    assert len(sent) == 1 and "OK" in sent[0]["subject"]
+    # Breach again, then remove the push: the alert recovers.
+    hub.alert_engine._state[key] = True
+    cert["targets"] = []
+    monkeypatch.setattr(ae.cm, "load_results", served(None))
+    _eval(hub, "default", {"cert_deploy_failed"})
+    assert len(sent) == 2 and "OK" in sent[1]["subject"]

@@ -5,6 +5,29 @@
 // earlier files define. Functions may call anything once the page is up.
 
 // ─── Certificate Management (le) view ──────────────────────────────────────
+// HTML-escape any value (null → '') for the legacy string-built markup below.
+const _leEsc = (s) => escapeHtml(String(s == null ? '' : s));
+
+// "Served" chip beside a cert: whether its live endpoint serves the issued cert,
+// from the Cert Monitor's LE deployment check (docs/cert-monitor.md). No chip
+// until the endpoint has been checked.
+const _LE_SERVED = {
+    verified: ['bg-green-100 text-green-700', '✓ served'],
+    stale: ['bg-red-600 text-white', '✗ served: old cert'],
+    mismatch: ['bg-red-100 text-red-700', '✗ served: wrong cert'],
+    newer: ['bg-green-100 text-green-700', '✓ served: newer cert'],
+    unreachable: ['bg-red-100 text-red-700', '✗ served: unreachable'],
+    unverifiable: ['bg-slate-100 text-slate-500', 'served: not checked'],
+    unknown: ['bg-slate-100 text-slate-500', 'served: unknown'],
+};
+// Render the "Served" chip for cert ``c`` ('' when not checked yet).
+function _leServedBadge(c) {
+    const s = c.served || {};
+    const m = _LE_SERVED[s.state];
+    if (!m) return '';
+    const when = s.checked_at ? ` (checked ${new Date(s.checked_at).toLocaleString()})` : '';
+    return ` <span class="inline-block px-1.5 py-0.5 rounded text-xs font-bold ${m[0]} align-middle whitespace-nowrap" title="${_leEsc((s.detail || s.state) + when)}">${m[1]}</span>`;
+}
 // Status bar (managed count) + a certificates table. The le spoke's handlers
 // are structured stubs until certbot/acme.sh is wired, so the table is usually
 // empty and the status bar carries the "not yet wired" message from the spoke.
@@ -18,7 +41,7 @@
 async function loadLeAcmeInfo() {
     const el = document.getElementById('le-acme-info');
     if (!el) return;
-    const esc = (s) => escapeHtml(String(s == null ? '' : s));
+    const esc = _leEsc;
     try {
         const r = await _spokeFetch('/api/le/acme-info');
         const a = (r.ok && r.data) ? r.data : {};
@@ -75,6 +98,13 @@ function _leLegend() {
           ${lbl('Cert')}
           <span class="flex items-center gap-1.5">${pill('bg-purple-100 text-purple-700', '★ AppBuilder')} pinned mTLS identity (hub mints its clientAuth cert from the Local CA)</span>
           <span class="flex items-center gap-1.5">${pill('bg-amber-100 text-amber-700', 'shortlived')} non-default ACME profile (short-lived ~7d). mTLS client certs come from the 🔒 hub Local CA, not here.</span>
+        </div>
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
+          ${lbl('Served')}
+          <span class="flex items-center gap-1.5">${pill('bg-green-100 text-green-700', '✓ served')} the live site serves this cert</span>
+          <span class="flex items-center gap-1.5">${pill('bg-red-600 text-white', '✗ served: old cert')} pushed but never installed</span>
+          <span class="flex items-center gap-1.5">${pill('bg-red-100 text-red-700', '✗ served: unreachable')} the site could not be reached</span>
+          <span class="text-slate-500">checked by the Cert Monitor; hover for details</span>
         </div>
         <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
           ${lbl('Expiry')}
@@ -318,7 +348,7 @@ async function loadLEData(subMenu) {
             // Targets moved out of the data row so each badge has room to be a
             // click-to-deploy button (mirrors the CS spoke-clients click-to-act).
             return `<tr class="border-b border-slate-100 hover:bg-slate-50">
-                <td class="px-4 py-2 font-mono font-medium">${issueDot(c.domain)}${c.domain || '—'}${bfBadge}${caBadge}${profBadge}${tenChips}</td>
+                <td class="px-4 py-2 font-mono font-medium">${issueDot(c.domain)}${c.domain || '—'}${_leServedBadge(c)}${bfBadge}${caBadge}${profBadge}${tenChips}</td>
                 <td class="px-4 py-2 text-xs">${c.email || '—'}</td>
                 <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">${escapeHtml(_leChallengeLabel(c.challenge))}</span></td>
                 <td class="px-4 py-2 text-center text-xs">${c.staging ? 'yes' : 'no'}</td>
