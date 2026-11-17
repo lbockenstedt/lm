@@ -950,6 +950,13 @@ def register(app, hub, ctx):
             report for sid, report in role_reports
             if hub._primary_key(sid) == hub._primary_key(parent_id)
         ), {})
+        # The host agent can be in another tenant than the DNS spoke it hosts
+        # (a Shared role on a tenant-assigned agent). It is then not a worker
+        # candidate, so ask it directly; it only supplies the coordinator address.
+        if parent_id and not any(
+                hub._primary_key(sid) == hub._primary_key(parent_id)
+                for sid in candidates):
+            _, parent_report = await _roles(parent_id)
         coordinator_addresses = _private_service_addresses(
             parent_report)
         coordinator_host = (
@@ -1305,7 +1312,11 @@ def register(app, hub, ctx):
             async with lock:
                 return await _discover_dns_workers_for_spoke(spoke_id)
         except HTTPException as exc:
-            logger.warning("DNS worker discovery failed: %s", exc.detail)
+            # A 5xx means discovery broke and is logged as an ERROR so AB's log
+            # scan (ERROR/CRITICAL only) picks it up; a 4xx such as "waiting
+            # for a second server" is an expected state and stays a WARNING.
+            log = logger.error if exc.status_code >= 500 else logger.warning
+            log("DNS worker discovery failed: %s", exc.detail)
             raise
 
     # Loopback lever (admin_ops) reuses the exact enrollment the UI button
@@ -4550,6 +4561,13 @@ def register(app, hub, ctx):
             report for sid, report in reports
             if hub._primary_key(sid) == hub._primary_key(parent_id)
         ), {})
+        # The host agent can be in another tenant than the DHCP spoke it hosts
+        # (a Shared role on a tenant-assigned agent). It is then not a worker
+        # candidate, so ask it directly; it only supplies the coordinator address.
+        if parent_id and not any(
+                hub._primary_key(sid) == hub._primary_key(parent_id)
+                for sid in candidates):
+            _, parent_report = await _roles(parent_id)
         coordinator_addresses = _private_service_addresses(parent_report)
         coordinator_host = (
             coordinator_addresses[0] if coordinator_addresses else "")
@@ -5369,7 +5387,11 @@ def register(app, hub, ctx):
             async with lock:
                 return await _discover_dhcp_workers_for_spoke(spoke_id)
         except HTTPException as exc:
-            logger.warning("DHCP worker discovery failed: %s", exc.detail)
+            # A 5xx means discovery broke and is logged as an ERROR so AB's log
+            # scan (ERROR/CRITICAL only) picks it up; a 4xx such as "waiting
+            # for a second server" is an expected state and stays a WARNING.
+            log = logger.error if exc.status_code >= 500 else logger.warning
+            log("DHCP worker discovery failed: %s", exc.detail)
             raise
 
     # Loopback lever (admin_ops) reuses the exact enrollment the UI button
