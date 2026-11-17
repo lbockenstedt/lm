@@ -9,9 +9,8 @@ disconnect is not automatically replayed. Direct inference requests are local-on
 ## Provision a worker VM
 
 Provision the approved Ollama 0.40.16 runtime at `/opt/lm-llm/bin/ollama` and
-stage approved, CPU-compatible weights in `/var/lib/lm-llm/models`. Install
-`agent/lm-llm-ollama.service` in the systemd unit directory during initial
-provisioning and reload systemd; do not enable it independently. It binds
+stage approved, CPU-compatible weights in `/var/lib/lm-llm/models`. The agent
+installer stages the dedicated unit without enabling it independently. It binds
 loopback port 11438, disables cloud, and uses one slot with no artificial CPU
 cap. Load **LLM Worker (CPU)** in the agent role picker. Unloading the role
 drains active work and stops its service without deleting models.
@@ -73,3 +72,8 @@ an ambiguous inference failure. `llm_cloud_profiles` accepts ordered records
 with `task: "pr_summary"`, `tenant`, `model`, `url` (public HTTPS
 `/chat/completions` endpoint), and `vault_credential: {bucket, name}` from that
 tenant's Vault bucket. Cloud profiles do not expose or store inline keys.
+# Qualification and fleet telemetry
+
+Global admins can use **LLM** to inspect worker readiness, active jobs, and the latest 200 finished attempts. The dashboard JSON is available at `GET /api/llm/admin/dashboard`; it contains no prompts, generated text, credentials, or provider URLs. History resets on hub restart; export it to a downstream system for longer-term analysis.
+
+`POST /api/llm/admin/qualify` accepts `{"candidate":"trial"}` and returns 202 when scheduled. Set the hub's `llm_qualification_candidates.trial` to `{"worker":"<Shared LLM registration ID>","label":"CPU trial"}`; that worker is excluded from tenant inference. On the dedicated VM, stage the vetted candidate binary on loopback port 11439 with a separate model store, and the approved baseline on port 11438. Set `/etc/lm/llm-qualification.json` to `{"trial":{"model":"<public tag>","digest":"<64 hex>","version":"<x.y.z>","baseline":{"model":"<installed tag>","digest":"<64 hex>","version":"<x.y.z>"}}}`. Only the candidate service pulls a model. Both runtimes run the same fixed CPU JSON and indentation fixtures; inspect correctness and timing separately. No test automatically activates an artifact or upgrades Ollama. Verify the candidate binary's origin and checksum and check open release regressions before staging it.

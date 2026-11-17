@@ -2,13 +2,47 @@
 
 import ast
 import json
+import re
 
 from fastapi import HTTPException, Request, Response
 
-from access import read_scope, request_effective_tenant, same_tenant, tenant_is_shared
+from access import read_scope, request_effective_tenant, safe_external_url, same_tenant, tenant_is_shared
 import instance_vault
 from llm_cloud import valid_endpoint
-from llm_pool import diagnostic
+from llm_pool import diagnostic, valid_model
+
+
+def validate_pool_config(hub, config):
+    """Validate routing and qualification policy before storing it."""
+    if "llm_task_models" in config:
+        tasks = config["llm_task_models"]
+        if not isinstance(tasks, dict) or len(tasks) > 32 or any(
+                not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", task)
+                or not isinstance(models, list) or len(models) > 8
+                or any(not isinstance(row, dict) or not valid_model(row.get("model"), row.get("digest"))
+                       for row in models)
+                for task, models in tasks.items()):
+            raise HTTPException(400, "Task profiles require ordered lists of pinned model artifacts")
+    if "llm_ab_pr_repos" in config:
+        repos = config["llm_ab_pr_repos"]
+        if not isinstance(repos, dict) or len(repos) > 256 or any(
+                not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}", name)
+                or not isinstance(row, dict) or not isinstance(row.get("tenant"), str)
+                or tenant_is_shared(row["tenant"]) or not hub.state.get_tenant(row["tenant"])
+                or not isinstance(row.get("certificate"), str)
+                or not 0 < len(row["certificate"].strip()) <= 255
+                or not isinstance(row.get("allow_public_cloud", False), bool)
+                for name, row in repos.items()):
+            raise HTTPException(400, "Repository policies require a tenant and a pinned certificate SAN")
+    if "llm_qualification_candidates" in config:
+        candidates = config["llm_qualification_candidates"]
+        if not isinstance(candidates, dict) or len(candidates) > 32 or any(
+                not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", key)
+                or not isinstance(row, dict) or not isinstance(row.get("worker"), str)
+                or not 0 < len(row["worker"]) <= 255 or not isinstance(row.get("label"), str)
+                or not 0 < len(row["label"].strip()) <= 100
+                for key, row in candidates.items()):
+            raise HTTPException(400, "Candidate profiles require a key, worker and label")
 
 
 async def validate_cloud_profiles(hub, profiles, session):
@@ -17,7 +51,8 @@ async def validate_cloud_profiles(hub, profiles, session):
         raise HTTPException(400, "Provide a list of at most 32 cloud profiles")
     output = []
     for row in profiles:
-        if not isinstance(row, dict) or not valid_endpoint(row.get("url")):
+        if (not isinstance(row, dict) or not safe_external_url(row.get("url"))
+                or not valid_endpoint(row.get("url"))):
             raise HTTPException(400, "A public cloud chat-completions HTTPS URL is required")
         tenant, model = row.get("tenant"), row.get("model")
         ref = row.get("vault_credential")
@@ -41,6 +76,30 @@ async def validate_cloud_profiles(hub, profiles, session):
 
 def register(app, hub, ctx):
     """Register the exact-model local inference endpoint."""
+
+    def require_admin(request):
+        """Restrict fleet diagnostics and synthetic jobs to global admins."""
+        session = ctx._session_user(request)
+        if not session:
+            raise HTTPException(401, "Authentication required")
+        if not ctx._is_admin(session):
+            raise HTTPException(403, "Global administrator required")
+
+    @app.get("/api/llm/admin/dashboard")
+    async def dashboard(request: Request, response: Response):
+        """Read worker inventory and bounded prompt-free metrics."""
+        require_admin(request)
+        response.headers["Cache-Control"] = "no-store"
+        return hub.llm_pool.dashboard()
+
+    @app.post("/api/llm/admin/qualify", status_code=202)
+    async def start_qualification(request: Request, data: dict):
+        """Start qualification only on its configured Shared worker."""
+        require_admin(request)
+        candidate = data.get("candidate")
+        if not isinstance(candidate, str) or not hub.llm_pool.start_qualification(candidate):
+            raise HTTPException(409, "Candidate is not configured or its worker is unavailable")
+        return {"status": "accepted"}
 
     def scoped_tenant(request, tenant):
         """Require an authenticated session and a concrete tenant scope."""

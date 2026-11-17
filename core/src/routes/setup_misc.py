@@ -293,13 +293,16 @@ def register(app, hub, ctx):
             # repoint the hub at an attacker repo or a weird ref. Admin-only
             # route, but config fields must never be arbitrary strings.
             _validate_update_config(config)
-            if "llm_cloud_profiles" in config:
-                from routes.llm import validate_cloud_profiles
+            if config.keys() & {"llm_cloud_profiles", "llm_task_models", "llm_ab_pr_repos",
+                                "llm_qualification_candidates"}:
+                from routes.llm import validate_cloud_profiles, validate_pool_config
                 session = ctx._session_user(request)
                 if not ctx._is_admin(session):
-                    raise HTTPException(403, "Only administrators can configure cloud LLM profiles")
-                config["llm_cloud_profiles"] = await validate_cloud_profiles(
-                    hub, config["llm_cloud_profiles"], session)
+                    raise HTTPException(403, "Only global administrators can configure LLM policies")
+                validate_pool_config(hub, config)
+                if "llm_cloud_profiles" in config:
+                    config["llm_cloud_profiles"] = await validate_cloud_profiles(
+                        hub, config["llm_cloud_profiles"], session)
 
             # Get (creating if needed) the stored global config dict.
             gc = hub.state.system_state.setdefault("global_config", {})

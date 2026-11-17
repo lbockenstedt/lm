@@ -28,9 +28,12 @@ def make_pool():
         approved_modules=dict.fromkeys(owners, True),
         spoke_module_types=dict.fromkeys(owners, "llm"),
         is_draining=lambda key: False,
+        _primary_key=lambda key: key,
         request_response=AsyncMock(),
         state=SimpleNamespace(
+            get_global_config=dict,
             get_tenant=lambda name: name in owners.values(),
+            get_module_name=lambda key: f"Worker {key}",
             system_state={"module_metadata": {
                 key: {"tenant_id": tenant, "module_type": "llm"}
                 for key, tenant in owners.items()
@@ -43,6 +46,54 @@ def make_pool():
             "status": "SUCCESS", "models": {JOB["model"]: DIGEST}, "available": True,
         })
     return pool
+
+
+def test_admin_llm_routes_reject_non_admin_before_using_pool():
+    """Fleet diagnostics and qualification are not tenant-admin operations."""
+    app = FastAPI()
+    pool = SimpleNamespace(dashboard=lambda: pytest.fail("unauthorized read"),
+                           start_qualification=lambda key: pytest.fail("unauthorized dispatch"))
+    ctx = SimpleNamespace(_session_user=lambda request: {"role": "tenant_admin"},
+                          _is_admin=lambda session: False)
+    llm.register(app, SimpleNamespace(llm_pool=pool), ctx)
+    with TestClient(app) as client:
+        assert client.get("/api/llm/admin/dashboard").status_code == 403
+        assert client.post("/api/llm/admin/qualify", json={"candidate": "cpu"}).status_code == 403
+
+
+def test_qualification_reserves_only_shared_test_worker_and_handles_old_reply():
+    """Qualification cannot touch a tenant-owned worker or use it for serving."""
+    pool = make_pool()
+    pool.hub.state.get_global_config = lambda: {"llm_qualification_candidates": {
+        "cpu": {"worker": "c", "label": "CPU trial"},
+        "owned": {"worker": "a", "label": "Not a test worker"},
+    }}
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def old_peer(*args, **kwargs):
+        """Hold the slot until the older spoke's error arrives."""
+        entered.set()
+        await release.wait()
+        return {"payload": {"data": {"status": "ERROR", "message": "Unknown command"}}}
+
+    async def exercise():
+        """Verify reservation and the resulting terminal state."""
+        assert not pool.start_qualification("owned")
+        assert pool.start_qualification("cpu")
+        assert not pool.start_qualification("cpu")
+        await entered.wait()
+        assert pool.dashboard()["jobs"][0]["state"] == "running"
+        assert (await pool.complete("tenant-without-workers", JOB))["code"] == "no_capacity"
+        task = next(t for t in asyncio.all_tasks() if t.get_coro().__name__ == "_qualify")
+        release.set()
+        await task
+
+    pool.hub.request_response.side_effect = old_peer
+    asyncio.run(exercise())
+    assert pool.hub.request_response.call_args.args[:2] == ("c", "LLM_QUALIFY")
+    assert pool.dashboard()["jobs"][0]["code"] == "unsupported_or_invalid_reply"
+    assert not pool.reserved
 
 
 def test_pool_tries_second_own_worker_and_never_spills_to_shared():
@@ -161,7 +212,7 @@ def test_slow_cpu_reply_is_advisory_not_failure(monkeypatch):
     import llm_pool
 
     start = pool.inventory["a"][0]
-    clock = iter((start, start, start + 700))
+    clock = iter((start, start, start, start + 700, start + 700))
     monkeypatch.setattr(llm_pool, "time", SimpleNamespace(monotonic=lambda: next(clock)))
     pool.hub.request_response.return_value = {"status": "SUCCESS", "text": "preserved"}
     result = asyncio.run(pool.complete("tenant-a", JOB))

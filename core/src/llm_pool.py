@@ -3,6 +3,7 @@
 import asyncio
 import re
 import time
+from collections import deque
 from collections.abc import Mapping
 
 from access import same_tenant, tenant_is_shared
@@ -60,6 +61,38 @@ def valid_model(model, digest):
             and isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest))
 
 
+def qualification_result(data):
+    """Keep only exact artifact identity and fixed, complete fixture results."""
+    if not isinstance(data, Mapping) or not valid_model(data.get("model"), data.get("digest")):
+        return None
+    version, fixtures = data.get("version"), data.get("fixtures")
+    if (not isinstance(version, str) or not re.fullmatch(r"\d{1,5}\.\d{1,5}\.\d{1,5}", version)
+            or not isinstance(fixtures, list) or len(fixtures) != 2):
+        return None
+    results = []
+    for expected, row in zip(("json", "indentation"), fixtures):
+        if (not isinstance(row, dict) or row.get("fixture") != expected
+                or not isinstance(row.get("passed"), bool)):
+            return None
+        results.append({"fixture": expected, "passed": row["passed"], **{
+            name: row[name] for name in ("elapsed_s", "eval_count", "eval_duration", "load_duration")
+            if type(row.get(name)) in (int, float) and 0 <= row[name] < 2**53
+        }})
+    return {"model": data["model"], "digest": data["digest"], "version": version, "fixtures": results}
+
+
+QUALIFICATION_GUIDANCE = {
+    "unsupported_or_invalid_reply": "Update the test agent and rerun qualification.",
+    "baseline_unavailable": "Start the pinned baseline and install its approved model on the test worker.",
+    "runtime_version_mismatch": "Check the staged candidate version and manifest before rerunning.",
+    "candidate_not_provisioned": "Stage the candidate and its local qualification manifest.",
+    "candidate_pull_failed": "Check registry access and disk space on the test worker.",
+    "candidate_digest_mismatch": "Check the approved digest and registry tag; do not promote this artifact.",
+    "qualification_runtime_failed": "Check CPU, memory and the candidate service logs; consider a smaller model.",
+    "fixture_mismatch": "Check the response format and thinking settings, then qualify a different artifact or runtime.",
+}
+
+
 class LlmPool:
     """Keep only volatile worker metadata and in-flight reservations."""
 
@@ -73,6 +106,148 @@ class LlmPool:
         self.cloud_cooldown = {}
         self.reserved = set()
         self.sequence = 0
+        self.jobs = deque(maxlen=200)
+        self.qualification_jobs = {}
+        self.active_jobs = {}
+        self.runtime_versions = {}
+
+    def qualification_candidates(self):
+        """Resolve configured candidates to approved Shared test workers only."""
+        manifest = self.hub.state.get_global_config().get("llm_qualification_candidates")
+        metadata = self.hub.state.system_state.get("module_metadata", {})
+        candidates = {}
+        for key, row in (manifest.items() if isinstance(manifest, dict) else ()):
+            if (not isinstance(row, dict) or not isinstance(key, str)
+                    or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", key)):
+                continue
+            worker, label = row.get("worker"), row.get("label")
+            if not isinstance(worker, str) or not isinstance(label, str):
+                continue
+            pk = self.hub._primary_key(worker)
+            record = metadata.get(pk, {})
+            if (isinstance(record, dict) and record.get("module_type") == "llm"
+                    and self.hub.approved_modules.get(pk)
+                    and tenant_is_shared(record.get("tenant_id"))):
+                candidates[key] = (pk, label[:100])
+        return candidates
+
+    def dashboard(self):
+        """Return bounded operational metadata, with no prompts, output or credentials."""
+        candidates = self.qualification_candidates()
+        test_workers = {pk for pk, _ in candidates.values()}
+        metadata = self.hub.state.system_state.get("module_metadata", {})
+        workers = []
+        for pk, row in metadata.items():
+            if not isinstance(row, dict) or row.get("module_type") != "llm":
+                continue
+            socket = self.hub.active_connections.get(pk)
+            report = self.inventory.get(pk)
+            fresh = socket is not None and report and report[1] is socket and time.monotonic() - report[0] < 75
+            state = ("pending" if not self.hub.approved_modules.get(pk) else
+                     "disconnected" if socket is None else
+                     "draining" if self.hub.is_draining(pk) else
+                     "unavailable" if pk in self.worker_issues else
+                     "no_fresh_report" if not fresh else
+                     "busy" if pk in self.reserved or not report[3] else "ready")
+            workers.append({"name": self.hub.state.get_module_name(pk), "state": state,
+                            "issues": [self.worker_issues[pk]] if pk in self.worker_issues else [],
+                            "version": self.runtime_versions.get(pk) if fresh else None,
+                            "qualification": pk in test_workers,
+                            "models": [{"name": name, "digest": digest}
+                                       for name, digest in (report[2].items() if fresh else ())]})
+        jobs = (list(self.qualification_jobs.values()) + list(self.active_jobs.values())
+                + list(reversed(self.jobs)))
+        metrics = {}
+        for job in self.jobs:
+            if job.get("model") is None:
+                continue
+            key = (job["model"], job["tier"], job.get("digest"), job.get("version"), job["kind"])
+            row = metrics.setdefault(key, {"model": key[0], "tier": key[1], "completed": 0,
+                                           "digest": key[2], "version": key[3], "kind": key[4],
+                                           "failed": 0, "no_capacity": 0, "mean_elapsed_s": 0.0})
+            if job["state"] == "no_capacity":
+                row["no_capacity"] += 1
+                continue
+            count = row["completed"] + row["failed"]
+            counter = "completed" if job["state"] == "passed" else "failed"
+            row[counter] += 1
+            row["mean_elapsed_s"] += (job["elapsed_s"] - row["mean_elapsed_s"]) / (count + 1)
+        return {"workers": workers, "jobs": jobs, "metrics": list(metrics.values()),
+                "candidates": [{"key": key, "label": label,
+                                "worker": self.hub.state.get_module_name(pk)}
+                               for key, (pk, label) in candidates.items()]}
+
+    def start_qualification(self, key):
+        """Schedule a synthetic job only on its configured Shared worker."""
+        candidate = self.qualification_candidates().get(key)
+        if not candidate:
+            return False
+        worker, label = candidate
+        socket = self.hub.active_connections.get(worker)
+        report = self.inventory.get(worker)
+        if (socket is None or self.hub.is_draining(worker) or worker in self.reserved
+                or not report or report[1] is not socket or not report[3]
+                or time.monotonic() - report[0] >= 75):
+            return False
+        job = {"kind": "qualification", "state": "running", "candidate": label, "tier": "local",
+               "worker": self.hub.state.get_module_name(worker)}
+        self.qualification_jobs[worker] = job
+        self.reserved.add(worker)
+        asyncio.create_task(self._qualify(worker, socket, key, job))
+        return True
+
+    async def _qualify(self, worker, socket, key, job):
+        """Store only validated qualification results from the reserved socket."""
+        start = time.monotonic()
+        try:
+            candidate = self.qualification_candidates().get(key)
+            if not candidate or candidate[0] != worker or self.hub.active_connections.get(worker) is not socket:
+                job.update(state="failed", code="worker_changed")
+                return
+            reply = await asyncio.wait_for(self.hub.request_response(
+                worker, "LLM_QUALIFY", {"candidate": key}, timeout=1440), 1445)
+            envelope = reply.get("payload", {}) if isinstance(reply, Mapping) else None
+            data = envelope.get("data", reply) if isinstance(envelope, Mapping) else None
+            if not isinstance(data, Mapping):
+                data = {}
+            if self.hub.active_connections.get(worker) is not socket:
+                job.update(state="failed", code="worker_changed")
+                return
+            code = data.get("code")
+            if data.get("message") == "Timed out waiting for spoke response":
+                code = "dispatch_outcome_unknown"
+            elif code not in ("qualified", "fixture_mismatch", "candidate_not_provisioned",
+                            "runtime_version_mismatch", "candidate_pull_failed",
+                            "candidate_digest_mismatch", "qualification_runtime_failed",
+                            "baseline_unavailable", "busy"):
+                code = "unsupported_or_invalid_reply"
+            result, baseline = qualification_result(data), qualification_result(data.get("baseline"))
+            if result and baseline:
+                job.update(result, baseline=baseline)
+                job["fixture_deltas"] = [
+                    {"fixture": after["fixture"], "pass_delta": int(after["passed"]) - int(before["passed"]),
+                     **({"elapsed_s_delta": round(after["elapsed_s"] - before["elapsed_s"], 3)}
+                        if "elapsed_s" in after and "elapsed_s" in before else {})}
+                    for after, before in zip(result["fixtures"], baseline["fixtures"])
+                ]
+            passed = (result and baseline and code == "qualified" and data.get("status") == "SUCCESS"
+                      and all(row["passed"] for row in result["fixtures"]))
+            if code == "qualified" and not passed:
+                code = "unsupported_or_invalid_reply"
+            job.update(state="passed" if passed else "failed", code=code)
+        except asyncio.CancelledError:
+            job.update(state="failed", code="dispatch_outcome_unknown")
+            raise
+        except (TimeoutError, ConnectionError):
+            job.update(state="failed", code="dispatch_outcome_unknown")
+        finally:
+            if job.get("code") in QUALIFICATION_GUIDANCE:
+                job["resolution"] = QUALIFICATION_GUIDANCE[job["code"]]
+            self.reserved.discard(worker)
+            self.qualification_jobs.pop(worker, None)
+            job["elapsed_s"] = round(time.monotonic() - start, 3)
+            self.jobs.append(job)
+
 
     def report(self, key, websocket, data):
         """Accept bounded catalog metadata only from the current approved socket."""
@@ -86,6 +261,7 @@ class LlmPool:
         if (data.get("status") != "SUCCESS" or not isinstance(models, dict)
                 or len(models) > 64):
             self.inventory.pop(key, None)
+            self.runtime_versions.pop(key, None)
             code = data.get("code")
             if code not in ("runtime_version_mismatch", "runtime_unavailable", "runtime_not_started"):
                 code = "runtime_unavailable"
@@ -102,6 +278,11 @@ class LlmPool:
         self.start_attempts.pop(key, None)
         approved = {name: digest for name, digest in models.items() if valid_model(name, digest)}
         self.inventory[key] = (time.monotonic(), websocket, approved, data.get("available") is True)
+        version = data.get("version")
+        if isinstance(version, str) and re.fullmatch(r"\d{1,5}\.\d{1,5}\.\d{1,5}", version):
+            self.runtime_versions[key] = version
+        else:
+            self.runtime_versions.pop(key, None)
         if not approved:
             self.worker_issues[key] = diagnostic("no_matching_models")
 
@@ -124,6 +305,7 @@ class LlmPool:
     def forget(self, key):
         """Forget status belonging to a disconnected worker."""
         self.inventory.pop(key, None)
+        self.runtime_versions.pop(key, None)
         self.worker_issues.pop(key, None)
         self.start_attempts.pop(key, None)
 
@@ -199,14 +381,20 @@ class LlmPool:
                 or self.cloud_cooldown.get(endpoint, 0) > time.monotonic()):
             return None
         self.cloud_busy.add(endpoint)
+        job = {"kind": "inference", "tier": "cloud", "model": model, "state": "running"}
+        self.active_jobs[id(job)] = job
+        started = time.monotonic()
         try:
             # Whitelist the overlay input: a stored inline key must never be used.
             resolved = await instance_vault.overlay(
                 self.hub, {"vault_credential": profile["vault_credential"]}, "llm_cloud_profiles")
             key = resolved.get("api_key")
             if not isinstance(key, str) or not key:
+                job.update(state="failed", code="credential_unavailable")
                 return None
             result = await asyncio.to_thread(llm_cloud.complete_public, endpoint, model, key, prompt)
+            job.update(state="passed" if result.get("status") == "SUCCESS" else "failed",
+                       code=result.get("code"))
             if result.get("code") == "cloud_rate_limit":
                 self.cloud_cooldown[endpoint] = time.monotonic() + 60
                 return None
@@ -215,13 +403,20 @@ class LlmPool:
             return result
         finally:
             self.cloud_busy.discard(endpoint)
+            self.active_jobs.pop(id(job), None)
+            if job["state"] == "running":
+                job.update(state="failed", code="dispatch_outcome_unknown")
+            job["elapsed_s"] = round(time.monotonic() - started, 3)
+            self.jobs.append(job)
 
     def _tenant_workers(self, tenant):
         """Select the tenant's own pool even if it is entirely disconnected."""
         metadata = self.hub.state.system_state.get("module_metadata", {})
         own, shared = [], []
+        test_workers = {pk for pk, _ in self.qualification_candidates().values()}
         for key, record in metadata.items():
             if (not isinstance(record, dict)
+                    or key in test_workers
                     or record.get("module_type") != "llm"
                     or not self.hub.approved_modules.get(key)):
                 continue
@@ -248,9 +443,24 @@ class LlmPool:
         if not artifacts:
             return {"status": "ERROR", "code": "invalid_request"}
         for model, digest in artifacts:
-            result = await self._dispatch(tenant, prompt, model, digest, output_format)
-            if result is not None:
-                return result
+            started = time.monotonic()
+            job = {"kind": "inference", "state": "running", "model": model,
+                   "digest": digest, "tier": "local"}
+            self.active_jobs[id(job)] = job
+            try:
+                result = await self._dispatch(tenant, prompt, model, digest, output_format, job)
+                if result is not None:
+                    job.update(state="passed" if result["status"] == "SUCCESS" else "failed",
+                               code=result.get("code"), metrics=result.get("metrics", {}),
+                               issues=result.get("issues", []))
+                    return result
+                job.update(state="no_capacity", code="no_capacity")
+            finally:
+                self.active_jobs.pop(id(job), None)
+                if job["state"] == "running":
+                    job.update(state="failed", code="dispatch_outcome_unknown")
+                job["elapsed_s"] = round(time.monotonic() - started, 3)
+                self.jobs.append(job)
         return {"status": "ERROR", **diagnostic("no_capacity"), "retryable": True}
 
     def _job_models(self, data):
@@ -269,7 +479,7 @@ class LlmPool:
                                   if isinstance(row, dict)
                                   and valid_model(row.get("model"), row.get("digest"))))
 
-    async def _dispatch(self, tenant, prompt, model, digest, output_format):
+    async def _dispatch(self, tenant, prompt, model, digest, output_format, job):
         """Try one artifact across its eligible workers, or return no capacity."""
         # Rotate the starting point, but recheck all claims before each dispatch.
         workers = self._tenant_workers(tenant)
@@ -278,6 +488,7 @@ class LlmPool:
         for key in workers[offset:] + workers[:offset]:
             if not self._eligible(key, tenant, model, digest):
                 continue
+            job["version"] = self.runtime_versions.get(key)
             self.reserved.add(key)
             started = time.monotonic()
             try:
@@ -291,7 +502,7 @@ class LlmPool:
             finally:
                 self.reserved.discard(key)
 
-            envelope = reply.get("payload", {})
+            envelope = reply.get("payload", {}) if isinstance(reply, Mapping) else None
             payload = envelope.get("data", reply) if isinstance(envelope, Mapping) else None
             if not isinstance(payload, Mapping):
                 return {"status": "ERROR", "code": "invalid_response"}

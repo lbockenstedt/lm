@@ -32,9 +32,9 @@ def runtime_service(action):
     ).returncode == 0
 
 
-def ollama_request(path, body=None, timeout=3):
+def ollama_request(path, body=None, timeout=3, *, port=11438):
     """Read one bounded JSON reply without using HTTP proxies or redirects."""
-    conn = http.client.HTTPConnection("127.0.0.1", 11438, timeout=timeout)
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
         conn.request(
             "GET" if body is None else "POST", path,
@@ -140,7 +140,7 @@ class LlmSpoke(BaseSpoke):
         except (OSError, ValueError, http.client.HTTPException):
             return {"status": "ERROR", "code": "runtime_unavailable"}
         return {
-            "status": "SUCCESS", "models": models,
+            "status": "SUCCESS", "models": models, "version": QUALIFIED_OLLAMA_VERSION,
             "available": bool(models) and self._job is None and not self._stopping,
         }
 
@@ -167,6 +167,16 @@ class LlmSpoke(BaseSpoke):
             return await self.get_status()
         if command_type == "LLM_START_RUNTIME":
             return await self._start_runtime()
+        if command_type == "LLM_QUALIFY":
+            from agent.src.llm_qualification import qualify
+            if self._stopping or self._job is not None:
+                return {"status": "ERROR", "code": "busy"}
+            if not self._service_started:
+                return {"status": "ERROR", "code": "baseline_unavailable"}
+            job = self._job = asyncio.create_task(
+                qualify(data.get("candidate"), ollama_request, self._available_models))
+            job.add_done_callback(self._release)
+            return await asyncio.shield(job)
         if command_type == "GET_VERSION":
             return {"status": "SUCCESS", "version": await asyncio.to_thread(
                 lambda: (Path(__file__).resolve().parents[2] / "VERSION").read_text().strip())}

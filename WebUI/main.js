@@ -461,6 +461,7 @@ for (const _cls of Object.keys(MODULE_CLASSES)) {
     for (const _p of MODULE_CLASSES[_cls]) PRODUCT_LABEL[_p] = _cls;
 }
 const VIEW_LABEL = {
+    llm: 'LLM',
     dashboard: 'Dashboard', setup: 'Setup', settings: 'System', logs: 'Logs', ldap: 'Directory', bugs: 'Bug Report', features: 'Feature Request', templates: 'Template Repo',
 };
 function updateHeaderModule() {
@@ -4134,6 +4135,7 @@ function _rebuildMainNav(allSpokes, connections) {
         ${isAdmin() ? adminSettings : ''}
         ${isAdmin() ? adminLogs : ''}
         ${isAdmin() ? _securityNavHtml() : ''}
+        ${isAdmin() ? '<button type="button" id="nav-llm" class="nav-item p-3 rounded-r-lg flex items-center gap-3 text-xs font-medium">LLM</button>' : ''}
         ${(isAdmin() || isTenantAdmin()) ? _osUpdatesNavHtml() : ''}
         ${(isAdmin() && window.__lmCertMonEnabled) ? _certMonNavHtml() : ''}
         ${(isAdmin() || isTenantAdmin()) ? _credVaultNavHtml() : ''}
@@ -4142,6 +4144,7 @@ function _rebuildMainNav(allSpokes, connections) {
         ${(isAdmin() || isTenantAdmin()) ? _featureRequestNavHtml() : ''}
         ${(!isAdmin() && isTenantAdmin()) ? _myDevicesNavHtml() : ''}
     `;
+    mainNav.querySelector('#nav-llm')?.addEventListener('click', () => setView('llm'));
 
     // Normalize the nav font size across every item. The admin items (Setup/
     // System/Logs) come from the STATIC index.html (captured via _getNavHtml),
@@ -4376,6 +4379,7 @@ function renderSpokeIndicators() {
 }
 
 async function setView(viewId) {
+    if (viewId === 'llm' && !isAdmin()) return;
     if ((viewId === 'setup' || viewId === 'settings' || viewId === 'logs') && !isAdmin()) {
         return;  // silently block — nav items are hidden, this guards deep-links
     }
@@ -4502,6 +4506,7 @@ async function setView(viewId) {
 const lmViews = {};
 
 const VIEW_LOADERS = {
+    llm: () => lmViews.llm(document.getElementById('llm-content')),
     // dashboard has real per-tenant content (summary tiles + infra status), so it
     // needs a loader too. A tenant switch re-renders through setSubView (not
     // setView, which would reset the active tab), and with no entry here the
@@ -5013,6 +5018,8 @@ function _viewTemplate(viewId) {
   <div id="reports-content"><p class="text-sm text-slate-500 italic p-4">Loading…</p></div>
 </div>`;
 
+        case 'llm':
+            return `<div id="llm-content"></div>`;
         case 'osupdates':
             return `<div id="osupdates-content"></div>`;
 

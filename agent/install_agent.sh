@@ -381,6 +381,7 @@ stage_role() {
         henet)      ROLE_REQ="$INSTALL_DIR/henet/requirements.txt" ;;   # in-repo (websockets); manages HE.NET public DNS, no local server
         dhcp)       ROLE_REQ="$INSTALL_DIR/dhcp/requirements.txt" ;;
         console)    ROLE_REQ="$INSTALL_DIR/console/requirements.txt" ;;   # in-repo (pyserial); agent runs as root so /dev/tty* needs no dialout
+        llm)        ;;  # in-repo role; vetted runtime and model bytes are staged separately
         statuspage) ROLE_REQ="$INSTALL_DIR/statuspage/requirements.txt" ;;   # in-repo (fastapi/uvicorn); serves the public status page on its own port
         proxy)      ROLE_REQ="$INSTALL_DIR/proxy/requirements.txt" ;;   # in-repo (aiohttp); per-tenant edge WebUI reverse proxy (no client-cert prompt)
         network)    ROLE_REPO="https://github.com/lbockenstedt/nw.git";        ROLE_CLONE_DIR="nw";       ROLE_REQ="$INSTALL_DIR/nw/requirements.txt" ;;
@@ -394,7 +395,7 @@ stage_role() {
                     ROLE_APT="certbot python3-certbot-dns-cloudflare python3-certbot-dns-route53 openssl" ;;
         truenas)    ROLE_REPO="https://github.com/lbockenstedt/truenas.git";    ROLE_CLONE_DIR="truenas";  ROLE_REQ="$INSTALL_DIR/truenas/requirements.txt" ;;   # sibling repo; requirements.txt pins truenas-api-client (official WS JSON-RPC client) + websockets
         zabbix)    ROLE_REPO="https://github.com/lbockenstedt/zabbix.git";    ROLE_CLONE_DIR="zabbix";  ROLE_REQ="$INSTALL_DIR/zabbix/requirements.txt" ;;   # sibling repo; requirements.txt pins zabbix-api-client (official WS JSON-RPC client) + websockets
-        *) echo "❌ Unknown role '$role'"; echo "Valid: dns henet dhcp network netbox opnsense ldap simulation cppm proxmox le console statuspage proxy truenas zabbix"; exit 1 ;;
+        *) echo "❌ Unknown role '$role'"; echo "Valid: dns henet dhcp network netbox opnsense ldap simulation cppm proxmox le console statuspage proxy truenas zabbix llm"; exit 1 ;;
     esac
 
     if [[ -n "$ROLE_REPO" ]]; then
@@ -596,6 +597,8 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
+# Stage the disabled unit so an agent installed without roles can load it later.
+install -m 0644 "$INSTALL_DIR/agent/lm-llm-ollama.service" /etc/systemd/system/lm-llm-ollama.service
 systemctl daemon-reload
 
 # The legacy Generic Leaf Agent was already purged early (retire_legacy_agent,
