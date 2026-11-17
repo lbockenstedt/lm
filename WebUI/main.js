@@ -43,7 +43,7 @@
 //          roles (loadApprovedSpokes, fetchLoadedRoles, showLoadRoleModal,
 //          loadRole), OPNsense management (loadOpnsenseManagement)
 //   js/perf-trends.js: shared 5-minute performance charts + History range
-//          selector (Storage → Performance, Firewalls → Overview)
+//          selector (Storage → Overview, Firewalls → Overview)
 //   js/nw.js, js/pxmx-console.js (loadPxmxData), js/netbox.js (loadNetboxData)
 //   js/time-window.js: shared Overview "Time window" picker (DNS, DHCP)
 //   js/dns-dhcp-cluster.js: DNS (loadDNSData), clustered DNS / HA DHCP panels
