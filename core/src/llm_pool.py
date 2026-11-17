@@ -290,7 +290,6 @@ class LlmPool:
                 or len(models) > 64):
             self.inventory.pop(key, None)
             self.runtime_versions.pop(key, None)
-            self.hardware.pop(key, None)
             code = data.get("code")
             if code not in ("runtime_version_mismatch", "runtime_unavailable", "runtime_not_started"):
                 code = "runtime_unavailable"
@@ -335,6 +334,7 @@ class LlmPool:
         """Forget status belonging to a disconnected worker."""
         self.inventory.pop(key, None)
         self.runtime_versions.pop(key, None)
+        self.hardware.pop(key, None)
         self.worker_issues.pop(key, None)
         self.start_attempts.pop(key, None)
 

@@ -173,6 +173,20 @@ def test_task_routes_only_to_workers_meeting_reported_guest_capacity():
                                       "arch": "x86_64", "cpu_model": "Test CPU"}
 
 
+def test_unavailable_runtime_still_reports_guest_capacity():
+    """An Ollama error must not erase independent hardware observations."""
+    pool = make_pool()
+    capabilities = {"mode": "cpu", "vcpus": 8, "ram_bytes": 16 * 1024**3}
+    pool.report("a", pool.hub.active_connections["a"], {
+        "status": "ERROR", "code": "runtime_version_mismatch", "capabilities": capabilities,
+    })
+    worker = next(row for row in pool.dashboard()["workers"] if row["name"] == "Worker a")
+    assert worker["state"] == "unavailable"
+    assert worker["capabilities"] == capabilities
+    pool.forget("a")
+    assert not next(row for row in pool.dashboard()["workers"] if row["name"] == "Worker a")["capabilities"]
+
+
 def test_pool_uses_shared_only_for_tenant_without_its_own_pool():
     """Only Shared can supply work when the tenant owns no workers."""
     pool = make_pool()

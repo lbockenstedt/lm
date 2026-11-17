@@ -207,6 +207,7 @@ function metricsRow(m) {
 
 // ── Render helpers ──────────────────────────────────────────────────────────
 
+// Surface action feedback without replacing the data snapshot.
 function renderStatus(status) {
     if (!status.type) return '';
     const cls = status.type === 'error'
@@ -215,6 +216,7 @@ function renderStatus(status) {
     return safeHtml`<div class="mb-3 p-2 rounded text-xs border ${cls}">${status.message}</div>`;
 }
 
+// Show registered workers even when no runtime is available.
 function renderWorkersSection(workers) {
     if (!workers.length) {
         return safeHtml`<div class="mb-4">
@@ -240,6 +242,7 @@ function renderWorkersSection(workers) {
     </div>`;
 }
 
+// Keep active jobs visible alongside recent terminal outcomes.
 function renderJobsSection(jobs) {
     if (!jobs.length) {
         return safeHtml`<div class="mb-4">
@@ -265,6 +268,7 @@ function renderJobsSection(jobs) {
     </div>`;
 }
 
+// Separate availability counts from completed inference timings.
 function renderMetricsSection(metrics) {
     if (!metrics.length) {
         return safeHtml`<div class="mb-4">
@@ -306,6 +310,7 @@ function renderCandidatesSection(candidates) {
 
 // Ignore stale requests if a second load reuses the same root element.
 const visits = new WeakMap();
+// Keep the dashboard and settings form on independent render lifecycles.
 async function renderLlmDashboard(container) {
     if (!container) return;
     const visit = {};
@@ -324,6 +329,7 @@ async function renderLlmDashboard(container) {
     const snapshot = container.querySelector('[data-llm-snapshot]');
     const settings = container.querySelector('[data-llm-settings]');
 
+    // Replace only the snapshot so a refresh cannot discard unsaved settings.
     function render() {
         if (!isCurrent()) return;
         snapshot.innerHTML = safeHtml`
