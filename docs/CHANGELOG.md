@@ -10,6 +10,18 @@ first. This is a pointer index, not the source of truth — each entry links to
 the module doc that describes the behaviour in full. Internal refactors and
 CI/tooling changes are omitted unless they change what an operator sees.
 
+## Week of 2026-11-16
+
+### WebUI
+
+- **History selectors match on Firewalls and Storage.** On both Firewalls →
+  Overview and Storage → Overview the History time selector now sits between
+  the summary tiles and the charts, and both open on 24 hours. See
+  [opnsense.md](opnsense.md#how-to-use-it).
+- **The header search no longer covers Help on a narrow window.** Below
+  1280px the search box shrinks to fit, and below 1024px Help and Updates
+  show only their icons.
+
 ## Week of 2026-11-09
 
 ### Firewalls
@@ -70,8 +82,8 @@ CI/tooling changes are omitted unless they change what an operator sees.
 - **Firewall performance history.** Firewalls → Overview now has History
   charts per firewall: throughput (bits/s), packets/s with interface errors,
   CPU and memory, and pf states, for all interfaces or one picked interface.
-  It uses the same time selector as Storage → Performance (1h to 7d or a
-  custom range; 7 days is the default). The firewall spoke keeps 7 days of
+  It uses the same time selector as Storage → Overview (1h to 7d or a
+  custom range; 24 hours is the default). The firewall spoke keeps 7 days of
   5-minute averages and pushes them to the hub. Needs the opnsense spoke
   update. See [opnsense.md](opnsense.md#how-to-use-it).
 
