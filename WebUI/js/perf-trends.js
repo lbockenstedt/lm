@@ -1,4 +1,4 @@
-// Shared performance trend charts: Storage → Performance (nw.js) and
+// Shared performance trend charts: Storage → Overview (nw.js) and
 // Firewalls → Overview (views/firewall-overview.js). Rows are 5-minute
 // averages [{ts, metrics}] from a spoke's 7-day history; perfTrendChart draws
 // one SVG line chart, perfRangeBar is the History time-range selector (1h…7d
