@@ -254,3 +254,153 @@ def test_escalation_ledger_survives_restart(tmp_path):
     hub._save_sentinel_ledger()
 
     assert hub._load_sentinel_ledger() == {"hub|abc": 123.0}
+
+
+# --------------------------------------------------------------------------
+# 5xx API responses
+# --------------------------------------------------------------------------
+
+def _access(status, ip="4.148.8.120:13267", query="?tenant=central"):
+    return (f'2026-11-17 21:34:05 - uvicorn.access - INFO - {ip} - '
+            f'"POST /api/dhcp/ha/discover{query} HTTP/1.1" {status}')
+
+
+def test_5xx_lines_flag_failing_api_routes_once_with_stable_text():
+    """A route answering 502 is an error even when its reason was a WARNING;
+    client address and query string must not split the fingerprint."""
+    lines = [_access(502), _access(502, ip="10.0.0.9:443", query="?tenant=ra"),
+             "2026-11-17 - Hub - WARNING - DHCP worker discovery failed: ..."]
+
+    out = main._sentinel_5xx_lines(lines)
+
+    assert out == ["[http-5xx] ERROR - POST /api/dhcp/ha/discover returned 502"]
+    assert main._sentinel_5xx_lines([_access(502, ip="1.2.3.4:5555")]) == out
+
+
+def test_5xx_lines_ignore_4xx_and_non_api_paths():
+    lines = [_access(409), _access(404),
+             '2026-11-17 - uvicorn.access - INFO - 1.2.3.4:1 - "GET /ws/spoke HTTP/1.1" 503']
+    assert main._sentinel_5xx_lines(lines) == []
+
+
+
+def test_analysis_text_carries_findings_from_the_wider_window():
+    """A 5xx seen only in the wide tail must reach the analyzer, or it judges
+    an unrelated healthy tail and never escalates what opened the gate."""
+    tail = ["2026-11-17 - Hub - INFO - all quiet",
+            "2026-11-17 - Hub - ERROR - already in the tail"]
+    synth = main._sentinel_5xx_lines([_access(502)])
+    errs = [tail[1]] + synth
+
+    text = main._sentinel_analysis_text(tail, errs)
+
+    assert text.endswith(synth[0])
+    assert text.count("already in the tail") == 1
+    assert main._sentinel_analysis_text(tail, [tail[1]]) == "\n".join(tail)
+
+
+def test_loop_sends_the_findings_to_the_analyzer():
+    src = open(os.path.join(_SRC, "main.py")).read()
+    assert "_sentinel_analysis_text(lines, errs)" in src
+
+
+def test_gate_reopens_when_a_failure_returns_after_a_quiet_window():
+    """A stable 5xx fingerprint must not stay suppressed forever: a quiet
+    window clears it, so the same route failing later is analyzed again."""
+    sigs = {}
+    errs = main._sentinel_5xx_lines([_access(502)])
+
+    first = main._sentinel_gate(sigs, "hub", errs)
+    assert first
+    assert main._sentinel_gate(sigs, "hub", errs) is None   # standing, unchanged
+    assert main._sentinel_gate(sigs, "hub", []) is None     # quiet window
+    assert main._sentinel_gate(sigs, "hub", errs) == first  # back again: reopens
+
+
+def test_gate_keeps_the_fingerprint_when_no_logs_were_read():
+    """An empty read (log read failed, relay gap) is not proof the fault
+    cleared, so a still-active fault is not re-analyzed when logs resume."""
+    sigs = {}
+    errs = main._sentinel_5xx_lines([_access(502)])
+    main._sentinel_gate(sigs, "hub", errs)
+
+    assert main._sentinel_gate(sigs, "hub", [], observed=False) is None
+    assert main._sentinel_gate(sigs, "hub", errs) is None
+
+
+def test_loop_uses_the_gate_helper():
+    src = open(os.path.join(_SRC, "main.py")).read()
+    assert "sig = _sentinel_gate(self._log_sentinel_sig, module, errs,\n" in src
+    assert "observed=bool(raw))" in src
+
+
+def test_loop_forgets_fingerprints_while_ab_is_unavailable(monkeypatch):
+    """With AB gone the sweep does not run, so a fault can clear and recur
+    unseen; its old fingerprint must not suppress it once AB is back."""
+    import asyncio
+    import types
+
+    sleeps = []
+
+    async def _sleep(_s):
+        sleeps.append(_s)
+        if len(sleeps) > 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", _sleep)
+    hub = types.SimpleNamespace(
+        state=types.SimpleNamespace(get_global_config=lambda: {}),
+        get_spoke_by_type=lambda _t: None,
+        _load_sentinel_ledger=lambda: {},
+        _log_sentinel_sig={"hub": "stale"},
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(main.LabManagerHub.run_log_health_loop(hub))
+
+    assert hub._log_sentinel_sig == {}
+
+
+def test_log_analysis_config_saves_the_triage_knobs():
+    # The 5xx / WARNING-volume knobs must be readable and settable through the
+    # Log Analysis config route the WebUI uses (rule 3.2: UI for everything).
+    from types import SimpleNamespace
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from routes import setup_admin
+
+    gc = {}
+    state = SimpleNamespace(get_global_config=lambda: gc, system_state={},
+                            _mark_dirty=lambda: None)
+    hub = SimpleNamespace(state=state, get_spoke_by_type=lambda t: None)
+    app = FastAPI()
+    app.state.hub = hub
+    setup_admin.register(app, hub, SimpleNamespace())
+    client = TestClient(app)
+
+    got = client.get("/setup/log-analysis/config").json()
+    assert (got["log_5xx_triage"], got["log_volume_triage"],
+            got["log_volume_threshold"]) == (True, True, 10)
+
+    saved = client.post("/setup/log-analysis/config", json={
+        "log_5xx_triage": False, "log_volume_triage": False,
+        "log_volume_threshold": 0}).json()
+    assert gc["log_5xx_triage"] is False and gc["log_volume_triage"] is False
+    assert gc["log_volume_threshold"] == 1
+    assert saved["log_volume_threshold"] == 1
+
+    client.post("/setup/log-analysis/config", json={"log_volume_threshold": "x"})
+    assert gc["log_volume_threshold"] == 1
+
+
+def test_sentinel_reads_each_module_once_and_hub_log_off_the_loop():
+    # hub.log can be hundreds of MB: a deque() walk of the whole file on the
+    # event loop stalled the hub. The sweep must read one tail per module, the
+    # hub's via the seek-based _tail_lines inside asyncio.to_thread.
+    import inspect
+    from main import LabManagerHub
+    tail_src = inspect.getsource(LabManagerHub._read_hub_log_tail)
+    assert "_tail_lines(p, n)" in tail_src and "deque(" not in tail_src
+    loop_src = inspect.getsource(LabManagerHub.run_log_health_loop)
+    assert "await _aio.to_thread(self._read_hub_log_tail, n)" in loop_src
+    assert loop_src.count("_gather_module_log_lines(") == 1

@@ -1090,6 +1090,17 @@ def register(app, hub, ctx):
         return {"ok": None, "running": False, "module": module or "hub",
                 "analysis": "", "verdict": None, "error": None, "at": None}
 
+    def _sentinel_settings(gc):
+        """The log-sentinel knobs as the UI sees them, with the loop's defaults
+        (main.run_log_health_loop): 5xx and WARNING-volume triage on, threshold 10."""
+        return {
+            "auto": gc.get("log_analysis_auto", True),
+            "interval_min": int(gc.get("log_analysis_interval_min", 30) or 30),
+            "log_5xx_triage": gc.get("log_5xx_triage", True) is not False,
+            "log_volume_triage": gc.get("log_volume_triage", True) is not False,
+            "log_volume_threshold": int(gc.get("log_volume_threshold", 10) or 10),
+        }
+
     @app.get("/setup/log-analysis/config")
     async def get_log_analysis_config():
         """Log-sentinel settings + last-sweep generation-time metric for the UI."""
@@ -1097,16 +1108,17 @@ def register(app, hub, ctx):
         hub = app.state.hub
         gc = hub.state.get_global_config()
         return {
-            "auto": gc.get("log_analysis_auto", True),
-            "interval_min": int(gc.get("log_analysis_interval_min", 30) or 30),
+            **_sentinel_settings(gc),
             "metric": getattr(hub, "_log_sentinel_metric", {}) or {},
             "ab_online": bool(hub.get_spoke_by_type("ab")),
         }
 
     @app.post("/setup/log-analysis/config")
     async def set_log_analysis_config(request: Request):
-        """Enable/disable the unattended sentinel + set its target interval (minutes).
-        The loop self-throttles so the effective gap is never shorter than a sweep takes."""
+        """Save the log-sentinel knobs: auto on/off, target interval (minutes), 5xx
+        triage, WARNING-volume triage and its threshold (min 1). Only sent fields
+        change; invalid numbers are ignored. The loop self-throttles so the effective
+        gap is never shorter than a sweep takes."""
         # A missing or invalid JSON body is treated as empty.
         hub = app.state.hub
         try:
@@ -1122,11 +1134,18 @@ def register(app, hub, ctx):
                 gc["log_analysis_interval_min"] = max(1, int(data.get("interval_min")))
             except (TypeError, ValueError):
                 pass
+        for key in ("log_5xx_triage", "log_volume_triage"):
+            if key in data:
+                gc[key] = bool(data.get(key))
+        if "log_volume_threshold" in data:
+            try:
+                gc["log_volume_threshold"] = max(1, int(data.get("log_volume_threshold")))
+            except (TypeError, ValueError):
+                pass
         # Store the config and mark state for saving.
         hub.state.system_state["global_config"] = gc
         hub.state._mark_dirty()
-        return {"ok": True, "auto": gc.get("log_analysis_auto", True),
-                "interval_min": int(gc.get("log_analysis_interval_min", 30) or 30)}
+        return {"ok": True, **_sentinel_settings(gc)}
 
     @app.post("/setup/logs/clear")
     async def clear_all_logs(request: Request):

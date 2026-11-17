@@ -485,6 +485,62 @@ def _sentinel_volume_lines(lines, threshold, minutes):
     return out
 
 
+_SENTINEL_5XX_RE = re.compile(r'"([A-Z]+) (/api/[^ ?"]*)[^"]*" (5\d\d)\b')
+
+
+def _sentinel_5xx_lines(lines):
+    """Synthetic error lines for API requests the hub answered with a 5xx.
+
+    A route that fails can log its reason at WARNING (or not at all), and the
+    uvicorn access line is INFO, so the sentinel's ERROR-only gate missed real
+    faults: DHCP HA discovery returned 502 for hours unseen. One line per
+    distinct method + path + status (query string and client address dropped),
+    so the fingerprint stays stable while the same route keeps failing."""
+    # Collect each distinct failing route once, in first-seen order.
+    out = []
+    for line in lines or ():
+        m = _SENTINEL_5XX_RE.search(line)
+        if not m:
+            continue
+        synth = f"[http-5xx] ERROR - {m.group(1)} {m.group(2)} returned {m.group(3)}"
+        if synth not in out:
+            out.append(synth)
+    return out
+
+
+def _sentinel_gate(last_sigs, module, errs, observed=True):
+    """Return the fingerprint of ``errs`` when it is new for ``module``, else None.
+
+    A window that was read and had no errors clears the module's remembered
+    fingerprint. A 5xx fingerprint (method + path + status) never changes, so
+    without the reset the same route failing again after a quiet spell would
+    match the stale fingerprint and never reach the analyzer. A window with
+    no log lines at all (``observed`` False: read failure, relay gap) proves
+    nothing, so the fingerprint is kept."""
+    if not errs:
+        if observed:
+            last_sigs.pop(module, None)
+        return None
+    sig = _sentinel_fingerprint(errs)
+    if last_sigs.get(module) == sig:
+        return None
+    last_sigs[module] = sig
+    return sig
+
+
+def _sentinel_analysis_text(lines, errs):
+    """The log text the sentinel sends to AB's analyzer.
+
+    The 5xx and volume findings come from a wider tail than ``lines``, so
+    they may not be in it at all. Without them the analyzer could judge an
+    unrelated healthy tail and never escalate what opened the gate. They go
+    last because the analyzer keeps the end of the text when it truncates."""
+    extra = [e for e in errs or () if e not in lines]
+    if not extra:
+        return "\n".join(lines)
+    return "\n".join(list(lines) + ["--- sentinel findings (wider window) ---"] + extra)
+
+
 def _log_cs_op_failure(source: str, cs_type: str, data: Dict[str, Any]) -> None:
     """Write a failed agent op (per-VM CS_PROGRESS result or a failed
     CS_COMMAND_RESULT terminal) to hub.log, so "VM 90012 · failed" in the UI
@@ -10858,14 +10914,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                        "at": now})
 
     def _read_hub_log_tail(self, n=400):
-        """Last n lines (list) of the hub's own log."""
+        """Last n lines (list) of the hub's own log. Seeks from the end
+        (_tail_lines), so the cost is O(n), not O(size of hub.log)."""
         # Prefer the on-disk hub log.
         try:
-            from collections import deque
             p = "/var/log/lm/hub.log"
             if os.path.exists(p):
-                with open(p, "r") as f:
-                    return [l.rstrip("\n") for l in deque(f, maxlen=n)]
+                return _tail_lines(p, n)
         except Exception:  # noqa: BLE001
             pass
         # Fall back to the in-memory log buffer.
@@ -11034,7 +11089,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 interval = max(60, interval_min * 60)
                 effective = max(interval, last_dur)  # self-throttle: never fire faster than a sweep takes
                 # Wait while disabled, without ab, or before the interval is up.
-                if not auto or not self.get_spoke_by_type("ab") or (_t.time() - last_sweep) < effective:
+                if not auto or not self.get_spoke_by_type("ab"):
+                    # Unobserved time: a fault may clear and recur unseen, so
+                    # don't let a remembered fingerprint suppress it later.
+                    self._log_sentinel_sig.clear()
+                    await _aio.sleep(30)
+                    continue
+                if (_t.time() - last_sweep) < effective:
                     await _aio.sleep(30)
                     continue
 
@@ -11046,25 +11107,40 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         # Only the last interval-minutes of logs — send the LLM recent
                         # activity, not the whole tail. Security lines never go to AB:
                         # the threat monitor handles them, and AB files public issues.
-                        lines = drop_security_lines(self._window_log_lines(
-                            self._gather_module_log_lines(module), interval_min))
-                        # Error lines, plus volume lines if enabled.
+                        # 5xx API responses and repeated warnings (both on by
+                        # default; the owner set the warning threshold to 10) need a
+                        # wider tail: 400 hub lines can cover only a few minutes of a
+                        # 30-minute window. Read once, at the wider size when needed,
+                        # with hub.log read off the event loop.
+                        want_5xx = gc.get("log_5xx_triage", True)
+                        want_volume = gc.get("log_volume_triage", True)
+                        n = 5000 if (want_5xx or want_volume) else 400
+                        if module == "hub":
+                            tail = await _aio.to_thread(self._read_hub_log_tail, n)
+                        else:
+                            tail = self._gather_module_log_lines(module, n)
+                        raw = tail[-400:]
+                        lines = drop_security_lines(self._window_log_lines(raw, interval_min))
                         errs = self._error_lines(lines)
-                        if gc.get("log_volume_triage", False):
-                            # Off by default; see _sentinel_volume_lines.
-                            errs += _sentinel_volume_lines(
-                                drop_security_lines(self._window_log_lines(
-                                    self._gather_module_log_lines(module, n=5000), interval_min)),
-                                int(gc.get("log_volume_threshold", 50) or 50), interval_min)
+                        if want_5xx or want_volume:
+                            wide = drop_security_lines(self._window_log_lines(tail, interval_min))
+                            if want_5xx:
+                                errs += _sentinel_5xx_lines(wide)
+                            if want_volume:
+                                errs += _sentinel_volume_lines(
+                                    wide, int(gc.get("log_volume_threshold", 10) or 10),
+                                    interval_min)
                         # Fingerprint the NORMALIZED errors, not the raw tail: every
                         # log line carries its own timestamp, so hashing raw text made
                         # a persistent condition look new on every single sweep.
-                        sig = _sentinel_fingerprint(errs)
                         # Cheap gate: skip unless this module has NEW error-level lines.
-                        if not errs or self._log_sentinel_sig.get(module) == sig:
+                        # A read that returned any history (even all older than the
+                        # window) is an observed quiet spell; an empty read is a
+                        # read failure or relay gap and proves nothing.
+                        sig = _sentinel_gate(self._log_sentinel_sig, module, errs,
+                                             observed=bool(raw))
+                        if not sig:
                             continue
-                        # Remember the new signature.
-                        self._log_sentinel_sig[module] = sig
                         # Title the hub with its version and commit.
                         if module == "hub":
                             running_ver = getattr(self, "_startup_version", "") or "unknown"
@@ -11102,7 +11178,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                             tag = (f" — v{ver}" if ver else "") + (f" @ {sha[:8]}" if sha else "")
                             title = f"{module} logs{tag}"
                         # Analyze the logs.
-                        res = await self.analyze_logs_via_ab(module, "\n".join(lines), title)
+                        res = await self.analyze_logs_via_ab(
+                            module, _sentinel_analysis_text(lines, errs), title)
                         if res.get("duration_s"):
                             durations.append(res["duration_s"])
                         # Escalate to ab unless still within the cooldown.
