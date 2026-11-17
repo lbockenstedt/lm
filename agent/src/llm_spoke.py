@@ -21,6 +21,7 @@ INFERENCE_TIMEOUT = 900
 DEFAULT_OLLAMA_VERSION = "0.40.16"
 SERVICE = "lm-llm-ollama.service"
 CATALOG = Path("/etc/lm/llm-models.json")
+BUNDLE_CATALOG = Path("/opt/lm-llm/llm-models.json")
 
 
 class RuntimeVersionMismatch(ValueError):
@@ -164,7 +165,10 @@ class LlmSpoke(BaseSpoke):
             try:
                 catalog = json.loads(await asyncio.to_thread(CATALOG.read_text, encoding="utf-8"))
             except FileNotFoundError:
-                catalog = {}
+                try:
+                    catalog = json.loads(await asyncio.to_thread(BUNDLE_CATALOG.read_text, encoding="utf-8"))
+                except FileNotFoundError:
+                    catalog = {}
         if not isinstance(catalog, dict) or not catalog:
             return {}
         inventory = await asyncio.to_thread(ollama_request, "/api/tags")

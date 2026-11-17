@@ -14,6 +14,8 @@
 #   Roles: dns | henet | dhcp | network | netbox | opnsense | ldap | simulation | cppm | proxmox | le
 #   (--roles is a comma-list; --role <one> is accepted as a backward-compat alias.
 #    Omit both for a bare agent that loads roles later via the hub WebUI.)
+#   --llm-bundle <tar> --llm-bundle-sha256 <digest> stages an approved offline
+#    serving bundle on a fresh worker; it does not replace an installed runtime.
 #
 #   --hub is optional: omit it (or pass "auto") to let the agent auto-discover the
 #   hub via mDNS/DNS (BaseControlPlane._resolve_hub_url).
@@ -67,6 +69,8 @@ AGENT_COLOCATED=false
 # — never a hard failure.
 ONBOARDING_PSK=""
 TENANT_ID_HINT=""
+LLM_BUNDLE=""
+LLM_BUNDLE_SHA256=""
 
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
@@ -84,9 +88,22 @@ while [[ "$#" -gt 0 ]]; do
         --tls-ca-cert) TLS_CA_CERT="$2"; shift ;;
         --onboarding-psk) ONBOARDING_PSK="$2"; shift ;;
         --tenant-hint)     TENANT_ID_HINT="$2"; shift ;;
+        --llm-bundle) LLM_BUNDLE="$2"; shift ;;
+        --llm-bundle-sha256) LLM_BUNDLE_SHA256="$2"; shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac; shift
 done
+if [[ -n "$LLM_BUNDLE" && -z "$LLM_BUNDLE_SHA256" || -z "$LLM_BUNDLE" && -n "$LLM_BUNDLE_SHA256" ]]; then
+    echo "--llm-bundle and --llm-bundle-sha256 must be supplied together" >&2
+    exit 1
+fi
+if [[ -n "$LLM_BUNDLE" ]]; then
+    [[ "$LLM_BUNDLE" = /* ]] || LLM_BUNDLE="$PWD/$LLM_BUNDLE"
+    if [[ ! -f "$LLM_BUNDLE" || ! "$LLM_BUNDLE_SHA256" =~ ^[a-f0-9]{64}$ ]]; then
+        echo "Supply a local LLM bundle and its trusted lowercase SHA-256" >&2
+        exit 1
+    fi
+fi
 
 # Accept a bare hub IP/host for --hub (e.g. `--hub 172.16.1.31` == `--hub
 # wss://172.16.1.31:443`). A ws://|wss:// scheme or the "auto" sentinel is left
@@ -598,6 +615,9 @@ WantedBy=multi-user.target
 EOF
 
 # Stage the disabled unit so an agent installed without roles can load it later.
+if [[ -n "$LLM_BUNDLE" ]]; then
+    python3 "$INSTALL_DIR/agent/src/llm_install.py" "$LLM_BUNDLE" "$LLM_BUNDLE_SHA256"
+fi
 install -m 0644 "$INSTALL_DIR/agent/lm-llm-ollama.service" /etc/systemd/system/lm-llm-ollama.service
 install -m 0644 "$INSTALL_DIR/agent/lm-llm-candidate.service" /etc/systemd/system/lm-llm-candidate.service
 systemctl daemon-reload
