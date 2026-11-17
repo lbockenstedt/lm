@@ -106,9 +106,11 @@ def _run(key, request, approved_baseline):
     # Nothing from a real job is provided to the candidate runtime.
     reference = _suite(request, BASELINE_PORT, baseline)
     result = _suite(request, PORT, candidate)
-    passed = all(row["passed"] for row in result["fixtures"])
-    return {**result, "baseline": reference, "status": "SUCCESS" if passed else "ERROR",
-            "code": "qualified" if passed else "fixture_mismatch"}
+    code = ("baseline_fixture_mismatch" if not all(row["passed"] for row in reference["fixtures"])
+            else "qualified" if all(row["passed"] for row in result["fixtures"])
+            else "fixture_mismatch")
+    return {**result, "baseline": reference,
+            "status": "SUCCESS" if code == "qualified" else "ERROR", "code": code}
 
 
 async def qualify(key, request, available_models):

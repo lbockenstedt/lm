@@ -61,6 +61,18 @@ def valid_model(model, digest):
             and isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest))
 
 
+HARDWARE_LIMITS = {"vcpus": 65536, "ram_bytes": 2**52}
+
+
+def model_minimums(row):
+    """Reject malformed hardware minima rather than treating them as zero."""
+    values = tuple(row.get(f"min_{field}", 0) for field in HARDWARE_LIMITS)
+    if any(type(value) is not int or not 0 <= value <= limit
+           for value, limit in zip(values, HARDWARE_LIMITS.values())):
+        return None
+    return values
+
+
 def qualification_result(data):
     """Keep only exact artifact identity and fixed, complete fixture results."""
     if not isinstance(data, Mapping) or not valid_model(data.get("model"), data.get("digest")):
@@ -84,6 +96,7 @@ def qualification_result(data):
 QUALIFICATION_GUIDANCE = {
     "unsupported_or_invalid_reply": "Update the test agent and rerun qualification.",
     "baseline_unavailable": "Start the pinned baseline and install its approved model on the test worker.",
+    "baseline_fixture_mismatch": "Repair the pinned baseline before drawing conclusions from this comparison.",
     "runtime_version_mismatch": "Check the staged candidate version and manifest before rerunning.",
     "candidate_not_provisioned": "Stage the candidate and its local qualification manifest.",
     "candidate_pull_failed": "Check registry access and disk space on the test worker.",
@@ -110,6 +123,7 @@ class LlmPool:
         self.qualification_jobs = {}
         self.active_jobs = {}
         self.runtime_versions = {}
+        self.hardware = {}
 
     def qualification_candidates(self):
         """Resolve configured candidates to approved Shared test workers only."""
@@ -143,6 +157,9 @@ class LlmPool:
             socket = self.hub.active_connections.get(pk)
             report = self.inventory.get(pk)
             fresh = socket is not None and report and report[1] is socket and time.monotonic() - report[0] < 75
+            hardware = self.hardware.get(pk)
+            capabilities = (hardware[2] if hardware and hardware[1] is socket
+                            and time.monotonic() - hardware[0] < 75 else {})
             state = ("pending" if not self.hub.approved_modules.get(pk) else
                      "disconnected" if socket is None else
                      "draining" if self.hub.is_draining(pk) else
@@ -152,6 +169,7 @@ class LlmPool:
             workers.append({"name": self.hub.state.get_module_name(pk), "state": state,
                             "issues": [self.worker_issues[pk]] if pk in self.worker_issues else [],
                             "version": self.runtime_versions.get(pk) if fresh else None,
+                            "capabilities": capabilities,
                             "qualification": pk in test_workers,
                             "models": [{"name": name, "digest": digest}
                                        for name, digest in (report[2].items() if fresh else ())]})
@@ -216,7 +234,7 @@ class LlmPool:
             code = data.get("code")
             if data.get("message") == "Timed out waiting for spoke response":
                 code = "dispatch_outcome_unknown"
-            elif code not in ("qualified", "fixture_mismatch", "candidate_not_provisioned",
+            elif code not in ("qualified", "fixture_mismatch", "baseline_fixture_mismatch", "candidate_not_provisioned",
                             "runtime_version_mismatch", "candidate_pull_failed",
                             "candidate_digest_mismatch", "qualification_runtime_failed",
                             "baseline_unavailable", "busy"):
@@ -231,7 +249,7 @@ class LlmPool:
                     for after, before in zip(result["fixtures"], baseline["fixtures"])
                 ]
             passed = (result and baseline and code == "qualified" and data.get("status") == "SUCCESS"
-                      and all(row["passed"] for row in result["fixtures"]))
+                      and all(row["passed"] for row in result["fixtures"] + baseline["fixtures"]))
             if code == "qualified" and not passed:
                 code = "unsupported_or_invalid_reply"
             job.update(state="passed" if passed else "failed", code=code)
@@ -258,10 +276,21 @@ class LlmPool:
                 or not isinstance(data, dict)):
             return
         models = data.get("models")
+        raw = data.get("capabilities")
+        if isinstance(raw, dict) and raw.get("mode") == "cpu":
+            capabilities = {"mode": "cpu"}
+            capabilities.update({field: raw[field] for field, limit in HARDWARE_LIMITS.items()
+                                 if type(raw.get(field)) is int and 0 < raw[field] <= limit})
+            capabilities.update({field: raw[field] for field, limit in (("cpu_model", 160), ("arch", 32))
+                                 if isinstance(raw.get(field), str) and 0 < len(raw[field]) <= limit})
+            self.hardware[key] = (time.monotonic(), websocket, capabilities)
+        else:
+            self.hardware.pop(key, None)
         if (data.get("status") != "SUCCESS" or not isinstance(models, dict)
                 or len(models) > 64):
             self.inventory.pop(key, None)
             self.runtime_versions.pop(key, None)
+            self.hardware.pop(key, None)
             code = data.get("code")
             if code not in ("runtime_version_mismatch", "runtime_unavailable", "runtime_not_started"):
                 code = "runtime_unavailable"
@@ -442,13 +471,13 @@ class LlmPool:
         artifacts = self._job_models(data)
         if not artifacts:
             return {"status": "ERROR", "code": "invalid_request"}
-        for model, digest in artifacts:
+        for model, digest, minimums in artifacts:
             started = time.monotonic()
             job = {"kind": "inference", "state": "running", "model": model,
                    "digest": digest, "tier": "local"}
             self.active_jobs[id(job)] = job
             try:
-                result = await self._dispatch(tenant, prompt, model, digest, output_format, job)
+                result = await self._dispatch(tenant, prompt, model, digest, output_format, job, minimums)
                 if result is not None:
                     job.update(state="passed" if result["status"] == "SUCCESS" else "failed",
                                code=result.get("code"), metrics=result.get("metrics", {}),
@@ -467,7 +496,7 @@ class LlmPool:
         """Resolve an exact request or the operator's ordered local task profile."""
         if "task" not in data:
             model, digest = data.get("model"), data.get("digest")
-            return [(model, digest)] if valid_model(model, digest) else []
+            return [(model, digest, (0, 0))] if valid_model(model, digest) else []
         task = data["task"]
         if not isinstance(task, str) or "model" in data or "digest" in data:
             return []
@@ -475,18 +504,19 @@ class LlmPool:
         approved = profiles.get(task) if isinstance(profiles, dict) else None
         if not isinstance(approved, list):
             return []
-        return list(dict.fromkeys((row["model"], row["digest"]) for row in approved[:8]
+        return list(dict.fromkeys((row["model"], row["digest"], minimums) for row in approved[:8]
                                   if isinstance(row, dict)
-                                  and valid_model(row.get("model"), row.get("digest"))))
+                                  and valid_model(row.get("model"), row.get("digest"))
+                                  and (minimums := model_minimums(row)) is not None))
 
-    async def _dispatch(self, tenant, prompt, model, digest, output_format, job):
+    async def _dispatch(self, tenant, prompt, model, digest, output_format, job, minimums):
         """Try one artifact across its eligible workers, or return no capacity."""
         # Rotate the starting point, but recheck all claims before each dispatch.
         workers = self._tenant_workers(tenant)
         offset = self.sequence % len(workers) if workers else 0
         self.sequence += 1
         for key in workers[offset:] + workers[:offset]:
-            if not self._eligible(key, tenant, model, digest):
+            if not self._eligible(key, tenant, model, digest, minimums):
                 continue
             job["version"] = self.runtime_versions.get(key)
             self.reserved.add(key)
@@ -506,6 +536,8 @@ class LlmPool:
             payload = envelope.get("data", reply) if isinstance(envelope, Mapping) else None
             if not isinstance(payload, Mapping):
                 return {"status": "ERROR", "code": "invalid_response"}
+            if payload.get("message") == "Timed out waiting for spoke response":
+                return {"status": "ERROR", "code": "dispatch_outcome_unknown"}
             if payload.get("code") in (
                     "busy", "runtime_unavailable", "model_unavailable", "runtime_version_mismatch"):
                 continue
@@ -527,12 +559,18 @@ class LlmPool:
             return {"status": "ERROR", **diagnostic(code)}
         return None
 
-    def _eligible(self, key, tenant, model, digest):
+    def _eligible(self, key, tenant, model, digest, minimums=(0, 0)):
         """Use fresh live status only; a stale snapshot cannot authorize routing."""
         status = self.inventory.get(key)
         if not status or key in self.reserved or key not in self._tenant_workers(tenant):
             return False
         seen, websocket, models, available = status
+        if any(minimums):
+            hardware = self.hardware.get(key)
+            if (not hardware or hardware[1] is not websocket or time.monotonic() - hardware[0] >= 75
+                    or any(hardware[2].get(field, 0) < minimum
+                           for field, minimum in zip(HARDWARE_LIMITS, minimums))):
+                return False
         return (available and time.monotonic() - seen < 75
                 and self.hub.active_connections.get(key) is websocket
                 and self.hub.spoke_module_types.get(key) == "llm"

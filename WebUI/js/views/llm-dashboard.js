@@ -28,11 +28,17 @@ function modelRow(m) {
 // One worker row.
 function workerRow(w) {
     const models = (w.models || []).map(modelRow);
+    const cap = w.capabilities || {};
     return safeHtml`<tr class="border-b border-slate-100">
         <td class="${td} font-medium">${w.name || '—'}</td>
         <td class="${td}" title="${(w.issues || []).map(issue => issue.resolution).join(' ')}">${workerBadge(w.state)}
             ${w.version || ''} ${w.qualification ? '(Qualification only)' : ''}</td>
         <td class="${td} align-middle">${models.length ? safeHtml`<table class="text-xs">${models}</table>` : safeHtml`<span class="text-slate-400">—</span>`}</td>
+        <td class="${td}">${cap.mode || '—'}</td>
+        <td class="${td}">${cap.cpu_model || '—'}</td>
+        <td class="${td}">${cap.vcpus ?? '—'}</td>
+        <td class="${td}">${cap.ram_bytes == null ? '—' : `${(cap.ram_bytes / (1024 ** 3)).toFixed(1)} GiB`}</td>
+        <td class="${td}">${cap.arch || '—'}</td>
     </tr>`;
 }
 
@@ -95,8 +101,8 @@ function renderWorkersSection(workers) {
             <div class="border border-slate-200 rounded-md overflow-x-auto">
                 <table class="w-full text-left">
                     <thead><tr class="border-b border-slate-200">
-                        <th class="${th}">Name</th><th class="${th}">State</th><th class="${th}">Models</th>
-                    </tr></thead><tbody><tr><td colspan="3" class="${td} text-slate-400 italic">No workers.</td></tr></tbody>
+                        <th class="${th}">Name</th><th class="${th}">State</th><th class="${th}">Models</th><th class="${th}">Mode</th><th class="${th}">CPU</th><th class="${th}">VCPUs</th><th class="${th}">RAM</th><th class="${th}">Arch</th>
+                    </tr></thead><tbody><tr><td colspan="8" class="${td} text-slate-400 italic">No workers.</td></tr></tbody>
                 </table>
             </div>
         </div>`;
@@ -106,7 +112,7 @@ function renderWorkersSection(workers) {
         <div class="border border-slate-200 rounded-md overflow-x-auto">
             <table class="w-full text-left">
                 <thead><tr class="border-b border-slate-200">
-                    <th class="${th}">Name</th><th class="${th}">State</th><th class="${th}">Models</th>
+                    <th class="${th}">Name</th><th class="${th}">State</th><th class="${th}">Models</th><th class="${th}">Mode</th><th class="${th}">CPU</th><th class="${th}">VCPUs</th><th class="${th}">RAM</th><th class="${th}">Arch</th>
                 </tr></thead><tbody>${workers.map(workerRow)}</tbody>
             </table>
         </div>

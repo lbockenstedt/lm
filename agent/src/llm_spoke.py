@@ -4,6 +4,8 @@ import asyncio
 import ast
 import http.client
 import json
+import os
+import platform
 import re
 import subprocess
 from pathlib import Path
@@ -22,6 +24,28 @@ CATALOG = Path("/etc/lm/llm-models.json")
 
 class RuntimeVersionMismatch(ValueError):
     """The loopback runtime is not the qualified release."""
+
+
+def cpu_capabilities():
+    """Measure guest hardware, not host hardware or model memory usage."""
+    result = {"mode": "cpu", "arch": platform.machine()}
+    count = os.cpu_count()
+    if count:
+        result["vcpus"] = count
+    try:
+        pages, page_size = os.sysconf("SC_PHYS_PAGES"), os.sysconf("SC_PAGE_SIZE")
+        if pages > 0 and page_size > 0:
+            result["ram_bytes"] = pages * page_size
+        with Path("/proc/cpuinfo").open(encoding="utf-8", errors="replace") as cpuinfo:
+            for line in cpuinfo:
+                name, _, value = line.partition(":")
+                if name.strip() in ("model name", "Hardware") and value.strip():
+                    result["cpu_model"] = value.strip()[:160]
+                    break
+    except (OSError, ValueError):
+        # An unavailable metric is unknown, never zero or assumed capacity.
+        pass
+    return result
 
 
 def runtime_service(action):
@@ -131,17 +155,19 @@ class LlmSpoke(BaseSpoke):
 
     async def get_status(self):
         """Report matching local models and capacity without returning any content."""
+        hardware = {"capabilities": await asyncio.to_thread(cpu_capabilities)}
         if not self._service_started:
-            return {"status": "ERROR", "code": "runtime_not_started"}
+            return {"status": "ERROR", "code": "runtime_not_started", **hardware}
         try:
             models = await self._available_models()
         except RuntimeVersionMismatch:
-            return {"status": "ERROR", "code": "runtime_version_mismatch"}
+            return {"status": "ERROR", "code": "runtime_version_mismatch", **hardware}
         except (OSError, ValueError, http.client.HTTPException):
-            return {"status": "ERROR", "code": "runtime_unavailable"}
+            return {"status": "ERROR", "code": "runtime_unavailable", **hardware}
         return {
             "status": "SUCCESS", "models": models, "version": QUALIFIED_OLLAMA_VERSION,
             "available": bool(models) and self._job is None and not self._stopping,
+            **hardware,
         }
 
     def stop_background_loops(self):

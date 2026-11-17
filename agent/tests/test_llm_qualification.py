@@ -10,6 +10,7 @@ from agent.src import llm_qualification as qualification
 @pytest.mark.parametrize(("fault", "expected"), [
     (None, "qualified"),
     ("indentation", "fixture_mismatch"),
+    ("baseline_indentation", "baseline_fixture_mismatch"),
     ("digest", "candidate_digest_mismatch"),
     ("version", "runtime_version_mismatch"),
     ("pull", "candidate_pull_failed"),
@@ -40,17 +41,17 @@ def test_cpu_candidate_uses_separate_store_and_fixed_fixtures(tmp_path, monkeypa
         assert body["think"] is False and body["options"]["num_gpu"] == 0
         text = (json.dumps(qualification.JSON_EXPECTED) if body.get("format") == "json"
                 else qualification.PYTHON_EXPECTED)
-        if new and fault == "indentation" and not body.get("format"):
+        if (new and fault == "indentation" or not new and fault == "baseline_indentation") and not body.get("format"):
             text = text.replace("        return 1", "    return 1")
         return {"done": True, "done_reason": "stop", "model": active["model"],
                 "response": text, "eval_duration": 180_000_000_000}
 
     result = qualification._run("cpu", request, {baseline["model"]: baseline["digest"]})
     assert result["code"] == expected
-    if fault in (None, "indentation"):
+    if fault in (None, "indentation", "baseline_indentation"):
         assert len(generations) == 4 and generations[0][1] == generations[2][1]
-        assert all(fixture["passed"] for fixture in result["baseline"]["fixtures"])
-        assert result["fixtures"][1]["passed"] is (fault is None)
+        assert all(fixture["passed"] for fixture in result["baseline"]["fixtures"]) is (fault != "baseline_indentation")
+        assert result["fixtures"][1]["passed"] is (fault != "indentation")
         assert result["fixtures"][0]["eval_duration"] == 180_000_000_000
     else:
         assert not generations

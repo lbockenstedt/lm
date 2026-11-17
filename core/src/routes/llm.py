@@ -9,7 +9,7 @@ from fastapi import HTTPException, Request, Response
 from access import read_scope, request_effective_tenant, safe_external_url, same_tenant, tenant_is_shared
 import instance_vault
 from llm_cloud import valid_endpoint
-from llm_pool import diagnostic, valid_model
+from llm_pool import diagnostic, model_minimums, valid_model
 
 
 def validate_pool_config(hub, config):
@@ -20,6 +20,7 @@ def validate_pool_config(hub, config):
                 not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", task)
                 or not isinstance(models, list) or len(models) > 8
                 or any(not isinstance(row, dict) or not valid_model(row.get("model"), row.get("digest"))
+                       or model_minimums(row) is None
                        for row in models)
                 for task, models in tasks.items()):
             raise HTTPException(400, "Task profiles require ordered lists of pinned model artifacts")

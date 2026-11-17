@@ -115,6 +115,34 @@ def test_pool_tries_second_own_worker_and_never_spills_to_shared():
     assert pool.hub.request_response.call_count == 2
 
 
+def test_task_routes_only_to_workers_meeting_reported_guest_capacity():
+    """Skip old peers and undersized workers without spilling into Shared."""
+    pool = make_pool()
+    gib = 1024**3
+    pool.hub.state.get_global_config = lambda: {"llm_task_models": {"coding": [
+        {"model": JOB["model"], "digest": DIGEST, "min_vcpus": 8, "min_ram_bytes": 16 * gib},
+    ]}}
+    for key, ram in (("b", 8 * gib), ("c", 32 * gib)):
+        pool.report(key, pool.hub.active_connections[key], {
+            "status": "SUCCESS", "models": {JOB["model"]: DIGEST}, "available": True,
+            "capabilities": {"mode": "cpu", "vcpus": 8, "ram_bytes": ram},
+        })
+    job = {"task": "coding", "prompt": JOB["prompt"]}
+    assert asyncio.run(pool.complete("tenant-a", job))["code"] == "no_capacity"
+    pool.hub.request_response.assert_not_called()
+    pool.report("b", pool.hub.active_connections["b"], {
+        "status": "SUCCESS", "models": {JOB["model"]: DIGEST}, "available": True,
+        "capabilities": {"mode": "cpu", "vcpus": 8, "ram_bytes": 16 * gib,
+                         "arch": "x86_64", "cpu_model": "Test CPU", "extra": "ignored"},
+    })
+    pool.hub.request_response.return_value = {"status": "SUCCESS", "text": "valid"}
+    assert asyncio.run(pool.complete("tenant-a", job))["status"] == "SUCCESS"
+    assert pool.hub.request_response.call_args.args[0] == "b"
+    worker = next(row for row in pool.dashboard()["workers"] if row["name"] == "Worker b")
+    assert worker["capabilities"] == {"mode": "cpu", "vcpus": 8, "ram_bytes": 16 * gib,
+                                      "arch": "x86_64", "cpu_model": "Test CPU"}
+
+
 def test_pool_uses_shared_only_for_tenant_without_its_own_pool():
     """Only Shared can supply work when the tenant owns no workers."""
     pool = make_pool()
