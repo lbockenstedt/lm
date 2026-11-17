@@ -12,6 +12,22 @@ from llm_cloud import valid_endpoint
 from llm_pool import diagnostic, model_minimums, valid_model
 
 
+POOL_SETTINGS = ("llm_task_models", "llm_ab_pr_repos", "llm_qualification_candidates", "llm_cloud_profiles")
+
+
+def cloud_profile_reference(row):
+    """Project a profile onto fields safe to store or return to the browser."""
+    ref = row.get("vault_credential") if isinstance(row, dict) else None
+    if not isinstance(ref, dict) or not valid_endpoint(row.get("url")):
+        return None
+    if not all(isinstance(row.get(key), str) for key in ("tenant", "model", "task")):
+        return None
+    if not all(isinstance(ref.get(key), str) for key in ("bucket", "name")):
+        return None
+    return {**{key: row[key] for key in ("url", "tenant", "model", "task")},
+            "vault_credential": {key: ref[key] for key in ("bucket", "name")}}
+
+
 def validate_pool_config(hub, config):
     """Validate routing and qualification policy before storing it."""
     if "llm_task_models" in config:
@@ -21,6 +37,7 @@ def validate_pool_config(hub, config):
                 or not isinstance(models, list) or len(models) > 8
                 or any(not isinstance(row, dict) or not valid_model(row.get("model"), row.get("digest"))
                        or model_minimums(row) is None
+                       or row.keys() - {"model", "digest", "min_vcpus", "min_ram_bytes"}
                        for row in models)
                 for task, models in tasks.items()):
             raise HTTPException(400, "Task profiles require ordered lists of pinned model artifacts")
@@ -33,6 +50,7 @@ def validate_pool_config(hub, config):
                 or not isinstance(row.get("certificate"), str)
                 or not 0 < len(row["certificate"].strip()) <= 255
                 or not isinstance(row.get("allow_public_cloud", False), bool)
+                or row.keys() - {"tenant", "certificate", "allow_public_cloud"}
                 for name, row in repos.items()):
             raise HTTPException(400, "Repository policies require a tenant and a pinned certificate SAN")
     if "llm_qualification_candidates" in config:
@@ -42,6 +60,7 @@ def validate_pool_config(hub, config):
                 or not isinstance(row, dict) or not isinstance(row.get("worker"), str)
                 or not 0 < len(row["worker"]) <= 255 or not isinstance(row.get("label"), str)
                 or not 0 < len(row["label"].strip()) <= 100
+                or row.keys() - {"worker", "label"}
                 for key, row in candidates.items()):
             raise HTTPException(400, "Candidate profiles require a key, worker and label")
 
@@ -51,9 +70,9 @@ async def validate_cloud_profiles(hub, profiles, session):
     if not isinstance(profiles, list) or len(profiles) > 32:
         raise HTTPException(400, "Provide a list of at most 32 cloud profiles")
     output = []
-    for row in profiles:
-        if (not isinstance(row, dict) or not safe_external_url(row.get("url"))
-                or not valid_endpoint(row.get("url"))):
+    for supplied in profiles:
+        row = cloud_profile_reference(supplied)
+        if row is None or not safe_external_url(row["url"]):
             raise HTTPException(400, "A public cloud chat-completions HTTPS URL is required")
         tenant, model = row.get("tenant"), row.get("model")
         ref = row.get("vault_credential")
@@ -64,14 +83,12 @@ async def validate_cloud_profiles(hub, profiles, session):
                 or not same_tenant(ref["bucket"], tenant)
                 or not isinstance(ref.get("name"), str) or not ref["name"].strip()):
             raise HTTPException(400, "Supply a model, PR summary task, and same-tenant Vault reference")
-        safe = {"url": row["url"], "tenant": tenant, "model": model, "task": "pr_summary",
-                "vault_credential": {"bucket": ref["bucket"], "name": ref["name"]}}
         try:
             await instance_vault.validate_ref(
-                hub, safe, session, is_admin=True, storage_key="llm_cloud_profiles")
+                hub, row, session, is_admin=True, storage_key="llm_cloud_profiles")
         except HTTPException as exc:
             raise HTTPException(400, "Cloud credential could not be validated") from exc
-        output.append(safe)
+        output.append(row)
     return output
 
 
@@ -85,6 +102,38 @@ def register(app, hub, ctx):
             raise HTTPException(401, "Authentication required")
         if not ctx._is_admin(session):
             raise HTTPException(403, "Global administrator required")
+        return session
+
+    @app.get("/api/llm/admin/settings")
+    async def settings(request: Request, response: Response):
+        """Return fleet routing policies and Vault references, never secret values."""
+        require_admin(request)
+        response.headers["Cache-Control"] = "no-store"
+        config = hub.state.get_global_config()
+        cloud = config.get("llm_cloud_profiles")
+        workers = hub.state.system_state.get("module_metadata", {})
+        return {**{key: config.get(key, {}) for key in POOL_SETTINGS[:-1]},
+                "llm_cloud_profiles": [row for item in (cloud if isinstance(cloud, list) else [])
+                                       if (row := cloud_profile_reference(item)) is not None],
+                "test_workers": [{"key": key, "label": hub.state.get_module_name(key)}
+                                 for key, row in workers.items() if isinstance(row, dict)
+                                 and row.get("module_type") == "llm"
+                                 and tenant_is_shared(row.get("tenant_id"))
+                                 and hub.approved_modules.get(key)]}
+
+    @app.post("/api/llm/admin/settings")
+    async def save_settings(request: Request, data: dict):
+        """Validate and save only the supplied LLM settings."""
+        session = require_admin(request)
+        if not data or data.keys() - set(POOL_SETTINGS):
+            raise HTTPException(400, "Only LLM settings can be saved here")
+        validate_pool_config(hub, data)
+        if "llm_cloud_profiles" in data:
+            data["llm_cloud_profiles"] = await validate_cloud_profiles(
+                hub, data["llm_cloud_profiles"], session)
+        hub.state.system_state.setdefault("global_config", {}).update(data)
+        hub.state._mark_dirty()
+        return {"status": "ok"}
 
     @app.get("/api/llm/admin/dashboard")
     async def dashboard(request: Request, response: Response):

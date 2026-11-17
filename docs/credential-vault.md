@@ -275,3 +275,4 @@ are `hub`-mode:
 3. **Delete the bucket** (`delete-bucket`).
 4. If the credential was meant for scanning, build an `nw` scan-credential set
    referencing it so the tenant's agent can finally use it.
+LLM cloud overflow profiles are Vault-only. In **LLM → Settings**, select an automation-readable API credential from the profile's tenant or Shared bucket. Lab Manager stores the reference and resolves the key only when dispatching an eligible public PR summary.

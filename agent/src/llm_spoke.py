@@ -8,6 +8,7 @@ import os
 import platform
 import re
 import subprocess
+import time
 from pathlib import Path
 
 from core.src.base_spoke import BaseSpoke
@@ -93,6 +94,8 @@ class LlmSpoke(BaseSpoke):
         self._reporter = None
         self._service_started = False
         self._startup = None
+        self._health_failures = 0
+        self._last_recovery = float("-inf")
 
     def start_background_loops(self):
         """Start a reconnect-safe inventory reporter for this role."""
@@ -103,6 +106,7 @@ class LlmSpoke(BaseSpoke):
         """Publish inventory periodically; workers remain unready before approval."""
         while not self._stopping:
             if self.control_plane is not None and self.control_plane.secret:
+                await self._recover_idle_runtime()
                 await self.control_plane.send_to_hub("LLM_WORKER_STATUS", await self.get_status())
             await asyncio.sleep(30)
 
@@ -111,18 +115,39 @@ class LlmSpoke(BaseSpoke):
         if self._stopping:
             return {"status": "ERROR", "code": "busy"}
         if self._startup is None or self._startup.done():
-            self._startup = asyncio.create_task(self._run_service_start())
+            self._startup = asyncio.create_task(self._run_service_start("start"))
         return await asyncio.shield(self._startup)
 
-    async def _run_service_start(self):
+    async def _run_service_start(self, action):
         """Record the result even if the connection goes away during startup."""
         try:
-            self._service_started = await asyncio.to_thread(runtime_service, "start")
+            self._service_started = await asyncio.to_thread(runtime_service, action)
         except (OSError, subprocess.TimeoutExpired):
             self._service_started = False
         return {"status": "SUCCESS"} if self._service_started else {
             "status": "ERROR", "code": "runtime_unavailable",
         }
+
+    async def _recover_idle_runtime(self):
+        """Restart only an idle, previously started runtime after repeated API failures."""
+        if (not self._service_started or self._stopping or self._job is not None
+                or (self._startup is not None and not self._startup.done())):
+            self._health_failures = 0
+            return
+        try:
+            await asyncio.to_thread(ollama_request, "/api/version")
+        except (OSError, ValueError, http.client.HTTPException):
+            self._health_failures += 1
+        else:
+            self._health_failures = 0
+        # Recheck after the probe: a completion may have taken the slot.
+        if (self._health_failures >= 3 and self._job is None and not self._stopping
+                and (self._startup is None or self._startup.done())
+                and time.monotonic() - self._last_recovery >= 300):
+            self._last_recovery = time.monotonic()
+            self._health_failures = 0
+            self._startup = asyncio.create_task(self._run_service_start("restart"))
+            await asyncio.shield(self._startup)
 
     async def _available_models(self):
         """Intersect operator approvals with the runtime's installed digests."""
@@ -193,6 +218,8 @@ class LlmSpoke(BaseSpoke):
             return await self.get_status()
         if command_type == "LLM_START_RUNTIME":
             return await self._start_runtime()
+        if command_type in ("LLM_COMPLETE", "LLM_QUALIFY") and self._startup and not self._startup.done():
+            return {"status": "ERROR", "code": "busy"}
         if command_type == "LLM_QUALIFY":
             from agent.src.llm_qualification import qualify
             if self._stopping or self._job is not None:

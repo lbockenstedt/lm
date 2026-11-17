@@ -59,6 +59,36 @@ def test_admin_llm_routes_reject_non_admin_before_using_pool():
     with TestClient(app) as client:
         assert client.get("/api/llm/admin/dashboard").status_code == 403
         assert client.post("/api/llm/admin/qualify", json={"candidate": "cpu"}).status_code == 403
+        assert client.get("/api/llm/admin/settings").status_code == 403
+        assert client.post("/api/llm/admin/settings", json={"llm_cloud_profiles": []}).status_code == 403
+
+
+def test_admin_cloud_settings_persist_and_return_only_vault_reference(monkeypatch):
+    """Reject mismatched ownership and strip any inline key from accepted records."""
+    pool = make_pool()
+    state = pool.hub.state
+    state._mark_dirty = lambda: None
+    state.get_global_config = lambda: state.system_state.get("global_config", {})
+    validate = AsyncMock()
+    monkeypatch.setattr(llm.instance_vault, "validate_ref", validate)
+    app = FastAPI()
+    llm.register(app, pool.hub, SimpleNamespace(
+        _session_user=lambda request: {"role": "admin"}, _is_admin=lambda session: True))
+    profile = {"url": "https://provider.example.com/v1/chat/completions", "model": "test",
+               "tenant": "tenant-a", "task": "pr_summary", "api_key": "synthetic",
+               "vault_credential": {"bucket": "tenant-b", "name": "summary"}}
+    with TestClient(app) as client:
+        path = "/api/llm/admin/settings"
+        assert client.post(path, json={"llm_cloud_profiles": [profile]}).status_code == 400
+        validate.assert_not_called()
+        profile["vault_credential"]["bucket"] = "tenant-a"
+        assert client.post(path, json={"llm_cloud_profiles": [profile]}).status_code == 200
+        stored = state.get_global_config()["llm_cloud_profiles"][0]
+        assert "api_key" not in stored
+        stored["api_key"] = "synthetic legacy value"
+        response = client.get(path)
+        assert response.status_code == 200 and "synthetic" not in response.text
+    validate.assert_awaited_once()
 
 
 def test_qualification_reserves_only_shared_test_worker_and_handles_old_reply():

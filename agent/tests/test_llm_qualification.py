@@ -1,10 +1,12 @@
 """Exercise side-by-side qualification without downloading a real model."""
 
+import asyncio
 import json
 
 import pytest
 
 from agent.src import llm_qualification as qualification
+from agent.src import llm_spoke
 
 
 @pytest.mark.parametrize(("fault", "expected"), [
@@ -55,3 +57,33 @@ def test_cpu_candidate_uses_separate_store_and_fixed_fixtures(tmp_path, monkeypa
         assert result["fixtures"][0]["eval_duration"] == 180_000_000_000
     else:
         assert not generations
+
+
+def test_watchdog_restarts_only_idle_runtime_after_repeated_failures(monkeypatch):
+    """CPU work owns its slot even when the health endpoint cannot respond."""
+    actions = []
+
+    def offline(*args):
+        """Stand in for an unresponsive daemon."""
+        raise TimeoutError
+
+    monkeypatch.setattr(llm_spoke, "ollama_request", offline)
+    monkeypatch.setattr(llm_spoke, "runtime_service", lambda action: actions.append(action) or True)
+
+    async def exercise():
+        """Report three failures only after the current job has ended."""
+        worker = llm_spoke.LlmSpoke("test-worker", {})
+        worker._service_started = True
+        worker._job = object()
+        for _ in range(3):
+            await worker._recover_idle_runtime()
+        assert not actions
+        worker._job = None
+        for _ in range(3):
+            await worker._recover_idle_runtime()
+        assert actions == ["restart"]
+        for _ in range(3):
+            await worker._recover_idle_runtime()
+        assert actions == ["restart"]
+
+    asyncio.run(exercise())

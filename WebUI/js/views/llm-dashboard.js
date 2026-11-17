@@ -4,6 +4,127 @@
 import { safeHtml } from '../core/safe-html.js';
 import { delegate } from '../core/view.js';
 
+const settingsPath = '/api/llm/admin/settings';
+
+// Read JSON from a hub route and surface the server's validation message.
+async function apiJson(path, init) {
+    const response = await fetch(path, init);
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.detail || `Request failed (${response.status})`);
+    return body;
+}
+
+// Render only nonsecret cloud settings; the picker stores bucket/name references.
+function settingsMarkup(config, credentials) {
+    return safeHtml`<section class="space-y-4 border-t pt-4">
+        <h3 class="font-bold">LLM Settings</h3>
+        <p data-settings-feedback role="status"></p>
+        <form data-submit="policies" class="space-y-2">
+            <label class="block">Ordered task model profiles (JSON)
+                <textarea name="tasks" rows="4" class="w-full">${JSON.stringify(config.llm_task_models, null, 2)}</textarea>
+            </label>
+            <label class="block">AppBuilder repository policies (JSON)
+                <textarea name="repos" rows="4" class="w-full">${JSON.stringify(config.llm_ab_pr_repos, null, 2)}</textarea>
+            </label>
+            <div class="text-right"><button class="hpe-btn hpe-btn-primary">Save routing policies</button></div>
+        </form>
+        <h4 class="font-bold">Qualification candidates</h4>
+        ${Object.entries(config.llm_qualification_candidates).map(([key, row]) => safeHtml`
+            <div>${row.label} <button type="button" data-action="removeCandidate" data-key="${key}" class="hpe-btn hpe-btn-secondary">Remove</button></div>`)}
+        <form data-submit="candidate" class="flex flex-wrap items-end gap-2">
+            <label>Staged key <input name="key" required pattern="[A-Za-z0-9_\\-]{1,64}"></label>
+            <label>Label <input name="label" required maxlength="100"></label>
+            <label>Shared test worker <select name="worker" required>
+                <option value="">Select worker</option>
+                ${config.test_workers.map(w => safeHtml`<option value="${w.key}">${w.label}</option>`)}
+            </select></label>
+            <button class="hpe-btn hpe-btn-primary">Save candidate</button>
+        </form>
+        <h4 class="font-bold">Cloud overflow for opted-in public PR summaries</h4>
+        ${config.llm_cloud_profiles.map((row, i) => safeHtml`<div>${row.model} — ${row.url}
+            (${row.vault_credential.name}) <button type="button" data-action="removeCloud" data-index="${i}" class="hpe-btn hpe-btn-secondary">Remove</button></div>`)}
+        <form data-submit="cloud" class="flex flex-wrap items-end gap-2">
+            <label>HTTPS chat-completions URL <input name="endpoint" type="url" required></label>
+            <label>Model <input name="model" required maxlength="200"></label>
+            <label>Credential Vault (required) <select name="credential" required>
+                <option value="">Select a credential</option>
+                ${credentials.map((c, i) => safeHtml`<option value="${i}">${c.label}</option>`)}
+            </select></label>
+            ${credentials.length ? safeHtml`<button class="hpe-btn hpe-btn-primary" type="submit">Add cloud profile</button>`
+                : safeHtml`<button class="hpe-btn hpe-btn-primary" type="submit" disabled>Add cloud profile</button>`}
+        </form>
+        ${credentials.length ? '' : 'No automation-readable Vault credentials are available.'}
+    </section>`;
+}
+
+// Open settings on demand; never replace an active settings form on a data refresh.
+async function openSettings(root, isCurrent, onSave) {
+    root.textContent = 'Loading settings…';
+    const live = () => isCurrent() && root.isConnected;
+    try {
+        const [config, credentials] = await Promise.all([
+            apiJson(settingsPath), _instanceVaultCredOptions(),
+        ]);
+        if (!live()) return;
+        let saving = false;
+        // Apply a successful server write to the rendered snapshot.
+        async function save(build) {
+            if (saving) return;
+            const feedback = root.querySelector('[data-settings-feedback]');
+            saving = true;
+            try {
+                const data = build();
+                await apiJson(settingsPath, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data),
+                });
+                if (!live()) return;
+                Object.assign(config, data);
+                draw('Saved.');
+                await onSave();
+            } catch (err) {
+                if (live()) feedback.textContent = err.message;
+            } finally {
+                saving = false;
+            }
+        }
+        // Draw from the last successfully saved configuration.
+        function draw(message = '') {
+            root.innerHTML = settingsMarkup(config, credentials);
+            root.querySelector('[data-settings-feedback]').textContent = message;
+        }
+        delegate(root, {
+            policies: form => save(() => ({
+                llm_task_models: JSON.parse(form.elements.tasks.value),
+                llm_ab_pr_repos: JSON.parse(form.elements.repos.value),
+            })),
+            candidate: form => save(() => ({ llm_qualification_candidates: {
+                ...config.llm_qualification_candidates,
+                [form.elements.key.value]: { label: form.elements.label.value, worker: form.elements.worker.value },
+            } })),
+            removeCandidate: button => save(() => ({
+                llm_qualification_candidates: Object.fromEntries(
+                    Object.entries(config.llm_qualification_candidates).filter(([key]) => key !== button.dataset.key)),
+            })),
+            cloud: form => save(() => {
+                const choice = form.elements.credential.value;
+                if (!choice || !credentials[Number(choice)]) throw new Error('Select a Credential Vault credential.');
+                const { bucket, name } = credentials[Number(choice)];
+                return { llm_cloud_profiles: [...config.llm_cloud_profiles, {
+                    url: form.elements.endpoint.value, model: form.elements.model.value,
+                    task: 'pr_summary', tenant: bucket, vault_credential: { bucket, name },
+                }] };
+            }),
+            removeCloud: button => save(() => ({
+                llm_cloud_profiles: config.llm_cloud_profiles.filter((_, i) => i !== Number(button.dataset.index)),
+            })),
+        });
+        draw();
+    } catch (err) {
+        if (live()) root.textContent = err.message;
+    }
+}
+
 const th = 'px-3 py-1.5 text-left text-xs font-bold text-slate-500 whitespace-nowrap';
 const td = 'px-3 py-1.5 text-xs text-slate-700 whitespace-nowrap';
 const tdM = 'px-3 py-1.5 text-xs text-slate-700 font-mono whitespace-nowrap';
@@ -199,18 +320,13 @@ async function renderLlmDashboard(container) {
     };
     let status = { type: '', message: '' };
     let loading = false;
-
-    // Reject HTTP errors before consuming the snapshot.
-    async function apiJson(path, init) {
-        const response = await fetch(path, init);
-        const body = await response.json();
-        if (!response.ok) throw new Error(body.detail || `Request failed (${response.status})`);
-        return body;
-    }
+    container.innerHTML = safeHtml`<div data-llm-snapshot></div><div data-llm-settings class="mt-4"></div>`;
+    const snapshot = container.querySelector('[data-llm-snapshot]');
+    const settings = container.querySelector('[data-llm-settings]');
 
     function render() {
         if (!isCurrent()) return;
-        container.innerHTML = safeHtml`
+        snapshot.innerHTML = safeHtml`
             <div class="space-y-4">
                 ${renderStatus(status)}
                 <div class="flex items-center justify-between mb-2">
@@ -218,6 +334,7 @@ async function renderLlmDashboard(container) {
                     <div class="flex items-center gap-2">
                         <a id="llm-download-json" href="/api/llm/admin/dashboard" class="text-xs text-primary-text hover:underline" download>Download JSON</a>
                         <button data-action="refresh" type="button" class="hpe-btn hpe-btn-secondary">Refresh</button>
+                        <button data-action="settings" type="button" class="hpe-btn hpe-btn-secondary">Settings</button>
                     </div>
                 </div>
                 ${renderWorkersSection(state.workers)}
@@ -225,10 +342,10 @@ async function renderLlmDashboard(container) {
                 ${renderMetricsSection(state.metrics)}
                 ${state.candidates.length ? renderCandidatesSection(state.candidates) : ''}
             </div>`;
-        delegate(container, {
+        delegate(snapshot, {
             qualify: async (el) => {
                 if (loading) return;
-                const sel = container.querySelector('#llm-candidate-select');
+                const sel = snapshot.querySelector('#llm-candidate-select');
                 const key = sel?.value;
                 if (!key) { status = { type: 'error', message: 'Select a worker to qualify.' }; render(); return; }
                 el.disabled = true;
@@ -248,6 +365,10 @@ async function renderLlmDashboard(container) {
                 if (isCurrent()) await load(status);
             },
             refresh: () => { load(); },
+            settings: () => {
+                if (!settings.hasChildNodes()) openSettings(settings, isCurrent, load);
+                else settings.scrollIntoView({ block: 'nearest' });
+            },
         });
     }
 
