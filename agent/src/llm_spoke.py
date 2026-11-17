@@ -17,8 +17,8 @@ from core.src.base_spoke import BaseSpoke
 MAX_PROMPT_BYTES = 64 * 1024
 MAX_RESPONSE_BYTES = 256 * 1024
 INFERENCE_TIMEOUT = 900
-# Previously qualified release. New versions require explicit side-by-side qualification.
-QUALIFIED_OLLAMA_VERSION = "0.40.16"
+# Start from the owner's CLI pin; Linux CPU artifacts still need qualification.
+DEFAULT_OLLAMA_VERSION = "0.40.16"
 SERVICE = "lm-llm-ollama.service"
 CATALOG = Path("/etc/lm/llm-models.json")
 
@@ -88,6 +88,8 @@ class LlmSpoke(BaseSpoke):
     def __init__(self, spoke_id, config):
         """Initialize the approved catalog and the local inference slot."""
         super().__init__(spoke_id, config)
+        # A local operator changes this pin after qualification, never a hub job.
+        self._runtime_version = os.environ.get("LM_LLM_OLLAMA_VERSION", DEFAULT_OLLAMA_VERSION)
         self._job = None
         self._stopping = False
         self.control_plane = None
@@ -151,6 +153,12 @@ class LlmSpoke(BaseSpoke):
 
     async def _available_models(self):
         """Intersect operator approvals with the runtime's installed digests."""
+        version = await asyncio.to_thread(ollama_request, "/api/version")
+        if (not re.fullmatch(r"[0-9]{1,5}(?:\.[0-9]{1,5}){2}", self._runtime_version)
+                or version.get("version") != self._runtime_version):
+            raise RuntimeVersionMismatch
+
+        # Read the approved digest catalog before querying installed artifacts.
         catalog = self.config.get("models")
         if catalog is None:
             try:
@@ -159,9 +167,6 @@ class LlmSpoke(BaseSpoke):
                 catalog = {}
         if not isinstance(catalog, dict) or not catalog:
             return {}
-        version = await asyncio.to_thread(ollama_request, "/api/version")
-        if version.get("version") != QUALIFIED_OLLAMA_VERSION:
-            raise RuntimeVersionMismatch
         inventory = await asyncio.to_thread(ollama_request, "/api/tags")
         rows = inventory.get("models")
         if not isinstance(rows, list):
@@ -190,7 +195,7 @@ class LlmSpoke(BaseSpoke):
         except (OSError, ValueError, http.client.HTTPException):
             return {"status": "ERROR", "code": "runtime_unavailable", **hardware}
         return {
-            "status": "SUCCESS", "models": models, "version": QUALIFIED_OLLAMA_VERSION,
+            "status": "SUCCESS", "models": models, "version": self._runtime_version,
             "available": bool(models) and self._job is None and not self._stopping,
             **hardware,
         }

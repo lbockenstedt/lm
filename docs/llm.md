@@ -30,6 +30,10 @@ summaries and docs, `qwen3.6-35b-coding-64k` for small coding drafts, and
 automatically approved Ollama artifacts.
 GPU results do not qualify those same weights or context sizes for a CPU VM.
 The role does not download model tags or upgrade the runtime.
+After Linux CPU qualification and review of open regressions, VM provisioning
+can set `LM_LLM_OLLAMA_VERSION` in the `lm-agent` service environment to pin
+the vetted replacement. The role rejects mismatched or invalid pins instead
+of serving with an unapproved version.
 
 ## API and diagnostics
 

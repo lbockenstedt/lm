@@ -9,6 +9,45 @@ from agent.src import llm_qualification as qualification
 from agent.src import llm_spoke
 
 
+@pytest.mark.parametrize(("pin", "running", "expected"), [
+    (None, "0.40.16", "SUCCESS"),
+    ("0.41.0", "0.41.0", "SUCCESS"),
+    ("0.41.0", "0.40.16", "ERROR"),
+    ("", "0.40.16", "ERROR"),
+])
+@pytest.mark.parametrize("with_models", [True, False])
+def test_worker_checks_local_runtime_pin_before_advertising_models(
+        monkeypatch, pin, running, expected, with_models):
+    """A stale or invalid local pin cannot advertise usable capacity."""
+    setting = "LM_LLM_OLLAMA_VERSION"
+    monkeypatch.delenv(setting, raising=False)
+    if pin is not None:
+        monkeypatch.setenv(setting, pin)
+    digest = "a" * 64
+    models = {"test:cpu": digest} if with_models else {}
+    probes = []
+
+    def request(path):
+        """Return the running version and one approved model."""
+        probes.append(path)
+        if path == "/api/version":
+            return {"version": running}
+        return {"models": [{"name": "test:cpu", "digest": digest}]}
+
+    monkeypatch.setattr(llm_spoke, "ollama_request", request)
+    worker = llm_spoke.LlmSpoke("test-worker", {"models": models})
+    worker._service_started = True
+    status = asyncio.run(worker.get_status())
+    assert status["status"] == expected
+    if expected == "SUCCESS":
+        assert status["version"] == running
+        assert status["models"] == models
+        assert status["available"] is with_models
+    else:
+        assert status["code"] == "runtime_version_mismatch"
+        assert probes == ["/api/version"]
+
+
 @pytest.mark.parametrize(("fault", "expected"), [
     (None, "qualified"),
     ("indentation", "fixture_mismatch"),
