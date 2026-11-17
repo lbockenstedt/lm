@@ -44,6 +44,19 @@ Two consequences every module must respect:
   %(message)s` guarantees this (an ERROR record contains "ERROR"; an
   `exc_info=` traceback contains "Traceback"/"Exception"). Use it for the relay
   handler; don't strip the level.
+- **Log a real failure at ERROR, not WARNING.** The hub's log sentinel (the
+  first-pass triage that escalates to AppBuilder every
+  `log_analysis_interval_min`) only opens on error-level lines. Keep WARNING
+  for expected or operator-fixable states (e.g. a 409 "waiting for the second
+  server"). Two backstops catch what slips through. Both are set on the Logs
+  page's log-analysis bar (the **5xx** and **Warn ≥** controls) or through
+  `POST /setup/log-analysis/config`, and stored in `global_config`:
+  - `log_5xx_triage` (default on): any `/api/...` request the hub answered
+    with a 5xx counts as an error, once per method + path + status, whatever
+    level the route logged its reason at.
+  - `log_volume_triage` (default on) with `log_volume_threshold` (default
+    10): a WARNING message repeated at least that many times in the window
+    counts as an error.
 
 ## The six requirements
 
