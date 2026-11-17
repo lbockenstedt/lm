@@ -8,6 +8,8 @@ from urllib.parse import urlsplit
 
 from access import safe_external_url
 
+TOKEN_LIMIT_FIELDS = ("max_tokens", "max_completion_tokens")
+
 
 def valid_endpoint(url):
     """Require a public HTTPS API URL without embedded credentials or queries."""
@@ -39,17 +41,19 @@ class PublicHTTPSConnection(http.client.HTTPSConnection):
             raise
 
 
-def complete_public(endpoint, model, api_key, prompt):
+def complete_public(endpoint, model, api_key, prompt, token_limit_field="max_tokens"):
     """Send one capped request to the configured endpoint, without redirects."""
     if not valid_endpoint(endpoint):
         return {"status": "ERROR", "code": "cloud_invalid_endpoint"}
+    if token_limit_field not in TOKEN_LIMIT_FIELDS:
+        return {"status": "ERROR", "code": "cloud_invalid_profile"}
     target = urlsplit(endpoint)
     conn = PublicHTTPSConnection(target.hostname, timeout=45)
     try:
         # Do not log the credential, provider response body, or user payload.
         conn.request("POST", target.path, json.dumps({
             "model": model, "messages": [{"role": "user", "content": prompt}],
-            "stream": False, "max_tokens": 1024,
+            "stream": False, token_limit_field: 1024,
         }), headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
         reply = conn.getresponse()
         if reply.status == 429:

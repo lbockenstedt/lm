@@ -87,3 +87,15 @@ def test_watchdog_restarts_only_idle_runtime_after_repeated_failures(monkeypatch
         assert actions == ["restart"]
 
     asyncio.run(exercise())
+
+
+def test_unavailable_candidate_stops_only_its_isolated_service(monkeypatch):
+    """A skipped systemd condition must not use some other process on the test port."""
+    artifact = ("test:tag", "a" * 64, "0.40.16")
+    monkeypatch.setattr(qualification, "_candidate", lambda key: (artifact, artifact))
+    actions = []
+    monkeypatch.setattr(qualification, "_service",
+                        lambda action: actions.append(action) or action != "is-active")
+    result = qualification._run_with_service("cpu", lambda *a, **kw: pytest.fail("unexpected probe"), {})
+    assert result["code"] == "candidate_not_provisioned"
+    assert actions == ["start", "is-active", "stop"]

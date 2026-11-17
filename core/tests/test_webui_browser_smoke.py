@@ -102,3 +102,47 @@ def test_uuid_check_sees_visible_text_only():
             assert visible_uuids(page) == [SPOKE_UUID]
         finally:
             browser.close()
+
+
+def test_llm_dashboard_uses_reported_model_and_launches_qualification(hub_url_and_session):
+    """Exercise the actual LLM page and its delegated settings/qualification actions."""
+    base, token = hub_url_and_session
+    digest = "a" * 64
+    config = {"llm_task_models": {}, "llm_ab_pr_repos": {},
+              "llm_qualification_candidates": {}, "llm_cloud_profiles": [], "test_workers": []}
+    with sync_api.sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            context = browser.new_context()
+            context.add_cookies([{"name": "lm_session", "value": token, "url": base}])
+            page = context.new_page()
+            page.route("**/api/llm/admin/dashboard", lambda route: route.fulfill(json={
+                "workers": [{"name": "CPU Worker", "state": "ready", "capabilities": {"vcpus": 16},
+                             "models": [{"name": "trial:cpu", "digest": digest}]}],
+                "candidates": [{"key": "trial", "label": "Candidate", "worker": "Test VM"}],
+            }))
+            page.route("**/api/llm/admin/settings", lambda route: route.fulfill(
+                json=config if route.request.method == "GET" else {"status": "ok"}))
+            page.route("**/api/llm/admin/qualify",
+                       lambda route: route.fulfill(status=202, json={"status": "accepted"}))
+            page.route("**/setup/tenants", lambda route: route.fulfill(json={"tenants": []}))
+            page.goto(base + "/")
+            page.wait_for_function("window.lmCoreLoaded && typeof currentUser !== 'undefined' && !!currentUser")
+            page.evaluate("setView('llm')")
+            page.get_by_text("CPU Worker", exact=True).wait_for()
+            with page.expect_request(lambda req: req.url.endswith("/admin/qualify")) as qualification:
+                page.get_by_role("button", name="Qualify", exact=True).click()
+            assert qualification.value.post_data_json == {"candidate": "trial"}
+            page.get_by_role("button", name="Settings", exact=True).click()
+            page.get_by_label("Task", exact=True).fill("pr_summary")
+            page.get_by_label("Approved model").select_option("0")
+            page.get_by_label("Minimum vCPUs").fill("16")
+            with page.expect_request(lambda req: req.url.endswith("/admin/settings")
+                                     and req.method == "POST") as save:
+                page.get_by_role("button", name="Add model", exact=True).click()
+            assert save.value.post_data_json == {"llm_task_models": {"pr_summary": [
+                {"model": "trial:cpu", "digest": digest, "min_vcpus": 16, "min_ram_bytes": 0},
+            ]}}
+            page.get_by_text("16 vCPUs, 0 RAM bytes minimum", exact=False).wait_for()
+        finally:
+            browser.close()

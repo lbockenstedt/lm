@@ -599,6 +599,7 @@ EOF
 
 # Stage the disabled unit so an agent installed without roles can load it later.
 install -m 0644 "$INSTALL_DIR/agent/lm-llm-ollama.service" /etc/systemd/system/lm-llm-ollama.service
+install -m 0644 "$INSTALL_DIR/agent/lm-llm-candidate.service" /etc/systemd/system/lm-llm-candidate.service
 systemctl daemon-reload
 
 # The legacy Generic Leaf Agent was already purged early (retire_legacy_agent,

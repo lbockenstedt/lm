@@ -2,7 +2,7 @@
 // An ES module: the main nav opens it through lmViews.llm(container).
 // Fetches GET /api/llm/admin/dashboard and POST /api/llm/admin/qualify.
 import { safeHtml } from '../core/safe-html.js';
-import { delegate } from '../core/view.js';
+import { createView, delegate } from '../core/view.js';
 
 const settingsPath = '/api/llm/admin/settings';
 
@@ -14,20 +14,49 @@ async function apiJson(path, init) {
     return body;
 }
 
+// Render ordered model rules and exact repository bindings without raw JSON edits.
+function routingMarkup(config, models, tenants) {
+    return safeHtml`
+        <h4 class="font-bold">Ordered task models</h4>
+        <p>New models are appended in priority order. To change priority, remove and re-add a model.</p>
+        ${Object.entries(config.llm_task_models).map(([task, rows]) => rows.map((row, index) => safeHtml`
+            <div>${task} — ${index + 1}. <span title="${row.digest}">${row.model}</span>
+                (${row.min_vcpus || 0} vCPUs, ${row.min_ram_bytes || 0} RAM bytes minimum)
+                <button type="button" data-action="removeModel" data-task="${task}" data-index="${index}" class="hpe-btn hpe-btn-secondary">Remove</button>
+            </div>`))}
+        <form data-submit="addModel" class="flex flex-wrap items-end gap-2">
+            <label>Task <input name="task" required pattern="[A-Za-z0-9_\\-]{1,64}" placeholder="pr_summary"></label>
+            <label>Approved model <select name="artifact" required>
+                <option value="">Select a reported model</option>
+                ${models.map((model, index) => safeHtml`<option value="${index}">${model.name} (${model.digest.slice(0, 12)})</option>`)}
+            </select></label>
+            <label>Minimum vCPUs <input name="vcpus" type="number" min="0" max="65536" step="1"></label>
+            <label>Minimum RAM (bytes) <input name="ram" type="number" min="0" max="${2 ** 52}" step="1"></label>
+            <button class="ml-auto hpe-btn hpe-btn-primary" ${models.length ? '' : safeHtml`disabled`}>Add model</button>
+        </form>
+        <h4 class="font-bold">AppBuilder repository policies</h4>
+        ${Object.entries(config.llm_ab_pr_repos).map(([repo, row]) => safeHtml`
+            <div>${repo} — ${tenants.find(t => t.id === row.tenant)?.name || 'Unknown tenant'}
+                (${row.allow_public_cloud ? 'public cloud overflow enabled' : 'local only'})
+                <button type="button" data-action="removeRepo" data-repo="${repo}" class="hpe-btn hpe-btn-secondary">Remove</button>
+            </div>`)}
+        <form data-submit="repo" class="flex flex-wrap items-end gap-2">
+            <label>Repository <input name="repo" required placeholder="owner/repo" maxlength="201"></label>
+            <label>Tenant <select name="tenant" required>
+                <option value="">Select a tenant</option>
+                ${tenants.map(t => safeHtml`<option value="${t.id}">${t.name}</option>`)}
+            </select></label>
+            <label>AppBuilder certificate SAN <input name="certificate" required maxlength="255"></label>
+            <label><input name="overflow" type="checkbox"> Allow cloud overflow for public PRs</label>
+            <button class="ml-auto hpe-btn hpe-btn-primary">Save repository</button>
+        </form>`;
+}
+
 // Render only nonsecret cloud settings; the picker stores bucket/name references.
-function settingsMarkup(config, credentials) {
+function settingsMarkup(config, credentials, models, tenants) {
     return safeHtml`<section class="space-y-4 border-t pt-4">
         <h3 class="font-bold">LLM Settings</h3>
-        <p data-settings-feedback role="status"></p>
-        <form data-submit="policies" class="space-y-2">
-            <label class="block">Ordered task model profiles (JSON)
-                <textarea name="tasks" rows="4" class="w-full">${JSON.stringify(config.llm_task_models, null, 2)}</textarea>
-            </label>
-            <label class="block">AppBuilder repository policies (JSON)
-                <textarea name="repos" rows="4" class="w-full">${JSON.stringify(config.llm_ab_pr_repos, null, 2)}</textarea>
-            </label>
-            <div class="text-right"><button class="hpe-btn hpe-btn-primary">Save routing policies</button></div>
-        </form>
+        ${routingMarkup(config, models, tenants)}
         <h4 class="font-bold">Qualification candidates</h4>
         ${Object.entries(config.llm_qualification_candidates).map(([key, row]) => safeHtml`
             <div>${row.label} <button type="button" data-action="removeCandidate" data-key="${key}" class="hpe-btn hpe-btn-secondary">Remove</button></div>`)}
@@ -46,6 +75,10 @@ function settingsMarkup(config, credentials) {
         <form data-submit="cloud" class="flex flex-wrap items-end gap-2">
             <label>HTTPS chat-completions URL <input name="endpoint" type="url" required></label>
             <label>Model <input name="model" required maxlength="200"></label>
+            <label>Token limit field <select name="tokenLimitField">
+                <option value="max_tokens">max_tokens</option>
+                <option value="max_completion_tokens">max_completion_tokens</option>
+            </select></label>
             <label>Credential Vault (required) <select name="credential" required>
                 <option value="">Select a credential</option>
                 ${credentials.map((c, i) => safeHtml`<option value="${i}">${c.label}</option>`)}
@@ -58,19 +91,22 @@ function settingsMarkup(config, credentials) {
 }
 
 // Open settings on demand; never replace an active settings form on a data refresh.
-async function openSettings(root, isCurrent, onSave) {
+async function openSettings(root, isCurrent, onSave, workers) {
     root.textContent = 'Loading settings…';
     const live = () => isCurrent() && root.isConnected;
     try {
-        const [config, credentials] = await Promise.all([
-            apiJson(settingsPath), _instanceVaultCredOptions(),
+        const [config, credentials, directory] = await Promise.all([
+            apiJson(settingsPath), _instanceVaultCredOptions(), apiJson('/setup/tenants'),
         ]);
         if (!live()) return;
+        const tenants = (directory.tenants || []).filter(t => !t.shared && t.id !== directory.shared_tenant_id);
+        const models = [...new Map(workers.filter(w => !w.qualification)
+            .flatMap(w => w.models || []).map(m => [`${m.name}:${m.digest}`, m])).values()];
+        const view = createView({ el: root, render: () => settingsMarkup(config, credentials, models, tenants) });
         let saving = false;
         // Apply a successful server write to the rendered snapshot.
         async function save(build) {
             if (saving) return;
-            const feedback = root.querySelector('[data-settings-feedback]');
             saving = true;
             try {
                 const data = build();
@@ -80,23 +116,46 @@ async function openSettings(root, isCurrent, onSave) {
                 });
                 if (!live()) return;
                 Object.assign(config, data);
-                draw('Saved.');
+                view.refresh();
+                showToast('LLM settings saved.', 'success');
                 await onSave();
             } catch (err) {
-                if (live()) feedback.textContent = err.message;
+                if (live()) showToast(err.message, 'error');
             } finally {
                 saving = false;
             }
         }
-        // Draw from the last successfully saved configuration.
-        function draw(message = '') {
-            root.innerHTML = settingsMarkup(config, credentials);
-            root.querySelector('[data-settings-feedback]').textContent = message;
-        }
         delegate(root, {
-            policies: form => save(() => ({
-                llm_task_models: JSON.parse(form.elements.tasks.value),
-                llm_ab_pr_repos: JSON.parse(form.elements.repos.value),
+            addModel: form => save(() => {
+                const { task, artifact, vcpus, ram } = form.elements;
+                const selected = artifact.value;
+                const model = selected && models[Number(selected)];
+                if (!model) throw new Error('Select a reported model.');
+                const rows = Object.hasOwn(config.llm_task_models, task.value) ? config.llm_task_models[task.value] : [];
+                if (rows.some(row => row.model === model.name && row.digest === model.digest)) {
+                    throw new Error('This model is already in the task order.');
+                }
+                return { llm_task_models: { ...config.llm_task_models, [task.value]: [...rows, {
+                    model: model.name, digest: model.digest,
+                    min_vcpus: Number(vcpus.value), min_ram_bytes: Number(ram.value),
+                }] } };
+            }),
+            removeModel: button => save(() => {
+                const { task, index } = button.dataset;
+                const tasks = { ...config.llm_task_models };
+                tasks[task] = tasks[task].filter((_, i) => i !== Number(index));
+                if (!tasks[task].length) delete tasks[task];
+                return { llm_task_models: tasks };
+            }),
+            repo: form => save(() => {
+                const { repo, tenant, certificate, overflow } = form.elements;
+                return { llm_ab_pr_repos: { ...config.llm_ab_pr_repos, [repo.value.trim()]: {
+                    tenant: tenant.value, certificate: certificate.value.trim(), allow_public_cloud: overflow.checked,
+                } } };
+            }),
+            removeRepo: button => save(() => ({
+                llm_ab_pr_repos: Object.fromEntries(
+                    Object.entries(config.llm_ab_pr_repos).filter(([repo]) => repo !== button.dataset.repo)),
             })),
             candidate: form => save(() => ({ llm_qualification_candidates: {
                 ...config.llm_qualification_candidates,
@@ -112,6 +171,7 @@ async function openSettings(root, isCurrent, onSave) {
                 const { bucket, name } = credentials[Number(choice)];
                 return { llm_cloud_profiles: [...config.llm_cloud_profiles, {
                     url: form.elements.endpoint.value, model: form.elements.model.value,
+                    token_limit_field: form.elements.tokenLimitField.value,
                     task: 'pr_summary', tenant: bucket, vault_credential: { bucket, name },
                 }] };
             }),
@@ -119,7 +179,7 @@ async function openSettings(root, isCurrent, onSave) {
                 llm_cloud_profiles: config.llm_cloud_profiles.filter((_, i) => i !== Number(button.dataset.index)),
             })),
         });
-        draw();
+        view.refresh();
     } catch (err) {
         if (live()) root.textContent = err.message;
     }
@@ -329,10 +389,8 @@ async function renderLlmDashboard(container) {
     const snapshot = container.querySelector('[data-llm-snapshot]');
     const settings = container.querySelector('[data-llm-settings]');
 
-    // Replace only the snapshot so a refresh cannot discard unsaved settings.
-    function render() {
-        if (!isCurrent()) return;
-        snapshot.innerHTML = safeHtml`
+    // Refresh only the snapshot so unsaved settings survive.
+    const view = createView({ el: snapshot, state, render: () => safeHtml`
             <div class="space-y-4">
                 ${renderStatus(status)}
                 <div class="flex items-center justify-between mb-2">
@@ -347,13 +405,14 @@ async function renderLlmDashboard(container) {
                 ${renderJobsSection(state.jobs)}
                 ${renderMetricsSection(state.metrics)}
                 ${state.candidates.length ? renderCandidatesSection(state.candidates) : ''}
-            </div>`;
+            </div>` });
+    // Bind once; morphing keeps delegated listeners on the snapshot root.
         delegate(snapshot, {
             qualify: async (el) => {
                 if (loading) return;
                 const sel = snapshot.querySelector('#llm-candidate-select');
                 const key = sel?.value;
-                if (!key) { status = { type: 'error', message: 'Select a worker to qualify.' }; render(); return; }
+                if (!key) { showToast('Select a qualification candidate.', 'error'); return; }
                 el.disabled = true;
                 loading = true;
                 try {
@@ -368,15 +427,17 @@ async function renderLlmDashboard(container) {
                 } finally {
                     loading = false;
                 }
-                if (isCurrent()) await load(status);
+                if (!isCurrent()) return;
+                el.disabled = false;
+                showToast(status.message, status.type);
+                await load();
             },
             refresh: () => { load(); },
             settings: () => {
-                if (!settings.hasChildNodes()) openSettings(settings, isCurrent, load);
+                if (!settings.hasChildNodes()) openSettings(settings, isCurrent, load, state.workers);
                 else settings.scrollIntoView({ block: 'nearest' });
             },
         });
-    }
 
     // Keep the cached snapshot visible while refreshing.
     async function load(feedback = { type: '', message: '' }) {
@@ -396,11 +457,11 @@ async function renderLlmDashboard(container) {
         } finally {
             loading = false;
         }
-        if (isCurrent()) render();
+        if (isCurrent()) view.refresh();
     }
 
     // Initial load.
-    render();
+    view.refresh();
     await load();
 }
 

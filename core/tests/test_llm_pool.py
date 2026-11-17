@@ -1,6 +1,7 @@
 """Verify scoped placement and CPU inference diagnostics."""
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from llm_pool import LlmPool
+import llm_cloud
 from llm_cloud import PublicHTTPSConnection, valid_endpoint
 from log_redaction import _redact
 from routes import llm
@@ -18,6 +20,21 @@ from routes import llm
 
 DIGEST = "a" * 64
 JOB = {"model": "test:latest", "digest": DIGEST, "prompt": "synthetic fixture"}
+
+
+@pytest.mark.parametrize("field", ["max_tokens", "max_completion_tokens"])
+def test_cloud_profiles_send_only_the_configured_output_limit(monkeypatch, field):
+    """Never retry a paid request merely to negotiate its token-limit field."""
+    from unittest.mock import Mock
+    connection = Mock()
+    connection.getresponse.return_value = SimpleNamespace(status=429)
+    monkeypatch.setattr(llm_cloud, "PublicHTTPSConnection", lambda *args, **kwargs: connection)
+    result = llm_cloud.complete_public(
+        "https://provider.example.com/v1/chat/completions", "test", "synthetic", "fixture", field)
+    assert result["code"] == "cloud_rate_limit"
+    connection.request.assert_called_once()
+    body = json.loads(connection.request.call_args.args[2])
+    assert {name: body[name] for name in llm_cloud.TOKEN_LIMIT_FIELDS if name in body} == {field: 1024}
 
 
 def make_pool():
@@ -267,7 +284,7 @@ def test_cloud_capacity_uses_only_same_tenant_vault_reference(monkeypatch):
     assert asyncio.run(pool._public_cloud_summary("tenant-a", "fixture", unavailable)) == unavailable
     resolver.assert_awaited_once_with(pool.hub, {"vault_credential": own["vault_credential"]},
                                       "llm_cloud_profiles")
-    invoke.assert_called_once_with(endpoint, "approved", "synthetic-vault-key", "fixture")
+    invoke.assert_called_once_with(endpoint, "approved", "synthetic-vault-key", "fixture", "max_tokens")
 
 
 def test_pool_does_not_replay_at_ambiguous_disconnect():

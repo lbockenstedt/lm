@@ -8,7 +8,7 @@ from fastapi import HTTPException, Request, Response
 
 from access import read_scope, request_effective_tenant, safe_external_url, same_tenant, tenant_is_shared
 import instance_vault
-from llm_cloud import valid_endpoint
+from llm_cloud import TOKEN_LIMIT_FIELDS, valid_endpoint
 from llm_pool import diagnostic, model_minimums, valid_model
 
 
@@ -24,7 +24,11 @@ def cloud_profile_reference(row):
         return None
     if not all(isinstance(ref.get(key), str) for key in ("bucket", "name")):
         return None
+    limit_field = row.get("token_limit_field", "max_tokens")
+    if limit_field not in TOKEN_LIMIT_FIELDS:
+        return None
     return {**{key: row[key] for key in ("url", "tenant", "model", "task")},
+            "token_limit_field": limit_field,
             "vault_credential": {key: ref[key] for key in ("bucket", "name")}}
 
 

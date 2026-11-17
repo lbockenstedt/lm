@@ -421,7 +421,11 @@ class LlmPool:
             if not isinstance(key, str) or not key:
                 job.update(state="failed", code="credential_unavailable")
                 return None
-            result = await asyncio.to_thread(llm_cloud.complete_public, endpoint, model, key, prompt)
+            limit_field = profile.get("token_limit_field", "max_tokens")
+            if limit_field not in llm_cloud.TOKEN_LIMIT_FIELDS:
+                job.update(state="failed", code="cloud_invalid_profile")
+                return None
+            result = await asyncio.to_thread(llm_cloud.complete_public, endpoint, model, key, prompt, limit_field)
             job.update(state="passed" if result.get("status") == "SUCCESS" else "failed",
                        code=result.get("code"))
             if result.get("code") == "cloud_rate_limit":

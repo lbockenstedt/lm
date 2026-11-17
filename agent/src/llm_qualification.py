@@ -5,6 +5,7 @@ import asyncio
 import http.client
 import json
 import re
+import subprocess
 import time
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from pathlib import Path
 MANIFEST = Path("/etc/lm/llm-qualification.json")
 PORT = 11439
 BASELINE_PORT = 11438
+CANDIDATE_SERVICE = "lm-llm-candidate.service"
 JSON_EXPECTED = {"items": [{"label": "CPU", "count": 2}]}
 PYTHON_EXPECTED = "def classify(value):\n    if value > 0:\n        return 1\n    return 0\n"
 
@@ -81,9 +83,9 @@ def _suite(request, port, artifact):
     return {"model": model, "digest": digest, "version": version, "fixtures": fixtures}
 
 
-def _run(key, request, approved_baseline):
+def _run(key, request, approved_baseline, *, spec=None):
     """Use only the pre-provisioned candidate service and its separate store."""
-    spec = _candidate(key)
+    spec = spec or _candidate(key)
     if spec is None:
         return {"status": "ERROR", "code": "candidate_not_provisioned"}
     candidate, baseline = spec
@@ -113,11 +115,41 @@ def _run(key, request, approved_baseline):
             "status": "SUCCESS" if code == "qualified" else "ERROR", "code": code}
 
 
+def _service(action):
+    """Operate only the isolated qualification unit."""
+    return subprocess.run(["systemctl", action, CANDIDATE_SERVICE], check=False, timeout=20,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
+
+def _run_with_service(key, request, approved_baseline):
+    """Start and stop the candidate service within the exclusive qualification job."""
+    spec = _candidate(key)
+    if spec is None:
+        return {"status": "ERROR", "code": "candidate_not_provisioned"}
+    try:
+        if not _service("start") or not _service("is-active"):
+            result = {"status": "ERROR", "code": "candidate_not_provisioned"}
+        else:
+            # Type=exec does not imply the HTTP listener is ready.
+            for _ in range(10):
+                try:
+                    request("/api/version", timeout=1, port=PORT)
+                    break
+                except (OSError, ValueError, http.client.HTTPException):
+                    time.sleep(0.5)
+            else:
+                return {"status": "ERROR", "code": "qualification_runtime_failed"}
+            result = _run(key, request, approved_baseline, spec=spec)
+    finally:
+        stopped = _service("stop")
+    return result if stopped else {"status": "ERROR", "code": "qualification_runtime_failed"}
+
+
 async def qualify(key, request, available_models):
     """Run the comparison under the spoke's exclusive job slot."""
     try:
-        return await asyncio.to_thread(_run, key, request, await available_models())
+        return await asyncio.to_thread(_run_with_service, key, request, await available_models())
     except FileNotFoundError:
         return {"status": "ERROR", "code": "candidate_not_provisioned"}
-    except (OSError, ValueError, http.client.HTTPException):
+    except (OSError, ValueError, http.client.HTTPException, subprocess.TimeoutExpired):
         return {"status": "ERROR", "code": "qualification_runtime_failed"}

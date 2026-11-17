@@ -12,7 +12,12 @@ Provision the approved Ollama 0.40.16 runtime at `/opt/lm-llm/bin/ollama` and
 stage approved, CPU-compatible weights in `/var/lib/lm-llm/models`. The agent
 installer stages the dedicated unit without enabling it independently. It binds
 loopback port 11438, disables cloud, and uses one slot with no artificial CPU
-cap. Load **LLM Worker (CPU)** in the agent role picker. Unloading the role
+cap. For either runtime, obtain the correct Linux architecture release from
+the approved distribution channel, verify the archive against an independently
+trusted SHA-256, and stage the full extracted bundle (including runtime libraries)
+in a root-owned, non-writable-by-service directory. Do not use an unversioned
+install script or overwrite the serving binary to run a trial.
+Load **LLM Worker (CPU)** in the agent role picker. Unloading the role
 drains active work and stops its service without deleting models.
 
 Set `/etc/lm/llm-models.json` to a JSON object mapping exact installed model
@@ -71,13 +76,15 @@ Cloud runs only after local no-capacity, never for a private repository or after
 an ambiguous inference failure. `llm_cloud_profiles` accepts ordered records
 with `task: "pr_summary"`, `tenant`, `model`, `url` (public HTTPS
 `/chat/completions` endpoint), and `vault_credential: {bucket, name}` from that
-tenant's Vault bucket. Cloud profiles do not expose or store inline keys.
+tenant's Vault bucket. Select `max_tokens` (default) or `max_completion_tokens`
+according to the endpoint and model. LM sends one capped request, never
+resubmitting to negotiate this field. Cloud profiles do not expose or store inline keys.
 # Qualification and fleet telemetry
 
 Global admins can use **LLM** to inspect worker readiness, active jobs, and the latest 200 finished attempts. The dashboard JSON is available at `GET /api/llm/admin/dashboard`; it contains no prompts, generated text, credentials, or provider URLs. History resets on hub restart; export it to a downstream system for longer-term analysis.
 
-Use **LLM → Settings** to save task and AppBuilder routing policies, select an approved Shared worker for a staged candidate, or create a Vault-backed cloud overflow profile. Edit an existing candidate by saving its staged key again. The worker restarts its serving daemon after three failed idle API health probes, at most once in five minutes; it does not interrupt an active inference or qualification.
+Use **LLM → Settings** to append reported, digest-pinned models in task priority order, bind exact AppBuilder repositories to a tenant and certificate SAN, select an approved Shared worker for a staged candidate, or create a Vault-backed cloud overflow profile. Edit an existing candidate by saving its staged key again. The worker restarts its serving daemon after three failed idle API health probes, at most once in five minutes; it does not interrupt an active inference or qualification.
 
 Workers report CPU mode, CPU model when available, CPU architecture, logical vCPUs and total guest RAM in bytes, even before Ollama is ready. These are VM totals, not free memory or service cgroup limits. An `llm_task_models` entry can set `min_vcpus` and `min_ram_bytes` from qualification results: the hub skips narrower or unreported capacity for that entry, then tries the next ordered artifact without bypassing tenant boundaries. Entries without minima retain older-worker compatibility.
 
-`POST /api/llm/admin/qualify` accepts `{"candidate":"trial"}` and returns 202 when scheduled. Set the hub's `llm_qualification_candidates.trial` to `{"worker":"<Shared LLM registration ID>","label":"CPU trial"}`; that worker is excluded from tenant inference. On the dedicated VM, stage the vetted candidate binary on loopback port 11439 with a separate model store, and the approved baseline on port 11438. Set `/etc/lm/llm-qualification.json` to `{"trial":{"model":"<public tag>","digest":"<64 hex>","version":"<x.y.z>","baseline":{"model":"<installed tag>","digest":"<64 hex>","version":"<x.y.z>"}}}`. Only the candidate service pulls a model. Both runtimes run the same fixed CPU JSON and indentation fixtures; inspect correctness and timing separately. No test automatically activates an artifact or upgrades Ollama. Verify the candidate binary's origin and checksum and check open release regressions before staging it.
+`POST /api/llm/admin/qualify` accepts `{"candidate":"trial"}` and returns 202 when scheduled. Set the hub's `llm_qualification_candidates.trial` to `{"worker":"<Shared LLM registration ID>","label":"CPU trial"}`; that worker is excluded from tenant inference. On the dedicated VM, stage the vetted candidate at `/opt/lm-llm-candidate/bin/ollama`. The installer supplies a disabled candidate unit; the role starts it for the job on loopback port 11439 and stops it afterward. It uses `/var/lib/lm-llm-candidate/models`, not the baseline store on port 11438. Set the root-managed `/etc/lm/llm-qualification.json` to `{"trial":{"model":"<public tag>","digest":"<64 hex>","version":"<x.y.z>","baseline":{"model":"<installed tag>","digest":"<64 hex>","version":"<x.y.z>"}}}`. Only the candidate service pulls a model. Both runtimes run the same fixed CPU JSON and indentation fixtures; inspect correctness and timing separately. No test automatically activates an artifact or upgrades Ollama. Check open release regressions before staging the candidate.
