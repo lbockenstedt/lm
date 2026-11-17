@@ -6,8 +6,54 @@ falling back to the raw id when nothing is registered. ``collect_error_logs``
 must apply it to the ``[source]`` prefix.
 """
 import types
+from collections import deque
+
+import pytest
 
 import main  # noqa: E402  (core/src on sys.path via conftest)
+
+
+@pytest.mark.parametrize("collector", ["collect_all_logs", "collect_error_logs"])
+def test_log_collection_snapshots_relay_buffers(monkeypatch, collector):
+    """Mutation during source resolution must not invalidate live iterators."""
+    first = "2026-08-21 15:36:43 - Agent - ERROR - first"
+    second = "2026-08-21 15:36:44 - Agent - ERROR - second"
+    buf = deque([first, second], maxlen=2)
+    hub = _hub(agent_logs={"agent": buf})
+    monkeypatch.setattr(main.os.path, "exists", lambda path: False)
+
+    def label_and_mutate(h, sid):
+        """Deterministically simulate concurrent eviction and registry growth."""
+        buf.append("2026-08-21 15:36:45 - Agent - ERROR - later")
+        h.agent_logs["new-agent"] = deque(["ERROR new source"])
+        return sid
+
+    monkeypatch.setattr(main, "_log_source_label", label_and_mutate)
+    result = getattr(main.LabManagerHub, collector)(hub)["logs"]
+    if collector == "collect_all_logs":
+        assert result == [{"module": "agent", "log": first},
+                          {"module": "agent", "log": second}]
+    else:
+        assert result == [f"[agent] {first}", f"[agent] {second}"]
+
+
+def test_error_collection_snapshots_hub_buffer(monkeypatch):
+    """Formatting an error can trigger logging without invalidating the read."""
+    buf = deque(maxlen=2)
+
+    class LoggingLine(str):
+        """Simulate a log emitted while an existing line is processed."""
+
+        def __format__(self, spec):
+            """Mutate the live buffer after iteration has begun."""
+            buf.append("ERROR later")
+            return super().__format__(spec)
+
+    buf.extend([LoggingLine("ERROR first"), "ERROR second"])
+    hub = _hub(logs=buf)
+    monkeypatch.setattr(main.os.path, "exists", lambda path: False)
+    assert main.LabManagerHub.collect_error_logs(hub)["logs"] == [
+        "[hub] ERROR first", "[hub] ERROR second"]
 
 
 def _hub(module_metadata=None, agent_info=None, logs=None, agent_logs=None):

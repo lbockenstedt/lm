@@ -8250,14 +8250,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         HUB_REQUEST GET_LOGS handler (used by the AppBuilder agent) share one
         implementation. Returns {"logs": [{"module": str, "log": str}, ...]}.
         """
-        # Start with the hub's own lines.
+        # Snapshot before processing: logging threads append while this reader
+        # runs, and the hub loop can add or clear relayed buffers concurrently.
         all_logs = []
-        for log in self.logs:
+        for log in list(self.logs):
             all_logs.append({"module": "hub", "log": log})
 
-        # Add each relayed agent/spoke buffer.
-        for agent_id, logs in self.agent_logs.items():
-            for log in logs:
+        # Add each relayed agent/spoke buffer from a stable snapshot.
+        for agent_id, logs in list(self.agent_logs.items()):
+            for log in list(logs):
                 all_logs.append({"module": _log_source_label(self, agent_id), "log": log})
 
         # Add the tail of each on-disk log file.
@@ -8324,14 +8325,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             r"(?<!\.)\b(?:ERROR|CRITICAL)\b"        # uppercase level (not prose "error")
             r"|\[[a-z][a-z-]*-error\]"              # [sync-error] and kin
             r"|(?i:\btraceback\b|\bexception\b)")    # Python failure indicators
-        # Collect matching hub lines.
+        # Filter snapshots, not live deques that logging threads can mutate.
         errs = []
-        for log in self.logs:
+        for log in list(self.logs):
             if pat.search(log):
                 errs.append(f"[hub] {log}")
-        # Collect matching agent/spoke lines.
-        for agent_id, logs in self.agent_logs.items():
-            for log in logs:
+        # Snapshot the registry too: this collector also runs in a worker.
+        for agent_id, logs in list(self.agent_logs.items()):
+            for log in list(logs):
                 if pat.search(log):
                     errs.append(f"[{_log_source_label(self, agent_id)}] {log}")
         # Collect matching lines from the tail of each on-disk log file.
