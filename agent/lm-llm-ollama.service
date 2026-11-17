@@ -1,0 +1,24 @@
+[Unit]
+Description=Lab Manager CPU Ollama worker
+PartOf=lm-agent.service
+
+[Service]
+Type=exec
+DynamicUser=yes
+StateDirectory=lm-llm
+Environment=HOME=/var/lib/lm-llm
+Environment=OLLAMA_HOST=127.0.0.1:11438
+Environment=OLLAMA_MODELS=/var/lib/lm-llm/models
+Environment=OLLAMA_NO_CLOUD=1
+Environment=OLLAMA_NUM_PARALLEL=1
+Environment=OLLAMA_MAX_LOADED_MODELS=1
+Environment=OLLAMA_KEEP_ALIVE=5m
+ExecStart=/opt/lm-llm/bin/ollama serve
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+IPAddressDeny=any
+IPAddressAllow=localhost

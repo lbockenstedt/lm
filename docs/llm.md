@@ -1,0 +1,75 @@
+# Local LLM workers
+
+`llm` is a loadable Linux agent role. It starts a pre-provisioned, dedicated
+Ollama service after approval and tenant assignment. The hub routes to an idle
+worker in the caller's tenant, or to explicitly Shared workers if the tenant
+has no approved pool. A busy reply can move to another worker; an ambiguous
+disconnect is not automatically replayed. Direct inference requests are local-only.
+
+## Provision a worker VM
+
+Provision the approved Ollama 0.40.16 runtime at `/opt/lm-llm/bin/ollama` and
+stage approved, CPU-compatible weights in `/var/lib/lm-llm/models`. Install
+`agent/lm-llm-ollama.service` in the systemd unit directory during initial
+provisioning and reload systemd; do not enable it independently. It binds
+loopback port 11438, disables cloud, and uses one slot with no artificial CPU
+cap. Load **LLM Worker (CPU)** in the agent role picker. Unloading the role
+drains active work and stops its service without deleting models.
+
+Set `/etc/lm/llm-models.json` to a JSON object mapping exact installed model
+names, including the tag, to their approved 64-character lowercase digests.
+An explicit role `config.models` object overrides the file. Only stage
+CPU-compatible artifacts whose licenses and provenance you have checked.
+The prior CLI benchmarks are a starting shortlist: `gemma4-12b-64k` for
+summaries and docs, `qwen3.6-35b-coding-64k` for small coding drafts, and
+`qwen3.8-27b-64k` for read-only scouting. These are CLI aliases, not
+automatically approved Ollama artifacts.
+GPU results do not qualify those same weights or context sizes for a CPU VM.
+The role does not download model tags or upgrade the runtime.
+
+## API and diagnostics
+
+- `GET /api/llm/models?tenant=…` returns the selected tenant's model digests
+  and readiness issues from current reports.
+- `POST /api/llm/complete?tenant=…` accepts `model`, `digest`, `prompt`, and
+  optional `format` (`text`, `json`, or `python`). JSON must be an object or
+  array. Python drafts are syntax-checked but never executed. Outputs are
+  advisory, not verified for correctness.
+- Alternatively, supply `task` instead of `model` and `digest`. The hub's
+  `llm_task_models` setting in `POST /setup/config` maps task names to ordered
+  lists of `{model, digest}` records. The hub tries the next approved artifact
+  only when the preferred one cannot accept the job. No task is enabled by
+  default.
+- `POST /api/llm/check?tenant=…` accepts an exact `model`, `digest`, and
+  `fixture` (`json` or `indentation`). It runs a synthetic pool smoke test,
+  checks that the output kept the expected structure and content, and reports
+  timings or a recommended fix without returning the generated text.
+
+The native Ollama call disables thinking and streaming, loads one model on
+demand, and allows roughly 15 minutes for CPU inference. Successful replies
+include Ollama timing counters when present (nanoseconds and token count).
+Compare load, prompt processing, and generation separately. Slow valid
+responses pass, with an advisory at ten minutes; timeouts, output-token truncation, malformed JSON, and
+invalid Python receive distinct error codes with suggested resolutions.
+Replay synthetic JSON and indentation fixtures on the target CPU VM before
+approving a model. Test candidate runtimes side by side on a spare port and
+check open regressions before changing the pin. No prompts or completions are
+written to the pool's metadata or offline mailbox.
+
+## AppBuilder and cloud routing
+
+Opt advisory PR summaries in by listing exact `owner/repo` names in AB's
+`pr_review_lm_summary_repos` setting. In hub `POST /setup/config`, map each
+repository under `llm_ab_pr_repos` to its `tenant` and pinned AB SAN
+(`certificate`), and define the ordered `pr_summary` task in `llm_task_models`.
+This does not change validation, final review, builds, or log triage. An
+unavailable hub summary is omitted rather than sent through AB's own providers.
+
+Optional cloud overflow is limited to explicitly opted-in **public** repositories
+(`allow_public_cloud: true` on the hub repo mapping, plus confirmed public GitHub
+visibility from AB). Enable only for repositories cleared for that provider.
+Cloud runs only after local no-capacity, never for a private repository or after
+an ambiguous inference failure. `llm_cloud_profiles` accepts ordered records
+with `task: "pr_summary"`, `tenant`, `model`, `url` (public HTTPS
+`/chat/completions` endpoint), and `vault_credential: {bucket, name}` from that
+tenant's Vault bucket. Cloud profiles do not expose or store inline keys.

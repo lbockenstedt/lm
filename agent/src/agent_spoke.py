@@ -196,6 +196,7 @@ RoleConnection = None
 #                otherwise the GitHub URL the agent shallow-clones on LOAD_ROLE
 #                when the spoke code isn't already present on the node.
 _ROLE_MAP = {
+    "llm": ("agent/src/llm_spoke.py", "LlmSpoke", "llm", None),
     "dns":        ("dns/src/dns_spoke.py",          "DNSSpoke",  "dns",        None),
     "henet":      ("henet/src/henet_spoke.py",      "HENetSpoke", "henet",     None),
     "dhcp":       ("dhcp/src/dhcp_spoke.py",        "DHCPSpoke", "dhcp",       None),
@@ -241,6 +242,7 @@ _ROLE_MAP = {
 _ROLE_LOG_PREFIXES: Dict[str, tuple] = {
     "dns":        ("DNS", "Unbound"),
     "henet":      ("HENet",),
+    "llm":        ("LLM",),
     "dhcp":       ("DHCP", "Kea"),
     "network":    ("Nw",),
     "netbox":     ("Netbox",),
