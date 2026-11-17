@@ -2288,12 +2288,26 @@ async function _lmLoadSentinelConfig() {
         const c = await (await setupFetch('/setup/log-analysis/config')).json();
         const m = c.metric || {};
         const metricTxt = m.at ? ` · last sweep ${m.last_sweep_s ?? '?'}s${m.avg_module_s != null ? ' · avg ' + m.avg_module_s + 's/mod' : ''}` : '';
+        const num = 'text-center border border-slate-300 rounded';
         el.innerHTML =
             `<label class="cursor-pointer flex items-center gap-1" title="Unattended per-module log sentinel">Auto`
-            + `<input type="checkbox" ${c.auto ? 'checked' : ''} onchange="_lmSetSentinel({auto:this.checked})"></label>`
-            + ` every <input type="number" min="1" value="${c.interval_min}" onchange="_lmSetSentinel({interval_min:parseInt(this.value)||15})" class="w-9 text-center border border-slate-300 rounded">m`
+            + `<input type="checkbox" data-sentinel="auto" ${c.auto ? 'checked' : ''}></label>`
+            + ` every <input type="number" min="1" data-sentinel="interval_min" value="${Number(c.interval_min) || 30}" class="w-9 ${num}">m`
+            + ` · <label class="cursor-pointer flex items-center gap-1" title="Also triage when an /api request returns a 5xx, even if the route logged it below ERROR">5xx`
+            + `<input type="checkbox" data-sentinel="log_5xx_triage" ${c.log_5xx_triage ? 'checked' : ''}></label>`
+            + ` · <label class="cursor-pointer flex items-center gap-1" title="Also triage a WARNING line that repeats at least this many times in the window">Warn ≥`
+            + `<input type="checkbox" data-sentinel="log_volume_triage" ${c.log_volume_triage ? 'checked' : ''}></label>`
+            + `<input type="number" min="1" data-sentinel="log_volume_threshold" value="${Number(c.log_volume_threshold) || 10}" class="w-9 ${num}" title="WARNING repeat threshold">`
             + `<span class="text-slate-500">${metricTxt}</span>`
             + (c.ab_online ? '' : ' · <span class="text-red-500">AppBuilder offline</span>');
+        // One change handler for every control: checkboxes send true/false, numbers send an int (blank is ignored).
+        el.onchange = (ev) => {
+            const key = ev.target.dataset && ev.target.dataset.sentinel;
+            if (!key) return;
+            if (ev.target.type === 'checkbox') { _lmSetSentinel({[key]: ev.target.checked}); return; }
+            const n = parseInt(ev.target.value, 10);
+            if (n >= 1) _lmSetSentinel({[key]: n});
+        };
     } catch (e) { /* config unavailable */ }
 }
 async function _lmSetSentinel(patch) {
