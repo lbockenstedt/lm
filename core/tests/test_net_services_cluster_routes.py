@@ -548,6 +548,52 @@ def test_dns_worker_discovery_uses_dns_parent_private_address_as_coordinator():
     assert load[2]["config"]["coordinator"] == "172.17.1.10"
 
 
+def test_dns_worker_discovery_asks_a_host_agent_in_another_tenant_for_the_coordinator():
+    """A Shared DNS role on an agent assigned to a tenant still gets its address."""
+    hub = FakeHub({
+        "dns-1": {
+            "DNS_CLUSTER_STATUS": {
+                "status": "SUCCESS", "enabled": False, "members": []},
+            "DNS_CLUSTER_ENROLL_WORKER": {
+                "status": "SUCCESS", "coordinator": "unresolvable-hostname",
+                "worker_secret": "generated-secret",
+                "coordinator_ca_pem": "-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----",
+            },
+        },
+        "dns-manager-agent": {
+            "GET_AVAILABLE_ROLES": {
+                "status": "SUCCESS", "installed_deploy_roles": ["dns-server"],
+                "active_deploy_roles": ["dns-server"],
+                "service_addresses": ["172.17.1.10"],
+            },
+        },
+        "dns-worker-agent": {
+            "GET_AVAILABLE_ROLES": {
+                "status": "SUCCESS", "installed_deploy_roles": ["dns-server"],
+                "active_deploy_roles": ["dns-server"],
+                "configured_worker_roles": [], "configured_workers": [],
+                "service_addresses": ["172.17.1.11"],
+            },
+            "LOAD_ROLE": {"status": "SUCCESS", "deploy": False},
+        },
+    })
+    hub.state.get_spoke_tenant = (
+        lambda sid: "group:other" if sid == "dns-manager-agent" else "shared")
+    hub.spoke_module_types["dns-manager-agent"] = "agent"
+    hub.active_connections.update({"dns-manager-agent", "dns-worker-agent"})
+    hub.spoke_parent_map["dns-1"] = "dns-manager-agent"
+
+    r = _client(ADMIN, hub).post("/api/dns/cluster/discover")
+
+    assert r.status_code == 200
+    load = next(call for call in hub.forwarded
+                if call[:2] == ("dns-worker-agent", "LOAD_ROLE"))
+    assert load[2]["config"]["coordinator"] == "172.17.1.10"
+    # The other-tenant host is asked for its address only, never enrolled.
+    assert not [c for c in hub.forwarded
+                if c[:2] == ("dns-manager-agent", "LOAD_ROLE")]
+
+
 def test_dns_worker_discovery_waits_for_existing_dns_deployment(monkeypatch):
     hub = FakeHub()
     hub.active_connections.add("dns-worker-agent")
@@ -758,6 +804,65 @@ def test_dhcp_worker_discovery_configures_exactly_two_server_roles():
         "discovered"] is True
 
 
+def test_dhcp_worker_discovery_asks_a_host_agent_in_another_tenant_for_the_coordinator():
+    """A Shared DHCP role on an agent assigned to a tenant still gets its address.
+
+    The host agent is not a worker candidate (wrong tenant), so before the fix
+    its address was never fetched and discovery failed with a 502.
+    """
+    hub = FakeHub()
+    hub.spoke_module_types = {
+        "dhcp-a-agent": "agent", "dhcp-b-agent": "agent", "dhcp-host-agent": "agent"}
+    hub.active_connections.update(hub.spoke_module_types)
+    hub.spoke_parent_map["dhcp-1"] = "dhcp-host-agent"
+    hub.state.get_spoke_tenant = (
+        lambda sid: "group:other" if sid == "dhcp-host-agent" else "shared")
+    cert = "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----"
+    key = "-----BEGIN PRIVATE KEY-----\nprivate\n-----END PRIVATE KEY-----"
+    addresses = {"dhcp-a-agent": "10.0.1.10", "dhcp-b-agent": "10.0.1.11",
+                 "dhcp-host-agent": "10.0.1.5"}
+    calls = 0
+
+    async def request_response(sid, cmd, payload=None, timeout=None):
+        nonlocal calls
+        hub.forwarded.append((sid, cmd, payload))
+        if cmd == "GET_AVAILABLE_ROLES":
+            data = {"status": "SUCCESS",
+                    "installed_deploy_roles": ["dhcp-server"],
+                    "active_deploy_roles": ["dhcp-server"],
+                    "configured_worker_roles": [], "configured_workers": [],
+                    "service_addresses": [addresses[sid]]}
+        elif cmd == "DHCP_HA_STATUS":
+            calls += 1
+            data = {"status": "SUCCESS", "enabled": calls > 1,
+                    "members": [] if calls == 1 else [
+                        {"id": "dhcp-a-agent", "host": "10.0.1.10", "connected": True},
+                        {"id": "dhcp-b-agent", "host": "10.0.1.11", "connected": True}]}
+        elif cmd == "DHCP_HA_ENROLL_WORKERS":
+            data = {"status": "SUCCESS", "workers": {
+                m["id"]: {"member_id": m["id"], "coordinator": "unresolvable",
+                          "worker_secret": "s", "coordinator_ca_pem": cert,
+                          "ha_user": "kea-ha", "ha_password": "p",
+                          "ha_ca_pem": cert, "ha_cert_pem": cert, "ha_key_pem": key,
+                          "ha_peers": [o["host"] for o in payload["members"]
+                                       if o["id"] != m["id"]]}
+                for m in payload["members"]}}
+        elif cmd in ("DHCP_HA_COMMIT_ENROLLMENT", "LOAD_ROLE"):
+            data = {"status": "SUCCESS", "deploy": False}
+        else:
+            raise AssertionError(cmd)
+        return {"payload": {"data": data}}
+
+    hub.request_response = request_response
+    response = _client(ADMIN, hub).post("/api/dhcp/ha/discover")
+
+    assert response.status_code == 200, response.text
+    loads = [call for call in hub.forwarded if call[1] == "LOAD_ROLE"]
+    # Only the two same-tenant workers are configured, each pointed at the host.
+    assert sorted(call[0] for call in loads) == ["dhcp-a-agent", "dhcp-b-agent"]
+    assert {call[2]["config"]["coordinator"] for call in loads} == {"10.0.1.5"}
+
+
 def test_dhcp_worker_deploy_polling_ignores_a_stale_unrelated_role_failure(monkeypatch):
     """Regression: GET_DEPLOY_STATUS's singular ``deploy`` field is just the
     MOST-RECENTLY-STARTED deploy role on that agent (agent_spoke.py's
@@ -893,6 +998,49 @@ def test_dhcp_worker_discovery_waits_until_two_servers_exist():
     assert response.json()["workers"][0]["status"] == "waiting"
     assert not any(cmd == "DHCP_HA_ENROLL_WORKERS"
                    for _sid, cmd, _payload in hub.forwarded)
+
+
+def _roles_reply(addresses):
+    """A GET_AVAILABLE_ROLES fake: every agent has an active dhcp-server role."""
+    async def request_response(sid, cmd, payload=None, timeout=None):
+        if cmd == "DHCP_HA_STATUS":
+            return {"payload": {"data": {
+                "status": "SUCCESS", "enabled": False, "members": []}}}
+        return {"payload": {"data": {
+            "status": "SUCCESS", "installed_deploy_roles": ["dhcp-server"],
+            "active_deploy_roles": ["dhcp-server"],
+            "service_addresses": addresses.get(sid, [])}}}
+    return request_response
+
+
+def test_dhcp_worker_discovery_logs_a_5xx_as_error_and_a_4xx_as_warning(caplog):
+    """AB's log scan reads only ERROR lines, so a broken discovery must be one;
+    an operator-fixable 409 (too many servers) stays a WARNING."""
+    # 502: the host agent answers with no private address.
+    hub = FakeHub()
+    hub.spoke_module_types = {"a": "agent", "b": "agent", "host": "agent"}
+    hub.active_connections.update(hub.spoke_module_types)
+    hub.spoke_parent_map["dhcp-1"] = "host"
+    hub.state.get_spoke_tenant = lambda sid: "group:x" if sid == "host" else "shared"
+    hub.request_response = _roles_reply({"a": ["10.0.1.10"], "b": ["10.0.1.11"]})
+    with caplog.at_level("WARNING"):
+        r = _client(ADMIN, hub).post("/api/dhcp/ha/discover")
+    assert r.status_code == 502
+    assert [rec.levelname for rec in caplog.records
+            if "worker discovery failed" in rec.getMessage()] == ["ERROR"]
+
+    # 409: three servers in the tenant.
+    caplog.clear()
+    hub = FakeHub()
+    hub.spoke_module_types = {"a": "agent", "b": "agent", "c": "agent"}
+    hub.active_connections.update(hub.spoke_module_types)
+    hub.request_response = _roles_reply(
+        {"a": ["10.0.1.10"], "b": ["10.0.1.11"], "c": ["10.0.1.12"]})
+    with caplog.at_level("WARNING"):
+        r = _client(ADMIN, hub).post("/api/dhcp/ha/discover")
+    assert r.status_code == 409
+    assert [rec.levelname for rec in caplog.records
+            if "worker discovery failed" in rec.getMessage()] == ["WARNING"]
 
 
 def test_dhcp_worker_discovery_is_global_admin_only():
