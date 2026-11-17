@@ -87,11 +87,12 @@ async function fetchOverview(fw) {
 }
 
 // ── Performance history ─────────────────────────────────────────────────────
-// The default range (7 days) is served by the hub from its own copy; any other
-// range is read from the spoke. perfRows[i] holds firewall i's rows so picking
-// an interface redraws without fetching again.
-const PERF_DEFAULT = 604800;
-let perfRange = { preset: PERF_DEFAULT };
+// The view opens on 24 hours, the same as Storage → Overview (owner's choice).
+// The 7-day range is served by the hub from its own copy (HUB_PRESET); any
+// other range is read from the spoke. perfRows[i] holds firewall i's rows so
+// picking an interface redraws without fetching again.
+const HUB_PRESET = 604800;
+let perfRange = { preset: 86400 };
 let perfFirewalls = [];
 let perfRows = [];
 const perfInterface = {};
@@ -128,7 +129,7 @@ function drawPerf(i, t0, t1) {
 
 // Fetch every firewall's history for the selected range and draw it.
 async function loadPerf() {
-    const { t0, t1, qs } = perfRangeWindow('fw', perfRange, PERF_DEFAULT);
+    const { t0, t1, qs } = perfRangeWindow('fw', perfRange, HUB_PRESET);
     await Promise.all(perfFirewalls.map(async (fw, i) => {
         const box = document.getElementById(`fw-trends-${i}`);
         if (!box) return;
@@ -176,7 +177,7 @@ function wirePerf(container, firewalls) {
     container.querySelectorAll('[data-fw-iface]').forEach(select => select.addEventListener('change', () => {
         const i = Number(select.dataset.fwIface);
         perfInterface[firewalls[i].id] = select.value;
-        const { t0, t1 } = perfRangeWindow('fw', perfRange, PERF_DEFAULT);
+        const { t0, t1 } = perfRangeWindow('fw', perfRange, HUB_PRESET);
         drawPerf(i, t0, t1);
     }));
     loadPerf();

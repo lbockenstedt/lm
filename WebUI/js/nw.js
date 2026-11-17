@@ -1532,10 +1532,11 @@ function _renderNwDeviceList(category, devices, counts) {
 // to truenas_data.json when no spoke is connected.
 
 // Performance chart range: a preset (seconds back from now) or a custom start/end.
-// The last hour is the default and comes from the hub's warm cache; any other
-// range is read from the spoke, which stores 7 days of 5-minute averages.
+// The view opens on 24 hours, the same as Firewalls → Overview. Only the last
+// hour comes from the hub's warm cache; any other range is read from the spoke,
+// which stores 7 days of 5-minute averages.
 // Charts and the selector are shared with Firewalls → Overview (js/perf-trends.js).
-let _tnRange = { preset: 3600 };
+let _tnRange = { preset: 86400 };
 let _tnPerfFleet = [];
 
 // Draw every appliance's trend charts for the selected range.
@@ -1692,13 +1693,15 @@ async function loadTruenasData(subMenu) {
                 <div class="text-xs text-slate-500">${label}</div>
                 <div class="text-lg font-semibold text-slate-800 font-mono">${value}</div></div>`;
             _tnPerfFleet = fleet;
-            container.innerHTML = `<div class="space-y-6">${perfRangeBar('tn', _tnRange)}${fleet.map((a, i) => {
+            const names = fleet.map(a => escapeHtml(a.name || a.id));
+            // Live tiles for every appliance, then the History selector, then
+            // the charts: the same layout as Firewalls → Overview.
+            container.innerHTML = `<div class="space-y-6">${fleet.map((a, i) => {
                 const res = results[i];
-                const name = escapeHtml(a.name || a.id);
-                const trends = `<div id="tn-trends-${i}" class="mt-3 grid grid-cols-1 xl:grid-cols-2 gap-3"></div>`;
+                const name = names[i];
                 if (res.status !== 'fulfilled') {
                     return `<div><h3 class="font-semibold text-slate-700 mb-2">${name}</h3>
-                        <div class="text-sm text-amber-600">Performance unavailable (${escapeHtml(String(res.reason && res.reason.message || res.reason))}).</div>${trends}</div>`;
+                        <div class="text-sm text-amber-600">Performance unavailable (${escapeHtml(String(res.reason && res.reason.message || res.reason))}).</div></div>`;
                 }
                 const p = _extract(res.value) || {};
                 const d = p.disks || {};
@@ -1724,9 +1727,13 @@ async function loadTruenasData(subMenu) {
                             <thead class="bg-slate-100 text-slate-600 text-xs"><tr><th class="px-4 py-2">INTERFACE</th><th class="px-4 py-2">SPEED</th><th class="px-4 py-2">RECEIVE</th><th class="px-4 py-2">SEND</th></tr></thead>
                             <tbody class="divide-y divide-slate-200">${ifRows}</tbody>
                         </table></div>` : ''}
-                    ${trends}
                 </div>`;
             }).join('')}
+            ${perfRangeBar('tn', _tnRange)}
+            ${fleet.map((_, i) => `<div>
+                <h3 class="font-semibold text-slate-700 mb-2">${names[i]}</h3>
+                <div id="tn-trends-${i}" class="grid grid-cols-1 xl:grid-cols-2 gap-3"></div>
+            </div>`).join('')}
             <div class="text-xs text-slate-500">Tiles are a live sample from each appliance (all disks combined); charts are 5-minute averages, kept 7 days by the storage spoke. <button data-tn-refresh class="text-emerald-600 hover:text-emerald-800 font-medium ml-1">Refresh</button></div>
             </div>`;
             container.querySelector('[data-tn-refresh]').addEventListener('click', () => loadTruenasData('Overview'));
