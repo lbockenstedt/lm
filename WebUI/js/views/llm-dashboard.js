@@ -14,8 +14,35 @@ async function apiJson(path, init) {
     return body;
 }
 
+// Render routing inputs from the hub schema with choices from cached inventory.
+function routingFields(fields, choices) {
+    return fields.map(field => {
+        const required = field.required ? safeHtml` required` : '';
+        if (field.source) {
+            return safeHtml`<div><label for="llm-routing-${field.name}">${field.label}</label>
+                <select id="llm-routing-${field.name}" name="${field.name}"${required}>
+                <option value="">${field.placeholder}</option>
+                ${choices[field.source].map(({ value, label }) => safeHtml`<option value="${value}">${label}</option>`)}
+                </select></div>`;
+        }
+        if (field.type === 'checkbox') {
+            return safeHtml`<label><input name="${field.name}" type="checkbox"> ${field.label}</label>`;
+        }
+        const bounds = field.type === 'number' ? safeHtml` min="0" max="${field.maximum}" step="1"` : '';
+        const pattern = field.pattern ? safeHtml` pattern="${field.pattern}"` : '';
+        const length = field.maxlength ? safeHtml` maxlength="${field.maxlength}"` : '';
+        return safeHtml`<label>${field.label} <input name="${field.name}" type="${field.type || 'text'}"
+            placeholder="${field.placeholder || ''}"${required}${bounds}${pattern}${length}></label>`;
+    });
+}
+
 // Render ordered model rules and exact repository bindings without raw JSON edits.
 function routingMarkup(config, models, tenants) {
+    const schema = config.routing_form_schema;
+    const choices = {
+        models: models.map((model, value) => ({ value, label: `${model.name} (${model.digest.slice(0, 12)})` })),
+        tenants: tenants.map(t => ({ value: t.id, label: t.name })),
+    };
     return safeHtml`
         <h4 class="font-bold">Ordered task models</h4>
         <p>New models are appended in priority order. To change priority, remove and re-add a model.</p>
@@ -25,13 +52,7 @@ function routingMarkup(config, models, tenants) {
                 <button type="button" data-action="removeModel" data-task="${task}" data-index="${index}" class="hpe-btn hpe-btn-secondary">Remove</button>
             </div>`))}
         <form data-submit="addModel" class="flex flex-wrap items-end gap-2">
-            <label>Task <input name="task" required pattern="[A-Za-z0-9_\\-]{1,64}" placeholder="pr_summary"></label>
-            <label>Approved model <select name="artifact" required>
-                <option value="">Select a reported model</option>
-                ${models.map((model, index) => safeHtml`<option value="${index}">${model.name} (${model.digest.slice(0, 12)})</option>`)}
-            </select></label>
-            <label>Minimum vCPUs <input name="vcpus" type="number" min="0" max="65536" step="1"></label>
-            <label>Minimum RAM (bytes) <input name="ram" type="number" min="0" max="${2 ** 52}" step="1"></label>
+            ${routingFields(schema.addModel, choices)}
             <button class="ml-auto hpe-btn hpe-btn-primary" ${models.length ? '' : safeHtml`disabled`}>Add model</button>
         </form>
         <h4 class="font-bold">AppBuilder repository policies</h4>
@@ -41,14 +62,8 @@ function routingMarkup(config, models, tenants) {
                 <button type="button" data-action="removeRepo" data-repo="${repo}" class="hpe-btn hpe-btn-secondary">Remove</button>
             </div>`)}
         <form data-submit="repo" class="flex flex-wrap items-end gap-2">
-            <label>Repository <input name="repo" required placeholder="owner/repo" maxlength="201"></label>
-            <label>Tenant <select name="tenant" required>
-                <option value="">Select a tenant</option>
-                ${tenants.map(t => safeHtml`<option value="${t.id}">${t.name}</option>`)}
-            </select></label>
-            <label>AppBuilder certificate SAN <input name="certificate" required maxlength="255"></label>
-            <label><input name="overflow" type="checkbox"> Allow cloud overflow for public PRs</label>
-            <button class="ml-auto hpe-btn hpe-btn-primary">Save repository</button>
+            ${routingFields(schema.repo, choices)}
+            <button class="ml-auto hpe-btn hpe-btn-primary" ${tenants.length ? '' : safeHtml`disabled`}>Save repository</button>
         </form>`;
 }
 

@@ -106,9 +106,11 @@ def test_uuid_check_sees_visible_text_only():
 
 def test_llm_dashboard_uses_reported_model_and_launches_qualification(hub_url_and_session):
     """Exercise the actual LLM page and its delegated settings/qualification actions."""
+    from routes.llm import ROUTING_FORM_SCHEMA
+
     base, token = hub_url_and_session
     digest = "a" * 64
-    config = {"llm_task_models": {}, "llm_ab_pr_repos": {},
+    config = {"llm_task_models": {}, "llm_ab_pr_repos": {}, "routing_form_schema": ROUTING_FORM_SCHEMA,
               "llm_qualification_candidates": {}, "llm_cloud_profiles": [], "test_workers": []}
     with sync_api.sync_playwright() as p:
         browser = p.chromium.launch()
@@ -125,7 +127,10 @@ def test_llm_dashboard_uses_reported_model_and_launches_qualification(hub_url_an
                 json=config if route.request.method == "GET" else {"status": "ok"}))
             page.route("**/api/llm/admin/qualify",
                        lambda route: route.fulfill(status=202, json={"status": "accepted"}))
-            page.route("**/setup/tenants", lambda route: route.fulfill(json={"tenants": []}))
+            page.route("**/setup/tenants", lambda route: route.fulfill(json={"tenants": [
+                {"id": "test-tenant", "name": "Test Tenant"},
+                {"id": "shared", "name": "Shared", "shared": True},
+            ]}))
             page.goto(base + "/")
             page.wait_for_function("window.lmCoreLoaded && typeof currentUser !== 'undefined' && !!currentUser")
             page.evaluate("setView('llm')")
@@ -144,5 +149,20 @@ def test_llm_dashboard_uses_reported_model_and_launches_qualification(hub_url_an
                 {"model": "trial:cpu", "digest": digest, "min_vcpus": 16, "min_ram_bytes": 0},
             ]}}
             page.get_by_text("16 vCPUs, 0 RAM bytes minimum", exact=False).wait_for()
+            page.get_by_label("Repository", exact=True).fill("not-a-repository")
+            repository = page.get_by_label("Repository", exact=True)
+            assert repository.evaluate("(input) => input.validity.patternMismatch")
+            repository.fill("test-org/test-repo")
+            tenant = page.get_by_label("Tenant", exact=True)
+            assert tenant.get_by_role("option", name="Shared").count() == 0
+            tenant.select_option(label="Test Tenant")
+            page.get_by_label("AppBuilder certificate SAN").fill("ab.test")
+            with page.expect_request(lambda req: req.url.endswith("/admin/settings")
+                                     and req.method == "POST") as binding:
+                page.get_by_role("button", name="Save repository", exact=True).click()
+            assert binding.value.post_data_json == {"llm_ab_pr_repos": {
+                "test-org/test-repo": {"tenant": "test-tenant", "certificate": "ab.test",
+                                       "allow_public_cloud": False},
+            }}
         finally:
             browser.close()

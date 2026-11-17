@@ -9,10 +9,29 @@ from fastapi import HTTPException, Request, Response
 from access import read_scope, request_effective_tenant, safe_external_url, same_tenant, tenant_is_shared
 import instance_vault
 from llm_cloud import TOKEN_LIMIT_FIELDS, valid_endpoint
-from llm_pool import diagnostic, model_minimums, valid_model
+from llm_pool import HARDWARE_LIMITS, diagnostic, model_minimums, valid_model
 
 
 POOL_SETTINGS = ("llm_task_models", "llm_ab_pr_repos", "llm_qualification_candidates", "llm_cloud_profiles")
+TASK_KEY = r"[A-Za-z0-9_\-]{1,64}"
+REPO_KEY = r"[A-Za-z0-9_.\-]{1,100}/[A-Za-z0-9_.\-]{1,100}"
+SAN_LIMIT = 255
+
+ROUTING_FORM_SCHEMA = {
+    "addModel": [
+        {"name": "task", "label": "Task", "required": True, "pattern": TASK_KEY, "placeholder": "pr_summary"},
+        {"name": "artifact", "label": "Approved model", "required": True,
+         "source": "models", "placeholder": "Select a reported model"},
+        {"name": "vcpus", "label": "Minimum vCPUs", "type": "number", "maximum": HARDWARE_LIMITS["vcpus"]},
+        {"name": "ram", "label": "Minimum RAM (bytes)", "type": "number", "maximum": HARDWARE_LIMITS["ram_bytes"]},
+    ],
+    "repo": [
+        {"name": "repo", "label": "Repository", "required": True, "pattern": REPO_KEY, "placeholder": "owner/repo"},
+        {"name": "tenant", "label": "Tenant", "required": True, "source": "tenants", "placeholder": "Select a tenant"},
+        {"name": "certificate", "label": "AppBuilder certificate SAN", "required": True, "maxlength": SAN_LIMIT},
+        {"name": "overflow", "label": "Allow cloud overflow for public PRs", "type": "checkbox"},
+    ],
+}
 
 
 def cloud_profile_reference(row):
@@ -37,7 +56,7 @@ def validate_pool_config(hub, config):
     if "llm_task_models" in config:
         tasks = config["llm_task_models"]
         if not isinstance(tasks, dict) or len(tasks) > 32 or any(
-                not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", task)
+                not re.fullmatch(TASK_KEY, task)
                 or not isinstance(models, list) or len(models) > 8
                 or any(not isinstance(row, dict) or not valid_model(row.get("model"), row.get("digest"))
                        or model_minimums(row) is None
@@ -48,11 +67,11 @@ def validate_pool_config(hub, config):
     if "llm_ab_pr_repos" in config:
         repos = config["llm_ab_pr_repos"]
         if not isinstance(repos, dict) or len(repos) > 256 or any(
-                not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}", name)
+                not re.fullmatch(REPO_KEY, name)
                 or not isinstance(row, dict) or not isinstance(row.get("tenant"), str)
                 or tenant_is_shared(row["tenant"]) or not hub.state.get_tenant(row["tenant"])
                 or not isinstance(row.get("certificate"), str)
-                or not 0 < len(row["certificate"].strip()) <= 255
+                or not 0 < len(row["certificate"].strip()) <= SAN_LIMIT
                 or not isinstance(row.get("allow_public_cloud", False), bool)
                 or row.keys() - {"tenant", "certificate", "allow_public_cloud"}
                 for name, row in repos.items()):
@@ -117,6 +136,7 @@ def register(app, hub, ctx):
         cloud = config.get("llm_cloud_profiles")
         workers = hub.state.system_state.get("module_metadata", {})
         return {**{key: config.get(key, {}) for key in POOL_SETTINGS[:-1]},
+                "routing_form_schema": ROUTING_FORM_SCHEMA,
                 "llm_cloud_profiles": [row for item in (cloud if isinstance(cloud, list) else [])
                                        if (row := cloud_profile_reference(item)) is not None],
                 "test_workers": [{"key": key, "label": hub.state.get_module_name(key)}
