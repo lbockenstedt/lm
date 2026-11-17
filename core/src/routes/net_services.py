@@ -15,6 +15,7 @@ from api import (
 )
 from cert_distribution import build_available_targets, target_owner_tenant
 import le_cert_access as _lca
+import cert_monitor as _certmon
 
 
 def _deploy_status_for_role(progress: dict, role: str) -> dict:
@@ -3039,31 +3040,12 @@ def register(app, hub, ctx):
         return hosts, any_source
 
     def _le_certs_holder(data):
-        """Locate the cert list inside an le-certs response.
-
-        The list lives at DIFFERENT depths depending on the caller:
-        * flat ``{"certs": [...]}`` — the already-unwrapped shape unit tests use;
-        * the spoke SUCCESS envelope ``{"status": ..., "data": {"certs": [...]}}``
-          — the REAL shape ``_relay_spoke`` returns and the warm cache stores
-          (``le_cache_get('certs')``), and the shape the WebUI unwraps via
-          ``inner(d).certs``.
-
-        Returns the list (possibly empty) or ``None`` when there is no cert list.
-        Fixes the silent-no-op bug where the tag/filter helpers read top-level
-        ``data['certs']`` (``None`` on the enveloped shape), so per-cert tenant
-        ownership / ab tags / the ownership filter never reached the certs
-        the UI actually renders."""
-        # Not a dict: no list.
-        if not isinstance(data, dict):
-            return None
-        # Flat shape.
-        if isinstance(data.get("certs"), list):
-            return data["certs"]
-        # Enveloped shape.
-        inner = data.get("data")
-        if isinstance(inner, dict) and isinstance(inner.get("certs"), list):
-            return inner["certs"]
-        return None
+        """Locate the cert list inside an le-certs response: flat ``{"certs"}``
+        or the spoke envelope ``{"data": {"certs"}}`` (the real shape
+        ``_relay_spoke`` returns and the warm cache stores). None when there is
+        no list. Shared with the Cert Monitor and alert engine, which read the
+        same cache."""
+        return _certmon.le_cert_holder(data)
 
     def _le_with_certs(data, new_certs):
         """Return ``data`` with its cert list replaced by ``new_certs`` at the
@@ -3223,6 +3205,27 @@ def register(app, hub, ctx):
             tagged.append({**c, "ab": is_bf})
         return _le_with_certs(data, tagged)
 
+    async def _tag_served(data):
+        """Tag each cert with ``served`` — the Cert Monitor's last check of
+        whether its live endpoint serves the issued cert (state, detail,
+        checked_at), so the Certificates page shows a cert that was pushed
+        but never installed. Certs never checked get no tag."""
+        # The cert list, and the LE results by domain (read off the event loop).
+        certs = _le_certs_holder(data)
+        if not certs:
+            return data
+        try:
+            res = (await asyncio.to_thread(_certmon.load_results)).get("results") or []
+        except Exception:  # noqa: BLE001
+            return data
+        # Copy each cert (never mutate the cache) and add its served state.
+        out = []
+        for c in certs:
+            r = _certmon.le_served_verdict(res, c)
+            out.append({**c, "served": {"state": r.get("deploy_state"), "detail": r.get("deploy_detail") or "",
+                                        "checked_at": r.get("checked_at")}} if r else c)
+        return _le_with_certs(data, out)
+
     def _tag_cert_tenants(request, data):
         """Tag each cert with its explicit owner ``tenants`` list plus the
         caller's rights (``shared``/``owned``/``can_edit``) so the LE UI can show
@@ -3284,20 +3287,20 @@ def register(app, hub, ctx):
             if cached is not None:
                 out = dict(cached) if isinstance(cached, dict) else {"certs": cached}
                 out["stale"] = True
-                return _tag_cert_tenants(request, await _filter_le_certs(request, _tag_ab(out), tenant))
+                return _tag_cert_tenants(request, await _filter_le_certs(request, await _tag_served(_tag_ab(out)), tenant))
             raise HTTPException(status_code=503, detail="No spoke connected")
         # Fetch live, cache it, and return it tagged and filtered.
         try:
             data = await _relay_spoke(le_sid, "LE_LIST_CERTS", log_name="le_list_certs")
             await hub.le_cache_set("certs", data)
-            return _tag_cert_tenants(request, await _filter_le_certs(request, _tag_ab(data), tenant))
+            return _tag_cert_tenants(request, await _filter_le_certs(request, await _tag_served(_tag_ab(data)), tenant))
         # Live fetch failed: fall back to the cached list, else re-raise.
         except HTTPException:
             cached = hub.le_cache_get("certs")
             if cached is not None:
                 out = dict(cached) if isinstance(cached, dict) else {"certs": cached}
                 out["stale"] = True
-                return _tag_cert_tenants(request, await _filter_le_certs(request, _tag_ab(out), tenant))
+                return _tag_cert_tenants(request, await _filter_le_certs(request, await _tag_served(_tag_ab(out)), tenant))
             raise
 
     @app.get("/api/le/eligible-domains")

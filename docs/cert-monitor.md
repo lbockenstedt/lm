@@ -47,6 +47,90 @@ For each host it captures:
 - serial number and the validity dates
 - days left
 
+## LE deployment verification
+
+Every Let's Encrypt cert the hub has pushed to at least one target (any ledger
+target status SUCCESS, DEFERRED or ERROR) is **added automatically** as a
+service **LE-deployed** row: its domain on the port the target type serves the
+cert on (Proxmox `hypervisor`/`simulation` targets on pveproxy's 8006, the
+`directory`/`ldap-server` targets on LDAPS 636, every other target on 443; a
+cert pushed to several types gets one row per port). An endpoint that is
+already monitored keeps its own row and service and gains the LE comparison;
+an `le_deploy` rule filtered to **LE-deployed** still matches it. Nothing to
+configure.
+After each probe the cert the endpoint **serves** is compared with the cert the
+le spoke **issued** (`not_after` from the hub's le cache):
+
+| State | Meaning | Row |
+| :--- | :--- | :--- |
+| `verified` | the site serves the issued cert | normal colour |
+| `stale` | the site serves an OLDER cert — the new one was pushed but never installed | red, whatever its days left |
+| `mismatch` | the site serves a cert whose SAN does not cover the domain, or has no SAN (another site's cert, a load balancer default) | red |
+| `newer` | the site serves a NEWER cert than the hub's copy of the ledger, which can lag a renewal; not a failure | normal colour |
+| `unreachable` | DNS, connect or TLS to the site failed (communication failure) | error |
+| `unverifiable` | wildcard cert — no single host to probe; listed, never alerted | n/a |
+| `unknown` | the served or issued expiry could not be read; alerts are held, not raised or cleared | n/a |
+
+The detail line quotes every target whose last push was not SUCCESS (for
+example `ipam/LM-agent-netbox reported DEFERRED (cached but NOT installed …)`),
+so the reason sits next to the symptom. The probe reads the served cert even
+when TLS verification fails, so the check also works against a site whose
+cert has expired or whose clients run with verification off.
+
+**What is probed, and from where.** The check probes the cert's *domain*
+from the hub, the way a client reaches it, not each push target on its own
+spoke. That verifies the outcome users see (the public or internal address
+that resolves for the name), and it also works for targets with no spoke of
+their own (for example the `netbox-server` agent). The trade-off is that
+several targets behind one name on the same port (for example nodes behind a
+VIP) share one verdict: a node that is not currently answering for the name
+is not checked. A per-target check on the owning spoke is a possible
+follow-up.
+
+- **Runs even while the monitor is disabled.** A deploy failure should never be
+  silently off, so while the monitor is off the scheduler still runs an
+  LE-only check (`scope: "le"` in the results file); enabling the monitor
+  runs the full check straight away.
+- **One probe, a verdict per cert.** When two certs (for example two tenants')
+  cover the same domain, the endpoint is probed once and each cert gets its own
+  verdict (`le_verdicts`); the row shows the worst, and each tenant sees only
+  its own.
+- **Prompt and repeated.** A new cert, a new push, a changed push status or a
+  push that went away (its row is then cleared) is
+  checked on the next 15-minute tick (`le-change` run). While any LE row is
+  `stale`, `mismatch` or `unreachable`, it is re-checked hourly (`le-retry`
+  run). With the monitor enabled these two runs probe only the LE endpoints and
+  fold them into the last full results (`le_checked_at`), so a failing LE
+  endpoint never turns the whole scan hourly. An LE-only row whose served
+  cert has expired does not count toward the full scan's "expiring soon"
+  hourly mode either; its own hourly re-check covers it.
+- **Held, not cleared, when the LE list is unreadable.** If the hub can't
+  read its LE cert list (the cache is missing or malformed), that is not
+  treated as "no certs pushed": no LE run happens, and a full scan keeps
+  the last LE rows and verdicts as they were.
+- **Named targets.** The row's targets read `module/name` (for example
+  `netbox-server/LM-NETBOX`): spoke and agent ids are shown by their display
+  name or hostname, and an id that can't be resolved is left out.
+- **Surfaced everywhere.** One `[cert-verify]` WARNING per failing cert (host:port, state, tenant) in
+  the hub log after every check; a chip on the row here; a **Served** chip
+  beside the cert on the Certificates page; the tenant alert source
+  **Certificate Deploy Failed** (`cert_deploy_failed`, item
+  `<domain>/served`, scoped to the cert's tenant and matched to the cert's
+  current issued expiry, so a verdict from before a renewal is never shown);
+  and the Cert Monitor trigger
+  `le_deploy` below.
+- The probe runs from the hub, so the hub must be able to reach the site on
+  that port. A site only reachable on an internal network shows
+  `unreachable`; Ignore its row if that is expected.
+- LE rows are tenant-scoped: the Cert Monitor page shows only the verdicts of
+  the tenant you are viewing plus the shared tenant, and the global Cert
+  Monitor rules alert only on shared-tenant LE certs. A tenant's own failures
+  alert through its **Cert deploy failed** rule (`<domain>/served`).
+- Both alert paths recover when the site serves the issued cert (`verified`)
+  or a newer one (`newer`); `<domain>/served` also recovers when the cert is
+  no longer pushed anywhere. While the verdict is `unknown`, `unverifiable`,
+  not there yet or unreadable, an open alert is held, not recovered.
+
 ## Colours / ordering
 
 | Status | Rule |
@@ -84,14 +168,17 @@ stored in `global_config.cert_monitor_ignored` as
 ## Schedule & storage
 
 - A scheduler started with the hub checks every 15 minutes whether a run is due.
-  A run happens **once per 24h**, and only while the feature is enabled.
+  A run happens **once per 24h** while the feature is enabled (LE-deployed
+  certs are checked even when it is not; see LE deployment verification).
   While any non-ignored cert expires within 24 hours (or has already expired) the
   run happens **every hour** instead, so a renewal is picked up — and its reminder
   emails stop — within the hour. Ignore a dead cert to drop back to daily.
   **Check now** forces an immediate run.
 - Results are written atomically to `$LM_STATE_DIR/cert_monitor.json`
   (default `/var/lib/lm/state/cert_monitor.json`). The file holds `last_run`,
-  `duration_s`, `counts` and a sorted `results` array.
+  `duration_s`, `counts` and a sorted `results` array, plus `scope` (`all`, or
+  `le` for an LE-only run while the monitor is off) and `le_fingerprint` (the
+  LE cert/push state the run checked).
 - Config is stored in `global_config.cert_monitor`:
   `{enabled, custom_hosts, disabled_builtin}`.
 
@@ -144,6 +231,7 @@ rules are hub-wide, not per-tenant. Each rule has:
 | `expiring` | days left < the rule's `threshold_days` (default 30; expired certs always match) |
 | `error` | the check failed (DNS failure, timeout or handshake error) |
 | `untrusted` | the cert did not validate against the system trust store (expected for private device-CA endpoints) |
+| `le_deploy` | an LE-deployed endpoint is `stale`, `mismatch` or `unreachable` (see LE deployment verification); service filter **LE-deployed** |
 
 How emails go out:
 - One email goes out when hosts newly breach a rule, and one when they recover.

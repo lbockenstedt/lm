@@ -62,12 +62,13 @@ CONFIG_KEY = "cert_monitor_alerts"
 # File (in the state dir) holding which hosts are bad per rule and when they were emailed.
 STATE_FILE = "cert_monitor_alert_state.json"
 # Trigger types a rule can use.
-TRIGGERS = ("expiring", "error", "untrusted")
+TRIGGERS = ("expiring", "error", "untrusted", "le_deploy")
 # Human-readable title for each trigger, used in subjects and default rule names.
 TRIGGER_LABELS = {
     "expiring": "Certificate expiring",
     "error": "Endpoint unreachable / check failed",
     "untrusted": "Certificate untrusted (chain verification failed)",
+    "le_deploy": "LE cert not deployed (endpoint not serving the issued cert)",
 }
 # Default "expiring" threshold: the monitor's own red (critical) days-left level.
 DEFAULT_THRESHOLD_DAYS = cm.RED_DAYS
@@ -91,8 +92,8 @@ def service_names() -> List[str]:
     for h in cm.BUILTIN_HOSTS:
         if h["service"] not in seen:
             seen.append(h["service"])
-    # "Custom" covers hosts the operator added by hand.
-    return seen + ["Custom"]
+    # "Custom" covers hosts the operator added by hand; LE-deployed the auto-added LE certs.
+    return seen + ["Custom", cm.LE_SERVICE]
 
 
 # ── rules ───────────────────────────────────────────────────────────────────
@@ -193,7 +194,10 @@ def _in_scope(rule: Dict[str, Any], r: Dict[str, Any]) -> bool:
     """Return True if host result ``r`` falls within the rule's service filter (empty = all)."""
     # No service filter means the rule applies to every host.
     svcs = rule.get("services") or []
-    return not svcs or (r.get("service") or "") in svcs
+    # An LE-verified endpoint also matches "LE-deployed" when it is monitored
+    # under its own service (the LE check was merged onto that row).
+    return (not svcs or (r.get("service") or "") in svcs
+            or bool(r.get("le_domain") and cm.LE_SERVICE in svcs))
 
 
 def is_bad(rule: Dict[str, Any], r: Dict[str, Any]) -> Optional[bool]:
@@ -205,6 +209,11 @@ def is_bad(rule: Dict[str, Any], r: Dict[str, Any]) -> Optional[bool]:
     # "error" rules: bad when the host check failed.
     if trig == "error":
         return r.get("status") == "error"
+    # "le_deploy" rules: bad while an LE endpoint is stale/mismatched/unreachable,
+    # good once it serves the issued (or a newer) cert; undecidable for non-LE
+    # hosts, wildcard certs and unknown expiries (an open alert is held).
+    if trig == "le_deploy":
+        return cm.deploy_bad(r.get("deploy_state"))
     # "untrusted" rules: undecidable without cert data; bad when the chain did not verify.
     if trig == "untrusted":
         if r.get("error") or r.get("days_left") is None:
@@ -403,6 +412,9 @@ def _detail(rule: Dict[str, Any], r: Dict[str, Any]) -> str:
     # Error rules: show the check error.
     if rule.get("trigger") == "error":
         return r.get("error") or "check failed"
+    # LE deploy rules: show the served-vs-issued comparison.
+    if rule.get("trigger") == "le_deploy":
+        return r.get("deploy_detail") or (r.get("deploy_state") or "")
     # Untrusted rules: show the verification error.
     if rule.get("trigger") == "untrusted":
         return r.get("verify_error") or ("trusted" if r.get("trusted") else "untrusted")
@@ -418,7 +430,8 @@ def _raw_host(rule: Dict[str, Any], r: Dict[str, Any]) -> Dict[str, Any]:
     """Return the selected fields of a host result for the raw (JSON) email format."""
     # Fields copied into the raw payload.
     keys = ("host", "port", "service", "region", "role", "status", "days_left",
-            "not_after", "provider", "issuer_cn", "subject_cn", "trusted", "error")
+            "not_after", "provider", "issuer_cn", "subject_cn", "trusted", "error",
+            "deploy_state", "le_issued_not_after")
     # Copy them and add the human-readable detail.
     out = {k: r.get(k) for k in keys}
     out["detail"] = _detail(rule, r)
