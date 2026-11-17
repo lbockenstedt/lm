@@ -928,7 +928,7 @@ def register(app, hub, ctx):
             if module == "agents":
                 # Flatten all agents' lines into one list.
                 flat = []
-                for agent_id, logs in hub.agent_logs.items():
+                for agent_id, logs in list(hub.agent_logs.items()):
                     # B2: agent_logs is guid-keyed for relayed agents; label with
                     # the raw name (guid→name via agent_info). Spoke-namespace
                     # keys (SPOKE_LOG, guid-keyed) fall back to the key itself —
@@ -937,8 +937,8 @@ def register(app, hub, ctx):
                     label = hub._agent_relay_name(agent_id)
                     if label == agent_id:
                         label = hub._log_source_label(agent_id)
-                    # Prefix each line with its source.
-                    for line in logs:
+                    # Prefix a snapshot so buffer mutations cannot break iteration.
+                    for line in list(logs):
                         flat.append(f"[{label}] {line}")
                 return {"logs": flat[-500:]}
 
@@ -975,7 +975,7 @@ def register(app, hub, ctx):
                 flat = []
                 for sid in matching_sids:
                     label = hub._log_source_label(sid)
-                    for line in hub.agent_logs.get(sid, []):
+                    for line in list(hub.agent_logs.get(sid, [])):
                         flat.append(f"[{label}] {line}")
                 # Hub-side cert-distribution activity (the le.distribution logger
                 # — per-target push outcomes, hub self-install, LE_GET_CERT

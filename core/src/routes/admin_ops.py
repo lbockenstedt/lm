@@ -1626,7 +1626,7 @@ def register(app, hub, ctx):
             lines = 100
         lines = max(1, min(lines, 500))
         needle = str((body or {}).get("contains") or "").lower()
-        entries = [str(e) for e in (hub.agent_logs.get(hub._primary_key(target)) or [])]
+        entries = [str(e) for e in list(hub.agent_logs.get(hub._primary_key(target)) or [])]
         if needle:
             entries = [e for e in entries if needle in e.lower()]
         return {"status": "ok", "target": target, "count": len(entries),
