@@ -345,3 +345,47 @@ def test_fix_access_refuses_bad_input(monkeypatch):
     _blocked(monkeypatch)
     assert os_update.fix_access("root; rm -rf /", "pw")["status"] == "ERROR"
     assert os_update.fix_access("root", "")["status"] == "ERROR"
+
+
+# ── a repository that 404s is named, not left as a transient-looking apt error ─
+_APT_404 = ("E: Failed to fetch http://security.debian.org/debian-security/pool/x.deb  "
+            "404  Not Found [IP: 151.101.2.132 80]\n"
+            "E: Unable to fetch some archives, maybe run apt-get update")
+
+
+def test_apply_names_a_dead_repository_when_apt_gets_a_404(root_node, monkeypatch):
+    monkeypatch.setattr(os_update, "check_updates", _pending("openssl"))
+
+    class _R404:
+        returncode = 100
+        stdout = ""
+        stderr = _APT_404
+    monkeypatch.setattr(os_update, "_run", lambda argv, t: _R404())
+    r = os_update.apply_updates()
+    assert r["status"] == "ERROR" and "404" in r["message"]
+    assert "past end of support" in r["message"] and "fix the apt sources" in r["message"]
+
+
+def test_apply_leaves_other_apt_failures_unexplained(root_node, monkeypatch):
+    monkeypatch.setattr(os_update, "check_updates", _pending("openssl"))
+
+    class _RLock:
+        returncode = 100
+        stdout = ""
+        stderr = "E: Could not get lock /var/lib/dpkg/lock-frontend"
+    monkeypatch.setattr(os_update, "_run", lambda argv, t: _RLock())
+    r = os_update.apply_updates()
+    assert r["status"] == "ERROR" and "end of support" not in r["message"]
+
+
+def test_check_warns_about_a_dead_repository_when_the_refresh_404s(root_node, monkeypatch):
+    monkeypatch.setattr(os_update, "_privilege_blocker", lambda: "")
+
+    class _R:
+        def __init__(self, rc, err="", out=""):
+            self.returncode, self.stderr, self.stdout = rc, err, out
+
+    monkeypatch.setattr(os_update, "_run", lambda argv, t: _R(100, _APT_404)
+                        if "update" in argv else _R(0))
+    r = os_update.check_updates(refresh=True)
+    assert any("past end of support" in w for w in r["warnings"])

@@ -242,11 +242,10 @@ async def take_snapshot(hub, vm: Dict[str, Any], prefix: str, keep: int = 0,
     # Label for logs and the new snapshot name.
     label = f"{vm.get('name')} ({vm.get('vmid')}@{vm.get('node')})"
     name = snapshot_name(prefix)
-    # Take the snapshot; on failure log and return an error.
+    # Take the snapshot; on failure return the error. Not logged here: each
+    # caller logs the failure once, with this message and what it did about it.
     d = await _vm_action(hub, vm, "snapshot", name)
     if d.get("status") != "SUCCESS":
-        logger.warning("[vm-snapshot] %s: snapshot FAILED (%s) by %s", label,
-                       d.get("message", ""), actor or "?")
         return {"status": "ERROR", "message": d.get("message") or "snapshot failed"}
     # Success.
     logger.info("[vm-snapshot] %s: took %s by %s", label, name, actor or "?")
@@ -367,6 +366,14 @@ def schedule_vms(sched: Dict[str, Any], vms: List[Dict[str, Any]]) -> List[Dict[
             or tags & set(vm.get("tags") or []) or (vm.get("pool") and vm.get("pool") in pools)]
 
 
+def _not_started(sid: str, message: str) -> Dict[str, Any]:
+    """Log a run that could not begin, and return its error result."""
+    # The only place this is logged, so the periodic loop and a Run-now (whose
+    # background task nobody reads) each leave exactly one line.
+    logger.warning("[vm-snapshot] schedule %s: %s", sid, message)
+    return {"status": "ERROR", "message": message}
+
+
 async def run_schedule(hub, sid: str, actor: str = "schedule") -> Dict[str, Any]:
     """Snapshot every VM of one schedule now (one at a time)."""
     # Unknown schedule fails; a running one is refused.
@@ -374,11 +381,11 @@ async def run_schedule(hub, sid: str, actor: str = "schedule") -> Dict[str, Any]
     if sched is None:
         raise KeyError(sid)
     if sid in _running:
-        return {"status": "ERROR", "message": "this schedule is already running"}
+        return _not_started(sid, "this schedule is already running")
     # The tenant's VMs; none loaded yet is an error.
     known = await tenant_vms(hub, sched.get("tenant", ""))
     if not known:
-        return {"status": "ERROR", "message": "the VM list hasn't loaded yet"}
+        return _not_started(sid, "the VM list hasn't loaded yet")
     # VMs this schedule covers.
     vms = schedule_vms(sched, known)
     # Mark running for the duration.
@@ -403,6 +410,10 @@ async def run_schedule(hub, sid: str, actor: str = "schedule") -> Dict[str, Any]
                "errors": errors}
     sched.update(last_run=summary["at"], last_result=summary)
     hub.state._mark_dirty()
+    # The one log line for a failed run, with each VM's reason: take_snapshot does
+    # not log them, and this covers both the periodic loop and a Run-now.
+    if errors:
+        logger.error("[vm-snapshot] schedule %s: %s", sid, "; ".join(errors))
     # Overall status, summary, and per-VM results.
     return {"status": "SUCCESS" if not errors else "ERROR", **summary, "results": results}
 
@@ -427,13 +438,10 @@ async def run_loop(hub) -> None:
     from sync_loop import run_sync_loop  # sibling leaf
 
     async def _tick():
-        """Run each due schedule once and warn on failures."""
-        # Run each due schedule; log failures.
+        """Run each due schedule once."""
+        # run_schedule logs its own failures, whether the run finished or never started.
         for sid in due_schedules(hub, time.time()):
-            res = await run_schedule(hub, sid)
-            if res.get("status") != "SUCCESS":
-                logger.warning("[vm-snapshot] schedule %s: %s", sid,
-                               res.get("message") or "; ".join(res.get("errors") or []))
+            await run_schedule(hub, sid)
 
     # Start after 2 minutes, then tick on the interval.
     await run_sync_loop(stagger=120, body=_tick, delay=lambda: _TICK_S,

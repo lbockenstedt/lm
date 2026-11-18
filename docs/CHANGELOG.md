@@ -12,6 +12,12 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ## Week of 2026-11-16
 
+### OS Updates
+
+- **VMs hosted behind a spoke that cannot snapshot are patched, with a warning.** A node whose VM sits on a cluster whose agents dial a spoke without VM-action support (the Client-Sim spokes) used to fail every run with "Unknown command: PXMX_VM_ACTION" and was never patched. It now patches with a warning on the run item, like storage that cannot snapshot; a snapshot that fails for any other reason still blocks patching.
+- **A repository that answers 404 is named.** When `apt-get update` or the upgrade gets a `404 Not Found` from the package repository, the message now says the OS release may be past end of support (its repository moved to an archive) and to fix the apt sources or upgrade the OS, instead of reading like a transient error.
+- **Log levels follow the outcome.** A node that patched fine, an approval, a cancel and a reboot that scheduled are INFO; a failed apply, a failed reboot, a node left in maintenance mode and a node not patched because its snapshot failed are ERROR (so AB's log sentinel opens on them). Healthy nodes no longer log at WARNING. Each failure is logged once: a failed snapshot is one ERROR that carries the reason (a failed scheduled or Run-now snapshot run is one ERROR listing each VM's error, a run that could not start is one WARNING, and the Run-now request itself is an INFO audit line), a degraded patch is one WARNING, and a failed cluster reboot is one ERROR (plus a second only if the node was left in maintenance mode).
+
 ### WebUI
 
 - **History selectors match on Firewalls and Storage.** On both Firewalls →
