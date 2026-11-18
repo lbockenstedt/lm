@@ -726,18 +726,21 @@ def test_own_firewall_keeps_vrf_prefixes_and_search_leg_never_goes_shared():
 
 
 # ── A tenant in its own VRF cannot use shared infrastructure ────────────────
-# Shared infra sits in the global table. A prefix that NetBox puts only in the
-# tenant's own VRF must not match a shared firewall/Kea/Proxmox record with the
-# same address in the global table. NetBox itself stays shared.
+# Shared infra serves the common routing domain: the global table or a VRF
+# several tenants share. A prefix that NetBox puts only in the tenant's own
+# VRF (one no other tenant uses) must not match a shared firewall/Kea/Proxmox
+# record with the same address. NetBox itself stays shared.
 
 class _OwnVrfPrefixHub(_PrefixHub):
-    """dxp: 10.0.0.0/8 only in its own VRF (id 7), 192.168.5.0/24 global."""
+    """dxp: 10.0.0.0/8 only in its own VRF (id 7), 192.168.5.0/24 global;
+    vrfonly: 10.0.0.0/8 only in its own VRF (id 8)."""
     _ROWS = {"dxp": [{"prefix": "10.0.0.0/8", "vrf_id": 7},
                      {"prefix": "192.168.5.0/24", "vrf_id": None}],
-             "vrfonly": [{"prefix": "10.0.0.0/8", "vrf_id": 7}]}
+             "vrfonly": [{"prefix": "10.0.0.0/8", "vrf_id": 8}]}
 
     async def request_response(self, spoke_id, command, payload, **kwargs):
-        return {"payload": {"data": {"prefixes": self._ROWS.get(payload.get("tenant"), [])}}}
+        key = payload.get("tenant") or "group:" + str(payload.get("tenant_group"))
+        return {"payload": {"data": {"prefixes": self._ROWS.get(key, [])}}}
 
 
 def _own_vrf_hub():
@@ -904,3 +907,142 @@ def test_vrf_cut_holds_after_hub_restart_without_netbox_fetch():
     # Rows without vrf_id (an older spoke's warm list) must not forget known VRFs.
     _access._note_prefix_vrfs(restarted, "vrfonly", [{"prefix": "10.0.0.0/8"}])
     assert _access.shared_slice_prefixes(restarted, "vrfonly", ["10.0.0.0/8"]) == []
+
+
+# ── A VRF several tenants share is common, not anyone's own ─────────────────
+# Every tenant can sit in a VRF: here lab1 and lab2 share VRF 3, which the
+# shared DNS/DHCP serve, lab1 also has a VRF of its own (1) and dxp sits alone
+# in VRF 2. Cutting every non-global VRF emptied lab1's and lab2's shared views.
+
+_COMMON_VRF_ROWS = {
+    "lab1": [{"prefix": "172.16.0.0/23", "vrf_id": 1}, {"prefix": "172.31.200.0/22", "vrf_id": 3}],
+    "lab2": [{"prefix": "172.21.0.0/24", "vrf_id": 3}],
+    "dxp": [{"prefix": "10.0.0.0/8", "vrf_id": 2}],
+    "group:g": [{"prefix": "172.16.0.0/23", "vrf_id": 1}, {"prefix": "172.31.200.0/22", "vrf_id": 3},
+                {"prefix": "10.0.0.0/8", "vrf_id": 2}],
+}
+
+
+def _common_vrf_hub(warm=None, fetch=True, **extra_tenants):
+    """A hub with lab1, lab2 and dxp (plus ``extra_tenants``), each tenant's
+    prefixes read from NetBox once unless ``fetch`` is False."""
+    tenants = {t: {"netbox_tenant_slug": t} for t in ("lab1", "lab2", "dxp")}
+    tenants.update(extra_tenants)
+    state = FakeState(system_state={"subnet_filter_modules": {"dns": True}}, tenants=tenants)
+    hub = _WarmOwnVrfHub(state, {} if warm is None else warm)
+    hub._ROWS = _COMMON_VRF_ROWS
+    for tid in tenants if fetch else ():
+        asyncio.run(_access.fetch_tenant_prefixes(hub, tid))
+    return hub
+
+
+def test_tenants_sharing_a_vrf_keep_shared_dns_and_dhcp_rows():
+    rows = {"records": [{"ip": "172.21.0.5", "name": "lab2-host"},
+                        {"ip": "172.31.200.9", "name": "lab1-host"},
+                        {"ip": "172.16.0.9", "name": "lab1-own-vrf"},
+                        {"ip": "10.1.2.3", "name": "dxp-host"}]}
+    hub = _common_vrf_hub()
+
+    def _names(module, tenant):
+        out = asyncio.run(filter_tenant(hub, {"a": _admin_session()}, _FakeRequest("a"),
+                                        rows, module, ["ip"], explicit_tenant=tenant))
+        return [r["name"] for r in out["records"]]
+
+    for module in ("dns", "dhcp"):
+        assert _names(module, "lab2") == ["lab2-host"]
+        assert _names(module, "lab1") == ["lab1-host"]  # its own VRF 1 is still cut
+        assert _names(module, "dxp") == []  # alone in VRF 2: still cut
+
+
+def test_common_vrf_is_known_right_after_a_hub_restart():
+    # After a restart only the selected tenant's VRFs would be in memory; the
+    # other tenants' saved copies must still mark VRF 3 as common.
+    warm = {}
+    _common_vrf_hub(warm)
+    restarted = _common_vrf_hub(warm, fetch=False)
+    assert _access.shared_slice_prefixes(restarted, "lab2", ["172.21.0.0/24"]) == ["172.21.0.0/24"]
+    assert _access.shared_slice_prefixes(restarted, "dxp", ["10.0.0.0/8"]) == []
+
+
+def test_one_netbox_tenant_and_tenant_groups_do_not_make_a_vrf_common():
+    # A second hub tenant on dxp's NetBox tenant, and a group whose prefixes
+    # include dxp's, are not other users of dxp's VRF. The group itself is cut
+    # on its members' own VRFs and keeps the common one.
+    hub = _common_vrf_hub(**{"dxp-lab": {"netbox_tenant_slug": "dxp"},
+                             "group:g": {"is_tenant_group": True,
+                                         "netbox_tenant_group_slug": "g"}})
+    assert _access.shared_slice_prefixes(hub, "dxp", ["10.0.0.0/8"]) == []
+    assert _access.shared_slice_prefixes(
+        hub, "group:g", ["172.16.0.0/23", "172.31.200.0/22", "10.0.0.0/8"]) == ["172.31.200.0/22"]
+
+
+def _reread(hub, tid, reply):
+    """Read ``tid``'s prefixes again, with the spoke answering ``reply``."""
+    async def _reply(*args, **kwargs):
+        return {"payload": {"data": reply}}
+    hub.request_response = _reply
+    _access.clear_prefix_cache(hub)
+    return asyncio.run(_access.fetch_tenant_prefixes(hub, tid))
+
+
+def _feed(warm, key, rows):
+    """Store ``rows`` as the NetBox cache feed's copy of scope ``key``'s prefixes."""
+    warm[("nb_prefixes", key)] = {"status": "SUCCESS", "prefixes": rows}
+
+
+def test_a_tenant_that_leaves_a_shared_vrf_stops_making_it_common():
+    # lab2 removes its last prefix, which leaves lab1 alone in VRF 3. Once
+    # NetBox answers that lab2 has no prefixes, VRF 3 is lab1's own and is cut,
+    # also after a restart. A failed read is not that answer: it changes nothing.
+    warm, lab1 = {}, ["172.31.200.0/22"]
+    hub = _common_vrf_hub(warm)
+    _reread(hub, "lab2", {"status": "ERROR", "message": "NetBox timed out"})
+    assert _access.shared_slice_prefixes(hub, "lab1", lab1) == lab1
+    _reread(hub, "lab2", {"status": "SUCCESS", "prefixes": []})
+    assert _access.shared_slice_prefixes(hub, "lab1", lab1) == []
+    assert _access.shared_slice_prefixes(_common_vrf_hub(warm, fetch=False), "lab1", lab1) == []
+
+
+def test_common_vrf_does_not_depend_on_which_tenants_were_read():
+    # Since the hub started, a page has read only lab1. lab2's and dxp's VRFs
+    # come from the NetBox cache feed's copies of their prefixes, so VRF 3 is
+    # still common to lab1 and lab2, and lab1's own VRF 1 is still cut.
+    warm = {}
+    for tid in ("lab2", "dxp"):
+        _feed(warm, tid, _COMMON_VRF_ROWS[tid])
+    hub = _common_vrf_hub(warm, fetch=False)
+    asyncio.run(_access.fetch_tenant_prefixes(hub, "lab1"))
+    assert _access.shared_slice_prefixes(
+        hub, "lab1", ["172.31.200.0/22", "172.16.0.0/23"]) == ["172.31.200.0/22"]
+
+
+def test_feed_copy_of_a_tenants_prefixes_beats_an_older_read():
+    # lab2 moved its prefix out of VRF 3 after the hub read it: the feed's newer
+    # copy says so, and VRF 3 is lab1's own. An empty copy is lab2 with no
+    # prefixes. A copy from an older netbox spoke (no vrf_id) says nothing
+    # about VRFs, so the read still counts.
+    warm, lab1 = {}, ["172.31.200.0/22"]
+    hub = _common_vrf_hub(warm)
+    _feed(warm, "lab2", [{"prefix": "172.21.0.0/24", "vrf_id": 9}])
+    assert _access.shared_slice_prefixes(hub, "lab1", lab1) == []
+    _feed(warm, "lab2", [])
+    assert _access.shared_slice_prefixes(hub, "lab1", lab1) == []
+    _feed(warm, "lab2", [{"prefix": "172.21.0.0/24"}])
+    assert _access.shared_slice_prefixes(hub, "lab1", lab1) == lab1
+
+
+def test_prefix_reads_ignore_the_pre_unified_hub_cache_copies():
+    # Before the unified hub cache, the NetBox page kept prefixes under
+    # "nb_netbox_prefixes", and a hub can still hold those copies, never
+    # refreshed. NetBox answering that lab2 has no prefixes beats lab2's old
+    # copy, and a failed read falls back to the feed's copy, not the old one.
+    warm, lab1 = {}, ["172.31.200.0/22"]
+    hub = _common_vrf_hub(warm)
+    warm[("nb_netbox_prefixes", "lab2")] = {"status": "SUCCESS", "prefixes": _COMMON_VRF_ROWS["lab2"]}
+    assert _reread(hub, "lab2", {"status": "SUCCESS", "prefixes": []}) == []
+    assert _access.shared_slice_prefixes(hub, "lab1", lab1) == []
+    warm[("nb_netbox_prefixes", "lab1")] = {"status": "SUCCESS",
+                                            "prefixes": [{"prefix": "192.0.2.0/24", "vrf_id": 5}]}
+    _feed(warm, "lab1", _COMMON_VRF_ROWS["lab1"])
+    assert _reread(hub, "lab1", {"status": "ERROR", "message": "NetBox timed out"}) == [
+        "172.16.0.0/23", "172.31.200.0/22"]
