@@ -120,6 +120,7 @@ from update_pipeline import UpdatePipelineMixin, _parse_nn, _version_behind
 from endpoint_sync import EndpointSyncMixin
 # 802.1X just-in-time helpers.
 import dot1x_jit
+from llm_pool import LlmPool
 from vm_sync import VmSyncMixin
 from fw_discovery_sync import FwDiscoverySyncMixin
 from nw_discovery_sync import NwDiscoverySyncMixin
@@ -793,6 +794,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # the parent's tenant so a Generic Node hosting N roles needs only the
         # one base-agent approval.
         self.spoke_parent_map: Dict[str, str] = {}
+        self.llm_pool = LlmPool(self)
+        self._ab_llm_jobs = set()
 
         # Generic-agent hosts that ran the "netbox-server" deploy role (they have
         # nginx + the /usr/local/bin/lm-netbox-install-cert helper and run as
@@ -6124,7 +6127,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         return False
 
     async def _handle_hub_request(self, spoke_id: str, msg_data, payload,
-                                 peer_cert_identity=None) -> None:
+                                 peer_cert_identity=None, *, allow_llm=True,
+                                 reply_socket=None) -> None:
         """Dispatch a spoke/agent-initiated HUB_REQUEST and reply with a signed
         HUB_RESPONSE.
 
@@ -6142,7 +6146,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Read the request and its id, and run the handler.
         req = payload.get("data", {}) or {}
         req_id = msg_data.get("header", {}).get("message_id")
-        result = await self.handle_hub_request(spoke_id, req, peer_cert_identity)
+        if (not allow_llm and isinstance(req, dict) and req.get("type") == "LLM_PR_SUMMARY"
+                and self._hub_request_authorized(spoke_id, peer_cert_identity)):
+            result = {"status": "ERROR", "code": "no_capacity", "retryable": True}
+        else:
+            result = await self.handle_hub_request(spoke_id, req, peer_cert_identity)
+        if (reply_socket is not None
+                and self.active_connections.get(self._primary_key(spoke_id)) is not reply_socket):
+            return
         # Build the signed HUB_RESPONSE carrying the request id.
         resp_msg = Message(
             header=MessageHeader(
@@ -7852,6 +7863,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
     # the old if-chain fell through. Types not listed here get that log too.
     # Message type to handler method name.
     _SPOKE_MESSAGE_HANDLERS = {
+        "LLM_WORKER_STATUS": "_spoke_msg_llm_worker_status",
         "CS_TELEMETRY": "_spoke_msg_cs_telemetry",
         "CS_CONFIG_REQUEST": "_spoke_msg_cs_config_request",
         **{_t: "_spoke_msg_dot1x" for _t in dot1x_jit.MESSAGE_TYPES},
@@ -7893,6 +7905,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Fallback for verified-but-unhandled message types. Logged at INFO
         # (not DEBUG) so a new/unknown spoke frame is visible by default.
         logger.info(f"Received verified message from {conn.spoke_id}: {payload.get('type')}")
+
+    async def _spoke_msg_llm_worker_status(self, conn, msg_data, payload, dec_secret):
+        """Record only the authenticated worker's current availability."""
+        self.llm_pool.report(conn.pk, conn.websocket, payload.get("data"))
 
     async def _spoke_msg_cs_telemetry(self, conn, msg_data, payload, dec_secret):
         """Client-Sim telemetry (combined spoke relays its full state).
@@ -8223,10 +8239,22 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         """Agent-initiated request (e.g. AppBuilder asking for logs or to
         trigger updates). See _handle_hub_request for the dispatch + signed
         HUB_RESPONSE reply."""
-        # Handle the request, passing the mTLS identity when present.
-        await self._handle_hub_request(
-            conn.spoke_id, msg_data, payload,
-            getattr(conn.websocket, "peer_cert_identity", None))
+        # Slow inference must not block the websocket's receive/heartbeat loop.
+        data = payload.get("data")
+        identity = getattr(conn.websocket, "peer_cert_identity", None)
+        if (isinstance(data, dict) and data.get("type") == "LLM_PR_SUMMARY"
+                and self._hub_request_authorized(conn.spoke_id, identity)
+                and len(self._ab_llm_jobs) < 4):
+            task = asyncio.create_task(self._handle_hub_request(
+                conn.spoke_id, msg_data, payload, identity, reply_socket=conn.websocket))
+            self._ab_llm_jobs.add(task)
+            task.add_done_callback(self._ab_llm_jobs.discard)
+            return
+        if isinstance(data, dict) and data.get("type") == "LLM_PR_SUMMARY":
+            await self._handle_hub_request(
+                conn.spoke_id, msg_data, payload, identity, allow_llm=False)
+        else:
+            await self._handle_hub_request(conn.spoke_id, msg_data, payload, identity)
 
     # ── Phase 6: connection end ─────────────────────────────────────────
     #
@@ -8283,6 +8311,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         del self.active_connections[pk]
         self.active_connection_key_ids.pop(pk, None)
         self.spoke_module_types.pop(pk, None)
+        if hasattr(self, "llm_pool"):
+            self.llm_pool.forget(pk)
         self.spoke_parent_map.pop(pk, None)
         self.netbox_server_agents.discard(pk)
         self.ldap_server_agents.discard(pk)
@@ -9016,6 +9046,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     "message": "not authorized for HUB_REQUEST (AppBuilder role required)"}
         # Dispatch by request type.
         try:
+            if req_type == "LLM_PR_SUMMARY":
+                return await self.llm_pool.ab_pr_summary(req, peer_cert_identity)
             # Return all logs, minus security lines (AB files public GitHub issues).
             if req_type == "GET_LOGS":
                 out = await asyncio.to_thread(self.collect_all_logs)

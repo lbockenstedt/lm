@@ -461,6 +461,7 @@ for (const _cls of Object.keys(MODULE_CLASSES)) {
     for (const _p of MODULE_CLASSES[_cls]) PRODUCT_LABEL[_p] = _cls;
 }
 const VIEW_LABEL = {
+    llm: 'LLM',
     dashboard: 'Dashboard', setup: 'Setup', settings: 'System', logs: 'Logs', ldap: 'Directory', bugs: 'Bug Report', features: 'Feature Request', templates: 'Template Repo',
 };
 function updateHeaderModule() {
@@ -516,6 +517,7 @@ function updateContextActions() {
 
 // Roles available to load on a generic agent (matches lm/agent/src/agent_spoke.py _ROLE_MAP)
 const AGENT_ROLES = {
+    'llm':        { name: 'LLM Worker (CPU)', desc: 'Loads a tenant-scoped inference worker on a VM with the dedicated Ollama service and pre-approved local models.', deploy: false },
     'dns':        { name: 'DNS Management',  desc: 'Coordinator-only management spoke. Does not install or run Unbound locally; deploy "DNS Server" on each resolver worker, then configure those members here.', deploy: false },
     'henet':      { name: 'HE.NET (Hurricane Electric public DNS)', desc: 'Manages public DNS records at dns.he.net over HE\'s dynamic-DNS update API. No server to deploy — the account login credential (shared with certificates, DNS → "Hurricane Electric (account login)") powers Import/Sync (reading the zone); pushing a record\'s IP needs THAT record\'s own per-record DDNS key, entered when you add or edit it.', deploy: false },
     'dns-server': { name: 'DNS Server (Unbound)', desc: 'Deploys Unbound itself (server + remote-control + conf.d include). Runs as its own service on this host; does NOT create a spoke. Load "DNS Management" to manage it.', deploy: true },
@@ -4133,6 +4135,7 @@ function _rebuildMainNav(allSpokes, connections) {
         ${isAdmin() ? adminSettings : ''}
         ${isAdmin() ? adminLogs : ''}
         ${isAdmin() ? _securityNavHtml() : ''}
+        ${isAdmin() ? '<button type="button" id="nav-llm" class="nav-item p-3 rounded-r-lg flex items-center gap-3 text-xs font-medium">LLM</button>' : ''}
         ${(isAdmin() || isTenantAdmin()) ? _osUpdatesNavHtml() : ''}
         ${(isAdmin() && window.__lmCertMonEnabled) ? _certMonNavHtml() : ''}
         ${(isAdmin() || isTenantAdmin()) ? _credVaultNavHtml() : ''}
@@ -4141,6 +4144,7 @@ function _rebuildMainNav(allSpokes, connections) {
         ${(isAdmin() || isTenantAdmin()) ? _featureRequestNavHtml() : ''}
         ${(!isAdmin() && isTenantAdmin()) ? _myDevicesNavHtml() : ''}
     `;
+    mainNav.querySelector('#nav-llm')?.addEventListener('click', () => setView('llm'));
 
     // Normalize the nav font size across every item. The admin items (Setup/
     // System/Logs) come from the STATIC index.html (captured via _getNavHtml),
@@ -4375,6 +4379,7 @@ function renderSpokeIndicators() {
 }
 
 async function setView(viewId) {
+    if (viewId === 'llm' && !isAdmin()) return;
     if ((viewId === 'setup' || viewId === 'settings' || viewId === 'logs') && !isAdmin()) {
         return;  // silently block — nav items are hidden, this guards deep-links
     }
@@ -4501,6 +4506,7 @@ async function setView(viewId) {
 const lmViews = {};
 
 const VIEW_LOADERS = {
+    llm: () => lmViews.llm(document.getElementById('llm-content')),
     // dashboard has real per-tenant content (summary tiles + infra status), so it
     // needs a loader too. A tenant switch re-renders through setSubView (not
     // setView, which would reset the active tab), and with no entry here the
@@ -5012,6 +5018,8 @@ function _viewTemplate(viewId) {
   <div id="reports-content"><p class="text-sm text-slate-500 italic p-4">Loading…</p></div>
 </div>`;
 
+        case 'llm':
+            return `<div id="llm-content"></div>`;
         case 'osupdates':
             return `<div id="osupdates-content"></div>`;
 
