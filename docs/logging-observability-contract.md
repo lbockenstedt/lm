@@ -53,10 +53,17 @@ Two consequences every module must respect:
   `POST /setup/log-analysis/config`, and stored in `global_config`:
   - `log_5xx_triage` (default on): any `/api/...` request the hub answered
     with a 5xx counts as an error, once per method + path + status, whatever
-    level the route logged its reason at.
+    level the route logged its reason at. The finding stays with the hub,
+    because the hub route answered (and logged) the failure. When the
+    path's first segment names a module (`/api/dhcp/...`), the line also
+    names the module the route relays to, so AppBuilder looks there too.
   - `log_volume_triage` (default on) with `log_volume_threshold` (default
     10): a WARNING message repeated at least that many times in the window
     counts as an error.
+
+  The sentinel analyzes the same condition only once until a quiet window
+  clears it. An analysis that failed (AppBuilder busy, timed out or
+  errored) does not count, so the next sweep tries again.
 
 ## The six requirements
 
