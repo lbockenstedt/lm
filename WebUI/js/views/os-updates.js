@@ -29,6 +29,8 @@ const _osuActions = {
     apply: () => osuApply(),
     cancel: () => osuCancel(),
     toggleNode: el => osuToggleNode(el.dataset.node, el.checked),
+    toggleGroup: el => osuToggleGroup(el.dataset.tenant, el.dataset.state, el.checked),
+    setSort: el => osuSetSort(el.value),
     togglePkg: el => osuTogglePkg(el.dataset.node, el.dataset.pkg, el.checked),
     reboot: el => osuReboot(el.dataset.node),
     fixAccess: el => osuFixAccess(el.dataset.node),
@@ -37,6 +39,8 @@ const _osuActions = {
 };
 
 function renderOsUpdatesView(content) {
+    // A fresh visit starts from the default order (the dropdown below is new too).
+    _osuUi.sort = 'attention';
     // Fleet-wide settings are Global Admin only; a Tenant Admin sees just their nodes.
     const osuFleetCls = isAdmin() ? '' : 'hidden';
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
@@ -53,6 +57,7 @@ function renderOsUpdatesView(content) {
 • Auto-reboot (on by default for auto-patch nodes) reboots nodes that installed something once the run is done, hub last.
 • Proxmox cluster nodes reboot only when needed, in HA maintenance mode (guests move off first), one node at a time.
 • Nodes update one at a time; the hub goes last (this page restarts).
+• Nodes are grouped by tenant, then by state (needs attention, patching, updates pending, not checked yet, up to date); each group has a Select all and the Sort box orders them.
 • Separate from LM code updates.">ⓘ</span></h3>
                 <span class="flex items-center gap-3"><span id="osu-status" class="text-xs text-slate-500"></span><span id="osu-checked" class="text-xs text-slate-500"></span></span>
             </div>
@@ -67,9 +72,18 @@ function renderOsUpdatesView(content) {
             </div>
         </div>
         <div class="${card} mt-4">
-            <div class="flex items-center justify-between">
+            <div class="flex flex-wrap items-center justify-between gap-2">
                 <h3 class="${h3}">Nodes</h3>
-                <span id="osu-hidden" class="text-xs text-slate-500"></span>
+                <span class="flex items-center gap-3">
+                    <span id="osu-hidden" class="text-xs text-slate-500"></span>
+                    <label class="flex items-center gap-1.5 text-xs text-slate-500" for="osu-sort">Sort
+                        <select id="osu-sort" class="${inputCls} w-48" data-action="setSort" title="Tenants and the nodes inside each state group">
+                            <option value="attention">Needs attention first</option>
+                            <option value="name">Name (A–Z)</option>
+                            <option value="updates">Most updates first</option>
+                        </select>
+                    </label>
+                </span>
             </div>
             <div id="osu-body"><p class="text-xs text-slate-500 italic">Loading…</p></div>
         </div>
@@ -339,6 +353,10 @@ async function osuCheck() {
 // leave a full dist-upgrade selected.
 const _osuSel = { nodes: new Set(), pkgs: {} };
 
+// How the node list is ordered ('attention' | 'name' | 'updates'). Not saved:
+// leaving the tab and coming back resets it (renderOsUpdatesView).
+const _osuUi = { sort: 'attention' };
+
 // The node list is a view (js/core/view.js): a re-render morphs the page, so
 // open package lists stay open while polling.
 const _osuView = createView({ el: 'osu-body', state: { data: {} }, render: _osuBodyHtml });
@@ -359,6 +377,23 @@ function osuTogglePkg(key, pkg, on) {
     if (on) { set.add(pkg); _osuSel.nodes.delete(key); } else set.delete(pkg);
     if (!set.size) delete _osuSel.pkgs[key];
     _osuRender(_osuView.state.data);
+}
+
+// A group's "Select all": tick (or untick) every deployable node in that
+// tenant + state group. Like a single node tick, it drops that node's package picks.
+function osuToggleGroup(tenantKey, state, on) {
+    const d = _osuView.state.data;
+    const busy = _osuBusy();
+    (d.nodes || []).map(n => _osuClassify(n, d.run, busy))
+        .filter(c => c.tenantKey === tenantKey && c.group === state && _osuSelectable(c.n, busy))
+        .forEach(c => { _osuSel.nodes[on ? 'add' : 'delete'](c.key); delete _osuSel.pkgs[c.key]; });
+    _osuRender(d);
+}
+
+// Sort dropdown changed: redraw the list from the data already loaded.
+function osuSetSort(sort) {
+    _osuUi.sort = sort;
+    _osuView.refresh();
 }
 
 // Pending upgrades on each affected node that belong to the vulnerable packages.
@@ -628,75 +663,214 @@ function _osuFailureGroups(run) {
         </div>`)}</div>`;
 }
 
+// Display order and labels of the state groups inside a tenant, worst first.
+const _OSU_STATES = [
+    { id: 'attention', label: 'Needs attention' },
+    { id: 'patching', label: 'Patching' },
+    { id: 'pending', label: 'Updates pending' },
+    { id: 'unchecked', label: 'Not checked yet' },
+    { id: 'current', label: 'Up to date' },
+];
+
+// A reboot was scheduled in the last 15 minutes (the node is about to restart).
+function _osuRebootScheduled(n) {
+    return !!(n.reboot_scheduled_at && (Date.now() / 1000 - n.reboot_scheduled_at) < 900);
+}
+
+// A node that needs a reboot nobody has scheduled yet.
+function _osuNeedsReboot(n) { return !!n.reboot_required && !_osuRebootScheduled(n); }
+
+// How the node's automatic reboot ended when it did not end cleanly, as the hub reports it
+// (reboot_state): the node was never rebooted, the reboot failed, the command went out but no answer
+// came back (the node may be rebooting), or the node is left in HA maintenance mode (rebooted or
+// not). Each needs a different follow-up, so each has its own badge.
+const _OSU_REBOOT_BADGES = {
+    not_started: 'not rebooted', failed: 'reboot failed',
+    unconfirmed: 'reboot not confirmed', drained: 'left in maintenance',
+};
+function _osuRebootProblem(item) {
+    const s = item && item.reboot_state;
+    return _OSU_REBOOT_BADGES[s] ? s : '';
+}
+
+// Node can be ticked for "Deploy selected" (and by a group's select-all).
+function _osuSelectable(n, busy) { return !!(n.eligible && n.count && !n.apply_blocker && !busy); }
+
+// Where a node sits on the page: its run item, the tenant group (a name, never
+// an id), the state group and the state badge. One place decides all of it, so
+// the row badge and the group it is listed under can never disagree.
+function _osuClassify(n, run, busy) {
+    const key = `${n.kind}:${n.id}`;
+    const item = run && (run.items || []).find(i => i.key === key);
+    // An in-flight status left in a run that is no longer going (the hub restarted mid-run, or the
+    // saved run predates the hub's own cleanup) was cut off: show it as the hub marks it on restart,
+    // never as a node that is still patching.
+    let st = item && item.status;
+    if (!busy) st = { applying: 'interrupted', rebooting: 'interrupted', queued: 'skipped', snapshotting: 'skipped' }[st] || st;
+    // Group by the tenant's key, show its name: two tenants may share a name. Real
+    // keys are prefixed, so no tenant id (any text is a valid id) can equal the
+    // "hub" or "none" keys and merge into those groups.
+    const tenantKey = n.kind === 'hub' ? 'hub' : (n.tenant_key ? `tenant-${n.tenant_key}` : 'none');
+    const tenant = n.tenant || (n.kind === 'hub' ? 'Hub' : 'Unassigned');
+    let group, badge;
+    // While a run is going the cached inventory is stale: a node it just finished is shown
+    // with the run item's own result (what is left, whether it now needs a reboot), so its
+    // group, badge, counts, sort and package list all agree and none shows pre-deploy data.
+    // A failed apply that got as far as re-listing (apt exited part-way) has the same result, and
+    // so does a node that was patched and is now rebooting; one that never reached apt reports no
+    // count, so its cached state still stands. A node being rebooted no longer needs one.
+    if (busy && item && (st === 'done' || Number.isInteger(item.remaining))) {
+        n = { ...n, count: item.remaining || 0, packages: [], security_count: 0, reboot_required: st !== 'rebooting' && !!item.reboot_required };
+    } else if (busy && st === 'rebooting') {
+        // The one-node Reboot button: its item reports no package count, so the cached one stands.
+        n = { ...n, reboot_required: false };
+    }
+    if (st === 'snapshotting' || st === 'applying' || st === 'rebooting') { group = 'patching'; badge = _osuBadge(`${st}…`, 'blue'); }
+    // The node's automatic reboot did not end cleanly (see _OSU_REBOOT_BADGES): a person has to look,
+    // even when the patch itself worked and no reboot is still due.
+    else if ((st === 'done' || st === 'failed') && _osuRebootProblem(item)) { group = 'attention'; badge = _osuBadge(_OSU_REBOOT_BADGES[item.reboot_state], 'red'); }
+    else if (st === 'failed' || st === 'interrupted') { group = 'attention'; badge = _osuBadge(st, 'red'); }
+    else if (st === 'queued') { group = 'patching'; badge = _osuBadge('queued', 'slate'); }
+    // Never patched this run (cancelled, or the window ended): still pending, and the user asked for it.
+    else if (st === 'skipped') { group = 'attention'; badge = _osuBadge('skipped', 'slate'); }
+    // A package-by-package deploy can leave others pending, so only "nothing remains" is up to date.
+    else if (st === 'done' && busy) {
+        group = _osuNeedsReboot(n) ? 'attention' : (n.count ? 'pending' : 'current');
+        badge = n.count ? _osuBadge(`updated, ${n.count} left`, 'amber') : _osuBadge('updated', 'emerald');
+    }
+    else if (n.unreachable) { group = 'attention'; badge = _osuBadge('unreachable', 'red'); }
+    else if (n.checked === false) { group = 'unchecked'; badge = _osuBadge('not checked yet', 'slate'); }
+    else if (!n.count) { group = _osuNeedsReboot(n) ? 'attention' : 'current'; badge = _osuBadge('up to date', 'emerald'); }
+    // Pending updates still need attention when a deploy is blocked or a reboot nobody scheduled is due.
+    else { group = (n.apply_blocker || _osuNeedsReboot(n)) ? 'attention' : 'pending'; badge = _osuBadge(`${n.count} pending`, 'amber'); }
+    return { n, key, item, tenantKey, tenant, group, badge };
+}
+
+// Nodes of one state group, in the chosen order (default: by name).
+function _osuSortNodes(rows, sort) {
+    const byName = (a, b) => String(a.n.label).localeCompare(String(b.n.label));
+    return [...rows].sort(sort === 'updates' ? (a, b) => (b.n.count || 0) - (a.n.count || 0) || byName(a, b) : byName);
+}
+
+// Per-tenant numbers for the group header and the sort order.
+function _osuTenantStats(key, items) {
+    return {
+        key, name: items[0].tenant, items,
+        attention: items.filter(c => c.group === 'attention').length,
+        packages: items.reduce((sum, c) => sum + (c.n.count || 0), 0),
+        reboot: items.filter(c => _osuNeedsReboot(c.n)).length,
+    };
+}
+
+// Tenants in the chosen order: worst first by default, A–Z, or most packages first.
+function _osuSortTenants(tenants, sort) {
+    const byName = (a, b) => a.name.localeCompare(b.name);
+    const order = {
+        attention: (a, b) => b.attention - a.attention || b.packages - a.packages || byName(a, b),
+        updates: (a, b) => b.packages - a.packages || byName(a, b),
+    };
+    return [...tenants].sort(order[sort] || byName);
+}
+
+// One state group of a tenant: a collapsible list of node rows, with a
+// select-all for the nodes in it that can be deployed.
+function _osuStateHtml(t, s, rows, open, busy) {
+    const selectable = rows.filter(c => _osuSelectable(c.n, busy));
+    const selectAll = selectable.length
+        ? safeHtml`<label class="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer py-1" title="Tick every node in this group that has updates to deploy"><input type="checkbox" class="w-4 h-4 rounded" ${selectable.every(c => _osuSel.nodes.has(c.key)) ? 'checked' : ''} data-action="toggleGroup" data-tenant="${t.key}" data-state="${s.id}">Select all ${selectable.length}</label>` : '';
+    // "osu-s-" vs the tenant card's "osu-t-": a tenant named "a-pending" can't take the id of tenant "a"'s pending group.
+    return safeHtml`<details id="osu-s-${encodeURIComponent(t.key)}-${s.id}" ${open ? 'open' : ''} class="mt-2">
+        <summary class="cursor-pointer text-xs font-bold text-slate-500 py-1">${s.label} (${rows.length})</summary>
+        ${selectAll}
+        <div class="divide-y divide-slate-100">${rows.map(c => _osuRowHtml(c, busy))}</div>
+    </details>`;
+}
+
+// One tenant: a collapsible card whose header counts what needs doing, then its state groups.
+function _osuTenantHtml(t, sort, busy) {
+    const states = _OSU_STATES
+        .map(s => ({ s, rows: _osuSortNodes(t.items.filter(c => c.group === s.id), sort) }))
+        .filter(x => x.rows.length);
+    // Up to date is collapsed unless it is all there is.
+    const groups = states.map(({ s, rows }) => _osuStateHtml(t, s, rows, s.id !== 'current' || states.length === 1, busy));
+    const badges = [
+        t.attention ? _osuBadge(`${t.attention} need attention`, 'red') : '',
+        t.packages ? _osuBadge(`${t.packages} package(s) pending`, 'amber') : '',
+        t.reboot ? _osuBadge(`${t.reboot} need reboot`, 'amber') : '',
+        states.length === 1 && states[0].s.id === 'current' ? _osuBadge('all up to date', 'emerald') : '',
+    ];
+    return safeHtml`<details id="osu-t-${encodeURIComponent(t.key)}" open class="border border-slate-200 rounded-md mb-3">
+        <summary class="cursor-pointer px-3 py-2 flex flex-wrap items-center gap-2 bg-slate-50 rounded-md">
+            <span class="text-sm font-bold text-slate-700">${t.name}</span>
+            <span class="text-xs text-slate-500">${t.items.length} node(s)</span>
+            ${badges}
+        </summary>
+        <div class="px-3 pb-2">${groups}</div>
+    </details>`;
+}
+
+// The Nodes card: nodes grouped by tenant, then by state.
 function _osuBodyHtml({ data: d }) {
     const run = d.run;
     const busy = _osuBusy();
-    const rows = (d.nodes || []).map(n => {
-        const key = `${n.kind}:${n.id}`;
-        const feats = n.features || [];
-        const item = run && (run.items || []).find(i => i.key === key);
-        let state;
-        if (item && item.status === 'snapshotting') state = _osuBadge('snapshotting…', 'blue');
-        else if (item && item.status === 'applying') state = _osuBadge('applying…', 'blue');
-        else if (item && item.status === 'rebooting') state = _osuBadge('rebooting…', 'blue');
-        else if (item && item.status === 'failed') state = _osuBadge('failed', 'red');
-        else if (item && item.status === 'interrupted') state = _osuBadge('interrupted', 'red');
-        else if (item && item.status === 'queued') state = _osuBadge('queued', 'slate');
-        else if (item && item.status === 'done' && busy) state = _osuBadge('updated', 'emerald');
-        else if (n.unreachable) state = _osuBadge('unreachable', 'red');
-        else if (n.checked === false) state = _osuBadge('not checked yet', 'slate');
-        else if (!n.count) state = _osuBadge('up to date', 'emerald');
-        else state = _osuBadge(`${n.count} pending`, 'amber');
-        const scheduled = n.reboot_scheduled_at && (Date.now() / 1000 - n.reboot_scheduled_at) < 900;
-        const reboot = scheduled ? _osuBadge('reboot scheduled', 'blue')
-            : (n.reboot_required ? _osuBadge('reboot required', 'amber', 'A kernel/PVE update needs a reboot. Nothing reboots automatically — do it deliberately.') : '');
-        const canReboot = n.eligible && n.reboot_required && !scheduled && feats.includes('reboot') && !busy;
-        const rebootBtn = canReboot ? safeHtml`<button data-action="reboot" data-node="${key}" class="text-xs font-bold text-amber-800 border border-amber-300 rounded-full px-2 py-0.5 hover:bg-amber-100">Reboot…</button>` : '';
-        const selectable = n.eligible && n.count && !n.apply_blocker && !busy;
-        const nodeBox = selectable
-            ? safeHtml`<input type="checkbox" class="w-4 h-4 rounded" ${_osuSel.nodes.has(key) ? 'checked' : ''} data-action="toggleNode" data-node="${key}" title="Upgrade everything pending on this node">`
-            : '';
-        const canPick = selectable && feats.includes('packages');
-        const picked = _osuSel.pkgs[key] || new Set();
-        const pkgs = (n.packages || []).map(p => {
-            const label = safeHtml`${p.package} <span class="text-slate-500">${p.current}→${p.candidate}</span>`;
-            const cls = p.security ? 'text-red-700' : 'text-slate-500';
-            if (!canPick) return safeHtml`<span class="inline-block mr-2 ${cls}">${label}</span>`;
-            return safeHtml`<label class="inline-flex items-center gap-1 mr-3 ${cls} cursor-pointer"><input type="checkbox" class="w-3 h-3" ${picked.has(p.package) ? 'checked' : ''} data-action="togglePkg" data-node="${key}" data-pkg="${p.package}">${label}</label>`;
-        });
-        const pickNote = selectable && !feats.includes('packages')
-            ? safeHtml`<div class="text-xs text-slate-500 mt-1">Update LM on this node to pick individual packages — it can only be updated whole.</div>` : '';
-        const pickHint = canPick ? safeHtml`<div class="text-xs text-slate-500 mb-1">${picked.size ? `${picked.size} picked — only these will be upgraded on this node.` : 'Pick packages to upgrade only those, or tick the node to upgrade everything.'}</div>` : '';
-        const detail = n.reason
-            ? safeHtml`<div class="text-xs text-slate-500 mt-1">${n.reason}</div>`
-            : (n.count ? safeHtml`<details class="mt-1"><summary class="cursor-pointer text-xs text-slate-500">${n.count} package(s)${n.security_count ? ` · ${n.security_count} security` : ''}</summary><div class="text-xs mt-1 leading-relaxed">${pickHint}${pkgs}</div></details>${pickNote}` : '');
-        const fixBtn = n.apply_blocker && feats.includes('fix_access') && !busy
-            ? safeHtml` <button data-action="fixAccess" data-node="${key}" class="ml-1 text-xs font-bold text-amber-800 border border-amber-300 rounded-full px-2 py-0.5 hover:bg-amber-100">Fix access…</button>` : '';
-        const autoBox = n.eligible
-            ? safeHtml`<label class="flex items-center gap-1 text-xs font-bold ${n.auto_patch ? 'text-emerald-700' : 'text-slate-500'} cursor-pointer" title="Install this node's updates automatically in the maintenance window"><input type="checkbox" class="w-3 h-3" ${n.auto_patch ? 'checked' : ''} data-action="toggleAutoPatch" data-node="${key}">Auto-patch</label>` : '';
-        const rebootBox = n.eligible && n.auto_patch
-            ? safeHtml`<label class="flex items-center gap-1 text-xs font-bold ${n.auto_reboot ? 'text-emerald-700' : 'text-slate-500'} cursor-pointer" title="Reboot this node after auto-patch installs something"><input type="checkbox" class="w-3 h-3" ${n.auto_reboot ? 'checked' : ''} data-action="toggleAutoReboot" data-node="${key}">Auto-reboot</label>` : '';
-        const blocker = n.apply_blocker ? safeHtml`<div class="text-xs text-amber-700 mt-1">Can't apply: ${n.apply_blocker}${fixBtn}</div>` : '';
-        const msg = [];
-        if (item && item.message) msg.push(safeHtml`<div class="text-xs ${item.status === 'done' ? 'text-slate-500' : 'text-red-600'} mt-1">${item.message}</div>`);
-        else if (item && item.status === 'done' && item.mode === 'packages') msg.push(safeHtml`<div class="text-xs text-slate-500 mt-1">upgraded ${(item.packages || []).join(', ')}</div>`);
-        if (item && item.snapshot) msg.push(safeHtml`<div class="text-xs text-slate-500 mt-1">snapshot: ${item.snapshot}</div>`);
-        if (item && item.auto_reboot) msg.push(safeHtml`<div class="text-xs ${item.auto_reboot.startsWith('failed') ? 'text-red-600' : 'text-slate-500'} mt-1">reboot: ${item.auto_reboot}</div>`);
-        const meta = [n.kind, n.flavor, n.pve_cluster && n.pve_cluster.name ? 'PVE cluster ' + n.pve_cluster.name : ''].filter(Boolean).join(' · ');
-        return safeHtml`<div id="osu-node-${key}" class="py-3 flex flex-wrap items-start gap-x-4 gap-y-2">
-            <div class="w-5 pt-0.5">${nodeBox}</div>
-            <div class="flex-1 min-w-[16rem]">
-                <div class="text-sm font-medium text-slate-700">${n.label}</div>
-                <div class="text-xs text-slate-500">${meta}${_osuVmLabel(n)}</div>
-                ${detail}${blocker}${msg}
-            </div>
-            <div class="flex flex-wrap items-center justify-end gap-1.5">${state}${reboot}${rebootBtn}</div>
-            <div class="flex flex-col gap-1 w-28">${autoBox}${rebootBox}</div>
-        </div>`;
+    const nodes = (d.nodes || []).map(n => _osuClassify(n, run, busy));
+    if (!nodes.length) return safeHtml`<p class="text-xs text-slate-500 italic">No nodes reporting.</p>`;
+    const byTenant = new Map();
+    nodes.forEach(c => byTenant.set(c.tenantKey, [...(byTenant.get(c.tenantKey) || []), c]));
+    const tenants = _osuSortTenants([...byTenant].map(([key, items]) => _osuTenantStats(key, items)), _osuUi.sort);
+    return safeHtml`${_osuFailureGroups(run)}${tenants.map(t => _osuTenantHtml(t, _osuUi.sort, busy))}`;
+}
+
+// One node row: name, state badge, pending packages, reboot and auto-patch controls.
+function _osuRowHtml(c, busy) {
+    const { n, key, item, badge: state } = c;
+    const feats = n.features || [];
+    const scheduled = _osuRebootScheduled(n);
+    const reboot = scheduled ? _osuBadge('reboot scheduled', 'blue')
+        : (n.reboot_required ? _osuBadge('reboot required', 'amber', 'A kernel/PVE update needs a reboot. Nothing reboots automatically — do it deliberately.') : '');
+    const canReboot = n.eligible && n.reboot_required && !scheduled && feats.includes('reboot') && !busy;
+    const rebootBtn = canReboot ? safeHtml`<button data-action="reboot" data-node="${key}" class="text-xs font-bold text-amber-800 border border-amber-300 rounded-full px-2 py-0.5 hover:bg-amber-100">Reboot…</button>` : '';
+    const selectable = _osuSelectable(n, busy);
+    const nodeBox = selectable
+        ? safeHtml`<input type="checkbox" class="w-4 h-4 rounded" ${_osuSel.nodes.has(key) ? 'checked' : ''} data-action="toggleNode" data-node="${key}" title="Upgrade everything pending on this node">`
+        : '';
+    const canPick = selectable && feats.includes('packages');
+    const picked = _osuSel.pkgs[key] || new Set();
+    const pkgs = (n.packages || []).map(p => {
+        const label = safeHtml`${p.package} <span class="text-slate-500">${p.current}→${p.candidate}</span>`;
+        const cls = p.security ? 'text-red-700' : 'text-slate-500';
+        if (!canPick) return safeHtml`<span class="inline-block mr-2 ${cls}">${label}</span>`;
+        return safeHtml`<label class="inline-flex items-center gap-1 mr-3 ${cls} cursor-pointer"><input type="checkbox" class="w-3 h-3" ${picked.has(p.package) ? 'checked' : ''} data-action="togglePkg" data-node="${key}" data-pkg="${p.package}">${label}</label>`;
     });
-    return rows.length
-        ? safeHtml`${_osuFailureGroups(run)}<div class="divide-y divide-slate-100">${rows}</div>`
-        : safeHtml`<p class="text-xs text-slate-500 italic">No nodes reporting.</p>`;
+    const pickNote = selectable && !feats.includes('packages')
+        ? safeHtml`<div class="text-xs text-slate-500 mt-1">Update LM on this node to pick individual packages — it can only be updated whole.</div>` : '';
+    const pickHint = canPick ? safeHtml`<div class="text-xs text-slate-500 mb-1">${picked.size ? `${picked.size} picked — only these will be upgraded on this node.` : 'Pick packages to upgrade only those, or tick the node to upgrade everything.'}</div>` : '';
+    const detail = n.reason
+        ? safeHtml`<div class="text-xs text-slate-500 mt-1">${n.reason}</div>`
+        : (n.count ? safeHtml`<details class="osu-pkgs mt-1"><summary class="cursor-pointer text-xs text-slate-500">${n.count} package(s)${n.security_count ? ` · ${n.security_count} security` : ''}</summary><div class="text-xs mt-1 leading-relaxed">${pickHint}${pkgs}</div></details>${pickNote}` : '');
+    const fixBtn = n.apply_blocker && feats.includes('fix_access') && !busy
+        ? safeHtml` <button data-action="fixAccess" data-node="${key}" class="ml-1 text-xs font-bold text-amber-800 border border-amber-300 rounded-full px-2 py-0.5 hover:bg-amber-100">Fix access…</button>` : '';
+    const autoBox = n.eligible
+        ? safeHtml`<label class="flex items-center gap-1 text-xs font-bold ${n.auto_patch ? 'text-emerald-700' : 'text-slate-500'} cursor-pointer" title="Install this node's updates automatically in the maintenance window"><input type="checkbox" class="w-3 h-3" ${n.auto_patch ? 'checked' : ''} data-action="toggleAutoPatch" data-node="${key}">Auto-patch</label>` : '';
+    const rebootBox = n.eligible && n.auto_patch
+        ? safeHtml`<label class="flex items-center gap-1 text-xs font-bold ${n.auto_reboot ? 'text-emerald-700' : 'text-slate-500'} cursor-pointer" title="Reboot this node after auto-patch installs something"><input type="checkbox" class="w-3 h-3" ${n.auto_reboot ? 'checked' : ''} data-action="toggleAutoReboot" data-node="${key}">Auto-reboot</label>` : '';
+    const blocker = n.apply_blocker ? safeHtml`<div class="text-xs text-amber-700 mt-1">Can't apply: ${n.apply_blocker}${fixBtn}</div>` : '';
+    const msg = [];
+    if (item && item.message) msg.push(safeHtml`<div class="text-xs ${item.status === 'done' ? 'text-slate-500' : 'text-red-600'} mt-1">${item.message}</div>`);
+    else if (item && item.status === 'done' && item.mode === 'packages') msg.push(safeHtml`<div class="text-xs text-slate-500 mt-1">upgraded ${(item.packages || []).join(', ')}</div>`);
+    if (item && item.snapshot) msg.push(safeHtml`<div class="text-xs text-slate-500 mt-1">snapshot: ${item.snapshot}</div>`);
+    if (item && item.auto_reboot) msg.push(safeHtml`<div class="text-xs ${_osuRebootProblem(item) || item.auto_reboot.startsWith('failed') ? 'text-red-600' : 'text-slate-500'} mt-1">reboot: ${item.auto_reboot}</div>`);
+    const meta = [n.kind, n.flavor, n.pve_cluster && n.pve_cluster.name ? 'PVE cluster ' + n.pve_cluster.name : ''].filter(Boolean).join(' · ');
+    return safeHtml`<div id="osu-node-${key}" class="py-3 flex flex-wrap items-start gap-x-4 gap-y-2">
+        <div class="w-5 pt-0.5">${nodeBox}</div>
+        <div class="flex-1 min-w-[16rem]">
+            <div class="text-sm font-medium text-slate-700">${n.label}</div>
+            <div class="text-xs text-slate-500">${meta}${_osuVmLabel(n)}</div>
+            ${detail}${blocker}${msg}
+        </div>
+        <div class="flex flex-wrap items-center justify-end gap-1.5">${state}${reboot}${rebootBtn}</div>
+        <div class="flex flex-col gap-1 w-28">${autoBox}${rebootBox}</div>
+    </div>`;
 }
 
 lmViews.osupdates = renderOsUpdatesView;

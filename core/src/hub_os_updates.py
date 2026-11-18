@@ -141,8 +141,55 @@ _MAINT_POLL_S = 15.0
 _MAINT_MIGRATE_TIMEOUT_S = 15 * 60.0
 _REBOOT_GRACE_S = 90.0          # shutdown -r +1, plus time to go down
 _REBOOT_RETURN_TIMEOUT_S = 20 * 60.0
+# How a run item's automatic reboot ended (``reboot_state``; ``auto_reboot`` is the text). They
+# need different follow-up, so the page shows each its own badge:
+#   ok           it rebooted (or the reboot was scheduled) and nothing is left to clean up
+#   not_started  the node was never rebooted: maintenance mode refused, its guests would not
+#                move off, the agent cannot reboot it safely, the command could not be sent (the
+#                spoke is not connected, or is updating and the hub skipped the request), or an
+#                unexpected error struck before the reboot command was sent
+#   failed       the spoke answered that the reboot did not happen (or an unexpected error
+#                struck once the reboot command had been sent); the node was handed back
+#   unconfirmed  the reboot command went out, or may have (the socket broke mid-send), but no
+#                answer came back (a timeout): the node may be rebooting right now or may never
+#                have got it, so check it before rebooting it again. A Proxmox cluster node is
+#                not handed back in that case (its guests could return and the next node start
+#                while it goes down): it stays in maintenance mode, so it reads as drained
+#                with the run stopped.
+#   drained      the node is left in HA maintenance mode, rebooted or not
+_REBOOT_OK, _REBOOT_NOT_STARTED, _REBOOT_FAILED, _REBOOT_UNCONFIRMED, _REBOOT_DRAINED = (
+    "ok", "not_started", "failed", "unconfirmed", "drained")
+# What an updating spoke's skipped request says: request_response answers it at once with the text
+# of a real timeout plus ``draining``, so the text alone would read as a lost command.
+_NOT_SENT_UPDATING = "the spoke is updating, so nothing was sent"
 _FIX_ACCESS_TIMEOUT_S = 180.0
 _STATE_FILE = "os_updates.json"
+
+
+def _maybe_delivered(message: Any) -> bool:
+    """True when a failed request may still have reached the spoke: no answer came back (the
+    hub's "Timed out waiting for spoke response", a relay's "Agent response timeout"), or the
+    socket broke while sending (main.py send_to_spoke: "connection closed/blocked mid-send").
+    A "not connected" error is not this: nothing went out."""
+    text = str(message or "").lower()
+    return "timed out" in text or "timeout" in text or "mid-send" in text
+
+
+def _legacy_reboot_state(text: str) -> str:
+    """The ``reboot_state`` of a run item saved before that field existed, read back from its
+    ``auto_reboot`` text ("" when the text reports no problem). These are the texts the earlier
+    code wrote, so a saved run keeps flagging a node whose reboot did not end cleanly."""
+    if "NOT cleared" in text or "left in maintenance mode" in text:
+        return _REBOOT_DRAINED
+    if text.startswith("failed: maintenance mode:"):
+        # The earlier code gave up on an enable that got no answer without turning maintenance
+        # mode off again, so the node may be drained; only a plain refusal left it untouched.
+        return _REBOOT_DRAINED if _maybe_delivered(text) else _REBOOT_NOT_STARTED
+    if "not rebooted" in text or "can't be rebooted from LM" in text:
+        return _REBOOT_NOT_STARTED
+    if not text.startswith("failed"):
+        return ""
+    return _REBOOT_UNCONFIRMED if _maybe_delivered(text) else _REBOOT_FAILED
 
 # Auto-check config lives in global_config["os_updates_check"]: {enabled,
 # interval_hours}. Enabled by default (seeded once — see
@@ -275,14 +322,21 @@ class HubOsUpdatesMixin:
         run = data.get("run")
         # A run that was still running died with the old process: mark it interrupted.
         if isinstance(run, dict):
+            for item in run.get("items") or []:
+                # A run saved before reboot_state existed: derive it from the auto_reboot text.
+                if item.get("auto_reboot") and not item.get("reboot_state"):
+                    legacy = _legacy_reboot_state(str(item["auto_reboot"]))
+                    if legacy:
+                        item["reboot_state"] = legacy
             if run.get("status") == "running":
                 run["status"] = "interrupted"
                 run["current"] = ""
                 for item in run.get("items") or []:
-                    if item.get("status") == "applying":
+                    if item.get("status") in ("applying", "rebooting"):
+                        what = "rebooting (it may still be in maintenance mode)" \
+                            if item["status"] == "rebooting" else "updating"
                         item["status"] = "interrupted"
-                        item["message"] = ("hub restarted while this node was "
-                                           "updating — check it, then re-check")
+                        item["message"] = f"hub restarted while this node was {what} — check it, then re-check"
                     elif item.get("status") in ("queued", "snapshotting"):
                         item["status"] = "skipped"
             # Keep the restored run and log the result.
@@ -348,28 +402,51 @@ class HubOsUpdatesMixin:
         own pinned tenant (agent_config → client_simulation.tenant_id, the
         per-agent Tenant setting) wins over its owning spoke's tenant, so an
         agent on a shared spoke still shows for its tenant. Never the hub."""
+        # Tenant ids reach us in different cases from different sources, so
+        # compare with same_tenant, never ==; a node with no tenant matches none.
+        from access import same_tenant
+        keys = set()
+        for t in self._osu_targets():
+            owner = self._osu_node_tenant_id(t)
+            if owner and any(same_tenant(owner, x) for x in tenants):
+                keys.add(f"{t['kind']}:{t['id']}")
+        return keys
+
+    def _osu_node_tenant_id(self, t: Dict[str, str]) -> str:
+        """Tenant id that owns the node ``t`` (a ``_osu_targets`` row), or "".
+
+        An agent's own pinned tenant wins over its owning spoke's. The hub
+        belongs to no tenant."""
+        if t["kind"] == "hub":
+            return ""
         # Primary-key helpers (identity if missing) and agent config.
         pk = getattr(self, "_primary_key", lambda k: k)
         apk = getattr(self, "_agent_primary_key", lambda k: k)
-        agent_cfg = (self.state.system_state.get("agent_config", {}) or {})
+        if t["kind"] == "agent":
+            agent_cfg = (self.state.system_state.get("agent_config", {}) or {})
+            ac = agent_cfg.get(apk(t["id"])) or agent_cfg.get(t["id"]) or {}
+            owner = str((ac.get("client_simulation") or {}).get("tenant_id") or "").strip()
+            if owner:
+                return owner
+        sid = t["spoke_id"]
+        return str(self.state.get_spoke_tenant(pk(sid)) or self.state.get_spoke_tenant(sid) or "")
 
-        def _spoke_tenant(sid):
-            """Tenant of a spoke, by primary key or raw id."""
-            return self.state.get_spoke_tenant(pk(sid)) or self.state.get_spoke_tenant(sid)
-
-        # Collect keys for nodes owned by the given tenants.
-        keys = set()
-        for t in self._osu_targets():
-            if t["kind"] == "hub":
-                continue
-            owner = ""
-            # An agent's own pinned tenant wins.
-            if t["kind"] == "agent":
-                ac = agent_cfg.get(apk(t["id"])) or agent_cfg.get(t["id"]) or {}
-                owner = str((ac.get("client_simulation") or {}).get("tenant_id") or "").strip()
-            if (owner or _spoke_tenant(t["spoke_id"])) in tenants:
-                keys.add(f"{t['kind']}:{t['id']}")
-        return keys
+    def _osu_tenant_name(self, tenant_id: str) -> str:
+        """Display name of a tenant, never its id: the global-admin tenant
+        "default" reads ADMIN (as on the Tenants page) and a tenant that no
+        longer exists reads "Unknown tenant". "" means no tenant."""
+        if not tenant_id:
+            return ""
+        from access import same_tenant
+        if same_tenant(tenant_id, "default"):
+            return "ADMIN"
+        get_tenant = getattr(self.state, "get_tenant", None)
+        rec = get_tenant(tenant_id) if get_tenant else None
+        # get_tenant matches the id's case exactly, but ids differ in case between sources.
+        if not rec:
+            tenants = (getattr(self.state, "tenant_state", None) or {}).get("tenants", {})
+            rec = next((v for k, v in tenants.items() if same_tenant(k, tenant_id)), None)
+        return str((rec or {}).get("name") or "Unknown tenant")
 
     # ── check ────────────────────────────────────────────────────────────────
     async def _osu_check_one(self, t: Dict[str, str], refresh: bool) -> Dict[str, Any]:
@@ -1037,12 +1114,19 @@ class HubOsUpdatesMixin:
                     "agent_id": t.get("agent_id", ""), "checked": False, "eligible": None, "unmanaged": False,
                     "unreachable": False, "reason": "not checked yet", "count": 0,
                 }
-        # Mark which nodes have auto-patch and auto-reboot.
+        # Mark which nodes have auto-patch and auto-reboot, and which tenant
+        # owns each (the hub belongs to none). The panel shows "tenant" (a name)
+        # and groups by "tenant_key" (the id, case-folded like same_tenant does),
+        # so two tenants sharing a name stay apart and one id in two cases merges.
+        import access
         ap_cfg = self.osu_autopatch_config()
         approved, reboot = set(ap_cfg["nodes"]), set(ap_cfg["reboot_nodes"])
         for key, n in merged.items():
             n["auto_patch"] = key in approved
             n["auto_reboot"] = key in reboot
+            tenant_id = self._osu_node_tenant_id(live[key])
+            n["tenant"] = self._osu_tenant_name(tenant_id)
+            n["tenant_key"] = access._norm_tenant_id(tenant_id)
         # Nodes we cannot patch (appliances, unsupported OS) are left out of
         # the panel entirely; only their count is reported.
         # Hide unmanaged nodes but count them.
@@ -1418,7 +1502,24 @@ class HubOsUpdatesMixin:
         # Cluster nodes go through maintenance mode.
         if _is_cluster_node(n):
             return self._osu_start_cluster_reboot(n, actor)
-        return await self._osu_reboot(n, actor)
+        res = await self._osu_reboot(n, actor)
+        if res.get("status") == "SUCCESS":
+            self._osu_supersede_reboot_problem(node_key)
+        return res
+
+    def _osu_supersede_reboot_problem(self, node_key: str) -> None:
+        """A reboot by hand went through: the last run's "not rebooted" / "reboot
+        failed" / "reboot not confirmed" mark on that node is over, so the page stops
+        flagging it. Only a non-cluster node comes here (a cluster node's button
+        starts a new run), and only those states: "left in maintenance" is not
+        undone by a reboot."""
+        run = self._osu_state().get("run") or {}
+        item = next((i for i in run.get("items", []) if i.get("key") == node_key), None)
+        if item and item.get("reboot_state") in (_REBOOT_NOT_STARTED, _REBOOT_FAILED,
+                                                 _REBOOT_UNCONFIRMED):
+            item["auto_reboot"] = "scheduled by hand"
+            item["reboot_state"] = _REBOOT_OK
+            self._osu_save()
 
     def _osu_start_cluster_reboot(self, n: Dict[str, Any], actor: str) -> Dict[str, Any]:
         """Reboot button on a Proxmox cluster node: a one-node run so the panel
@@ -1436,7 +1537,7 @@ class HubOsUpdatesMixin:
 
         async def _go():
             """Do the cluster reboot, then finish the run."""
-            item["auto_reboot"], _ = await self._osu_cluster_reboot(n, run, actor)
+            item["auto_reboot"], _, item["reboot_state"] = await self._osu_cluster_reboot(n, run, actor)
             item["status"] = "failed" if item["auto_reboot"].startswith("failed") else "done"
             run.update(status="finished", current="", done=1, finished_at=time.time())
             self._osu_save()
@@ -1445,10 +1546,13 @@ class HubOsUpdatesMixin:
                 "message": "entering maintenance mode — HA guests move off, then it reboots"}
 
     async def _osu_reboot(self, n: Dict[str, Any], actor: str) -> Dict[str, Any]:
-        """Send the reboot command to one node (no checks — see callers)."""
+        """Send the reboot command to one node (no checks — see callers). A failure
+        carries ``state`` (see ``_REBOOT_OK``): the command was never sent, the spoke
+        got no answer back (it may still have run), or the reboot did not happen."""
         # Log the request.
         node_key = f"{n['kind']}:{n['id']}"
         logger.info("OS-UPDATE: REBOOT of %s approved by %s", n["label"], actor or "?")
+        state = _REBOOT_FAILED
         # Hub: reboot locally.
         try:
             if n["kind"] == "hub":
@@ -1468,9 +1572,17 @@ class HubOsUpdatesMixin:
                     n["id"], "OS_REBOOT", {}, timeout=_REBOOT_TIMEOUT_S))
         except Exception as exc:  # noqa: BLE001
             d = {"status": "ERROR", "message": str(exc)}
+            if isinstance(exc, ConnectionError):
+                state = _REBOOT_NOT_STARTED  # the send failed; a mid-send break is sorted out below
         # Result and message.
         ok = isinstance(d, dict) and d.get("status") == "SUCCESS"
         msg = (d or {}).get("message", "") if isinstance(d, dict) else ""
+        if not ok and isinstance(d, dict):
+            if d.get("draining"):
+                # The hub skipped the send because the spoke is updating: nothing went out.
+                state, msg = _REBOOT_NOT_STARTED, _NOT_SENT_UPDATING
+            elif n["kind"] != "hub" and _maybe_delivered(msg):
+                state = _REBOOT_UNCONFIRMED  # sent, or maybe sent, but no answer came back
         logger.log(logging.INFO if ok else logging.ERROR, "OS-UPDATE: reboot %s → %s (%s)",
                    n["label"], "scheduled" if ok else "FAILED", msg)
         # Remember when a reboot was scheduled.
@@ -1479,7 +1591,7 @@ class HubOsUpdatesMixin:
             if cached is not None:
                 cached["reboot_scheduled_at"] = time.time()
                 self._osu_save()
-        return {"status": "SUCCESS" if ok else "ERROR",
+        return {"status": "SUCCESS" if ok else "ERROR", "state": _REBOOT_OK if ok else state,
                 "message": msg or ("reboot scheduled" if ok else "reboot failed")}
 
     async def _osu_apply_one(self, n: Dict[str, Any]) -> Dict[str, Any]:
@@ -1574,7 +1686,19 @@ class HubOsUpdatesMixin:
                 else:
                     actor = (_AUTOREBOOT_ACTOR if run.get("actor") == _AUTOPATCH_ACTOR
                              else run.get("actor") or _AUTOREBOOT_ACTOR)
-                    item["auto_reboot"], stop = await self._osu_cluster_reboot(n, run, actor)
+                    # The node is rebooting (maintenance mode, then restart) until this returns; the
+                    # patch itself succeeded either way, so the item goes back to done with auto_reboot
+                    # saying how the reboot went.
+                    item["status"] = "rebooting"
+                    self._osu_save()
+                    try:
+                        item["auto_reboot"], stop, item["reboot_state"] = \
+                            await self._osu_cluster_reboot(n, run, actor)
+                    finally:
+                        item["status"] = "done"
+                    # A node that did reboot no longer needs one, so the page must not keep listing it.
+                    if item["auto_reboot"].startswith("rebooted"):
+                        item["reboot_required"] = False
                     if stop:
                         run["cancel_requested"] = True
                 self._osu_save()
@@ -1623,35 +1747,75 @@ class HubOsUpdatesMixin:
         r = await self._osu_maintenance(n, "disable")
         if r.get("status") == "SUCCESS":
             return True, "maintenance mode cleared"
-        return False, f"maintenance mode NOT cleared: {r.get('message', '')}"
+        msg = _NOT_SENT_UPDATING if r.get("draining") else r.get("message", "")
+        return False, f"maintenance mode NOT cleared: {msg}"
 
     async def _osu_cluster_reboot(self, n: Dict[str, Any], run: Dict[str, Any],
-                                  actor: str = _AUTOREBOOT_ACTOR) -> "tuple[str, bool]":
+                                  actor: str = _AUTOREBOOT_ACTOR) -> "tuple[str, bool, str]":
+        """``_osu_cluster_reboot_steps`` that never raises: an unexpected error must
+        not escape and leave the run "running" forever. It can strike at any step,
+        after maintenance mode was already entered, so the node is handed back like
+        every other failing step does (best effort) and the state says whether that
+        worked, and whether the reboot command had been sent yet (``reached``).
+        The rest of the run stops either way."""
+        reached = {"reboot": False}
+        try:
+            return await self._osu_cluster_reboot_steps(n, run, actor, reached)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("OS-UPDATE: %s cluster reboot failed unexpectedly", n["label"])
+            try:
+                cleared, left = await self._osu_leave_maintenance(n)
+            except Exception as exc2:  # noqa: BLE001
+                cleared, left = False, f"maintenance mode NOT cleared: {exc2}"
+            logger.log(logging.INFO if cleared else logging.ERROR,
+                       "OS-UPDATE: %s after its unexpected reboot error: %s", n["label"], left)
+            if not cleared:
+                state = _REBOOT_DRAINED
+            else:
+                state = _REBOOT_FAILED if reached["reboot"] else _REBOOT_NOT_STARTED
+            note = "" if reached["reboot"] else "not rebooted, "
+            return f"failed: unexpected error: {exc} — {note}{left}", True, state
+
+    async def _osu_cluster_reboot_steps(self, n: Dict[str, Any], run: Dict[str, Any],
+                                        actor: str, reached: Dict[str, bool]
+                                        ) -> "tuple[str, bool, str]":
         """Maintenance mode -> wait for HA guests to leave -> reboot -> wait
         until the node is back without a pending reboot -> maintenance off.
-        Returns ``(result text for the run item, stop the rest of the run)``."""
+        Sets ``reached["reboot"]`` just before the reboot command is sent.
+        Returns ``(result text for the run item, stop the rest of the run,
+        reboot state)``; the states are listed at ``_REBOOT_OK``."""
         # Show progress and log.
         key, label = f"{n['kind']}:{n['id']}", n["label"]
         run["current"] = f"{label} — entering maintenance mode"
         self._osu_save()
         logger.info("OS-UPDATE: %s (Proxmox %s) → maintenance mode before reboot by %s",
                     label, (n.get("pve_cluster") or {}).get("name") or "standalone", actor)
-        # Turn on maintenance mode.
+        # Turn on maintenance mode. A request that timed out or broke mid-send may still have
+        # entered it, so that case is handed back too, like every other failing step. A reply
+        # from a draining (updating) spoke is the hub's own skip: nothing was sent, so there is
+        # nothing to undo.
         r = await self._osu_maintenance(n, "enable")
         if r.get("status") != "SUCCESS":
+            unsent = bool(r.get("draining"))
+            msg = _NOT_SENT_UPDATING if unsent else r.get("message", "")
             logger.error("OS-UPDATE: %s could not enter maintenance mode, not rebooted: %s",
-                         label, r.get("message", ""))
-            return f"failed: maintenance mode: {r.get('message', '')}", False
+                         label, msg)
+            if unsent or not _maybe_delivered(msg):
+                return f"failed: maintenance mode: {msg}", False, _REBOOT_NOT_STARTED
+            cleared, left = await self._osu_leave_maintenance(n)
+            return (f"failed: maintenance mode: {msg} — not rebooted, {left}", False,
+                    _REBOOT_NOT_STARTED if cleared else _REBOOT_DRAINED)
         # Wait for HA guests to move off, with a time limit.
         deadline = time.time() + _MAINT_MIGRATE_TIMEOUT_S
         guests = (r.get("ha_guests") or []) + (r.get("local_guests") or [])
         while guests or r.get("draining"):
             if time.time() > deadline:
-                _cleared, left = await self._osu_leave_maintenance(n)
+                cleared, left = await self._osu_leave_maintenance(n)
                 logger.error("OS-UPDATE: %s guests did not move off in time (%s), not rebooted; %s",
                              label, ", ".join(guests), left)
                 return (f"failed: guests did not move off in time ({', '.join(guests)}) — "
-                        f"not rebooted, {left}"), False
+                        f"not rebooted, {left}"), False, \
+                    (_REBOOT_NOT_STARTED if cleared else _REBOOT_DRAINED)
             run["current"] = f"{label} — moving/shutting down {len(guests)} guest(s)"
             await asyncio.sleep(_MAINT_POLL_S)
             r = await self._osu_maintenance(n, "status")
@@ -1660,12 +1824,22 @@ class HubOsUpdatesMixin:
         # Reboot; clear maintenance mode if that fails. _osu_reboot has already
         # logged the failed reboot at ERROR, so only a node left in maintenance
         # mode (new information) is logged at ERROR again.
+        reached["reboot"] = True
         res = await self._osu_reboot(n, actor)
+        if res.get("status") != "SUCCESS" and res.get("state") == _REBOOT_UNCONFIRMED:
+            # No answer: the node may be about to reboot. Handing it back would let its guests
+            # return and the next node start while it goes down, so it stays in maintenance mode
+            # and the run stops; the operator checks it and takes it out of maintenance.
+            logger.error("OS-UPDATE: %s got no answer to its reboot command, left in maintenance "
+                         "mode, stopping the run", label)
+            return (f"failed: {res.get('message', '')} — reboot not confirmed, left in "
+                    "maintenance mode, rest of the run stopped"), True, _REBOOT_DRAINED
         if res.get("status") != "SUCCESS":
             cleared, left = await self._osu_leave_maintenance(n)
             logger.log(logging.INFO if cleared else logging.ERROR,
                        "OS-UPDATE: %s after its failed reboot: %s", label, left)
-            return f"failed: {res.get('message', '')} — {left}", False
+            return (f"failed: {res.get('message', '')} — {left}", False,
+                    res.get("state", _REBOOT_FAILED) if cleared else _REBOOT_DRAINED)
         # Wait for it to go down.
         run["current"] = f"{label} — rebooting"
         self._osu_save()
@@ -1685,7 +1859,7 @@ class HubOsUpdatesMixin:
                              "left in maintenance mode, stopping the run", label)
                 return ("failed: did not come back within "
                         f"{int(_REBOOT_RETURN_TIMEOUT_S // 60)} min — left in maintenance mode, "
-                        "rest of the run stopped"), True
+                        "rest of the run stopped"), True, _REBOOT_DRAINED
             await asyncio.sleep(_MAINT_POLL_S)
         # Clear maintenance mode and report.
         r = await self._osu_maintenance(n, "disable")
@@ -1693,9 +1867,10 @@ class HubOsUpdatesMixin:
         logger.log(logging.INFO if cleared else logging.ERROR,
                    "OS-UPDATE: %s back from its reboot; maintenance mode %s",
                    label, "cleared" if cleared else "NOT cleared")
-        if r.get("status") != "SUCCESS":
-            return f"rebooted, but maintenance mode NOT cleared: {r.get('message', '')}", False
-        return "rebooted (cluster maintenance mode)", False
+        if not cleared:
+            return (f"rebooted, but maintenance mode NOT cleared: {r.get('message', '')}", False,
+                    _REBOOT_DRAINED)
+        return "rebooted (cluster maintenance mode)", False, _REBOOT_OK
 
     async def _osu_auto_reboot(self, run: Dict[str, Any]) -> None:
         """Reboot the run's ``reboot_after`` nodes that are done and installed
@@ -1719,16 +1894,19 @@ class HubOsUpdatesMixin:
             n = nodes.get(item["key"])
             if n is None or "reboot" not in (n.get("features") or []):
                 item["auto_reboot"] = "failed: node can't be rebooted from LM (needs an LM update)"
+                item["reboot_state"] = _REBOOT_NOT_STARTED
             elif (n.get("pve_cluster") or n.get("vm_note") == "Proxmox host (bare metal)") \
                     and not _is_cluster_node(n):
                 # A bare plain reboot could take several Proxmox hosts down at
                 # once; only the one-at-a-time maintenance flow is allowed.
                 item["auto_reboot"] = ("not rebooted: the Proxmox agent needs an update before "
                                        "it can reboot safely (one host at a time)")
+                item["reboot_state"] = _REBOOT_NOT_STARTED
             else:
                 res = await self._osu_reboot(n, _AUTOREBOOT_ACTOR)
-                item["auto_reboot"] = ("scheduled" if res.get("status") == "SUCCESS"
-                                       else f"failed: {res.get('message', '')}")
+                ok = res.get("status") == "SUCCESS"
+                item["auto_reboot"] = "scheduled" if ok else f"failed: {res.get('message', '')}"
+                item["reboot_state"] = _REBOOT_OK if ok else res.get("state", _REBOOT_FAILED)
             self._osu_save()
 
 
