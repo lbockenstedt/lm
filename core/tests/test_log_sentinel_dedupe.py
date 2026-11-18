@@ -382,6 +382,11 @@ def test_log_analysis_config_saves_the_triage_knobs():
     assert (got["log_5xx_triage"], got["log_volume_triage"],
             got["log_volume_threshold"]) == (True, True, 10)
 
+    # A stored falsy non-bool reads as off, exactly as the sweep reads it.
+    gc["log_volume_triage"] = 0
+    assert client.get("/setup/log-analysis/config").json()["log_volume_triage"] is False
+    del gc["log_volume_triage"]
+
     saved = client.post("/setup/log-analysis/config", json={
         "log_5xx_triage": False, "log_volume_triage": False,
         "log_volume_threshold": 0}).json()
@@ -404,3 +409,62 @@ def test_sentinel_reads_each_module_once_and_hub_log_off_the_loop():
     loop_src = inspect.getsource(LabManagerHub.run_log_health_loop)
     assert "await _aio.to_thread(self._read_hub_log_tail, n)" in loop_src
     assert loop_src.count("_gather_module_log_lines(") == 1
+
+
+def _one_sweep(analysis_ok, monkeypatch):
+    """Run one sentinel sweep of a fake 'dhcp' module whose analysis returns
+    ``analysis_ok``; return the remembered fingerprints afterwards."""
+    import asyncio
+    import time
+    import types
+
+    sleeps = []
+
+    async def _sleep(_s):
+        sleeps.append(_s)
+        if len(sleeps) > 1:
+            raise asyncio.CancelledError
+
+    async def _analyze(_m, _text, _title):
+        return {"ok": analysis_ok, "verdict": "none"}
+
+    monkeypatch.setattr(asyncio, "sleep", _sleep)
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    hub = types.SimpleNamespace(
+        state=types.SimpleNamespace(get_global_config=lambda: {}),
+        get_spoke_by_type=lambda _t: "ab",
+        _load_sentinel_ledger=lambda: {},
+        _log_sentinel_sig={},
+        _sentinel_modules=lambda: ["dhcp"],
+        _gather_module_log_lines=lambda _m, n=400: [f"{now} - Kea - ERROR - lease db down"],
+        _SENTINEL_MODULE_TYPES=main.LabManagerHub._SENTINEL_MODULE_TYPES,
+        _sentinel_module_sids=lambda _m: set(),
+        analyze_logs_via_ab=_analyze,
+    )
+    hub._error_lines = main.LabManagerHub._error_lines
+    hub._window_log_lines = main.LabManagerHub._window_log_lines
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(main.LabManagerHub.run_log_health_loop(hub))
+    return hub._log_sentinel_sig
+
+
+def test_failed_analysis_is_retried_next_sweep(monkeypatch):
+    """A failed analysis (AB busy or timed out) judged nothing, so the
+    fingerprint must not mute the condition until a quiet window."""
+    assert "dhcp" not in _one_sweep(False, monkeypatch)
+    assert "dhcp" in _one_sweep(True, monkeypatch)
+
+
+def test_5xx_line_names_the_module_its_route_relays_to():
+    hub_route = ('2026-11-17 21:34:05 - uvicorn.access - INFO - 1.2.3.4:1 - '
+                 '"GET /api/system/info HTTP/1.1" 500')
+    out = main._sentinel_5xx_lines([_access(502), hub_route],
+                                   main.LabManagerHub._SENTINEL_MODULE_TYPES)
+    assert out == ["[http-5xx] ERROR - POST /api/dhcp/ha/discover returned 502"
+                   " (route relays to the dhcp module)",
+                   "[http-5xx] ERROR - GET /api/system/info returned 500"]
+
+
+def test_loop_tags_5xx_lines_with_the_module_map():
+    src = open(os.path.join(_SRC, "main.py")).read()
+    assert "_sentinel_5xx_lines(wide, self._SENTINEL_MODULE_TYPES)" in src
