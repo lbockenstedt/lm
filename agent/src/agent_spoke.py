@@ -1155,6 +1155,40 @@ class _RoleAdapter(BaseSpoke):
             }
 
 
+_LLM_POST_INSTALL_RETRY_INTERVAL = 60
+
+
+def _publish_new_file(target: Path, content: bytes, mode: int = 0o644) -> bool:
+    """Create ``target`` holding ``content`` unless an entry already exists.
+
+    Returns True when the file was created and False when something was
+    already there. The bytes are written and synced to a hidden temporary
+    file in the same directory, then hard-linked into place, so a failed or
+    interrupted write never leaves a partial file at ``target``. That matters
+    for systemd units: systemd reads an empty unit as masked, and staging
+    never replaces an existing entry, so a partial unit would block every
+    retry. ``os.link`` refuses to replace an existing entry, so a unit created
+    by someone else in the meantime is kept.
+    """
+    # Write the whole file beside the target first.
+    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp, mode)
+        # Publish it in one step, never over an existing entry.
+        try:
+            os.link(tmp, target)
+        except FileExistsError:
+            return False
+        return True
+    finally:
+        # The temporary name was only a staging area.
+        os.unlink(tmp)
+
+
 class GenericAgent(BaseSpoke):
     """
     Morphable LM agent.
@@ -1198,6 +1232,14 @@ class GenericAgent(BaseSpoke):
         # to threads, so a second LOAD_ROLE for the same role could otherwise
         # start a concurrent apt/pip run mid-install → double-spawn).
         self._role_installs_inflight: set = set()
+        # True while an LLM post-install daemon-reload is pending.
+        # Set before LLM staging; cleared only after staging + reload succeeds.
+        self.llm_post_install_retry: bool = False
+        # Last LLM post-install error text, or None once staging succeeds.
+        # The retry repeats every minute, so it also keeps a permanent failure
+        # from logging a warning on every attempt.
+        self._llm_post_install_error: Optional[str] = None
+        self._llm_post_install_retry_task: Optional[asyncio.Task] = None
         # Make apt wait for the dpkg lock rather than failing a deploy that
         # merely collided with another apt run. Cheap, idempotent, best-effort.
         # Make apt wait for the dpkg lock on this node.
@@ -1418,11 +1460,50 @@ class GenericAgent(BaseSpoke):
 
         return {"status": "SUCCESS"}
 
+    @staticmethod
+    def _stage_llm_service_units(
+        lm_root: Path, unit_dir: Optional[Path] = None
+    ) -> None:
+        """Install missing LLM service-unit templates without starting services.
+
+        Every existing filesystem entry counts as "existing" — regular files,
+        symlinks (even dangling ones), and symlinks pointing to /dev/null.
+        We never write through an existing symlink or change its target. Each
+        unit is published whole (``_publish_new_file``), so a failed write
+        leaves nothing behind for the next retry to mistake for a unit.
+        """
+        # Resolve at call time so tests can redirect systemd's fixed directory.
+        if unit_dir is None:
+            unit_dir = Path("/etc/systemd/system")
+        # Validate both templates before changing the systemd directory.
+        names = ("lm-llm-ollama.service", "lm-llm-candidate.service")
+        sources = [(lm_root / "agent" / name, unit_dir / name) for name in names]
+        if any(not source.is_file() for source, _ in sources):
+            missing = [str(source) for source, _ in sources if not source.is_file()]
+            raise FileNotFoundError(f"LLM service-unit template missing: {', '.join(missing)}")
+        # Keep existing service units untouched; only stage missing templates.
+        # An entry is "missing" only when nothing exists at all (not a file,
+        # not a symlink, not a dangling symlink).
+        missing_units = [
+            (source, target)
+            for source, target in sources
+            if not target.exists() and not target.is_symlink()
+        ]
+        if missing_units:
+            contents = [(target, source.read_bytes()) for source, target in missing_units]
+            unit_dir.mkdir(parents=True, exist_ok=True)
+            for target, content in contents:
+                if _publish_new_file(target, content):
+                    logger.info("Installed missing LLM service unit %s", target.name)
+        # Retry even when files exist: a previous daemon-reload may have failed.
+        subprocess.run(["systemctl", "daemon-reload"], check=True,
+                       capture_output=True, timeout=30)
+
     def _role_post_install(self, role_name: str) -> None:
         """Module-specific OS config the dedicated installers did, so a loaded
         role reaches parity. Idempotent + best-effort (never fails the load).
-        Pure management/API roles (dns/dhcp/opnsense/netbox/cppm/ldap/le/nw/
-        pxmx) need nothing here.
+        DNS/DHCP create coordinator certificates, and LLM stages missing service
+        units. Other pure management/API roles need nothing here.
         Runs as root (the lm-agent unit is User=root)."""
         # Best-effort; failures are only logged.
         try:
@@ -1446,6 +1527,10 @@ class GenericAgent(BaseSpoke):
                     )
                 os.chmod(cert, 0o644)
                 os.chmod(key, 0o600)
+            elif role_name == "llm":
+                # LLM can be loaded after an older installer omitted its units.
+                self._stage_llm_service_units(self._lm_root())
+                self._llm_post_install_error = None
             elif role_name in ("simulation", "proxmox"):
                 # Heavy roles carry OS infra the dedicated installers set up (cs:
                 # sim-client Kea/NIC + agent-listener cert; pxmx: agent-host prep).
@@ -1464,8 +1549,38 @@ class GenericAgent(BaseSpoke):
                     subprocess.run(["bash", str(_script), "--infra-only"],
                                    check=False, timeout=600)
         except Exception as e:  # noqa: BLE001
-            logger.warning("post-install OS config for role '%s' failed "
-                           "(non-fatal): %s", role_name, e)
+            # The LLM retry repeats a permanent failure (a missing template)
+            # every minute: warn on the first or a changed error only.
+            repeat = role_name == "llm" and str(e) == self._llm_post_install_error
+            logger.log(logging.DEBUG if repeat else logging.WARNING,
+                       "post-install OS config for role '%s' failed "
+                       "(non-fatal): %s", role_name, e)
+            if role_name == "llm":
+                self._llm_post_install_error = str(e)
+
+    def _schedule_llm_post_install_retry(self) -> None:
+        """Retry failed LLM unit staging while its role remains loaded."""
+        task = self._llm_post_install_retry_task
+        if (self.llm_post_install_retry and "llm" in self._roles
+                and (task is None or task.done())):
+            self._llm_post_install_retry_task = asyncio.create_task(
+                self._retry_llm_post_install())
+
+    async def _retry_llm_post_install(self) -> None:
+        """Retry LLM systemd setup without waiting for another hub command.
+
+        This never starts Ollama. Only the hub sends ``LLM_START_RUNTIME``, and
+        only to an approved, tenant-bound worker (``llm_pool._start_runtime``).
+        After a repair the next status report re-checks the cause: a staged
+        unit turns ``runtime_unit_missing`` into ``runtime_start_failed``,
+        which the hub's gated start retry picks up."""
+        while self.llm_post_install_retry and "llm" in self._roles:
+            # Re-stage units and reload systemd off the event loop.
+            await asyncio.sleep(_LLM_POST_INSTALL_RETRY_INTERVAL)
+            if not self.llm_post_install_retry or "llm" not in self._roles:
+                return
+            await asyncio.to_thread(self._role_post_install, "llm")
+            self.llm_post_install_retry = self._llm_post_install_error is not None
 
     # ── Background deployment (deploy roles) ──────────────────────────────────
 
@@ -2576,14 +2691,25 @@ class GenericAgent(BaseSpoke):
             # (boot _seed + a runtime LOAD could otherwise double-spawn).
             # Already loaded.
             if role_name in self._roles:
+                if role_name == "llm" and self.llm_post_install_retry:
+                    self._schedule_llm_post_install_retry()
                 return {"status": "SUCCESS", "role": role_name,
                         "sub_spoke_id": self._roles[role_name]["conn"].spoke_id,
                         "module_type": _ROLE_MAP[role_name][2],
                         "message": f"Role '{role_name}' already loaded"}
             # Install, then load the role class.
+            # Keep the retry pending until the role is registered so its repair
+            # task can re-stage the units. It never starts Ollama; only the
+            # hub does, with LLM_START_RUNTIME.
+            if role_name == "llm":
+                self.llm_post_install_retry = True
             install_result = await self._install_role(role_name)
             if install_result["status"] != "SUCCESS":
                 return install_result
+            # Staging + daemon-reload succeeded; clear the retry flag.
+            if role_name == "llm":
+                if self._llm_post_install_error is None:
+                    self.llm_post_install_retry = False
             role_config = data.get("config", {})
             sub_spoke_id = f"{self.spoke_id}-{role_name}"
             inst = self._sync_load_role(role_name, role_config, sub_spoke_id)
@@ -2613,6 +2739,8 @@ class GenericAgent(BaseSpoke):
             conn.agent_control_plane = cp
             task = asyncio.create_task(conn.run())
             self._roles[role_name] = {"instance": inst, "conn": conn, "task": task}
+            if role_name == "llm" and self.llm_post_install_retry:
+                self._schedule_llm_post_install_retry()
             self._persist_loaded_roles()
             return {"status": "SUCCESS", "role": role_name, "module_type": mtype,
                     "sub_spoke_id": sub_spoke_id,

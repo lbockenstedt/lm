@@ -1,6 +1,7 @@
 """Tenant-scoped, live-only routing to approved inference workers."""
 
 import asyncio
+import logging
 import re
 import time
 from collections import deque
@@ -10,10 +11,22 @@ from access import same_tenant, tenant_is_shared
 import instance_vault
 import llm_cloud
 
+logger = logging.getLogger(__name__)
+
 
 REMEDIATION = {
     "runtime_unavailable": "Check the local-only Ollama service and its loopback listener.",
     "runtime_not_started": "Provision the dedicated Ollama service on the worker VM.",
+    "runtime_unit_missing": "Stage the approved lm-llm-ollama.service unit on the worker.",
+    "runtime_unit_symlink": (
+        "Inspect the existing service-unit symlink; remove an intentional mask or "
+        "repair a dangling target before retrying."
+    ),
+    "runtime_binary_missing": (
+        "Install the approved offline Ollama bundle on the worker. The installer "
+        "never replaces an existing /opt/lm-llm, so remove a partial runtime first."
+    ),
+    "runtime_start_failed": "Check the worker's systemd journal for lm-llm-ollama.service.",
     "runtime_version_mismatch": (
         "Use the pinned release, or check open regressions and qualify a candidate "
         "side by side on a spare port before changing the pin."
@@ -62,6 +75,27 @@ def valid_model(model, digest):
 
 
 HARDWARE_LIMITS = {"vcpus": 65536, "ram_bytes": 2**52}
+# hub.request_response returns this, rather than raising, when a reply times
+# out, and also without sending anything while the spoke is draining.
+SPOKE_TIMEOUT = "Timed out waiting for spoke response"
+# The causes a stopped worker re-evaluates and sends as detail_code; mirrors
+# runtime_failure_code in the agent's llm_spoke.py.
+RUNTIME_STOP_CAUSES = {
+    "runtime_unit_missing", "runtime_unit_symlink", "runtime_binary_missing",
+    "runtime_start_failed",
+}
+WORKER_ISSUE_CODES = {
+    "runtime_version_mismatch", "runtime_unavailable", "runtime_not_started",
+} | RUNTIME_STOP_CAUSES
+
+
+def worker_issue_code(value):
+    """Return ``value`` when it is a known worker issue code, else None.
+
+    Status and reply fields are untrusted JSON. A list or object is unhashable,
+    so it is type-checked before the set lookup rather than raising TypeError,
+    which would end the worker's status handling."""
+    return value if isinstance(value, str) and value in WORKER_ISSUE_CODES else None
 
 
 def model_minimums(row):
@@ -254,7 +288,7 @@ class LlmPool:
                 job.update(state="failed", code="worker_changed")
                 return
             code = data.get("code")
-            if data.get("message") == "Timed out waiting for spoke response":
+            if data.get("message") == SPOKE_TIMEOUT:
                 code = "dispatch_outcome_unknown"
             elif code not in ("qualified", "fixture_mismatch", "baseline_fixture_mismatch", "candidate_not_provisioned",
                             "runtime_version_mismatch", "candidate_pull_failed",
@@ -312,19 +346,23 @@ class LlmPool:
                 or len(models) > 64):
             self.inventory.pop(key, None)
             self.runtime_versions.pop(key, None)
-            code = data.get("code")
-            if code not in ("runtime_version_mismatch", "runtime_unavailable", "runtime_not_started"):
-                code = "runtime_unavailable"
-            self.worker_issues[key] = diagnostic(code)
+            code = worker_issue_code(data.get("code")) or "runtime_unavailable"
+            detail_code = worker_issue_code(data.get("detail_code"))
+            # Stopped workers keep runtime_not_started for older hubs and send
+            # the re-evaluated cause in detail_code. Only a stop cause may
+            # refine it; any other code would end the start retry below.
+            if code == "runtime_not_started" and detail_code in RUNTIME_STOP_CAUSES:
+                code = detail_code
+            self._set_worker_issue(key, code)
             # Report frames arrive only after approval and session authentication.
             # Defer the command so its acknowledgement can be read by this socket.
             now = time.monotonic()
-            if (code == "runtime_not_started" and self._bound(key)
+            if (code in ("runtime_not_started", "runtime_start_failed")
+                    and self._bound(key)
                     and now - self.start_attempts.get(key, float("-inf")) >= 120):
                 self.start_attempts[key] = now
                 asyncio.create_task(self._start_runtime(key, websocket))
             return
-        self.worker_issues.pop(key, None)
         self.start_attempts.pop(key, None)
         approved = {name: digest for name, digest in models.items() if valid_model(name, digest)}
         self.inventory[key] = (time.monotonic(), websocket, approved, data.get("available") is True)
@@ -334,7 +372,28 @@ class LlmPool:
         else:
             self.runtime_versions.pop(key, None)
         if not approved:
-            self.worker_issues[key] = diagnostic("no_matching_models")
+            self._set_worker_issue(key, "no_matching_models")
+        else:
+            self._clear_worker_issue(key)
+
+    def _set_worker_issue(self, key, code):
+        """Log an unavailable transition once and store bounded guidance."""
+        issue = diagnostic(code)
+        previous = self.worker_issues.get(key)
+        self.worker_issues[key] = issue
+        if previous != issue:
+            logger.warning("LLM worker %s unavailable: %s", self._label(key), code)
+
+    def _clear_worker_issue(self, key):
+        """Log recovery once when a worker returns to a usable inventory."""
+        issue = self.worker_issues.pop(key, None)
+        if issue:
+            logger.info("LLM worker %s recovered from %s", self._label(key), issue["code"])
+
+    def _label(self, key):
+        """Name a worker in hub logs; its key alone can be an opaque GUID."""
+        name = self.hub.state.get_module_name(key)
+        return f"{name} ({key})" if name and name != key else key
 
     def _bound(self, key):
         """Do not issue lifecycle commands to unassigned worker hosts."""
@@ -342,15 +401,41 @@ class LlmPool:
                     .get(key, {}).get("tenant_id"))
 
     async def _start_runtime(self, key, websocket):
-        """Start only a current, approved, tenant-bound worker."""
+        """Start only a current, approved, tenant-bound worker.
+
+        The checks are repeated here, right before the send, because the
+        worker can be unbound or unapproved after its report scheduled this."""
         if (self.hub.active_connections.get(key) is not websocket
                 or not self.hub.approved_modules.get(key) or not self._bound(key)):
             return
+        label = self._label(key)
         try:
-            await self.hub.request_response(key, "LLM_START_RUNTIME", {}, timeout=25)
+            reply = await self.hub.request_response(
+                key, "LLM_START_RUNTIME", {}, timeout=25)
         except (TimeoutError, ConnectionError):
             # The next authenticated status report is authoritative.
+            logger.warning("LLM worker %s runtime start request failed", label)
             return
+        # Unwrap the reply envelope; anything but an object is malformed.
+        envelope = reply.get("payload") if isinstance(reply, Mapping) else None
+        data = (envelope.get("data", reply) if isinstance(envelope, Mapping) else reply)
+        if not isinstance(data, Mapping):
+            data = {}
+        if data.get("status") == "SUCCESS":
+            logger.info("LLM worker %s runtime start request accepted", label)
+            return
+        # Only a stable issue code shows that the worker tried and failed.
+        code = worker_issue_code(data.get("code"))
+        if code:
+            logger.warning("LLM worker %s runtime start rejected: %s", label, code)
+            return
+        # A timeout (or an unsent request to a draining spoke), a stopping
+        # worker's busy reply or a malformed reply says nothing about the
+        # runtime, so do not point the operator at its journal. Log fixed text,
+        # never the raw reply; the next status report decides any retry.
+        outcome = (SPOKE_TIMEOUT if data.get("message") == SPOKE_TIMEOUT
+                   else "busy" if data.get("code") == "busy" else "unrecognised reply")
+        logger.warning("LLM worker %s runtime start outcome unknown: %s", label, outcome)
 
     def forget(self, key):
         """Forget status belonging to a disconnected worker."""
@@ -567,7 +652,7 @@ class LlmPool:
             payload = envelope.get("data", reply) if isinstance(envelope, Mapping) else None
             if not isinstance(payload, Mapping):
                 return {"status": "ERROR", "code": "invalid_response"}
-            if payload.get("message") == "Timed out waiting for spoke response":
+            if payload.get("message") == SPOKE_TIMEOUT:
                 return {"status": "ERROR", "code": "dispatch_outcome_unknown"}
             if payload.get("code") in (
                     "busy", "runtime_unavailable", "model_unavailable", "runtime_version_mismatch"):
