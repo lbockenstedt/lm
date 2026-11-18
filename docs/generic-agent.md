@@ -49,6 +49,7 @@ role's live status.
   - `console` → `console/src/console_spoke.py::ConsoleSpoke` (`console`, in-repo)
   - `statuspage` → `statuspage/src/statuspage_spoke.py::StatusPageSpoke` (`statuspage`, in-repo) — one-tenant public status page; serves its own HTTPS page (fastapi/uvicorn), hub pushes the tenant's redacted `STATUS_SNAPSHOT`.
   - `proxy` → `proxy/src/proxy_spoke.py::ProxySpoke` (`proxy`, in-repo) — per-tenant edge WebUI reverse proxy; terminates its own TLS listener with `CERT_NONE` (no client-cert prompt for browsers) and forwards HTTP/WebSocket traffic to the hub over its own spoke mTLS client cert. See [edge-proxy-role.md](edge-proxy-role.md).
+  - `llm` → `agent/src/llm_spoke.py::LlmSpoke` (`llm`, in-repo) — runs CPU inference one job at a time using a dedicated, pre-provisioned Ollama service. See [LLM workers](llm.md).
   - `network` → `nw/src/nw_spoke.py::NwSpoke` (`nw`, `lbockenstedt/nw.git`)
   - `netbox` → `netbox/src/netbox_spoke.py::NetboxSpoke` (`ipam`, `lbockenstedt/netbox.git`)
   - `opnsense` → `opnsense/src/opn_spoke.py::OpnSpoke` (`firewall`, `lbockenstedt/opnsense.git`)
