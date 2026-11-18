@@ -42,7 +42,8 @@ from simulations.tenant_filter import (filter_items_by_prefixes,
                                        filter_firewall_rules, filter_record_by_prefixes,
                                        filter_hypervisor_vms,
                                        build_alias_map, _find_list_slot,
-                                       _replace_slot, extract_addrs, _nets)
+                                       _replace_slot, extract_addrs, _nets,
+                                       OWN_SOURCE_MARKER)
 
 if TYPE_CHECKING:  # annotations only — never evaluated at runtime
     from fastapi import Request
@@ -1517,6 +1518,11 @@ def _session_tenants(sess) -> list:
     return tids
 
 
+def _session_tenant_id(sess) -> str:
+    """The session user's primary tenant id, the one ``resolve_prefixes`` uses."""
+    return str(((sess or {}).get("user", {}) or {}).get("tenant_id") or "")
+
+
 def firewall_owner_tenant(hub, firewall_id) -> Optional[str]:
     """The tenant a firewall is dedicated to: its own non-shared ``tenant_id``,
     else its spoke's (``spoke_owner_tenant``). None for a shared firewall."""
@@ -1535,6 +1541,36 @@ def firewall_owner_tenant(hub, firewall_id) -> Optional[str]:
     if tid and not tenant_is_shared(tid):
         return tid
     return spoke_owner_tenant(hub, fw.get("spoke_id"))
+
+
+# Config lists whose records can make a spoke a tenant's own instance.
+_INSTANCE_LISTS = ("dns_instances", "dhcp_instances", "firewalls")
+
+
+def source_owner_tenant(hub, spoke_id) -> Optional[str]:
+    """The tenant a DNS/DHCP/firewall source spoke is dedicated to: the
+    spoke's own binding (``spoke_owner_tenant``), else the tenant of the
+    ``dns_instances``/``dhcp_instances``/``firewalls`` records that point at
+    it (a tenant admin's self-configured instance, the same records
+    ``_dns_spoke_for_request`` and ``_dhcp_spoke_for_request`` route by).
+    None for a shared source, or unless every record on the spoke names the
+    same non-shared tenant (a spoke serving a shared record too stays shared,
+    which cuts more, never less)."""
+    owner = spoke_owner_tenant(hub, spoke_id)
+    if owner or not spoke_id:
+        return owner
+    # Tenants of the instance records on this spoke.
+    try:
+        gc = hub.state.system_state.get("global_config", {}) or {}
+    except Exception:  # noqa: BLE001
+        return None
+    tids = {str(r.get("tenant_id") or "").strip()
+            for key in _INSTANCE_LISTS for r in (gc.get(key) or [])
+            if isinstance(r, dict) and r.get("spoke_id") == spoke_id}
+    if len(tids) != 1:
+        return None
+    tid = tids.pop()
+    return None if not tid or tenant_is_shared(tid) else tid
 
 
 _MODULE_TYPE_ALIASES = {
@@ -1636,6 +1672,16 @@ def tenant_has_own_firewall(hub, tenant_id) -> bool:
     return tenant_has_own_spoke(hub, t, "firewall")
 
 
+def firewall_dhcp_prefixes(hub, tenant_id, prefixes):
+    """The prefixes global search's firewall DHCP leg filters on. A shared
+    firewall serves the global table, so a prefix the tenant has only in its
+    own VRF is dropped; a tenant with its own firewall (bound spoke or its own
+    ``firewalls`` record) keeps them all."""
+    if tenant_has_own_firewall(hub, tenant_id):
+        return list(prefixes or [])
+    return shared_slice_prefixes(hub, tenant_id, prefixes or [], "firewall")
+
+
 # Per-tenant "Shared access" setting (Global Admin, Setup → Tenants):
 #   auto  — default: hide a module's shared resources once the tenant owns its own
 #   allow — always see shared resources, even with its own spokes
@@ -1683,18 +1729,31 @@ def tenant_shared_fallback_blocked(hub, tenant_id, module_type) -> bool:
 def scoped_spoke_of_type(hub, tenant_id, module_type) -> Optional[str]:
     """Single-spoke pick for ``module_type``: the tenant's own connected spoke
     when it owns one (None if all of them are offline — never a shared
-    fallback), else the first connected spoke of that type (legacy)."""
+    fallback), else the first connected spoke of that type (legacy).
+
+    A firewall is also the tenant's own when its ``firewalls`` record names
+    the tenant (an unbound spoke, as ``tenant_has_own_firewall`` counts it),
+    so the firewall pick goes to that record's spoke."""
+    want = canon_module_type(module_type)
+    t = _norm_tenant_id(tenant_id)
+    # Spokes of the tenant's own firewall records (firewall only).
+    own_fw_spokes = set()
+    if want == "firewall" and t:
+        gc = _dict_attr(getattr(hub, "state", None), "system_state").get("global_config")
+        for fw in (gc.get("firewalls") if isinstance(gc, dict) else None) or []:
+            if (isinstance(fw, dict) and fw.get("id") and fw.get("spoke_id")
+                    and _norm_tenant_id(firewall_owner_tenant(hub, fw["id"])) == t):
+                own_fw_spokes.add(fw["spoke_id"])
     # Tenant has no own spoke: fall back to any spoke of the type (unless denied).
-    if not tenant_has_own_spoke(hub, tenant_id, module_type):
+    if not own_fw_spokes and not tenant_has_own_spoke(hub, tenant_id, module_type):
         return None if tenant_left_shared(hub, tenant_id, module_type) else hub.get_spoke_by_type(module_type)
     # Find the tenant's connected, approved spoke of this type.
-    t = _norm_tenant_id(tenant_id)
-    want = canon_module_type(module_type)
     active = getattr(hub, "active_connections", None) or {}
     approved = _dict_attr(hub, "approved_modules")
     for sid, mt in list(_dict_attr(hub, "spoke_module_types").items()):
         if (canon_module_type(mt) == want and sid in active and approved.get(sid, False)
-                and _norm_tenant_id(spoke_owner_tenant(hub, sid)) == t):
+                and (sid in own_fw_spokes
+                     or _norm_tenant_id(spoke_owner_tenant(hub, sid)) == t)):
             return sid
     return None
 
@@ -2016,11 +2075,18 @@ def clear_prefix_cache(hub) -> None:
         cache.clear()
 
 
+# Warm-cache namespace persisting each NetBox scope's prefix VRFs, so the VRF
+# cut of shared infrastructure holds right after a hub restart (a session can
+# keep its cached prefixes across a restart without a NetBox fetch).
+_PREFIX_VRF_NS = "tenant_prefix_vrfs"
+
+
 def _note_prefix_vrfs(hub, key, rows) -> None:
     """Remember the NetBox VRF id of each prefix row under scope ``key``
     (``{prefix: {vrf id}}``; "" is the global table). Rows without
     ``vrf_id`` (an older netbox spoke) leave the VRF unknown: VRF names
-    need not be unique."""
+    need not be unique. Rows that carry no VRF at all keep what is already
+    known rather than forgetting it."""
     vrfs: Dict[str, set] = {}
     for p in rows or []:
         if not (isinstance(p, dict) and p.get("prefix") and "vrf_id" in p):
@@ -2033,21 +2099,82 @@ def _note_prefix_vrfs(hub, key, rows) -> None:
             continue
         vrfs.setdefault(net, set()).add(vrf)
     # Store them on the hub.
+    if vrfs:
+        try:
+            vars(hub).setdefault("_tenant_prefix_vrfs", {})[key] = vrfs
+        except TypeError:
+            pass
+
+
+async def _persist_prefix_vrfs(hub, key) -> None:
+    """Save scope ``key``'s known prefix VRFs with the hub cache when they
+    differ from the saved copy. Best effort: a hub without a warm cache skips."""
     try:
-        vars(hub).setdefault("_tenant_prefix_vrfs", {})[key] = vrfs
-    except TypeError:
+        vrfs = vars(hub).get("_tenant_prefix_vrfs", {}).get(key)
+        if not vrfs:
+            return
+        saved = {p: sorted(v) for p, v in vrfs.items()}
+        if hub.warm_get(_PREFIX_VRF_NS, key) != saved:
+            await hub.warm_set(_PREFIX_VRF_NS, key, saved)
+    except Exception:  # noqa: BLE001 - persistence must never break a prefix read
         pass
 
 
 def tenant_prefix_vrfs(hub, tenant_id) -> Dict[str, set]:
     """``{prefix: {vrf ids}}`` last fetched for ``tenant_id`` by
-    ``fetch_tenant_prefixes``; empty when unknown."""
+    ``fetch_tenant_prefixes``, else the copy saved with the hub cache (warm
+    after a restart); empty when unknown."""
     scope = netbox_tenant_scope(hub, tenant_id)
     key = scope.get("tenant") or ("group:" + str(scope.get("tenant_group")))
     try:
-        return vars(hub).get("_tenant_prefix_vrfs", {}).get(key) or {}
+        store = vars(hub).setdefault("_tenant_prefix_vrfs", {})
     except TypeError:
         return {}
+    # Cold start: load the saved copy once.
+    if key not in store:
+        try:
+            saved = hub.warm_get(_PREFIX_VRF_NS, key)
+        except Exception:  # noqa: BLE001 - a hub without a warm cache
+            saved = None
+        if isinstance(saved, dict):
+            store[key] = {p: set(v) for p, v in saved.items() if isinstance(v, list)}
+    return store.get(key) or {}
+
+
+def shared_slice_prefixes(hub, tenant_id, prefixes, module: str = "", spoke_id=None) -> list:
+    """``prefixes`` with every prefix that lives only in a non-global NetBox VRF
+    removed, for slicing SHARED infrastructure (a shared firewall, Kea,
+    Unbound, Proxmox, ClearPass, …) down to ``tenant_id``.
+
+    Owner-directed: shared infrastructure sits in the global routing table. A
+    tenant that moves into its own VRF can no longer use it, even when its
+    addresses overlap global ones; only NetBox stays shared. Without this, a
+    VRF tenant's 10.x prefixes matched the shared firewall's rules for the same
+    10.x addresses in the global table, and the tenant saw rules that were not
+    its own. ``netbox`` is exempt: NetBox scopes by its own tenant and VRF.
+
+    A prefix whose VRF is unknown (older netbox spoke, never fetched) is
+    kept, which is the behaviour before VRFs were read. Known VRFs are saved
+    with the hub cache, so they hold right after a restart.
+
+    ``spoke_id`` names the source when it is known: a tenant's own source
+    (``source_owner_tenant``, e.g. its own ``dns_instances`` record on an
+    unbound spoke) serves its VRF, so nothing is cut for it."""
+    if module == "netbox" or not prefixes:
+        return list(prefixes or [])
+    if spoke_id and tenant_in(source_owner_tenant(hub, spoke_id), tenant_id):
+        return list(prefixes)
+    vrfs = tenant_prefix_vrfs(hub, tenant_id)
+    out = []
+    for p in prefixes:
+        try:
+            known = vrfs.get(str(ipaddress.ip_network(str(p), strict=False)))
+        except ValueError:
+            known = None
+        # Keep a prefix in the global table ("") or with an unknown VRF.
+        if not known or "" in known:
+            out.append(p)
+    return out
 
 
 async def fetch_tenant_prefixes(hub, tenant_id) -> list:
@@ -2118,6 +2245,7 @@ async def fetch_tenant_prefixes(hub, tenant_id) -> list:
         out = [p["prefix"] for p in rows if p.get("prefix")]
         if out:
             _note_prefix_vrfs(hub, key, rows)
+            await _persist_prefix_vrfs(hub, key)
         if not out:
             # A SUCCESS reply with an empty list is a tenant that simply has no
             # prefixes in NetBox — normal, so INFO. Anything else (error
@@ -2353,10 +2481,12 @@ async def resolve_prefixes_for_session_tenant(hub, sess, tenant_id) -> list:
     return prefixes
 
 
-async def resolve_owned_prefixes(hub, sess) -> list:
+async def resolve_owned_prefixes(hub, sess, shared: bool = False) -> list:
     """Prefixes across EVERY tenant the session user holds (``user.tenants``
     plus the primary ``tenant_id``). For WRITE gates: a user of several
     tenants may change records in any of them, not only their primary one.
+    ``shared=True`` is for a write to shared infrastructure: each tenant's
+    VRF-only prefixes are dropped (``shared_slice_prefixes``).
     Empty for admins / users with no tenant."""
     if not sess or is_admin(sess):
         return []
@@ -2366,7 +2496,10 @@ async def resolve_owned_prefixes(hub, sess) -> list:
     out = []
     # Merge each tenant's prefixes.
     for tid in tids:
-        for p in await resolve_prefixes_for_session_tenant(hub, sess, tid) or []:
+        prefixes = await resolve_prefixes_for_session_tenant(hub, sess, tid) or []
+        if shared:
+            prefixes = shared_slice_prefixes(hub, tid, prefixes)
+        for p in prefixes:
             if p not in out:
                 out.append(p)
     return out
@@ -2439,9 +2572,10 @@ async def filter_session(hub, sessions: dict, request: "Request", data, module: 
     tid = effective_tenant(sessions, request, selected)
     if not tid:
         return _empty_filter_result(data)
-    prefixes = await resolve_prefixes_for_session_tenant(hub, sess, tid)
+    raw = await resolve_prefixes_for_session_tenant(hub, sess, tid)
+    prefixes = shared_slice_prefixes(hub, tid, raw, module, spoke_id)
     if not prefixes:
-        return _empty_filter_result(data)
+        return _vrf_only_result(data, ip_fields) if raw else _empty_filter_result(data)
     return filter_items_by_prefixes(data, prefixes, ip_fields)
 
 
@@ -2525,18 +2659,25 @@ async def filter_fw(hub, sessions: dict, request: "Request", data, endpoint: str
     if explicit_tenant and tid:
         if not filter_enabled(hub, "firewall"):
             return data
-        prefixes = await resolve_prefixes_for_tenant(hub, tid)
+        raw = await resolve_prefixes_for_tenant(hub, tid)
+        prefixes = shared_slice_prefixes(hub, tid, raw)
     else:
         sess = session_user(sessions, request)
         if not sess or is_admin(sess):
             return data
         if not filter_enabled(hub, "firewall"):
             return data
-        prefixes = await resolve_prefixes(hub, sess)
+        raw = await resolve_prefixes(hub, sess)
+        prefixes = shared_slice_prefixes(hub, _session_tenant_id(sess), raw)
+    # Every prefix cut as own-VRF: no address matches, but category-tagged
+    # records below are still the tenant's.
+    vrf_only = bool(raw) and not prefixes
     # No prefixes: shared sees all, others see nothing.
-    if not prefixes:
+    if not prefixes and not vrf_only:
         if tenant_is_shared(tid):
             return data
+        return _empty_filter_result(data)
+    if vrf_only and _find_list_slot(data)[0] is None:
         return _empty_filter_result(data)
     # OPNsense category attribution: for rules/nat/aliases, a record whose
     # `category` belongs to the tenant is shown regardless of subnet. The admin
@@ -2555,7 +2696,8 @@ async def filter_fw(hub, sessions: dict, request: "Request", data, endpoint: str
     # Rules: source/destination match with alias resolution.
     if mode == "fw":
         alias_map = await _fw_alias_map(hub, firewall_id) if firewall_id else None
-        out = filter_firewall_rules(data, prefixes, alias_map, tenant_category=tenant_cat)
+        out = filter_firewall_rules(data, prefixes, alias_map, tenant_category=tenant_cat,
+                                    empty_keeps_all=not vrf_only)
         logger.debug("DIAG filter_fw[%s] filtered %d -> %d alias_map=%s",
                        endpoint, before, _list_len(out), bool(alias_map))
         return out
@@ -2568,9 +2710,10 @@ async def filter_fw(hub, sessions: dict, request: "Request", data, endpoint: str
     # and a rule whose concrete IP belongs to a *different* tenant is still
     # dropped by the has_concrete branch below. dhcp/dns/interfaces keep the
     # strict default (empty/stopped rows shouldn't leak across tenants).
-    drop_no_ip = endpoint != "nat"
-    out = filter_items_by_prefixes(data, prefixes, fields,
-                                   drop_no_ip=drop_no_ip, tenant_category=tenant_cat)
+    # A VRF-only tenant keeps only category-tagged NAT rows (nothing is its by address).
+    drop_no_ip = endpoint != "nat" or vrf_only
+    out = filter_items_by_prefixes(data, prefixes, fields, drop_no_ip=drop_no_ip,
+                                   tenant_category=tenant_cat, empty_keeps_all=not vrf_only)
     if endpoint == "impair":
         out = _filter_impairments(out, prefixes)
     logger.debug("DIAG filter_fw[%s] filtered %d -> %d drop_no_ip=%s",
@@ -2641,7 +2784,7 @@ async def fw_rule_in_tenant_scope(hub, sess, endpoint: str, firewall_id, payload
         return owned
     # Match the payload against all the caller's prefixes (no category trust).
     mode, fields = spec
-    prefixes = await resolve_owned_prefixes(hub, sess)
+    prefixes = await resolve_owned_prefixes(hub, sess, shared=True)
     if not prefixes:
         return False
     if mode == "fw":
@@ -2703,7 +2846,7 @@ async def vm_in_tenant_scope(hub, sess, vm_record, spoke_id=None) -> bool:
         tenant_tags = _tenant_tag_set(hub, tid) or set()
         if tenant_tags and (vm_tags & {str(t).strip().lower() for t in tenant_tags}):
             return True
-        prefixes = await resolve_prefixes_for_tenant(hub, tid)
+        prefixes = shared_slice_prefixes(hub, tid, await resolve_prefixes_for_tenant(hub, tid))
         if not prefixes:
             continue
         out = filter_hypervisor_vms([vm_record], prefixes, template_pools=[],
@@ -2728,7 +2871,7 @@ async def record_in_tenant_scope(hub, sess, record, fields, spoke_id=None) -> bo
     owned = _owned_spoke_writable(hub, sess, spoke_id)
     if owned is not None:
         return owned
-    prefixes = await resolve_owned_prefixes(hub, sess)
+    prefixes = await resolve_owned_prefixes(hub, sess, shared=True)
     if not prefixes:
         return False
     out = filter_items_by_prefixes([record], prefixes, fields, drop_no_ip=True)
@@ -2762,14 +2905,15 @@ async def filter_nw(hub, sessions: dict, request: "Request", data, endpoint: str
     if explicit_tenant and tid:
         if not filter_enabled(hub, "nw"):
             return data
-        prefixes = await resolve_prefixes_for_tenant(hub, tid)
+        prefixes = shared_slice_prefixes(hub, tid, await resolve_prefixes_for_tenant(hub, tid))
     else:
         sess = session_user(sessions, request)
         if not sess or is_admin(sess):
             return data
         if not filter_enabled(hub, "nw"):
             return data
-        prefixes = await resolve_prefixes(hub, sess)
+        prefixes = shared_slice_prefixes(hub, _session_tenant_id(sess),
+                                         await resolve_prefixes(hub, sess))
     # No prefixes: shared sees all, others see nothing.
     if not prefixes:
         if tenant_is_shared(tid):
@@ -2801,10 +2945,18 @@ async def gate_record(hub, sessions: dict, request: "Request", record, module: s
         return record
     if not filter_enabled(hub, module):
         return record
-    prefixes = await resolve_prefixes(hub, sess)
+    raw = await resolve_prefixes(hub, sess)
+    prefixes = shared_slice_prefixes(hub, _session_tenant_id(sess), raw, module, spoke_id)
     if not prefixes:
-        return None
+        return _vrf_only_record(record) if raw else None
     return filter_record_by_prefixes(record, prefixes, ip_fields)
+
+
+def _vrf_only_record(record):
+    """Single-record twin of ``_vrf_only_result``: a tenant whose prefixes are
+    all in its own VRF still sees a record from its own data source
+    (``OWN_SOURCE_MARKER``); anything else is ``None``."""
+    return record if isinstance(record, dict) and record.get(OWN_SOURCE_MARKER) else None
 
 
 def _list_len(data) -> int:
@@ -2815,6 +2967,17 @@ def _list_len(data) -> int:
         return -1
     lst = container if key is None else container[key]
     return len(lst) if isinstance(lst, list) else -1
+
+
+def _vrf_only_result(data, ip_fields):
+    """Read result for a tenant whose prefixes are all in its own VRF (so none
+    match shared infrastructure): no subnet matches, but rows from the tenant's
+    own data source (``OWN_SOURCE_MARKER``, e.g. its own ClearPass merged into a
+    shared list) are still shown. Data with no record list fails closed."""
+    container, _key = _find_list_slot(data)
+    if container is None:
+        return _empty_filter_result(data)
+    return filter_items_by_prefixes(data, [], ip_fields, empty_keeps_all=False)
 
 
 def _empty_filter_result(data):
@@ -2972,7 +3135,10 @@ async def filter_tenant(hub, sessions: dict, request: "Request", data, module: s
     tid = effective_tenant(sessions, request, explicit_tenant)
     if explicit_tenant and tid:
         enabled = filter_enabled(hub, module)
-        prefixes = await resolve_prefixes_for_tenant(hub, tid) if enabled else []
+        raw = await resolve_prefixes_for_tenant(hub, tid) if enabled else []
+        prefixes = shared_slice_prefixes(hub, tid, raw, module, spoke_id)
+        # Every prefix is in the tenant's own VRF: no subnet matches shared infra.
+        vrf_only = bool(raw) and not prefixes
         before = _list_len(data)
         # DIAG: pinpoints where the admin-switcher filter diverges. Remove once
         # the cross-tenant leak is resolved.
@@ -2981,7 +3147,7 @@ async def filter_tenant(hub, sessions: dict, request: "Request", data, module: s
                        tid, enabled, len(prefixes), before, ip_fields)
         if not enabled:
             return data          # subnet filter toggled OFF for this module → show all
-        if not prefixes:
+        if not prefixes and not (vrf_only and module == "hypervisor"):
             # Hypervisor attributes by tenant TAG + template pool too, so a
             # no-prefix tenant may still own tag-attributed VMs — don't blank
             # it (filter_hypervisor_vms applies those overrides). The SHARED
@@ -2992,12 +3158,14 @@ async def filter_tenant(hub, sessions: dict, request: "Request", data, module: s
             # a tenant with no prefixes sees nothing, not the whole fleet.
             if module == "hypervisor" or tenant_is_shared(tid):
                 return data
-            return _empty_filter_result(data)
+            return _vrf_only_result(data, ip_fields) if vrf_only else _empty_filter_result(data)
         # Apply the module's filter.
         if module == "hypervisor":
+            # A VRF-only tenant keeps just its tagged and template-pool VMs.
             out = filter_hypervisor_vms(data, prefixes,
                                         template_pools=_template_pools(hub),
-                                        tenant_tags=_tenant_tag_set(hub, tid))
+                                        tenant_tags=_tenant_tag_set(hub, tid),
+                                        empty_keeps_all=not vrf_only)
         else:
             out = filter_items_by_prefixes(data, prefixes, ip_fields)
             if shared_source and not tenant_is_shared(tid):
@@ -3015,15 +3183,19 @@ async def filter_tenant(hub, sessions: dict, request: "Request", data, module: s
         scope_tid = sess.get("user", {}).get("tenant_id") if sess and not is_admin(sess) else None
         if not scope_tid or not filter_enabled(hub, "hypervisor"):
             return data
-        prefixes = await resolve_prefixes_for_tenant(hub, scope_tid)
-        if not prefixes:
+        raw = await resolve_prefixes_for_tenant(hub, scope_tid)
+        prefixes = shared_slice_prefixes(hub, scope_tid, raw, module, spoke_id)
+        vrf_only = bool(raw) and not prefixes
+        if not prefixes and not vrf_only:
             return data
         return filter_hypervisor_vms(data, prefixes,
                                      template_pools=_template_pools(hub),
-                                     tenant_tags=_tenant_tag_set(hub, scope_tid))
+                                     tenant_tags=_tenant_tag_set(hub, scope_tid),
+                                     empty_keeps_all=False)
     logger.debug("DIAG filter_tenant[%s] FALLBACK legacy (explicit=%r tid=%r) "
                    "-> admin-bypass/no-op path", module, explicit_tenant, tid)
-    return await filter_session(hub, sessions, request, data, module, ip_fields)
+    return await filter_session(hub, sessions, request, data, module, ip_fields,
+                                spoke_id=spoke_id)
 
 
 async def gate_record_tenant(hub, sessions: dict, request: "Request", record, module: str, ip_fields,
@@ -3040,9 +3212,11 @@ async def gate_record_tenant(hub, sessions: dict, request: "Request", record, mo
     if explicit_tenant and tid:
         if not filter_enabled(hub, module):
             return record
-        prefixes = await resolve_prefixes_for_tenant(hub, tid)
+        raw = await resolve_prefixes_for_tenant(hub, tid)
+        prefixes = shared_slice_prefixes(hub, tid, raw, module, spoke_id)
         if not prefixes:
-            return None      # FAIL-CLOSED: a no-prefix tenant sees no foreign record
+            # FAIL-CLOSED: a no-prefix tenant sees no foreign record.
+            return _vrf_only_record(record) if raw else None
         return filter_record_by_prefixes(record, prefixes, ip_fields)
     return await gate_record(hub, sessions, request, record, module, ip_fields)
 

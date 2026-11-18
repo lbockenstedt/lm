@@ -40,7 +40,9 @@ serial ports from the hub WebUI's **Console** view (an xterm.js terminal in the 
   ports explicitly bound to `default`, and shared infra (unmasked — the ADMIN tenant owns no
   NetBox prefixes, so masking there would fail closed), but **never another tenant's
   dedicated ports**. Selecting a real tenant shows that tenant's dedicated ports plus shared
-  infra subnet-masked to it. Only a call with no `?tenant=` at all (programmatic, never the
+  infra subnet-masked to it. Shared infra follows the tenant's "Access to shared tenant" mode:
+  `deny` hides it, `allow` keeps it even when the tenant has its own console agent, and `auto`
+  (default) hides it once the tenant has one. Only a call with no `?tenant=` at all (programmatic, never the
   WebUI) is unscoped. Same rule `routes/nw.py` names *"ADMIN(default) must not accumulate
   across tenants"*; the shared predicates are `access.tenant_scope_ids` /
   `access.in_tenant_scope`.
