@@ -706,6 +706,25 @@ def test_scoped_firewall_pick_follows_own_firewall_record():
     assert _access.scoped_spoke_of_type(hub, "central", "firewall") is None
 
 
+def test_own_firewall_keeps_vrf_prefixes_and_search_leg_never_goes_shared():
+    # Even with shared access "allow", a tenant with its own firewall record
+    # keeps every prefix for the firewall DHCP leg and that leg goes only to
+    # its own spoke, so no shared firewall is queried with the VRF prefixes.
+    hub = _left_shared_hub()
+    hub.state.tenant_state = {"tenants": {"central": {"shared_access": "allow"}}}
+    hub.state.system_state["global_config"] = {"firewalls": [
+        {"id": "fw-c", "tenant_id": "central", "spoke_id": "opn-1"}]}
+    hub.spoke_module_types = {"opn-1": "firewall", "opn-shared": "firewall"}
+    hub.active_connections = {"opn-1", "opn-shared"}
+    hub.approved_modules = {"opn-1": True, "opn-shared": True}
+    hub.get_spoke_by_type = lambda t: "opn-shared"
+    prefixes = ["10.0.0.0/8", "192.168.5.0/24"]
+    assert _access.firewall_dhcp_prefixes(hub, "central", prefixes) == prefixes
+    assert _access.scoped_spoke_of_type(hub, "central", "firewall") == "opn-1"
+    hub.active_connections = {"opn-shared"}
+    assert _access.scoped_spoke_of_type(hub, "central", "firewall") is None
+
+
 # ── A tenant in its own VRF cannot use shared infrastructure ────────────────
 # Shared infra sits in the global table. A prefix that NetBox puts only in the
 # tenant's own VRF must not match a shared firewall/Kea/Proxmox record with the
@@ -836,6 +855,26 @@ def test_vrf_tenant_reads_its_own_instance_spoke_uncut():
 
     assert _read("kea-own") == (rows["records"], rows["records"])
     assert _read("kea-mixed") == ([], [])
+
+
+def test_vrf_tenant_keeps_own_instance_rows_in_a_merged_multi_spoke_list():
+    # A list merged from several spokes is filtered one source spoke at a time:
+    # rows from the tenant's own unbound Kea stay, rows from a shared Kea in
+    # the same list are still cut, and the original order is kept.
+    hub = _own_vrf_hub()
+    hub.state.system_state.setdefault("global_config", {})["dhcp_instances"] = [
+        {"tenant_id": "vrfonly", "spoke_id": "kea-own"}]
+    rows = {"records": [{"ip": "10.20.0.5", "s": "kea-shared"}, {"ip": "10.20.0.6", "s": "kea-own"},
+                        {"ip": "10.20.0.7", "s": "kea-shared"}, {"ip": "10.20.0.8", "s": "kea-own"}]}
+    explicit = asyncio.run(filter_tenant(
+        hub, {"a": _admin_session()}, _FakeRequest("a"), rows, "dhcp", ["ip"],
+        explicit_tenant="vrfonly", spoke_of=lambda r: r["s"]))
+    session = asyncio.run(filter_session(
+        hub, {"u": _user_session("vrfonly")}, _QSRequest("u"), rows, "dhcp", ["ip"],
+        spoke_of=lambda r: r["s"]))
+    own_only = [r for r in rows["records"] if r["s"] == "kea-own"]
+    assert explicit["records"] == own_only
+    assert session["records"] == own_only
 
 
 class _WarmOwnVrfHub(_OwnVrfPrefixHub):
