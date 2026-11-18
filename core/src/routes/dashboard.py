@@ -372,7 +372,7 @@ def register(app, hub, ctx):
         # matches the (tenant-scoped) hypervisor + Access Tracker views, not the
         # global totals.
         raw_prefixes = await _resolve_prefixes_for_tenant(hub, scoping.get("tenant_id"))
-        # Shared hosts and the shared NAC sit in the global table: drop own-VRF prefixes.
+        # Shared hosts and the shared NAC serve the common routing domain: drop own-VRF prefixes.
         sess_prefixes = access.shared_slice_prefixes(hub, scoping.get("tenant_id"), raw_prefixes)
         # Hypervisor VMs attribute by Proxmox TAG and template-pool too, NOT just
         # subnet — a VM tagged for this tenant on a SHARED host (whose IPs are off

@@ -234,8 +234,8 @@ def test_range_is_sent_as_window_seconds_with_day_fallback(rng, seconds, days):
 @pytest.mark.parametrize("owner,expected", [("", ["10.1.0.0/24"]),
                                             ("t-v", ["10.1.0.0/24", "10.9.0.0/16"])])
 def test_own_vrf_prefixes_do_not_scope_the_shared_resolver(monkeypatch, owner, expected):
-    """The shared Unbound sees global-table clients, so a prefix the tenant has
-    only in its own VRF is dropped; the tenant's own resolver keeps it."""
+    """The shared Unbound sees clients in the common routing domain, so a prefix
+    the tenant has only in its own VRF is dropped; the tenant's own resolver keeps it."""
     monkeypatch.setitem(TENANT_PREFIXES, "t-v", ["10.1.0.0/24", "10.9.0.0/16"])
     monkeypatch.setattr(ns.access, "tenant_prefix_vrfs",
                         lambda hub, tid: {"10.9.0.0/16": {"7"}, "10.1.0.0/24": {""}})
