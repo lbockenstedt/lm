@@ -163,6 +163,19 @@ def apply_cs_mode_entry(entry, enabled, tenant_id=_UNSET):
     return new_entry
 
 
+def _scan_host_summary(x: dict) -> dict:
+    """The few fields the admin scan route shows for one listed host.
+
+    ``snmp_ok`` is listed only when the entry carries it (the identified and
+    reachable results do; the added/preview summaries and an older spoke's
+    results do not), so a missing value is never shown as null, which would
+    read as "SNMP never tried"."""
+    out = {kk: x.get(kk) for kk in ("address", "hostname", "object_type", "method")}
+    if "snmp_ok" in x:
+        out["snmp_ok"] = x["snmp_ok"]
+    return out
+
+
 def _peer_is_loopback(request: Request) -> bool:
     """Return True when the request's TCP peer is a loopback address."""
     # Use the real TCP peer (no proxy in front); X-Forwarded-* is deliberately ignored.
@@ -610,8 +623,7 @@ def register(app, hub, ctx):
         # Return the summary fields, trimming each listed device to a few key fields,
         # merged with the moved-device lists.
         return {k: (res.get(k) if not isinstance(res.get(k), list) else
-                    [{kk: x.get(kk) for kk in ("address", "hostname", "object_type", "method")}
-                     for x in res[k] if isinstance(x, dict)])
+                    [_scan_host_summary(x) for x in res[k] if isinstance(x, dict)])
                 for k in ("status", "message", "reason", "targets", "sources", "scanned",
                           "identified", "reachable", "added", "preview", "dry_run")} | {
             # Devices moved into this tenant (verified as the same hardware).
