@@ -777,13 +777,25 @@ class HubOsUpdatesMixin:
         # Take the snapshot, keeping only the last few.
         res = await vm_snapshots.take_snapshot(self, vm, _PREPATCH_PREFIX, cfg["keep"],
                                                run.get("actor") or "os-updates")
-        # Storage that cannot snapshot at all: nothing to roll back to, so patch with a warning.
-        if res.get("status") != "SUCCESS" and "snapshotfeatureisnotavailable" in (
-                res.get("message") or "").lower().replace(" ", "").replace("_", ""):
-            logger.warning("OS-UPDATE: %s → VM storage cannot snapshot; patching without a snapshot", n["label"])
+        # A snapshot that is impossible (not merely failed): nothing to roll
+        # back to, so patch with a warning. Either the storage cannot snapshot,
+        # or the spoke that owns the VM's host does not know the VM-action
+        # command (an older peer or a spoke type that never had it, e.g. the
+        # Client-Sim spokes that host a cluster's agents): rule 3.3, handle a
+        # peer that answers "Unknown command".
+        flat = (res.get("message") or "").lower().replace(" ", "").replace("_", "")
+        unsupported = ""
+        if res.get("status") != "SUCCESS":
+            if "snapshotfeatureisnotavailable" in flat:
+                unsupported = "VM storage does not support snapshots"
+            elif "unknowncommand" in flat:
+                unsupported = "the spoke managing this VM's host cannot snapshot VMs"
+        if unsupported:
+            logger.warning("OS-UPDATE: %s → %s (%s); patching without a snapshot",
+                           n["label"], unsupported, res.get("message", ""))
             if item:
                 item["snapshot"] = ""
-                item["warning"] = "VM storage does not support snapshots — patched without one"
+                item["warning"] = unsupported + " — patched without one"
             return True
         # Failure: mark the item and block patching.
         if res.get("status") != "SUCCESS":
@@ -845,7 +857,7 @@ class HubOsUpdatesMixin:
             return {"status": "SKIPPED", "message": "nothing to patch"}
         # Log what will be patched.
         exclude = cfg["exclude"]
-        logger.warning("OS-UPDATE: auto-patch found updates on %d node(s) (%s%s)",
+        logger.info("OS-UPDATE: auto-patch found updates on %d node(s) (%s%s)",
                        len(keys), "security only" if cfg["security_only"] else "all updates",
                        f", excluding {', '.join(exclude)}" if exclude else "")
         # Rolling apply, with reboots for auto-reboot nodes, stopping new nodes at window close.
@@ -855,7 +867,7 @@ class HubOsUpdatesMixin:
                                          reboot_after=[k for k in keys if k in cfg["reboot_nodes"]],
                                          until=closes)
         if res.get("status") == "ERROR":
-            logger.warning("OS-UPDATE: auto-patch not started: %s", res.get("message"))
+            logger.error("OS-UPDATE: auto-patch not started: %s", res.get("message"))
         return res
 
     def _osu_autopatch_plan(self, cfg: Dict[str, Any]) -> "tuple[List[str], Dict[str, List[str]]]":
@@ -955,7 +967,7 @@ class HubOsUpdatesMixin:
                                                   "before access can be fixed from here"}
         # Default user is root; log the request (never the password).
         username = (username or "root").strip()
-        logger.warning("OS-UPDATE: fix-access on %s as %s requested by %s",
+        logger.info("OS-UPDATE: fix-access on %s as %s requested by %s",
                        n["label"], username, actor or "?")
         try:
             # Hub: run locally in a thread.
@@ -983,8 +995,8 @@ class HubOsUpdatesMixin:
         # Result and message.
         ok = isinstance(d, dict) and d.get("status") == "SUCCESS"
         msg = (d or {}).get("message", "") if isinstance(d, dict) else ""
-        logger.warning("OS-UPDATE: fix-access on %s → %s (%s)", n["label"],
-                       "ok" if ok else "FAILED", msg)
+        logger.log(logging.INFO if ok else logging.ERROR, "OS-UPDATE: fix-access on %s → %s (%s)",
+                   n["label"], "ok" if ok else "FAILED", msg)
         if ok:
             # Re-check just this node so the "blocked" badge clears right away.
             target = next((t for t in self._osu_targets()
@@ -1361,9 +1373,9 @@ class HubOsUpdatesMixin:
         }
         # Save, log the approved plan, and start the run in the background.
         self._osu_save()
-        logger.warning("OS-UPDATE: apply approved by %s — %s, hub last", actor or "?",
-                       ", ".join(f"{n['label']}[{'all' if n['apply_packages'] is None else len(n['apply_packages'])}]"
-                                 for n in plan))
+        logger.info("OS-UPDATE: apply approved by %s — %s, hub last", actor or "?",
+                    ", ".join(f"{n['label']}[{'all' if n['apply_packages'] is None else len(n['apply_packages'])}]"
+                              for n in plan))
         asyncio.create_task(self._osu_run(plan))
         return {"status": "SUCCESS", "queued": len(plan)}
 
@@ -1378,8 +1390,8 @@ class HubOsUpdatesMixin:
         run["cancel_requested"] = True
         run["cancelled_by"] = actor
         self._osu_save()
-        logger.warning("OS-UPDATE: run cancel requested by %s (current node finishes)",
-                       actor or "?")
+        logger.info("OS-UPDATE: run cancel requested by %s (current node finishes)",
+                    actor or "?")
         return {"status": "SUCCESS", "message": "cancelling after the current node"}
 
     async def osu_reboot_node(self, node_key: str, actor: str = "") -> Dict[str, Any]:
@@ -1436,7 +1448,7 @@ class HubOsUpdatesMixin:
         """Send the reboot command to one node (no checks — see callers)."""
         # Log the request.
         node_key = f"{n['kind']}:{n['id']}"
-        logger.warning("OS-UPDATE: REBOOT of %s approved by %s", n["label"], actor or "?")
+        logger.info("OS-UPDATE: REBOOT of %s approved by %s", n["label"], actor or "?")
         # Hub: reboot locally.
         try:
             if n["kind"] == "hub":
@@ -1459,8 +1471,8 @@ class HubOsUpdatesMixin:
         # Result and message.
         ok = isinstance(d, dict) and d.get("status") == "SUCCESS"
         msg = (d or {}).get("message", "") if isinstance(d, dict) else ""
-        logger.warning("OS-UPDATE: reboot %s → %s (%s)", n["label"],
-                       "scheduled" if ok else "FAILED", msg)
+        logger.log(logging.INFO if ok else logging.ERROR, "OS-UPDATE: reboot %s → %s (%s)",
+                   n["label"], "scheduled" if ok else "FAILED", msg)
         # Remember when a reboot was scheduled.
         if ok:
             cached = self._osu_state()["nodes"].get(node_key)
@@ -1522,8 +1534,8 @@ class HubOsUpdatesMixin:
             if not await self._osu_prepatch_snapshot(n, run, item):
                 run["done"] += 1
                 self._osu_save()
-                logger.warning("OS-UPDATE: %s → not patched (pre-patch snapshot failed)",
-                               n["label"])
+                logger.error("OS-UPDATE: %s → not patched (%s)", n["label"],
+                             (item or {}).get("cause") or "pre-patch snapshot failed")
                 continue
             # Mark it applying.
             run["current"] = n["label"]
@@ -1550,8 +1562,11 @@ class HubOsUpdatesMixin:
             # Count it and log.
             run["done"] += 1
             self._osu_save()
-            logger.warning("OS-UPDATE: %s → %s (%s)", n["label"],
-                           "ok" if ok else "FAILED", (d or {}).get("message", "") or "")
+            # A node that patched fine is routine (INFO); a failed apply is a
+            # real failure (ERROR) so AB's log sentinel opens on it, and a
+            # healthy node never feeds the repeated-warning backstop.
+            logger.log(logging.INFO if ok else logging.ERROR, "OS-UPDATE: %s → %s (%s)",
+                       n["label"], "ok" if ok else "FAILED", (d or {}).get("message", "") or "")
             # Cluster node: reboot via maintenance mode only if it needs one.
             if ok and item and key in (run.get("reboot_after") or []) and _is_cluster_node(n):
                 if not item["reboot_required"]:
@@ -1601,6 +1616,15 @@ class HubOsUpdatesMixin:
         except Exception as exc:  # noqa: BLE001
             return {"status": "ERROR", "message": str(exc)}
 
+    async def _osu_leave_maintenance(self, n: Dict[str, Any]) -> "tuple[bool, str]":
+        """Turn maintenance mode off after a failed cluster reboot. Returns
+        ``(cleared, text)``: the disable can fail too, which leaves the node
+        drained and must not be reported as cleared."""
+        r = await self._osu_maintenance(n, "disable")
+        if r.get("status") == "SUCCESS":
+            return True, "maintenance mode cleared"
+        return False, f"maintenance mode NOT cleared: {r.get('message', '')}"
+
     async def _osu_cluster_reboot(self, n: Dict[str, Any], run: Dict[str, Any],
                                   actor: str = _AUTOREBOOT_ACTOR) -> "tuple[str, bool]":
         """Maintenance mode -> wait for HA guests to leave -> reboot -> wait
@@ -1610,30 +1634,38 @@ class HubOsUpdatesMixin:
         key, label = f"{n['kind']}:{n['id']}", n["label"]
         run["current"] = f"{label} — entering maintenance mode"
         self._osu_save()
-        logger.warning("OS-UPDATE: %s (Proxmox %s) → maintenance mode before reboot by %s",
-                       label, (n.get("pve_cluster") or {}).get("name") or "standalone", actor)
+        logger.info("OS-UPDATE: %s (Proxmox %s) → maintenance mode before reboot by %s",
+                    label, (n.get("pve_cluster") or {}).get("name") or "standalone", actor)
         # Turn on maintenance mode.
         r = await self._osu_maintenance(n, "enable")
         if r.get("status") != "SUCCESS":
+            logger.error("OS-UPDATE: %s could not enter maintenance mode, not rebooted: %s",
+                         label, r.get("message", ""))
             return f"failed: maintenance mode: {r.get('message', '')}", False
         # Wait for HA guests to move off, with a time limit.
         deadline = time.time() + _MAINT_MIGRATE_TIMEOUT_S
         guests = (r.get("ha_guests") or []) + (r.get("local_guests") or [])
         while guests or r.get("draining"):
             if time.time() > deadline:
-                await self._osu_maintenance(n, "disable")
+                _cleared, left = await self._osu_leave_maintenance(n)
+                logger.error("OS-UPDATE: %s guests did not move off in time (%s), not rebooted; %s",
+                             label, ", ".join(guests), left)
                 return (f"failed: guests did not move off in time ({', '.join(guests)}) — "
-                        "not rebooted, maintenance mode cleared"), False
+                        f"not rebooted, {left}"), False
             run["current"] = f"{label} — moving/shutting down {len(guests)} guest(s)"
             await asyncio.sleep(_MAINT_POLL_S)
             r = await self._osu_maintenance(n, "status")
             if r.get("status") == "SUCCESS":
                 guests = (r.get("ha_guests") or []) + (r.get("local_guests") or [])
-        # Reboot; clear maintenance mode if that fails.
+        # Reboot; clear maintenance mode if that fails. _osu_reboot has already
+        # logged the failed reboot at ERROR, so only a node left in maintenance
+        # mode (new information) is logged at ERROR again.
         res = await self._osu_reboot(n, actor)
         if res.get("status") != "SUCCESS":
-            await self._osu_maintenance(n, "disable")
-            return f"failed: {res.get('message', '')} — maintenance mode cleared", False
+            cleared, left = await self._osu_leave_maintenance(n)
+            logger.log(logging.INFO if cleared else logging.ERROR,
+                       "OS-UPDATE: %s after its failed reboot: %s", label, left)
+            return f"failed: {res.get('message', '')} — {left}", False
         # Wait for it to go down.
         run["current"] = f"{label} — rebooting"
         self._osu_save()
@@ -1649,16 +1681,18 @@ class HubOsUpdatesMixin:
                     self._osu_state()["nodes"][key] = chk
                     break
             if time.time() > deadline:
-                logger.warning("OS-UPDATE: %s did not come back from its auto-reboot — "
-                               "left in maintenance mode, stopping the run", label)
+                logger.error("OS-UPDATE: %s did not come back from its auto-reboot — "
+                             "left in maintenance mode, stopping the run", label)
                 return ("failed: did not come back within "
                         f"{int(_REBOOT_RETURN_TIMEOUT_S // 60)} min — left in maintenance mode, "
                         "rest of the run stopped"), True
             await asyncio.sleep(_MAINT_POLL_S)
         # Clear maintenance mode and report.
         r = await self._osu_maintenance(n, "disable")
-        logger.warning("OS-UPDATE: %s back from its reboot; maintenance mode %s",
-                       label, "cleared" if r.get("status") == "SUCCESS" else "NOT cleared")
+        cleared = r.get("status") == "SUCCESS"
+        logger.log(logging.INFO if cleared else logging.ERROR,
+                   "OS-UPDATE: %s back from its reboot; maintenance mode %s",
+                   label, "cleared" if cleared else "NOT cleared")
         if r.get("status") != "SUCCESS":
             return f"rebooted, but maintenance mode NOT cleared: {r.get('message', '')}", False
         return "rebooted (cluster maintenance mode)", False
