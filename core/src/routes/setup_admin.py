@@ -1096,8 +1096,8 @@ def register(app, hub, ctx):
         return {
             "auto": gc.get("log_analysis_auto", True),
             "interval_min": int(gc.get("log_analysis_interval_min", 30) or 30),
-            "log_5xx_triage": gc.get("log_5xx_triage", True) is not False,
-            "log_volume_triage": gc.get("log_volume_triage", True) is not False,
+            "log_5xx_triage": bool(gc.get("log_5xx_triage", True)),
+            "log_volume_triage": bool(gc.get("log_volume_triage", True)),
             "log_volume_threshold": int(gc.get("log_volume_threshold", 10) or 10),
         }
 
