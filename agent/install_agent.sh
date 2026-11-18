@@ -16,6 +16,8 @@
 #    Omit both for a bare agent that loads roles later via the hub WebUI.)
 #   --llm-bundle <tar> --llm-bundle-sha256 <digest> stages an approved offline
 #    serving bundle on a fresh worker; it does not replace an installed runtime.
+#   --llm-candidate-bundle <tar> --llm-candidate-bundle-sha256 <digest> stages a
+#    vetted runtime-only qualification candidate the same way, once.
 #
 #   --hub is optional: omit it (or pass "auto") to let the agent auto-discover the
 #   hub via mDNS/DNS (BaseControlPlane._resolve_hub_url).
@@ -71,6 +73,8 @@ ONBOARDING_PSK=""
 TENANT_ID_HINT=""
 LLM_BUNDLE=""
 LLM_BUNDLE_SHA256=""
+LLM_CANDIDATE_BUNDLE=""
+LLM_CANDIDATE_BUNDLE_SHA256=""
 
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
@@ -90,20 +94,22 @@ while [[ "$#" -gt 0 ]]; do
         --tenant-hint)     TENANT_ID_HINT="$2"; shift ;;
         --llm-bundle) LLM_BUNDLE="$2"; shift ;;
         --llm-bundle-sha256) LLM_BUNDLE_SHA256="$2"; shift ;;
+        --llm-candidate-bundle) LLM_CANDIDATE_BUNDLE="$2"; shift ;;
+        --llm-candidate-bundle-sha256) LLM_CANDIDATE_BUNDLE_SHA256="$2"; shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac; shift
 done
-if [[ -n "$LLM_BUNDLE" && -z "$LLM_BUNDLE_SHA256" || -z "$LLM_BUNDLE" && -n "$LLM_BUNDLE_SHA256" ]]; then
-    echo "--llm-bundle and --llm-bundle-sha256 must be supplied together" >&2
-    exit 1
-fi
-if [[ -n "$LLM_BUNDLE" ]]; then
-    [[ "$LLM_BUNDLE" = /* ]] || LLM_BUNDLE="$PWD/$LLM_BUNDLE"
-    if [[ ! -f "$LLM_BUNDLE" || ! "$LLM_BUNDLE_SHA256" =~ ^[a-f0-9]{64}$ ]]; then
-        echo "Supply a local LLM bundle and its trusted lowercase SHA-256" >&2
-        exit 1
+# Print an offline LLM bundle's absolute path; the archive and its trusted digest come together.
+llm_bundle_path() {
+    [[ -z "$1$2" ]] && return 0
+    if [[ ! -f "$1" || ! "$2" =~ ^[a-f0-9]{64}$ ]]; then
+        echo "Supply each local LLM bundle with its trusted lowercase SHA-256" >&2
+        return 1
     fi
-fi
+    if [[ "$1" = /* ]]; then echo "$1"; else echo "$PWD/$1"; fi
+}
+LLM_BUNDLE="$(llm_bundle_path "$LLM_BUNDLE" "$LLM_BUNDLE_SHA256")"
+LLM_CANDIDATE_BUNDLE="$(llm_bundle_path "$LLM_CANDIDATE_BUNDLE" "$LLM_CANDIDATE_BUNDLE_SHA256")"
 
 # Accept a bare hub IP/host for --hub (e.g. `--hub 172.16.1.31` == `--hub
 # wss://172.16.1.31:443`). A ws://|wss:// scheme or the "auto" sentinel is left
@@ -617,6 +623,9 @@ EOF
 # Stage the disabled unit so an agent installed without roles can load it later.
 if [[ -n "$LLM_BUNDLE" ]]; then
     python3 "$INSTALL_DIR/agent/src/llm_install.py" "$LLM_BUNDLE" "$LLM_BUNDLE_SHA256"
+fi
+if [[ -n "$LLM_CANDIDATE_BUNDLE" ]]; then
+    python3 "$INSTALL_DIR/agent/src/llm_install.py" --candidate "$LLM_CANDIDATE_BUNDLE" "$LLM_CANDIDATE_BUNDLE_SHA256"
 fi
 install -m 0644 "$INSTALL_DIR/agent/lm-llm-ollama.service" /etc/systemd/system/lm-llm-ollama.service
 install -m 0644 "$INSTALL_DIR/agent/lm-llm-candidate.service" /etc/systemd/system/lm-llm-candidate.service

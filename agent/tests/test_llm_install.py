@@ -64,3 +64,23 @@ def test_rejected_offline_bundle_is_not_installed(tmp_path, bad_bundle):
         stage_bundle(source, "0" * 64 if bad_bundle == "digest" else digest, destination)
     assert not destination.exists()
     assert not (tmp_path / "outside").exists()
+
+
+def test_candidate_bundle_is_runtime_only(tmp_path):
+    """A candidate stages only its runtime; a bundled model store is refused."""
+    source, destination = tmp_path / "candidate.tar", tmp_path / "candidate"
+    with tarfile.open(source, "w") as archive:
+        entry = tarfile.TarInfo("bin/ollama")
+        entry.size, entry.mode = 7, 0o755
+        archive.addfile(entry, io.BytesIO(b"trial-1"))
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    stage_bundle(source, digest, destination, serving=False)
+    assert (destination / "bin/ollama").read_bytes() == b"trial-1"
+    assert not (destination / "bundle.env").exists()
+    with pytest.raises(ValueError, match="does not upgrade"):
+        stage_bundle(source, "b" * 64, destination, serving=False)
+
+    serving_source = tmp_path / "serving.tar"
+    with pytest.raises(ValueError, match="Unexpected entry"):
+        stage_bundle(serving_source, _bundle(serving_source), tmp_path / "other", serving=False)
+    assert not (tmp_path / "other").exists()
