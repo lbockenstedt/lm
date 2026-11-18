@@ -115,6 +115,10 @@ picker sees automation keys a per-bucket PSK-gated listing would hide.
 
 ## How modules consume vault secrets
 
+Hub [cloud LLM profiles](llm.md) require a reference in the profile tenant's
+Vault bucket. The hub resolves the API key at dispatch; it is not pushed to
+workers or stored inline.
+
 The pattern: the module stores just a `{bucket, name}` reference; a server-side
 resolver calls `cred_vault.automation_get(hub, bucket, name)` at use-time and
 injects the plaintext into the outbound command. The browser never sees the
@@ -271,3 +275,4 @@ are `hub`-mode:
 3. **Delete the bucket** (`delete-bucket`).
 4. If the credential was meant for scanning, build an `nw` scan-credential set
    referencing it so the tenant's agent can finally use it.
+LLM cloud overflow profiles are Vault-only. In **LLM → Settings**, select an automation-readable API credential from the profile's tenant or Shared bucket. Lab Manager stores the reference and resolves the key only when dispatching an eligible public PR summary.

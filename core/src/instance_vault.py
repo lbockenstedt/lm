@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 # client_id, url, user, address, port, …) always stay inline on the record and
 # are never sourced from the vault. Keyed by the ``global_config`` list name.
 SECRET_FIELDS = {
+    "llm_cloud_profiles": {"api_key": ("api_key", "apikey", "token", "key")},
     # External syslog archive (Syslog -> Settings -> Archive): the read-only
     # API password for an external Graylog. One record per tenant.
     "syslog_archive": {
@@ -130,7 +131,7 @@ VAULT_REQUIRED = {"firewalls", "truenas_appliances", "ad_connections"}
 # Products whose secret may ONLY come from the vault, with or without a cloud
 # vault: they are new (fleet rule 5.1, vault from day one), and the generic
 # /setup CRUD would otherwise store an inline secret in clear and list it.
-VAULT_ONLY = {"ad_connections"}
+VAULT_ONLY = {"ad_connections", "llm_cloud_profiles"}
 
 
 NONSECRET_VAULT_FIELDS = {
