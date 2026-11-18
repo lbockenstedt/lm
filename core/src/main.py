@@ -488,14 +488,25 @@ def _sentinel_volume_lines(lines, threshold, minutes):
 _SENTINEL_5XX_RE = re.compile(r'"([A-Z]+) (/api/[^ ?"]*)[^"]*" (5\d\d)\b')
 
 
-def _sentinel_5xx_lines(lines):
+def _sentinel_5xx_lines(lines, modules=None):
     """Synthetic error lines for API requests the hub answered with a 5xx.
 
     A route that fails can log its reason at WARNING (or not at all), and the
     uvicorn access line is INFO, so the sentinel's ERROR-only gate missed real
     faults: DHCP HA discovery returned 502 for hours unseen. One line per
     distinct method + path + status (query string and client address dropped),
-    so the fingerprint stays stable while the same route keeps failing."""
+    so the fingerprint stays stable while the same route keeps failing.
+
+    ``modules`` maps sentinel module names to spoke types. When the route's
+    first path segment names one (``/api/dhcp/...``), the line says so: the
+    finding stays with the hub, whose route answered and logged the reason
+    (the DHCP HA 502 was a hub bug), but AB is told which spoke the route
+    relays to, so it can look there too."""
+    # Path segment (module name or spoke type) -> module name.
+    by_seg = {}
+    for name, mtype in (modules or {}).items():
+        by_seg.setdefault(mtype, name)
+        by_seg[name] = name
     # Collect each distinct failing route once, in first-seen order.
     out = []
     for line in lines or ():
@@ -503,6 +514,9 @@ def _sentinel_5xx_lines(lines):
         if not m:
             continue
         synth = f"[http-5xx] ERROR - {m.group(1)} {m.group(2)} returned {m.group(3)}"
+        mod = by_seg.get(m.group(2).split("/")[2] if m.group(2).count("/") >= 2 else "")
+        if mod:
+            synth += f" (route relays to the {mod} module)"
         if synth not in out:
             out.append(synth)
     return out
@@ -11125,7 +11139,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         if want_5xx or want_volume:
                             wide = drop_security_lines(self._window_log_lines(tail, interval_min))
                             if want_5xx:
-                                errs += _sentinel_5xx_lines(wide)
+                                errs += _sentinel_5xx_lines(wide, self._SENTINEL_MODULE_TYPES)
                             if want_volume:
                                 errs += _sentinel_volume_lines(
                                     wide, int(gc.get("log_volume_threshold", 10) or 10),
@@ -11182,6 +11196,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                             module, _sentinel_analysis_text(lines, errs), title)
                         if res.get("duration_s"):
                             durations.append(res["duration_s"])
+                        # A failed analysis (AB busy, timed out, errored) judged
+                        # nothing: forget the fingerprint so the next sweep retries
+                        # instead of muting this condition until a quiet window.
+                        if not res.get("ok"):
+                            self._log_sentinel_sig.pop(module, None)
                         # Escalate to ab unless still within the cooldown.
                         if res.get("ok") and res.get("verdict") == "escalate":
                             # Cooldown per (module, condition). Without this a standing
