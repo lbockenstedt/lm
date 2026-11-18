@@ -5,6 +5,8 @@ Ollama service after approval and tenant assignment. The hub routes to an idle
 worker in the caller's tenant, or to explicitly Shared workers if the tenant
 has no approved pool. A busy reply can move to another worker; an ambiguous
 disconnect is not automatically replayed. Direct inference requests are local-only.
+Loading the role restores missing service-unit files and reloads systemd, but
+does not install the Ollama bundle or download models.
 
 ## Provision a worker VM
 
@@ -102,6 +104,41 @@ Global admins can use **LLM** to inspect worker readiness, active jobs, and the 
 Use **LLM → Settings** to append reported, digest-pinned models in task priority order, bind exact AppBuilder repositories to a tenant and certificate SAN, select an approved Shared worker for a staged candidate, or create a Vault-backed cloud overflow profile. Edit an existing candidate by saving its staged key again. The worker restarts its serving daemon after three failed idle API health probes, at most once in five minutes; it does not interrupt an active inference or qualification.
 
 Workers report CPU mode, CPU model when available, CPU architecture, logical vCPUs and total guest RAM in bytes, even before Ollama is ready. These are VM totals, not free memory or service cgroup limits. An `llm_task_models` entry can set `min_vcpus` and `min_ram_bytes` from qualification results: the hub skips narrower or unreported capacity for that entry, then tries the next ordered artifact without bypassing tenant boundaries. Entries without minima retain older-worker compatibility. An entry can also set optional `temperature` (0–2) and `top_p` (0–1) in **LLM → Settings**; leave them blank for Ollama's defaults. The hub sends them only with that artifact, and the worker rejects any other option or out-of-range value. Workers never choose sampling from a model's name; the CLI trials capped Gemma drafts at temperature 0.7 and top-p 0.8, so set those values on a Gemma entry. Workers released before this setting ignore it and keep their built-in Gemma cap (0.7/0.8 for model names starting with `gemma`), so update every worker before relying on per-profile sampling.
+
+Workers report lifecycle status every 30 seconds. Start failures distinguish a
+missing service unit (`runtime_unit_missing`), missing Ollama binary
+(`runtime_binary_missing`), and other start failures (`runtime_start_failed`).
+A unit or binary that exists but is unusable (for example a directory in place
+of the unit, or a binary without execute permission) is `runtime_start_failed`,
+not missing: unit staging never overwrites an existing entry, so inspect it on
+the worker. The bundle installer never replaces an existing `/opt/lm-llm`, so
+for `runtime_binary_missing` on a partial runtime, remove that directory before
+reinstalling. An invalid or masked service-unit symlink is reported as
+`runtime_unit_symlink`; inspect its target before changing it. If unit staging
+or `systemctl daemon-reload` fails during role load, the agent retries once a
+minute while the LLM role remains loaded, without requiring another hub
+command. That retry only repairs the units; it never starts Ollama. Only the
+hub starts the runtime, and only on an approved worker bound to a tenant: it
+retries transient runtime-start failures every two minutes, which covers a
+worker whose units were just repaired. Missing binaries and masked or broken
+unit links remain visible for operator repair.
+The agent logs the first repair failure, and any change in its error, as a
+warning; identical repeats are logged at debug level. The worker's runtime
+start and restart results (logger `LLMSpoke`) appear in the hub's agent logs
+under the LLM sub-spoke (`<agent>-llm`), not the base agent.
+Stopped workers keep the `runtime_not_started` status code for compatibility
+with older hubs and include the current, re-evaluated cause in `detail_code`:
+`runtime_unit_missing`, `runtime_unit_symlink`, `runtime_binary_missing` or
+`runtime_start_failed`. The hub ignores any other `detail_code`, so no other
+code can end the start retry.
+The hub logs issue transitions and recovery once per change, and the admin
+dashboard exposes the same stable codes without retaining raw systemd output.
+Hub log lines name the worker by its display name with its key in parentheses
+(the key alone if it has no display name). A start reply with a stable code is
+logged as `runtime start rejected: <code>`. A timeout, an updating spoke, a
+busy worker or an unrecognised reply is logged as
+`runtime start outcome unknown` instead, because it says nothing about the
+runtime; the next status report decides any retry.
 
 The routing forms read their field constraints from the hub settings schema.
 Model choices come from reporting workers, and repository bindings offer only
