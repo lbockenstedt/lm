@@ -152,7 +152,9 @@ def register(app, hub, ctx):
         if vm_snapshots.is_running(sid):
             raise HTTPException(status_code=409, detail="this schedule is already running")
         # Record who started the run, then launch it in the background so the request returns fast.
-        logger.warning("[vm-snapshot] schedule %s run now by %s", sid, actor)
+        # INFO: this only records who asked; the run's own outcome (a failed snapshot or a run that
+        # could not start) is logged by run_schedule, so a failed Run-now is not two loud lines.
+        logger.info("[vm-snapshot] schedule %s run now by %s", sid, actor)
         asyncio.create_task(vm_snapshots.run_schedule(hub, sid, actor))
         # Tell the UI the run has started; it polls the schedule for the result.
         return {"status": "started"}
