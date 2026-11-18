@@ -78,6 +78,26 @@ def _fake_ca(monkeypatch):
     monkeypatch.setattr(mtls_ca, "ca_cert_pem", lambda: "HUB-CA")
 
 
+# ── storage ──────────────────────────────────────────────────────────────────
+
+def test_legacy_tenants_spelt_only_by_case_keep_separate_records(tmp_path, monkeypatch):
+    """One tenant's record is found whatever the case or spaces, but with
+    "acme" and "ACME" both stored, tenant ids compare by exact spelling
+    (access._AMBIGUOUS_TENANT_IDS), so neither reads the other's settings or
+    archive (and with it the archive password)."""
+    import access
+    hub = _Hub(tmp_path)
+    sa.save_settings(hub, "acme", {"retention_hours": 12})
+    assert sa.get_settings(hub, " ACME ")["retention_hours"] == 12
+    monkeypatch.setattr(access, "_AMBIGUOUS_TENANT_IDS",
+                        access._case_collisions({"acme": {}, "ACME": {}}))
+    sa.save_settings(hub, "ACME", {"retention_hours": 48})
+    sa._set_archive(hub, "ACME", {"backend": "graylog", "host": "gl"})
+    assert sa.get_settings(hub, "acme")["retention_hours"] == 12
+    assert sa.get_settings(hub, "ACME")["retention_hours"] == 48
+    assert sa.get_archive(hub, "acme") is None and sa.get_archive(hub, "ACME")["host"] == "gl"
+
+
 # ── settings validation ──────────────────────────────────────────────────────
 
 def test_drop_rules_valid_rules_are_normalised():

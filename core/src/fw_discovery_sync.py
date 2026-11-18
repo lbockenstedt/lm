@@ -64,8 +64,10 @@ try:
 except Exception:  # pragma: no cover - access always importable in-app
     fetch_tenant_prefixes = None  # type: ignore
     attribute_by_prefix = None  # type: ignore
-# Shared helpers: MAC normalisation, spoke/tenant ownership and spoke reply unwrapping.
-from access import norm_mac, nw_spoke_tenant, spoke_owner_tenant, unwrap_spoke  # sibling leaf (no main/api back-import)
+# Shared helpers: MAC normalisation, spoke/tenant ownership, the tenant id a
+# push goes under, and spoke reply unwrapping.
+from access import (norm_mac, nw_spoke_tenant, push_tenant_key, raw_tenant_id,
+                    spoke_owner_tenant, unwrap_spoke)  # sibling leaf (no main/api back-import)
 # Shared scheduling helpers: compute the next delay and run the periodic loop.
 from sync_loop import next_schedule_delay, run_sync_loop  # sibling leaf
 
@@ -592,6 +594,18 @@ class FwDiscoverySyncMixin:
         attributed devices still gets a pushed status per source (the sink's
         replace-delete then reconciles that tenant's set for that source).
         """
+        # Push under the stored tenant id the target names, as the buckets are
+        # keyed (access.push_tenant_key). One that names no single tenant is
+        # pushed nowhere: get_tenant ignores surrounding spaces, so a
+        # replace=True push of " ACME"'s empty bucket would land on "ACME" and
+        # delete that tenant's devices.
+        key = push_tenant_key(self, tenant_id)
+        if not key:
+            return {"tenant_id": raw_tenant_id(tenant_id), "status": "skipped", "pushed": 0,
+                    "errors": 0, "skipped": 0, "deleted": 0, "discovered_total": 0,
+                    "message": "tenant id names no single tenant",
+                    "discovered_total_global": 0, "dropped_unattributed": 0, "pull_errors": []}
+        tenant_id = key
         # Sources to pull this run.
         sources = self._fw_discovery_sources()
         # None connected: record a "skipped" status.
@@ -705,8 +719,12 @@ class FwDiscoverySyncMixin:
             # forever. Push an explicit empty replace=True for exactly those
             # tenants so the sink's own tenant+source-scoped delete reconciles
             # them, same as any other tenant's push.
-            previous_tids = set(await self.simulations_store
-                                .get_fw_discovery_last_nonzero_tenants(source_label))
+            # Each remembered tenant as the stored id it names, as the buckets
+            # are keyed (access.push_tenant_key); one that names no single
+            # tenant is not pushed (get_tenant could find a twin for it).
+            remembered = await self.simulations_store.get_fw_discovery_last_nonzero_tenants(
+                source_label)
+            previous_tids = {k for k in (push_tenant_key(self, t) for t in remembered) if k}
             # Tenants to push: current ones plus those that just dropped to zero.
             stale_tids = previous_tids - active_tids
             tids = sorted(active_tids | stale_tids)

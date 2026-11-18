@@ -75,3 +75,14 @@ def test_tenant_admin_never_sees_other_tenants():
     c = _client("tenant_admin", ["acme"])
     r = c.get("/tenant/templates/refresh-status")
     assert _tenants(r) == ["acme"]
+
+
+def test_scope_ignores_tenant_capitalisation():
+    """Tenant ids compare canonically (fleet rule 6.1): "ACME" is acme's
+    selection and acme's membership, and still never globex's."""
+    admin = _client("admin", [])
+    assert _tenants(admin.get("/tenant/templates/refresh-status?tenant=ACME")) == ["acme"]
+    own = _client("tenant_admin", ["ACME"])
+    assert _tenants(own.get("/tenant/templates/refresh-status")) == ["acme"]
+    both = _client("tenant_admin", ["ACME", "globex"])
+    assert _tenants(both.get("/tenant/templates/refresh-status?tenant=Acme")) == ["acme"]

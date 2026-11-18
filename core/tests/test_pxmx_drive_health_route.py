@@ -357,6 +357,30 @@ def test_drive_health_attaches_linked_ilo_hardware_health_in_tenant_scope():
     assert "hw_health" not in node(admin, "")
 
 
+def test_drive_health_tenant_of_only_spaces_is_no_tenant(monkeypatch):
+    """A tenant of only spaces resolves as None and "" do: an admin is held to
+    the ADMIN scope (its own controller shows) and anyone else sees no
+    controller, not the shared ones the shared scope alone would give."""
+    monkeypatch.setattr(pxmx.access, "_SHARED_TENANT_ID", "shared")
+    hub = _MockHub(bound_spoke="pxmx-spoke-1")
+    hub.heartbeat = SimpleNamespace(last_seen={})
+    ctl = {"id": "c1", "name": "ilo-pve1", "address": "192.0.2.10", "object_type": "ipmi",
+           "tenant_id": "default", "host_link": {"kind": "agent", "id": "g1", "name": "pve1"}}
+    hub.state.system_state["global_config"] = {"nw_devices": [ctl]}
+    hub.nw_device_cache = {"c1": {"hw_health": {
+        "overall": "ok", "source": "snmp", "polled_at": time.time(), "components": {}}}}
+
+    def node(user):
+        """The first node of a fresh drive-health answer for ?tenant=%20%20."""
+        pxmx._DRIVE_HEALTH_CACHE.clear()
+        return _ilo_client(hub, user).get(
+            "/api/pxmx/drive-health?refresh=true&tenant=%20%20").json()["nodes"][0]
+
+    assert node({"username": "a", "permissions": {"admin": True}})["hw_health"]["controller"]["id"] == "c1"
+    ctl["tenant_id"] = "shared"
+    assert "hw_health" not in node({"username": "u", "tenant_id": "  ", "permissions": {}})
+
+
 def test_drive_health_marks_hw_health_unavailable_when_the_lookup_fails(monkeypatch):
     """A failing iLO lookup leaves drive data intact and says so per node,
     instead of looking like "no controller linked"."""

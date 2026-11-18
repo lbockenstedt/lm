@@ -53,9 +53,27 @@ def test_set_get_roundtrip(hub):
     assert lca.get_tenants(hub, "a.com") == ["t1", "t2"]
 
 
-def test_set_dedupes_and_strips(hub):
-    lca.set_tenants(hub, "a.com", [" t1 ", "t1", "", "t2"])
-    assert lca.get_tenants(hub, "a.com") == ["t1", "t2"]
+def test_set_dedupes_as_tenant_among_compares(hub):
+    """One owner per tenant, kept as first given: " t1 " and "t1" name one
+    tenant when no twin exists, and blanks are dropped."""
+    lca.set_tenants(hub, "a.com", [" t1 ", "t1", "", "  ", "t2"])
+    assert lca.get_tenants(hub, "a.com") == [" t1 ", "t2"]
+
+
+def test_padded_twin_owner_is_not_merged_into_its_twin(hub, monkeypatch):
+    """A legacy " ACME " beside "ACME" is another tenant: its ownership must
+    not be stripped into "ACME", so a user in "ACME" can't edit its cert."""
+    monkeypatch.setattr(access, "_AMBIGUOUS_TENANT_IDS", frozenset({"acme"}))
+    lca.set_tenants(hub, "a.com", [" ACME ", "ACME"])
+    assert lca.get_tenants(hub, "a.com") == [" ACME ", "ACME"]
+    lca.set_tenants(hub, "b.com", [" ACME "])
+    assert lca.add_tenant(hub, "b.com", "ACME") == [" ACME ", "ACME"]
+    lca.set_tenants(hub, "c.com", [" ACME "])
+    assert not lca.is_owner(hub, _sess(["ACME"]), "c.com")
+    assert lca.is_owner(hub, _sess([" ACME "]), "c.com")
+    out = lca.validate_tenant_edit(hub, _sess([" ACME "]), "c.com", [" ACME "],
+                                   _exists({" ACME ", "ACME"}))
+    assert out == [" ACME "]
 
 
 def test_set_empty_removes_entry(hub):
@@ -239,3 +257,30 @@ def test_validate_admin_can_drop_anyone(hub, monkeypatch):
     out = lca.validate_tenant_edit(hub, _sess(["zzz"]), "a.com",
                                    ["t2"], _exists({"t2"}))
     assert out == ["t2"]
+
+
+def test_ownership_ignores_tenant_capitalisation(hub):
+    """A cert owned by "ACME" is owned by a user assigned "acme" (fleet rule 6.1)."""
+    lca.set_tenants(hub, "a.com", ["ACME"])
+    sess = _sess(["acme"])
+    assert lca.is_owner(hub, sess, "a.com")
+    assert lca.can_change(hub, sess, "a.com")
+    assert lca.visible_to(hub, sess, "a.com", ["acme"]) is True
+    # Re-saving your own tenant in another spelling is not "removing" it.
+    out = lca.validate_tenant_edit(hub, sess, "a.com", ["Acme"], _exists({"Acme"}))
+    assert out == ["Acme"]
+
+
+def test_validate_refuses_dropping_own_tenant_in_other_spelling(hub):
+    lca.set_tenants(hub, "a.com", ["ACME", "BETA"])
+    with pytest.raises(lca.TenantEditError):
+        lca.validate_tenant_edit(hub, _sess(["acme", "beta"]), "a.com",
+                                 ["acme"], _exists({"acme"}))
+
+
+def test_shared_cert_deploys_to_own_device_in_any_spelling(hub):
+    lca.set_tenants(hub, "s.com", [SHARED.upper()])
+    sess = _sess(["acme"])
+    assert lca.is_shared(hub, "s.com")
+    assert lca.can_deploy(hub, sess, "s.com", "ACME")
+    assert not lca.can_deploy(hub, sess, "s.com", "other")

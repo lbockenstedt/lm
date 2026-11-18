@@ -88,8 +88,7 @@ def register(app, hub, ctx):
         it is treated as not-found so existence never leaks across tenants."""
         if access.is_admin(sess):
             return True
-        tid = (record or {}).get("tenant_id") or ""
-        return bool(tid) and tid in _acting_tenants(sess)
+        return access.tenant_among((record or {}).get("tenant_id"), _acting_tenants(sess))
 
     def _store(prod):
         """Return the stored record list for a product (``[]`` when none exist yet)."""

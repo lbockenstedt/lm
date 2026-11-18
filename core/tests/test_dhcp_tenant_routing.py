@@ -299,3 +299,18 @@ def test_no_dhcp_spokes_connected_returns_503():
     c = _build(_admin(), hub)
     r = c.get("/api/dhcp/subnets")
     assert r.status_code == 503
+
+
+def test_dhcp_instance_record_pins_its_spoke_in_any_case():
+    """The tenant's own dhcp_instances record is matched by tenant in any
+    case, as the spoke binding is (fleet rule 6.1)."""
+    hub = FakeHub(
+        {"dhcp-a", "dhcp-pinned"},
+        replies={"dhcp-a": {"DHCP_STATUS": {"status": "SUCCESS", "server": "fallback"}},
+                 "dhcp-pinned": {"DHCP_STATUS": {"status": "SUCCESS", "server": "pinned"}}},
+        module_metadata={"dhcp-a": {"tenant_id": "tenantA"}},
+        dhcp_instances=[{"tenant_id": "TENANTA", "spoke_id": "dhcp-pinned"}],
+    )
+    c = _build(_tenant_user("tenantA"), hub)
+    assert c.get("/api/dhcp/status").json()["server"] == "pinned"
+    assert hub.forwarded[-1][0] == "dhcp-pinned"

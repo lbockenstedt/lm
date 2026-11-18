@@ -23,7 +23,10 @@ def test_absent_selection_is_unscoped(monkeypatch):
     # None/blank == a programmatic call with no ?tenant= at all → no filtering.
     assert access.tenant_scope_ids(None) is None
     assert access.tenant_scope_ids("") is None
-    assert access.tenant_scope_ids("   ") is None
+    # Only spaces is not an absent selection: it names no tenant (a legacy
+    # blank record or grant), so it fails closed to the shared scope alone,
+    # which is empty here.
+    assert access.tenant_scope_ids("   ") == set()
     assert access.in_tenant_scope("lrb", None) is True
 
 
@@ -164,6 +167,17 @@ def test_real_tenant_bound_spoke_is_not_unbound(monkeypatch):
     # belongs to a tenant surfaced that tenant's data in the ADMIN view.
     _set_shared(monkeypatch, "sharedtenant")
     assert access.spoke_is_unbound(_Hub({"s1": {"tenant_id": "lrb"}}), "s1") is False
+
+
+def test_a_spoke_of_a_stored_default_twin_is_not_the_admins(monkeypatch):
+    # A "Default" record stored beside the built-in Admin tenant makes the id
+    # ambiguous: a spoke bound to "Default" is that tenant's own, not the
+    # Admin's unfiltered global spoke, while one bound to "default" still is.
+    _set_shared(monkeypatch, None)
+    monkeypatch.setattr(access, "_AMBIGUOUS_TENANT_IDS", access._case_collisions({"Default": {}}))
+    hub = _Hub({"s_twin": {"tenant_id": "Default"}, "s_admin": {"tenant_id": "default"}})
+    assert access.spoke_is_unbound(hub, "s_twin") is False
+    assert access.spoke_is_unbound(hub, "s_admin") is True
 
 
 def test_falsy_spoke_id_and_unreadable_state_fail_closed(monkeypatch):

@@ -6,7 +6,7 @@ from api import (
     HTTPException, Request, logger,
 )
 # Access-control helpers: name/identifier validators and spoke-binding permission check.
-from access import valid_display_name, valid_identifier, can_bind_spoke
+from access import valid_display_name, valid_identifier, can_bind_spoke, same_tenant
 # Table of roles that bind network ports, plus helpers that detect/describe port clashes.
 from role_listeners import (
     LISTENER_PORT_ROLES, listener_conflict, listener_conflict_message,
@@ -211,7 +211,9 @@ async def _zbxagent_find_proxy(hub, cfg, spoke_id, tenant):
     Raises 400 when no such node answers."""
     # Walk every agent's recorded roles looking for a zbxproxy in this tenant.
     for pk, roles in list(hub._agent_roles_store().items()):
-        if "zbxproxy" not in (roles or []) or hub.state.get_spoke_tenant(pk) != _zbxproxy_tenant(hub, spoke_id):
+        # Tenant tags compared in any case (fleet rule 6.1), as tenant_may_manage does.
+        if "zbxproxy" not in (roles or []) or not same_tenant(hub.state.get_spoke_tenant(pk),
+                                                              _zbxproxy_tenant(hub, spoke_id)):
             continue
         # Ask the proxy node for its primary IP; skip nodes that don't answer.
         try:
@@ -508,7 +510,8 @@ async def _auto_cluster_ldap_server_config(hub, spoke_id, cfg):
         for pk, roles in hub._agent_roles_store().items():
             if pk == my_pk or "ldap-server" not in (roles or []):
                 continue
-            if (hub.state.get_spoke_tenant(pk) or "") != tenant_id:
+            # Compared in any case; two unbound nodes still pair, as before.
+            if not same_tenant(hub.state.get_spoke_tenant(pk), tenant_id):
                 continue
             # A second match means 3+ nodes: ambiguous, so leave clustering manual.
             if peer_pk is not None:

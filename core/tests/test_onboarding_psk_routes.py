@@ -240,6 +240,17 @@ def test_list_spokes_includes_remote_ip_from_telemetry():
     assert by_id["s-hv2"]["ip"] == ""
 
 
+def test_list_and_delete_match_the_spoke_binding_in_any_case():
+    """A spoke bound to "TENANTA" is tenant "tenantA"'s own (fleet rule 6.1):
+    My Devices lists it and its tenant admin can remove it."""
+    c, hub = _build(_tenant_admin(["tenantA"]))
+    hub.add_spoke("s-a1", "TENANTA", name="box-a1")
+    hub.add_spoke("s-b1", "tenantB", name="box-b1")
+    r = c.get("/tenant/tenantA/spokes")
+    assert [s["spoke_id"] for s in r.json()["spokes"]] == ["s-a1"]
+    assert c.request("DELETE", "/tenant/tenantA/spokes/s-a1").status_code == 200
+    assert "s-a1" in hub.deleted_keys
+
 def test_tenant_admin_cannot_list_another_tenants_spokes():
     c, _ = _build(_tenant_admin(["tenantA"]))
     r = c.get("/tenant/tenantB/spokes")

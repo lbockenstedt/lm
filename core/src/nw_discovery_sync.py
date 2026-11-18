@@ -57,8 +57,10 @@ except Exception:  # pragma: no cover - access always importable in-app
     norm_mac = None  # type: ignore
     nw_spoke_tenant = None  # type: ignore
     spoke_owner_tenant = None  # type: ignore
+# Tenant id helpers (the Admin id, normalising, the id a push goes under);
 # unwrap_spoke strips the spoke response envelope down to its payload.
-from access import ADMIN_TENANT_ID, unwrap_spoke  # sibling leaf (no main/api back-import)
+from access import (ADMIN_TENANT_ID, _norm_tenant_id, push_tenant_key,
+                    raw_tenant_id, unwrap_spoke)  # sibling leaf (no main/api back-import)
 # Device spec lookup (e.g. object type defaults) from the device_specs leaf.
 from device_specs import get_spec as get_device_spec  # sibling leaf
 import hw_serial_links  # sibling leaf: serial matcher for controller<->host stitching
@@ -115,8 +117,10 @@ def nw_hardware_primaries(devices: List[Dict[str, Any]],
     serials and hostnames differ). The primary is the first configured row that
     has poll data (stable across cycles), else the first row."""
     def _t(d):
-        """Tenant key of a device row, case-folded, defaulting to "default"."""
-        return str(d.get("tenant_id") or d.get("tenant") or "default").casefold()
+        """Tenant key of a device row ("default" when unassigned), compared as
+        access compares tenant ids, so legacy tenants spelt only by case
+        ("acme" beside "ACME") never share a group."""
+        return _norm_tenant_id(d.get("tenant_id") or d.get("tenant")) or "default"
 
     def _serial(did):
         """Chassis serial for a device id from the identity cache (empty if unknown)."""
@@ -677,7 +681,7 @@ class NwDiscoverySyncMixin:
             # agent's rows are its tenant's outright (no prefix check).
             # Prefer the agent owner's tenant, then the device's tenant, then the spoke's tenant.
             owner = spoke_owner_tenant(self, sid) if spoke_owner_tenant else None
-            src_tid = owner or str(device.get("tenant_id") or "").strip() or (
+            src_tid = owner or raw_tenant_id(device.get("tenant_id")) or (
                 nw_spoke_tenant(self, sid) if nw_spoke_tenant else "")
             # Commands to run: ARP always, the MAC table when the source supports it.
             cmds = [se.get("arp_command", "NW_GET_ARP")]
@@ -1284,7 +1288,7 @@ class NwDiscoverySyncMixin:
         if device_cfg.get("address") and attribute_by_prefix is not None:
             try:
                 # Tenant hints: device/spoke tenant and the agent's owner tenant.
-                src_tid = str(device_cfg.get("tenant_id") or "").strip() or (
+                src_tid = raw_tenant_id(device_cfg.get("tenant_id")) or (
                     nw_spoke_tenant(self, device_cfg.get("spoke_id"))
                     if nw_spoke_tenant and device_cfg.get("spoke_id") else "")
                 owner = (spoke_owner_tenant(self, device_cfg.get("spoke_id"))
@@ -1695,6 +1699,18 @@ class NwDiscoverySyncMixin:
         mixins are mixed into ``LabManagerHub`` together. Pulls globally,
         attributes by prefix, pushes only ``tenant_id``.
         """
+        # Push under the stored tenant id the target names, as the buckets are
+        # keyed (access.push_tenant_key). One that names no single tenant is
+        # pushed nowhere: get_tenant ignores surrounding spaces, so a
+        # replace=True push of " ACME"'s empty bucket would land on "ACME" and
+        # delete that tenant's devices.
+        key = push_tenant_key(self, tenant_id)
+        if not key:
+            return {"tenant_id": raw_tenant_id(tenant_id), "status": "skipped", "pushed": 0,
+                    "errors": 0, "skipped": 0, "deleted": 0, "discovered_total": 0,
+                    "message": "tenant id names no single tenant",
+                    "discovered_total_global": 0, "dropped_unattributed": 0, "pull_errors": []}
+        tenant_id = key
         # Pull all sightings across every nw spoke.
         records, pull = await self._nw_pull_discovered()
         # On-demand single-tenant sync is IP-bearing only — MAC-only sightings
@@ -1828,8 +1844,8 @@ class NwDiscoverySyncMixin:
         LLDP sync, not 40. Returns whether a push was started."""
         # Per-scope task registry, stored on the instance and created on first use.
         tasks = self.__dict__.setdefault("_lldp_netbox_tasks", {})
-        # Scope key: "*" for all tenants, else the case-folded tenant id.
-        key = "*" if tenant_id is None else (str(tenant_id).strip() or "default").casefold()
+        # Scope key: "*" for all tenants, else the tenant id as access compares it.
+        key = "*" if tenant_id is None else (_norm_tenant_id(tenant_id) or "default")
         # A push for this scope is still running, so drop the request (coalescing).
         running = tasks.get(key)
         if running is not None and not running.done():
@@ -1866,14 +1882,17 @@ class NwDiscoverySyncMixin:
         devices = [d for d in ((self.state.system_state.get("global_config", {}) or {})
                                .get("nw_devices", []) or [])
                    if isinstance(d, dict) and d.get("id")]
-        # Group devices by case-folded tenant, keeping the original tenant id for lookups.
+        # Group devices by tenant as access compares ids (legacy tenants spelt
+        # only by case or spaces stay apart), keeping the device's own tag for
+        # the registry lookup: get_tenant tries it exactly before stripping it,
+        # so a legacy " ACME " finds its own record, not a stored "ACME".
         groups: Dict[str, Tuple[str, List[Dict[str, Any]]]] = {}
         for d in devices:
-            tid = _s(d.get("tenant_id")) or "default"
-            groups.setdefault(tid.casefold(), (tid, []))[1].append(d)
+            tid = d.get("tenant_id") if _s(d.get("tenant_id")) else "default"
+            groups.setdefault(_norm_tenant_id(d.get("tenant_id")) or "default", (tid, []))[1].append(d)
         # Restrict to one tenant when requested.
         if tenant_id is not None:
-            want = (_s(tenant_id) or "default").casefold()
+            want = _norm_tenant_id(tenant_id) or "default"
             groups = {k: v for k, v in groups.items() if k == want}
 
         # Connected nw spokes, and at most 4 concurrent LLDP refreshes.

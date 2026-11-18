@@ -162,3 +162,19 @@ def test_bindable_spokes_unapproved_excluded():
     r = c.get("/tenant/devices/spokes")
     spokes = {s["spoke_id"] for s in r.json()["spokes"]}
     assert spokes == {"spoke-A"}
+
+
+def test_own_spokes_and_records_match_in_any_capitalisation():
+    """A tenant admin assigned "acme" owns a spoke or record tagged "ACME"
+    (fleet rule 6.1); another tenant's stay hidden."""
+    c, hub, holder = _build()
+    _seed(hub, "spoke-up", tenant_id="ACME")
+    _seed(hub, "spoke-other", tenant_id="other")
+    hub.state.system_state["global_config"]["firewalls"] = [
+        {"id": "f1", "tenant_id": "ACME"}, {"id": "f2", "tenant_id": "other"}]
+    holder.current = _tenant_admin("acme")
+
+    spokes = c.get("/tenant/devices/spokes").json()["spokes"]
+    assert [s["spoke_id"] for s in spokes] == ["spoke-up"]
+    firewalls = c.get("/tenant/devices/firewalls").json()["firewalls"]
+    assert [f["id"] for f in firewalls] == ["f1"]

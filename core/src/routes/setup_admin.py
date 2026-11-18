@@ -3,7 +3,7 @@
 import asyncio
 # Hub-wide helpers: HTTP errors, logger, os/re/time and the log-level setter.
 from api import (
-    HTTPException, Request, logger, os, re, set_log_level, time,
+    HTTPException, Request, access, logger, os, re, set_log_level, time,
 )
 # Compares a spoke's version with the latest one for its repo.
 from update_pipeline import _version_behind
@@ -465,10 +465,11 @@ async def store_bug_report(hub, ctx, request, data: dict) -> str:
         if not _tid:
             _c = data.get("context") or {}
             if isinstance(_c, dict):
-                _tid = str(_c.get("currentTenant") or "").strip()
+                # As picked (unstripped): " ACME " is a legacy twin of "ACME".
+                _tid = access.raw_tenant_id(_c.get("currentTenant"))
         # 'default' is the WebUI's no-tenant sentinel, not a real tenant —
         # store it as untagged (Global-Admin-only) rather than a bogus tenant.
-        if _tid == "default":
+        if _tid.strip() == "default":
             _tid = ""
         # Save the report off the event loop; an empty id means it failed.
         data["tenant_id"] = _tid
@@ -1438,15 +1439,15 @@ def register(app, hub, ctx):
         recorded — still scope by the tenant that's already in the bug."""
         # Use the stored tenant_id when set.
         r = r or {}
-        tid = str(r.get("tenant_id") or "").strip()
+        tid = access.raw_tenant_id(r.get("tenant_id"))
         if tid:
             return tid
         # Otherwise fall back to the tenant recorded in the report's context.
         cmeta = r.get("context") or {}
         if isinstance(cmeta, dict):
-            ctid = str(cmeta.get("currentTenant") or "").strip()
+            ctid = access.raw_tenant_id(cmeta.get("currentTenant"))
             # 'default' is the WebUI no-tenant sentinel, not a real tenant.
-            return "" if ctid == "default" else ctid
+            return "" if ctid.strip() == "default" else ctid
         return ""
 
     def _bug_report_visible(sess, r):
@@ -1459,8 +1460,7 @@ def register(app, hub, ctx):
         if ctx._is_admin(sess):
             return True
         # Others see only reports tagged with one of their tenants.
-        tid = _bug_report_tenant(r)
-        return bool(tid) and tid in _bug_acting_tenants(sess)
+        return access.tenant_among(_bug_report_tenant(r), _bug_acting_tenants(sess))
 
     @app.get("/tenant/bug-reports")
     async def tenant_list_bug_reports(request: Request):

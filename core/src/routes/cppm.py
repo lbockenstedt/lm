@@ -687,7 +687,7 @@ def register(app, hub, ctx):
         if not isinstance(devices, list):
             return data
         # Keep the scope's devices and fix up the total.
-        kept = [d for d in devices if isinstance(d, dict) and _device_tenant(d) == scope]
+        kept = [d for d in devices if isinstance(d, dict) and access.same_tenant(_device_tenant(d), scope)]
         out = dict(data)
         out["devices"] = kept
         out["total"] = len(kept)

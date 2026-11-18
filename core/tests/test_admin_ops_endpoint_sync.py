@@ -69,3 +69,10 @@ def test_tenant_required():
     with pytest.raises(HTTPException) as ei:
         _run({})
     assert ei.value.status_code == 400
+
+
+def test_tenant_reaches_the_sync_as_sent():
+    """The id is not stripped: stripped, a legacy " ACME " would name its
+    twin "ACME" (the sync resolves the stored id itself)."""
+    _, hub = _run({"tenant_id": " ACME "})
+    assert hub.calls == [(" ACME ", False)]

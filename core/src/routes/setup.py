@@ -6,7 +6,8 @@ from api import (
     HTTPException, Request, _hub_msg, logger, time, _unwrap_spoke,
 )
 # Tenant helpers: is a tenant shared, and may this session see a given spoke.
-from access import tenant_is_shared as _tenant_is_shared, spoke_visible_to_session as _spoke_visible
+from access import tenant_is_shared as _tenant_is_shared, spoke_visible_to_session as _spoke_visible, \
+    same_tenant as _same_tenant
 # Ids of spokes that connect directly to the hub (not relayed through another spoke).
 from spoke_alert_sync import direct_module_ids as _direct_module_ids
 from hub_spoke_registry import LEGACY_NAC_RECORD_ID
@@ -2219,10 +2220,11 @@ def register(app, hub, ctx):
             except Exception as e:                      # noqa: BLE001
                 logger.debug("[registry-diag] election for %s failed: %s", t, e)
                 elected = None
-            # Connected, approved cs spokes bound to this tenant or to no tenant.
+            # Connected, approved cs spokes bound to this tenant (in any case, as
+            # the election matches) or to no tenant.
             cands = [r["spoke_id"] for r in rows
                      if r["spoke_id"] in cs_ids and r["connected"]
-                     and r["approved"] and (r["tenant_id"] == t or not r["tenant_id"])]
+                     and r["approved"] and (not r["tenant_id"] or _same_tenant(r["tenant_id"], t))]
             brokers[t] = {
                 "elected": elected,
                 "candidates": cands,

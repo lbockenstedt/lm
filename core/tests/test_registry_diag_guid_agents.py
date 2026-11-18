@@ -169,3 +169,15 @@ def test_unrelated_dead_spoke_still_flagged():
 def test_unapproved_plain_spoke_still_reports_not_approved():
     rows, _ = _rows(_hub({}, {}, extra_md={"fw-new": {"tenant_id": "t"}}))
     assert "not approved" in rows["fw-new"]["ghost_reasons"]
+
+
+def test_broker_candidates_include_a_spoke_bound_in_another_case():
+    """Tenant ids match in any case, as the broker election matches them, so a
+    cs spoke tagged "dxp" is a candidate for tenant "DXP" too (and back)."""
+    md = {"cs-a": {"display_name": "cs-a", "tenant_id": "DXP", "module_type": "client-sim"},
+          "cs-b": {"display_name": "cs-b", "tenant_id": "dxp", "module_type": "client-sim"}}
+    hub = _hub({}, {}, extra_md=md, approved={"cs-a": True, "cs-b": True},
+               conns={"cs-a": object(), "cs-b": object()})
+    _, body = _rows(hub)
+    for t in ("DXP", "dxp"):
+        assert sorted(body["brokers"][t]["candidates"]) == ["cs-a", "cs-b"]

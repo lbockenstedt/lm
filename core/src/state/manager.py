@@ -24,7 +24,7 @@ import logging
 import asyncio
 import threading
 import time
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 # Encrypts state files at rest.
 from security.encryption import hub_encryption
 
@@ -704,13 +704,18 @@ class StateManager:
     # --- Tenant Management ---
 
     def get_tenant(self, tenant_id: str) -> Optional[Dict]:
-        """Return a tenant record by id (exact match first, then case-insensitive), or None."""
+        """Return a tenant record by id (exact match first, then ignoring
+        surrounding spaces), or None. Case is not folded; tenant_key finds the
+        stored spelling of an id given in another case."""
         # Standardize the input ID: remove whitespace and treat as string
         clean_id = str(tenant_id).strip()
 
         tenants = self.tenant_state.get("tenants", {})
 
-        # Try exact match first
+        # Try exact match first: the id as given (so a legacy " ACME " finds
+        # its own record, not a stored "ACME"), then without surrounding spaces.
+        if str(tenant_id) in tenants:
+            return tenants[str(tenant_id)]
         tenant = tenants.get(clean_id)
         if tenant:
             return tenant
@@ -741,30 +746,77 @@ class StateManager:
         )
         return None
 
+    def tenant_key(self, tenant_id) -> Optional[str]:
+        """The key of the tenant ``tenant_id`` names, or None if none does.
+
+        The exact spelling wins. Otherwise the one stored id, or the built-in
+        Admin tenant ("default", access.ADMIN_TENANT_ID, which exists before
+        any record is stored for it), that is equal to it ignoring case and
+        surrounding spaces, as the access checks compare ids
+        (access.match_tenant_id). Raises ValueError when several match that
+        way (tenants saved before update_tenant kept ids unique, such as
+        "ACME" beside " ACME ", or a "Default" record beside the built-in
+        "default"), or when one does and so does a deleted twin's id
+        (access.retired_twin_ids), rather than guessing which tenant is meant.
+        A blank id names no tenant."""
+        # Lazy import: access is a leaf module, state stays importable alone.
+        from access import match_tenant_id, retired_twin_ids
+        stored = self.tenant_state.get("tenants", {}) or {}
+        return match_tenant_id(tenant_id, set(map(str, stored)) | {"default"},
+                               retired_twin_ids(self.tenant_state))
+
     def update_tenant(self, tenant_id: str, data: Dict):
-        """Merge ``data`` into a tenant's record, creating the tenant if new."""
-        # Create the tenant if needed, then merge the data.
+        """Merge ``data`` into a tenant's record, creating the tenant if new.
+
+        An id that differs from a stored one only by case or surrounding spaces
+        names that tenant (tenant_key), so the data merges into it: a second
+        record would be a tenant the access checks cannot tell apart from the
+        first (a member of "acme" would pass the gates for "ACME"). Raises
+        ValueError when tenant_key cannot name one tenant, and for a new
+        blank id, which names no tenant (as a scope it would read as no
+        selection). A blank-id record saved before that stays editable by its
+        exact id, so a single-shared sweep can still clear its flag."""
         tenants = self.tenant_state.setdefault("tenants", {})
-        if tenant_id not in tenants:
-            tenants[tenant_id] = {}
-        tenants[tenant_id].update(data)
+        if tenant_id not in tenants and (tenant_id is None or not str(tenant_id).strip()):
+            raise ValueError("tenant id is blank")
+        # Merge into the stored tenant this id names, or create it.
+        key = self.tenant_key(tenant_id)
+        tenants.setdefault(tenant_id if key is None else key, {}).update(data)
         self._mark_dirty()
 
-    def delete_tenant(self, tenant_id: str) -> bool:
-        """Remove a tenant's registry record and detach every user from it.
+    def delete_tenant(self, tenant_id: str) -> Optional[List[str]]:
+        """Remove a tenant's registry record and detach it from every user and
+        permission group.
 
-        Returns True if a record was removed. Does NOT touch per-module data
-        (NetBox objects, simulations, etc.) or spoke bindings — the caller is
-        expected to guard against deleting a tenant that still owns spokes. If
-        the deleted tenant was the active one, the active pointer falls back to
+        Returns the ids of the users who lost a grant of it, so the caller can
+        end their sessions and API tokens: each holds a snapshot of the user's
+        tenants, and a stale grant would still reach the deleted tenant's
+        per-module records, which stay tagged with its id. Returns None when
+        no tenant matched.
+
+        When a twin that differs from it only by case or surrounding spaces is
+        still stored (or is the built-in "default"), the deleted id is kept in
+        ``tenant_state["retired_twin_ids"]`` (access.retired_twin_ids), so the
+        access checks keep telling it apart from the survivor: its records
+        never come to name the survivor, and no other spelling of the two
+        names either (tenant_key).
+
+        A user's saved default tenant (the one the WebUI opens on) that named
+        it is cleared too. Does NOT touch per-module data (NetBox objects,
+        simulations, etc.) or spoke bindings — the caller is expected to guard
+        against deleting a tenant that still owns spokes. If the deleted
+        tenant was the active one, the active pointer falls back to
         ``default``.
         """
-        # Find the tenant key, tolerating whitespace differences.
+        # Find the tenant key: the exact spelling first, then one that differs
+        # only by surrounding spaces (mirroring get_tenant), so deleting a
+        # legacy " ACME " never removes a stored "ACME" instead.
         tenants = self.tenant_state.setdefault("tenants", {})
-        # Case-insensitive / whitespace-tolerant match, mirroring get_tenant.
         clean_id = str(tenant_id).strip()
         match = None
-        if clean_id in tenants:
+        if str(tenant_id) in tenants:
+            match = str(tenant_id)
+        elif clean_id in tenants:
             match = clean_id
         else:
             for key in list(tenants.keys()):
@@ -773,21 +825,48 @@ class StateManager:
                     break
         # Unknown tenant: nothing removed.
         if match is None:
-            return False
+            return None
         tenants.pop(match, None)
+        # Lazy import: access is a leaf module, state stays importable alone.
+        from access import goes_with_deleted_tenant, retired_twin_ids
+        remaining = set(map(str, tenants)) | {"default"}
+        # Keep the id as retired while a twin of it survives; see the docstring.
+        folded = str(match).strip().casefold()
+        retired = retired_twin_ids(self.tenant_state)
+        if folded and str(match) not in retired and any(
+                t != match and t.strip().casefold() == folded for t in remaining):
+            self.tenant_state["retired_twin_ids"] = retired + [str(match)]
         # Detach the tenant from every user's assignment list so stale grants
-        # don't dangle after the tenant is gone.
-        for user_data in (self.system_state.get("users", {}) or {}).values():
-            # Remove the tenant from each user's tenant list.
+        # don't dangle after the tenant is gone. Another spelling of the id is
+        # the same grant (the access checks match ids in any case), so it goes
+        # too; otherwise it would grant a later tenant re-created under the id.
+        # The exact id of a remaining twin stays (goes_with_deleted_tenant).
+
+        def _goes(t):
+            """Whether ``t`` named the deleted tenant."""
+            return goes_with_deleted_tenant(t, match, remaining)
+        # Detach it from every permission group: an Entra login copies its
+        # groups' tenants onto the user record (groups_and_tenants_for_membership).
+        for grp in (self.system_state.get("permission_groups", {}) or {}).values():
+            gts = grp.get("tenants") if isinstance(grp, dict) else None
+            if isinstance(gts, list) and any(_goes(t) for t in gts):
+                grp["tenants"] = [t for t in gts if not _goes(t)]
+        # Detach it from each user, noting whose grants changed, and clear a
+        # saved default tenant that named it, so it never opens a twin.
+        detached = []
+        for uid, user_data in (self.system_state.get("users", {}) or {}).items():
             uts = user_data.get("tenants")
-            if isinstance(uts, list) and match in uts:
-                user_data["tenants"] = [t for t in uts if t != match]
+            if isinstance(uts, list) and any(_goes(t) for t in uts):
+                user_data["tenants"] = [t for t in uts if not _goes(t)]
+                detached.append(uid)
+            if _goes(user_data.get("default_tenant")):
+                user_data.pop("default_tenant", None)
         # If the deleted tenant was active, fall back to the default view.
-        if self.system_state.get("active_tenant") == match:
+        if _goes(self.system_state.get("active_tenant")):
             self.system_state["active_tenant"] = "default"
         self._mark_dirty()
         logger.info(f"Tenant '{match}' deleted (users detached).")
-        return True
+        return detached
 
     def set_active_tenant(self, tenant_id: str):
         """Switch the active tenant view and mark state for saving."""
@@ -822,7 +901,11 @@ class StateManager:
         return tenant.get("quotas", {}).get(resource_type, 0)
 
     def assign_user_to_tenant(self, user_id: str, tenant_id: str):
-        """Assigns a user to a specific tenant. Users can belong to multiple tenants."""
+        """Assigns a user to a specific tenant. Users can belong to multiple
+        tenants. Raises ValueError for a blank tenant id: a blank grant names
+        no tenant, and as a picker selection it would read as no selection."""
+        if tenant_id is None or not str(tenant_id).strip():
+            raise ValueError("tenant id is blank")
         # Create the user record if needed.
         users = self.system_state.setdefault("users", {})
         if user_id not in users:
@@ -840,15 +923,20 @@ class StateManager:
             self.save_state()
 
     def remove_user_from_tenant(self, user_id: str, tenant_id: str):
-        """Removes a user from a specific tenant."""
+        """Removes a user from a specific tenant: every grant that names it,
+        its exact id or another spelling the access checks take for it
+        (access.tenant_among). The exact id of a twin names that twin and
+        stays."""
+        # Lazy import: access is a leaf module, state stays importable alone.
+        from access import tenant_among
         # Remove the tenant from the user's list, then log and save.
         users = self.system_state.get("users", {})
         if user_id in users:
             user_data = users[user_id]
             tenants = user_data.get("tenants", [])
-            if tenant_id in tenants:
-                tenants.remove(tenant_id)
-                user_data["tenants"] = tenants
+            kept = [t for t in tenants if t != tenant_id and not tenant_among(t, [tenant_id])]
+            if len(kept) != len(tenants):
+                user_data["tenants"] = kept
                 logger.info(f"User {user_id} removed from tenant {tenant_id}")
                 self.save_state()
 

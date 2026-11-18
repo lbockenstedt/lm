@@ -99,11 +99,12 @@ async def tenant_vms(hub, tenant: str) -> List[Dict[str, Any]]:
     # Keep only VMs that survived, in original order.
     keep = {id(vm) for vm in owned + rest}
     vms = [vm for vm in vms if id(vm) in keep]
-    # Hosts whose agent is pinned to this tenant.
+    # Hosts whose agent is pinned to this tenant, compared as the access
+    # checks compare ids (a blank pin matches nothing).
     pinned_hosts = set()
     for apk, cfg in (hub.state.system_state.get("agent_config") or {}).items():
-        pin = str(((cfg or {}).get("client_simulation") or {}).get("tenant_id") or "")
-        if pin.strip().casefold() == tenant.strip().casefold():
+        pin = ((cfg or {}).get("client_simulation") or {}).get("tenant_id")
+        if access.tenant_among(pin, [tenant]):
             pinned_hosts.add(str((hub.agent_info.get(apk) or {}).get("hostname") or ""))
     # Add VMs on pinned hosts that are not already listed.
     pinned_hosts.discard("")
@@ -282,6 +283,16 @@ def _store(hub) -> Dict[str, Dict[str, Any]]:
     return gc.setdefault(SCHEDULES_KEY, {})
 
 
+def _schedule_of(sched: Dict[str, Any], tenant: str) -> bool:
+    """Whether ``tenant`` may see and change schedule ``sched``: it is the
+    tenant's own, compared as access.same_tenant compares (so one saved under
+    "acme" is ACME's too), or it has no tenant (made before schedules had one)."""
+    # Lazy import, as tenant_vms does.
+    import access
+    owner = sched.get("tenant", "")
+    return not owner or access.same_tenant(owner, tenant)
+
+
 def list_schedules(hub, tenant: Optional[str] = None) -> List[Dict[str, Any]]:
     """All schedules, or one tenant's. A schedule made before schedules had a
     tenant (``tenant`` "") covers all VMs and is listed for every tenant until
@@ -292,8 +303,7 @@ def list_schedules(hub, tenant: Optional[str] = None) -> List[Dict[str, Any]]:
     except Exception:  # noqa: BLE001 — hub without state (tests)
         store = {}
     # This tenant's (or untenanted) schedules, sorted by name.
-    out = [s for s in store.values()
-           if tenant is None or s.get("tenant", "") in ("", tenant)]
+    out = [s for s in store.values() if tenant is None or _schedule_of(s, tenant)]
     return sorted(out, key=lambda s: s.get("name", "").lower())
 
 
@@ -315,7 +325,7 @@ def save_schedule(hub, body: Dict[str, Any], sid: str = "", tenant: str = "") ->
     the tags, or is in one of the pools."""
     # Existing sid must exist and belong to this tenant.
     store = _store(hub)
-    if sid and (sid not in store or store[sid].get("tenant", "") not in ("", tenant)):
+    if sid and (sid not in store or not _schedule_of(store[sid], tenant)):
         raise KeyError(sid)
     # Name is required.
     name = str(body.get("name") or "").strip()
@@ -338,8 +348,10 @@ def save_schedule(hub, body: Dict[str, Any], sid: str = "", tenant: str = "") ->
     # Keep the prefix and last-run info from the existing schedule.
     old = store.get(sid, {})
     sid = sid or uuid.uuid4().hex[:6]
-    # Store the schedule and mark state dirty.
-    store[sid] = {"id": sid, "tenant": tenant, "name": name, "enabled": bool(body.get("enabled", True)),
+    # Store the schedule and mark state dirty. An edit keeps the owner's
+    # stored spelling; only an untenanted schedule moves to the editing tenant.
+    store[sid] = {"id": sid, "tenant": old.get("tenant") or tenant, "name": name,
+                  "enabled": bool(body.get("enabled", True)),
                   **targets, "every_hours": every, "keep": keep,
                   "prefix": old.get("prefix") or f"lms-{sid}-",
                   "last_run": old.get("last_run", 0.0), "last_result": old.get("last_result")}

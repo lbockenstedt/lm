@@ -11,6 +11,9 @@ import time
 # Type hints only.
 from typing import Any, Dict, List, Optional, Tuple
 
+# Tenant ids compare in any case (fleet rule 6.1).
+from access import same_tenant
+
 # Check statuses that count as pass / fail / warning for summaries.
 _PASS = {"pass", "ok", "functional", "up", "healthy"}
 _FAIL = {"fail", "failed", "down", "error", "critical"}
@@ -111,7 +114,7 @@ class SimulationsService:
         # Keep cached spokes that belong to this tenant (or all, if no tenant lookup exists).
         for sid, data in self._cache().items():
             try:
-                if get_tenant is None or get_tenant(sid) == tenant_id:
+                if get_tenant is None or same_tenant(get_tenant(sid), tenant_id):
                     out.append((sid, data or {}))
             # A lookup failure for one spoke just skips it.
             except Exception:

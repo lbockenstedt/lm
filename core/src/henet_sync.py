@@ -42,7 +42,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 # Unwraps a spoke's reply envelope into its payload.
-from access import unwrap_spoke  # sibling leaf (no main/api back-import)
+from access import raw_tenant_id, tenant_key_in, unwrap_spoke  # sibling leaf (no main/api back-import)
 # Shared scheduling helpers: compute the next delay and run the periodic loop.
 from sync_loop import next_schedule_delay, run_sync_loop  # sibling leaf
 
@@ -71,11 +71,13 @@ def cred_ref_for_scope(hub, tenant_id: str) -> Optional[Dict[str, str]]:
     # Read the HE.NET section of the hub-wide settings.
     gc = hub.state.system_state.get("global_config", {}) or {}
     hn = gc.get("henet") or {}
-    # Normalised tenant id ("" means the global scope).
-    tid = (tenant_id or "").strip()
-    # A tenant scope first tries its own assigned credential.
-    if tid:
-        ref = (hn.get("tenant_credentials") or {}).get(tid)
+    # A tenant scope first tries its own assigned credential: the slot spelt
+    # exactly like it, else one same_tenant matches, never a legacy twin's
+    # (a blank tenant id means the global scope).
+    creds = hn.get("tenant_credentials") or {}
+    key = tenant_key_in(creds, tenant_id)
+    if key is not None:
+        ref = creds.get(key)
         if _valid_ref(ref):
             return {"bucket": ref["bucket"].strip(), "name": ref["name"].strip()}
     # Fall back to the module-wide (global) credential.
@@ -246,8 +248,11 @@ class HenetSyncMixin:
             value = str(r.get("value") or "").strip()
             if not name or not value:
                 continue
-            # Group by tenant scope ("" = global) so each scope uses its own credential.
-            scope = str(r.get("tenant_id") or "").strip()
+            # Group by tenant scope ("" = global) so each scope uses its own
+            # credential; one scope per tenant as same_tenant compares ids (a
+            # legacy " ACME " twin keeps its own scope and credential).
+            scope = raw_tenant_id(r.get("tenant_id"))
+            scope = tenant_key_in(by_scope, scope) or scope
             by_scope.setdefault(scope, []).append(
                 {"name": name, "type": rtype, "value": value,
                  "ttl": r.get("ttl", 300), "tenant_id": scope})

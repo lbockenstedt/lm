@@ -24,7 +24,7 @@ import logging
 from typing import Any, Callable, Dict, List, Optional, Set
 
 # Strips the request_response envelope from a spoke reply.
-from access import unwrap_spoke  # sibling leaf (no main/api back-import)
+from access import raw_tenant_id, unwrap_spoke  # sibling leaf (no main/api back-import)
 
 # Hub-side cert distribution logs to the "le.distribution" logger so they surface
 # under the WebUI Logs → Certificates tab (the hub routes le.* loggers into a
@@ -1098,19 +1098,19 @@ def target_owner_tenant(target, spoke_tenant, agent_spoke, agent_tenant=None):
         node = str(target.get("agent_id") or target.get("identifier") or "").strip()
         if node:
             if agent_tenant is not None:
-                atid = (agent_tenant(node) or "").strip()
+                atid = raw_tenant_id(agent_tenant(node))
                 if atid:
                     return atid
             sid = spoke_id or (agent_spoke(node) or "").strip()
-            return (spoke_tenant(sid) or "").strip() if sid else ""
-        return (spoke_tenant(spoke_id) or "").strip() if spoke_id else ""
+            return raw_tenant_id(spoke_tenant(sid)) if sid else ""
+        return raw_tenant_id(spoke_tenant(spoke_id)) if spoke_id else ""
     # Non-agent-hosting spoke-level target: identifier IS the spoke_id when the
     # explicit spoke_id isn't set.
     # Other types: the identifier is the spoke id.
     sid = spoke_id or str(target.get("identifier") or "").strip()
     if not sid:
         return ""
-    return (spoke_tenant(sid) or "").strip()
+    return raw_tenant_id(spoke_tenant(sid))
 
 
 class TargetDeviceTracker:

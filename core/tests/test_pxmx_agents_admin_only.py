@@ -147,3 +147,29 @@ def test_agent_config_only_pins_explicit_display_name_edits(
     assert entry["display_name"] == expected_name
     assert entry["display_name_source"] == expected_source
     assert entry["client_simulation"]["tenant_id"] == "tenant-a"
+
+
+def test_agents_list_needs_a_tenant_unless_admin(monkeypatch):
+    """A None scope lists every tenant's agents, so (as on the nodes view) a
+    non-admin with no tenant is refused instead of shown the whole roster."""
+    seen = []
+
+    async def _payload(hub, tid):
+        """Record the scope the route asked for."""
+        seen.append(tid)
+        return {"agents": []}
+
+    monkeypatch.setattr(pxmx, "pxmx_agents_payload", _payload)
+    codes = []
+    for admin in (False, True):
+        ctx = _ctx(admin)
+        ctx._resolve_tenant = lambda request, explicit=None: explicit or None
+        app = FastAPI()
+        hub = _Hub()
+        app.state.hub = hub
+        pxmx.register(app, hub, ctx)
+        c = TestClient(app)
+        codes += [c.get("/api/pxmx/agents").status_code,
+                  c.get("/api/pxmx/agents?tenant=acme").status_code]
+    assert codes == [403, 200, 200, 200]
+    assert seen == ["acme", None, "acme"]

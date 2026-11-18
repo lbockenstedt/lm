@@ -33,6 +33,9 @@ import time
 # Type hints only.
 from typing import Optional, Tuple
 
+# Drops blank tenant grants from a stored user snapshot.
+from access import drop_blank_grants
+
 # One named logger so API-token messages can be filtered together.
 logger = logging.getLogger("APITokens")
 
@@ -163,8 +166,10 @@ def bearer_session(request):
     rec = _access.get(_hash(tok))
     if not rec or rec.get("expires", 0) < time.time():
         return None
-    # Build a dict shaped like a WebUI session so existing permission checks work unchanged.
-    return {"user_id": rec.get("user_id"), "user": rec.get("user", {}),
+    # Build a dict shaped like a WebUI session so existing permission checks
+    # work unchanged. A snapshot minted before the routes refused blank grants
+    # has them dropped.
+    return {"user_id": rec.get("user_id"), "user": drop_blank_grants(rec.get("user", {})),
             "expires": rec.get("expires"), "created": rec.get("created"),
             "last_seen": time.time(), "sid": rec.get("family"), "api_token": True}
 

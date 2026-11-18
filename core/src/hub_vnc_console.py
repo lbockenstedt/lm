@@ -473,10 +473,10 @@ class HubVncConsoleMixin:
         # access provides tenant-sharing checks and prefix-based attribution.
         import access
         # The spoke's registered tenant and the tenant the payload claims.
-        base = (self.state.get_spoke_tenant(spoke_id) or "").strip()
-        claimed = str(claimed or "").strip()
-        # No claim, or a claim matching the registered tenant, is simply the registered tenant.
-        if not claimed or claimed == base:
+        base = access.raw_tenant_id(self.state.get_spoke_tenant(spoke_id))
+        claimed = access.raw_tenant_id(claimed)
+        # No claim, or a claim naming the registered tenant, is simply the registered tenant.
+        if not claimed or access.same_tenant(claimed, base):
             return base
         # Dedicated spoke: its registered tenant is authoritative, full stop.
         if base and not access.tenant_is_shared(base):
@@ -494,9 +494,11 @@ class HubVncConsoleMixin:
         except Exception:  # noqa: BLE001
             # Attribution failure means the claim cannot be corroborated.
             buckets = {}
-        # Honour the claim only when the IP actually falls in that tenant's prefixes.
-        if device_ip and claimed in buckets:
-            return claimed
+        # Honour the claim only when the IP actually falls in that tenant's
+        # prefixes (the bucket key is the tenant's stored id).
+        hit = access.tenant_key_in(buckets, claimed) if device_ip else None
+        if hit:
+            return hit
         # Otherwise refuse the cross-tenant claim and fall back to the registered tenant.
         logger.warning(
             "console probe from %s claimed tenant %s not corroborated by prefix for ip=%r; "

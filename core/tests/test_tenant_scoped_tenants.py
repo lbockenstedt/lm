@@ -26,6 +26,7 @@ from fastapi.testclient import TestClient
 import access
 from access import resolve_effective_permissions  # noqa: F401  (import side-effect parity)
 import routes.tenants_users as tenants_users
+from state.manager import StateManager
 
 
 # ── session builders ───────────────────────────────────────────────────────
@@ -69,25 +70,11 @@ class _State:
     def get_tenant(self, tid):
         return self.tenant_state.get("tenants", {}).get(tid)
 
-    def update_tenant(self, tid, data):
-        rec = self.tenant_state.setdefault("tenants", {}).setdefault(tid, {})
-        rec.update(dict(data))
-        return rec
-
-    def delete_tenant(self, tid):
-        # Mirrors StateManager.delete_tenant: pop the record, detach the tenant
-        # from every user, and reset the active pointer if it was active.
-        tenants = self.tenant_state.setdefault("tenants", {})
-        if tid not in tenants:
-            return False
-        tenants.pop(tid, None)
-        for ud in (self.system_state.get("users", {}) or {}).values():
-            uts = ud.get("tenants")
-            if isinstance(uts, list) and tid in uts:
-                ud["tenants"] = [t for t in uts if t != tid]
-        if self.system_state.get("active_tenant") == tid:
-            self.system_state["active_tenant"] = "default"
-        return True
+    # The real lookup, merge and delete, so another spelling of a stored
+    # tenant id names that tenant here as it does on the hub.
+    tenant_key = StateManager.tenant_key
+    update_tenant = StateManager.update_tenant
+    delete_tenant = StateManager.delete_tenant
 
     def save_state(self):
         return None
@@ -475,3 +462,291 @@ def test_tenant_group_prune_drops_nac_caches(monkeypatch, nac_drops):
     asyncio.run(main.LabManagerHub._sync_tenant_groups(hub, "nb-1"))
     assert nac_drops == [hub] and access.shared_tenant_id() is None
     assert "group:emea" not in hub.state.tenant_state["tenants"]
+def test_delete_tenant_with_spoke_bound_in_another_case_rejected_409():
+    # The access checks match a spoke tag in any case, so "ACME" binds the
+    # spoke to "acme" and deleting it would orphan that binding.
+    c, hub, holder = _build(_acme_record())
+    hub.state.system_state["module_metadata"] = {
+        "spoke-1": {"tenant_id": "ACME", "display_name": "acme-fw"},
+    }
+    holder.current = _global_admin()
+    r = c.delete("/setup/tenants/acme")
+    assert r.status_code == 409
+    assert "acme" in hub.state.tenant_state["tenants"]
+
+
+def test_delete_tenant_detaches_every_spelling_of_the_grant():
+    # Another spelling of the id is the same grant; left behind, it would grant
+    # a tenant later re-created under the id.
+    c, hub, holder = _build(_acme_record())
+    hub.state.system_state["users"] = {"u1": {"tenants": ["ACME", "other"]}}
+    hub.state.system_state["active_tenant"] = "Acme"
+    holder.current = _global_admin()
+    assert c.delete("/setup/tenants/acme").status_code == 200
+    assert hub.state.system_state["users"]["u1"]["tenants"] == ["other"]
+    assert hub.state.system_state["active_tenant"] == "default"
+    # Without a twin left, nothing is kept as retired.
+    assert "retired_twin_ids" not in hub.state.tenant_state
+
+
+def test_delete_tenant_ends_the_sessions_of_users_who_lose_it(monkeypatch, keep_tenant_cache):
+    # Each session and API token holds a snapshot of the user's tenants. One
+    # still naming "ACME" would reach the per-module records left tagged
+    # "ACME", so whoever lost "ACME" is logged out.
+    ended = []
+    monkeypatch.setattr(tenants_users, "_invalidate_user_sessions",
+                        lambda hub, user_id: ended.append(user_id))
+    c, hub, holder = _build({"ACME": {"name": "Acme"}, "acme": {"name": "acme"}})
+    hub.state.system_state["users"] = {
+        "u-upper": {"tenants": ["ACME"]},
+        "u-lower": {"tenants": ["acme"], "default_tenant": "acme"},
+        "u-other": {"tenants": ["beta"]},
+        "admin": {"tenants": [], "default_tenant": "ACME"},
+    }
+    hub.state.system_state["permission_groups"] = {
+        "g1": {"ldap_group": "grp-1", "tenants": ["ACME", "beta"]},
+        "g2": {"ldap_group": "grp-2", "tenants": ["acme"]},
+    }
+    holder.current = _global_admin()
+    assert c.delete("/setup/tenants/ACME").status_code == 200
+    assert ended == ["u-upper"]
+    users = hub.state.system_state["users"]
+    assert users["u-upper"]["tenants"] == [] and users["u-lower"]["tenants"] == ["acme"]
+    # A saved default that named it is cleared, so it never opens the twin.
+    assert "default_tenant" not in users["admin"] and users["u-lower"]["default_tenant"] == "acme"
+    # A group drops the grant too, so an Entra login through it can't grant
+    # the deleted id again; the twin's grant stays.
+    groups = hub.state.system_state["permission_groups"]
+    assert groups["g1"]["tenants"] == ["beta"] and groups["g2"]["tenants"] == ["acme"]
+    assert access.groups_and_tenants_for_membership(hub, ["grp-1"]) == (["g1"], ["beta"])
+
+
+def test_tenant_group_prune_ends_the_sessions_of_users_who_lose_it(monkeypatch, keep_tenant_cache):
+    """Pruning a tenant group that left NetBox logs out its members, as
+    deleting a tenant in Setup does."""
+    import asyncio
+    import main
+    import routes.cppm as cppm
+    monkeypatch.setattr(cppm, "drop_nac_caches", lambda hub: None)
+    ended = []
+    monkeypatch.setattr(main, "_invalidate_user_sessions",
+                        lambda hub, user_id: ended.append(user_id))
+    hub = _Hub({**_acme_record(), "group:emea": {"name": "EMEA", "is_tenant_group": True}})
+    hub.state.system_state["users"] = {"u1": {"tenants": ["group:emea"]},
+                                       "u2": {"tenants": ["acme"]}}
+
+    async def _rr(spoke_id, cmd, payload, timeout=None):
+        """A NetBox spoke reporting no tenant groups."""
+        return {"payload": {"data": {"status": "SUCCESS", "groups": []}}}
+    hub.request_response = _rr
+
+    asyncio.run(main.LabManagerHub._sync_tenant_groups(hub, "nb-1"))
+    assert "group:emea" not in hub.state.tenant_state["tenants"]
+    assert ended == ["u1"]
+
+
+# ── tenant ids are unique ignoring case ─────────────────────────────────────
+# The access checks compare tenant ids in any case, so two stored tenants that
+# differ only by case would be one tenant to them: a member of "acme" would
+# pass the gates for "ACME".
+@pytest.fixture
+def keep_tenant_cache(monkeypatch):
+    """Restore access's cached tenant data after a route reloads it."""
+    for name in ("_SHARED_TENANT_ID", "_GROUP_MEMBERS", "_AMBIGUOUS_TENANT_IDS"):
+        monkeypatch.setattr(access, name, getattr(access, name, None), raising=False)
+
+
+def test_create_refuses_another_spelling_of_a_stored_tenant(keep_tenant_cache):
+    c, hub, holder = _build(_acme_record())
+    holder.current = _global_admin()
+    r = c.post("/setup/tenants", json={"tenant_id": "ACME"})
+    assert r.status_code == 409
+    assert set(hub.state.tenant_state["tenants"]) == {"acme"}
+    # A missing id is the caller's error, not a server error.
+    assert c.post("/setup/tenants", json={}).status_code == 400
+    # A new tenant is still created.
+    assert c.post("/setup/tenants", json={"tenant_id": "beta"}).status_code == 200
+    assert set(hub.state.tenant_state["tenants"]) == {"acme", "beta"}
+
+
+@pytest.mark.parametrize("spelling", [" acme ", "acme ", " ACME"])
+def test_create_refuses_a_padded_spelling_of_a_stored_tenant(keep_tenant_cache, spelling):
+    """Surrounding spaces make another spelling too. Before, " acme " passed
+    the check (compared stripped), changed nothing and replied "created"."""
+    c, hub, holder = _build(_acme_record())
+    holder.current = _global_admin()
+    before = dict(hub.state.tenant_state["tenants"])
+    r = c.post("/setup/tenants", json={"tenant_id": spelling})
+    assert r.status_code == 409 and "'acme'" in r.json()["detail"]
+    assert hub.state.tenant_state["tenants"] == before
+
+
+def test_create_refuses_another_spelling_of_the_built_in_default(keep_tenant_cache):
+    """With no "default" record stored, "Default" is still the built-in Admin
+    tenant: create refuses it, and the editor saves into "default"."""
+    c, hub, holder = _build({})
+    holder.current = _global_admin()
+    assert c.post("/setup/tenants", json={"tenant_id": "Default"}).status_code == 409
+    assert hub.state.tenant_state["tenants"] == {}
+    r = c.post("/setup/tenant", json={"tenant_id": "DEFAULT", "config": {"name": "Admin"}})
+    assert r.status_code == 200
+    assert hub.state.tenant_state["tenants"] == {"default": {"name": "Admin"}}
+
+
+def test_netbox_sync_merges_case_variants_and_skips_ambiguous_slugs(keep_tenant_cache):
+    c, hub, holder = _build({"ACME": {"name": "A1"}, "acme": {"name": "A2"},
+                             "beta": {"name": "B", "quotas": {"vm": 1}}})
+    holder.current = _global_admin()
+    hub.get_spoke_by_type = lambda module_type: "nb-1" if module_type == "ipam" else None
+
+    async def _reply(spoke_id, command, payload, **kw):
+        """NetBox's tenants: one slug matching two stored tenants, one matching one."""
+        return {"payload": {"data": {"status": "SUCCESS", "tenants": [
+            {"slug": "Acme", "name": "Acme", "id": 1},
+            {"slug": "BETA", "name": "Beta", "id": 2}]}}}
+
+    hub.request_response = _reply
+    r = c.post("/setup/sync-tenants")
+    assert r.status_code == 200, r.text
+    assert (r.json()["skipped"], r.json()["updated"], r.json()["added"]) == (["Acme"], ["BETA"], [])
+    tenants = hub.state.tenant_state["tenants"]
+    # Neither stored acme was touched, and no third spelling was created.
+    assert set(tenants) == {"ACME", "acme", "beta"}
+    assert tenants["ACME"] == {"name": "A1"} and tenants["acme"] == {"name": "A2"}
+    # "BETA" updated the stored "beta" and kept its local quotas.
+    assert tenants["beta"]["netbox_id"] == 2 and tenants["beta"]["quotas"] == {"vm": 1}
+
+
+# ── blank tenant ids ─────────────────────────────────────────────────────────
+# A blank id names no tenant, and as a picker selection it would read as no
+# selection (access.tenant_scope_ids), so no route stores one as a tenant or a
+# grant.
+def test_routes_refuse_a_blank_tenant_id(keep_tenant_cache):
+    c, hub, holder = _build(_acme_record())
+    hub.state.system_state["users"] = {"u1": {"tenants": ["acme"]}}
+    holder.current = _global_admin()
+    assert c.post("/setup/tenants", json={"tenant_id": "  "}).status_code == 400
+    for tid in ("  ", None):
+        r = c.post("/setup/tenant", json={"tenant_id": tid, "config": {"name": "X"}})
+        assert r.status_code == 400 and r.json()["detail"] == "Missing tenant_id"
+    assert c.post("/setup/users/assign-tenant",
+                  json={"user_id": "u1", "tenant_id": " "}).status_code == 400
+    r = c.post("/setup/users/set-tenants", json={"user_id": "u1", "add": [" ", ""]})
+    assert r.status_code == 200 and r.json()["errors"] == ["blank tenant id"] * 2
+    # A Global Admin naming a blank path tenant on the tenant-scoped routes.
+    assert c.get("/api/tenant/%20/users").status_code == 400
+    assert set(hub.state.tenant_state["tenants"]) == {"acme"}
+    assert hub.state.system_state["users"]["u1"]["tenants"] == ["acme"]
+
+
+def test_user_edits_drop_blank_tenant_grants(keep_tenant_cache, monkeypatch):
+    monkeypatch.setattr(tenants_users, "_invalidate_user_sessions", lambda hub, uid: 0)
+    c, hub, holder = _build(_acme_record())
+    holder.current = _global_admin()
+    r = c.post("/setup/users", json={"user_id": "u2", "tenants": ["acme", " ", ""],
+                                     "tenant_id": "  "})
+    assert r.status_code == 200, r.text
+    assert hub.state.system_state["users"]["u2"]["tenants"] == ["acme"]
+    r = c.post("/api/tenant/acme/users/u2", json={"tenants": ["acme", "  "]})
+    assert r.status_code == 200, r.text
+    assert hub.state.system_state["users"]["u2"]["tenants"] == ["acme"]
+
+
+# ── a legacy "Default" record beside the built-in default ───────────────────
+# The built-in Admin tenant "default" exists without a record and can never be
+# deleted. A record spelt "Default" saved beside it is a tenant of its own
+# (access._case_collisions), so it can be, by its exact id.
+def test_delete_a_legacy_Default_record_but_never_the_built_in(keep_tenant_cache):
+    c, hub, holder = _build({"Default": {"name": "Old"}, "acme": {}})
+    hub.state.system_state["users"] = {
+        "u1": {"tenants": ["default", "Default", "DEFAULT", "acme"]}}
+    hub.state.system_state["module_metadata"] = {
+        "spoke-1": {"tenant_id": "default", "display_name": "admin-fw"}}
+    access.refresh_shared_tenant(hub)
+    holder.current = _global_admin()
+    assert c.delete("/setup/tenants/default").status_code == 400
+    # A third spelling cannot pick between them.
+    assert c.delete("/setup/tenants/DEFAULT").status_code == 409
+    # The built-in tenant's spoke does not block deleting the record ...
+    assert c.delete("/setup/tenants/Default").status_code == 200
+    assert set(hub.state.tenant_state["tenants"]) == {"acme"}
+    # ... and the built-in tenant's own grant stays, while "DEFAULT" (which
+    # named neither while both existed) does not come to name it.
+    assert hub.state.system_state["users"]["u1"]["tenants"] == ["default", "acme"]
+    # Records left tagged "Default" never come to name the built-in tenant.
+    assert hub.state.tenant_state["retired_twin_ids"] == ["Default"]
+    assert not access.same_tenant("Default", "default")
+
+
+def test_delete_a_legacy_blank_tenant_record_by_its_exact_id(keep_tenant_cache):
+    # Saved before blank ids were refused. An unassigned spoke is not bound to it.
+    c, hub, holder = _build({" ": {"name": "Blank"}, "acme": {}})
+    hub.state.system_state["users"] = {"u1": {"tenants": [" ", "acme"]}}
+    hub.state.system_state["module_metadata"] = {
+        "s-1": {"tenant_id": "", "display_name": "unassigned-fw"}}
+    holder.current = _global_admin()
+    assert c.delete("/setup/tenants/%20%20").status_code == 404
+    assert c.delete("/setup/tenants/%20").status_code == 200
+    assert set(hub.state.tenant_state["tenants"]) == {"acme"}
+    assert hub.state.system_state["users"]["u1"]["tenants"] == ["acme"]
+
+
+def test_deleting_one_twin_keeps_the_other_and_refuses_unplaceable_tags(keep_tenant_cache):
+    # "ACME" and "acme" were both saved before ids were kept unique. A spoke
+    # tagged "Acme" names neither; deleting one twin would move it into the
+    # other, so it must be re-bound first.
+    c, hub, holder = _build({"ACME": {}, "acme": {}})
+    hub.state.system_state["users"] = {"u1": {"tenants": ["ACME", "acme", "Acme"]}}
+    hub.state.system_state["module_metadata"] = {
+        "s-1": {"tenant_id": "acme", "display_name": "twin-fw"},
+        "s-2": {"tenant_id": "Acme", "display_name": "loose-fw"}}
+    access.refresh_shared_tenant(hub)
+    holder.current = _global_admin()
+    r = c.delete("/setup/tenants/ACME")
+    assert r.status_code == 409 and "loose-fw" in r.json()["detail"]
+    assert "twin-fw" not in r.json()["detail"]
+    del hub.state.system_state["module_metadata"]["s-2"]
+    assert c.delete("/setup/tenants/ACME").status_code == 200
+    assert set(hub.state.tenant_state["tenants"]) == {"acme"}
+    assert hub.state.system_state["users"]["u1"]["tenants"] == ["acme"]
+
+
+def test_a_deleted_twins_id_stays_retired(keep_tenant_cache):
+    """Per-module records tagged "ACME" stay in place when the twin "ACME" is
+    deleted, so its id is kept as retired and still told apart from the
+    surviving "acme": those records never come to name "acme", and no other
+    spelling names "acme" either. A repeated delete is refused rather than
+    deleting the survivor, a sync push for "ACME" goes nowhere, and a group
+    grant spelt "ACME" grants neither."""
+    c, hub, holder = _build({"ACME": {}, "acme": {}})
+    holder.current = _global_admin()
+    assert c.delete("/setup/tenants/ACME").status_code == 200
+    assert hub.state.tenant_state["retired_twin_ids"] == ["ACME"]
+    assert not access.tenant_among("ACME", ["acme"])
+    assert access.tenant_among("acme", ["acme"])
+    for spelling in ("ACME", "Acme"):
+        assert c.delete(f"/setup/tenants/{spelling}").status_code == 409
+    assert set(hub.state.tenant_state["tenants"]) == {"acme"}
+    assert access.push_tenant_key(hub, "ACME") == ""
+    r = c.post("/setup/groups", json={"name": "Ops", "tenants": ["ACME", "acme"]})
+    assert r.status_code == 200
+    assert hub.state.system_state["permission_groups"][r.json()["group_id"]]["tenants"] == ["acme"]
+    # Recomputed from the saved tenant state alone, as after a restart.
+    access._AMBIGUOUS_TENANT_IDS = frozenset()
+    access.refresh_shared_tenant(hub)
+    assert not access.tenant_among("ACME", ["acme"])
+
+
+def test_group_grants_each_tenant_by_its_stored_id(monkeypatch):
+    """A group's tenant list stores each tenant's own id: " ACME " is the
+    legacy twin itself (not stripped into "ACME"), "acme" names both twins
+    and so grants neither, "other" names "Other", and an unknown id is
+    dropped."""
+    monkeypatch.setattr(access, "_AMBIGUOUS_TENANT_IDS", frozenset({"acme"}))
+    c, hub, holder = _build({"ACME": {}, " ACME ": {}, "Other": {}})
+    holder.current = _global_admin()
+    r = c.post("/setup/groups", json={"name": "Ops",
+                                      "tenants": [" ACME ", "acme", "other", "ghost", " ACME "]})
+    assert r.status_code == 200
+    gid = r.json()["group_id"]
+    assert hub.state.system_state["permission_groups"][gid]["tenants"] == [" ACME ", "Other"]
