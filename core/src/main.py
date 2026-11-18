@@ -5762,7 +5762,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             agent_pk = self._agent_primary_key(agent_id)
             entry = store.get(agent_pk)
             if not isinstance(entry, dict):
-                entry = {"display_name": agent_id}
+                entry = {"display_name": agent_id, "display_name_source": "auto"}
                 store[agent_pk] = entry
             # Copy its client-simulation settings.
             cs_cfg = dict(entry.get("client_simulation") or {})
@@ -6705,8 +6705,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             await websocket.close(
                 1008, "Identity mismatch — re-approval required")
             return False
-        # Record the identity, migrating on a proven rename.
+        # Record the identity, migrating on a proven rename. The claimed parent
+        # only names a role sub-spoke ("{host}-{role}"); it grants nothing.
         self._reconcile_spoke_identity(spoke_id, install_uuid, hello.hostname,
+                                       parent_spoke_id=hello.parent_spoke_id or None,
                                        migrate_if=rename_proven)
         return True
 

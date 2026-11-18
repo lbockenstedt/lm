@@ -207,6 +207,7 @@ def register(app, hub, ctx):
             data = await request.json()
             spoke_id = data.get("spoke_id")
             new_name = data.get("display_name")
+            display_name_edited = data.get("display_name_edited") is True
             new_hostname = data.get("hostname")
 
             # Both spoke id and display name are required.
@@ -230,9 +231,17 @@ def register(app, hub, ctx):
             if spoke_id not in known_modules:
                 raise HTTPException(status_code=404, detail="Spoke not found")
 
-            # Save the new display name.
-            hub.state.set_module_name(spoke_id, new_name)
-            hub.state._mark_dirty()
+            # Only pin the name when the operator changed it, not when this
+            # form resubmits the unchanged auto-derived name with a hostname.
+            spoke_pk = hub._primary_key(spoke_id)
+            current = (hub.state.system_state.get("module_metadata", {})
+                       .get(spoke_pk, {}))
+            current_name = (current.get("display_name")
+                            or hub.state.system_state.get("module_names", {}).get(spoke_pk)
+                            or spoke_id)
+            if display_name_edited or new_name != current_name:
+                hub.state.set_module_name(spoke_pk, new_name)
+                hub.state._mark_dirty()
 
             # Hostname change: send it now if the spoke is connected, else queue it in the mailbox.
             if new_hostname:
