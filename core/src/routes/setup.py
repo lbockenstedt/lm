@@ -5,9 +5,12 @@ import asyncio
 from api import (
     HTTPException, Request, _hub_msg, logger, time, _unwrap_spoke,
 )
-# Tenant helpers: is a tenant shared, and may this session see a given spoke.
-from access import tenant_is_shared as _tenant_is_shared, spoke_visible_to_session as _spoke_visible, \
-    same_tenant as _same_tenant
+# Tenant helpers: the hub's tenant comparison key, is a tenant shared, and may
+# this session see a given spoke.
+from access import (
+    _norm_tenant_id, tenant_is_shared as _tenant_is_shared, spoke_visible_to_session as _spoke_visible,
+    with_tenant_keys as _with_tenant_keys, same_tenant as _same_tenant,
+)
 # Ids of spokes that connect directly to the hub (not relayed through another spoke).
 from spoke_alert_sync import direct_module_ids as _direct_module_ids
 from hub_spoke_registry import LEGACY_NAC_RECORD_ID
@@ -134,6 +137,7 @@ async def _aggregate_spokes(hub):
     spokes_status = []
     for sid in known_spokes:
         meta = module_metadata.get(sid, {}) or {}
+        tenant = hub.state.get_spoke_tenant(sid) or ""
         spokes_status.append({
             "spoke_id": sid,
             "display_name": module_names.get(sid, sid),
@@ -156,8 +160,12 @@ async def _aggregate_spokes(hub):
             "install_uuid": meta.get("install_uuid", ""),
             "spoke_guid": meta.get("install_uuid", ""),
             "identity_change": _identity_change_for(hub, sid, meta),
-            "tenant_id": hub.state.get_spoke_tenant(sid) or "",
-            "tenant_shared": _tenant_is_shared(hub.state.get_spoke_tenant(sid) or ""),
+            "tenant_id": tenant,
+            # The form the hub compares tenant ids in (access._norm_tenant_id),
+            # so the WebUI groups tenants as the hub does instead of
+            # re-deriving the case rules in JS (Managed Devices drill-down).
+            "tenant_key": _norm_tenant_id(tenant),
+            "tenant_shared": _tenant_is_shared(tenant),
             # B4: explicit parent linkage for role sub-spokes. Post-B1 both the
             # base agent + the role sub-spoke are independent guid keys, so the
             # pre-B1 ``{base}-{role}`` string-prefix match broke. ``parent_name``
@@ -2885,5 +2893,6 @@ def register(app, hub, ctx):
             if access.tenant_left_shared(hub, tid, "firewall"):
                 firewalls = [f for f in firewalls
                              if access.firewall_owner_tenant(hub, (f or {}).get("id"))]
-        # Return the filtered list.
-        return {"firewalls": firewalls}
+        # Return the filtered list, each row with ``tenant_key`` (Managed
+        # Devices groups by it).
+        return {"firewalls": _with_tenant_keys(firewalls)}

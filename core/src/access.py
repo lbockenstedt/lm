@@ -1329,6 +1329,16 @@ def _norm_tenant_id(tenant_id) -> str:
     return raw if key in _AMBIGUOUS_TENANT_IDS else key
 
 
+def with_tenant_keys(rows) -> list:
+    """Copies of the dict ``rows``, each with ``tenant_key``: its tenant_id in
+    the form the hub compares tenant ids (_norm_tenant_id), so the WebUI
+    groups tenants as the hub does instead of re-deriving the case rules in JS
+    (Managed Devices). Copies, so the key is never stored; anything that is not
+    a dict passes through unchanged."""
+    return [dict(r, tenant_key=_norm_tenant_id(r.get("tenant_id"))) if isinstance(r, dict) else r
+            for r in rows]
+
+
 def tenant_is_shared(tenant_id) -> bool:
     """True if the tenant is the configured shared tenant (or literally "shared")."""
     normalized = _norm_tenant_id(tenant_id)

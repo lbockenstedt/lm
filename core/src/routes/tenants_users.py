@@ -9,7 +9,7 @@ from api import (
 )
 # Access-control helpers: permission resolution, shared-tenant cache and input validators.
 from access import (
-    ENFORCED_RIGHTS, SHARED_ACCESS_MODES, resolve_effective_permissions, refresh_shared_tenant,
+    ENFORCED_RIGHTS, SHARED_ACCESS_MODES, _norm_tenant_id, resolve_effective_permissions, refresh_shared_tenant,
     goes_with_deleted_tenant, granted_tenants, match_tenant_id, retired_twin_ids, tenant_among,
     valid_display_name as _valid_display_name,
     valid_hostname as _valid_hostname,
@@ -330,12 +330,15 @@ def register(app, hub, ctx):
                 "group_slug": cfg.get("netbox_tenant_group_slug", "") if cfg.get("is_tenant_group")
                               else cfg.get("tenant_group_slug", ""),
                 "members": list(cfg.get("member_tenant_slugs") or []) if cfg.get("is_tenant_group") else [],
+                # The form the hub compares tenant ids in, so the WebUI matches
+                # a tenant to its bindings as the hub does (Managed Devices).
+                "tenant_key": _norm_tenant_id(tid),
             }
             for tid, cfg in tenants.items()
         ]
         # Add the default (ADMIN) tenant if it is not stored.
         if "default" not in [t["id"] for t in tenant_list]:
-            tenant_list.insert(0, {"id": "default", "name": "ADMIN", "slug": "default", "netbox_id": None, "description": "", "shared": False, "shared_access": "auto", "is_group": False, "group_slug": "", "members": []})
+            tenant_list.insert(0, {"id": "default", "name": "ADMIN", "slug": "default", "netbox_id": None, "description": "", "shared": False, "shared_access": "auto", "is_group": False, "group_slug": "", "members": [], "tenant_key": "default"})
         # Keep the shared-tenant cache fresh whenever the list is loaded.
         shared_id = refresh_shared_tenant(hub)
         return {"tenants": tenant_list, "shared_tenant_id": shared_id}

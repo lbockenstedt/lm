@@ -1810,7 +1810,8 @@ def register(app, hub, ctx):
         if not _is_admin(sess):
             devices = [d for d in devices
                        if access.spoke_visible_to_session(sess, (d or {}).get("tenant_id", ""))]
-        return {"nw_devices": devices}
+        # Each row also carries ``tenant_key`` (Managed Devices groups by it).
+        return {"nw_devices": access.with_tenant_keys(devices)}
 
     @app.get("/setup/nw-poll-config")
     async def get_nw_poll_config(request: Request):
@@ -3865,6 +3866,8 @@ def register(app, hub, ctx):
                              if isinstance(i, dict) and access.in_tenant_scope(i.get("tenant_id"), scope)]
                 if storage_key == "nw_scan_credentials":
                     instances = instances + _vault_scan_sets(hub, req_tenant)
+            # Each row also carries ``tenant_key`` (Managed Devices groups by it).
+            instances = access.with_tenant_keys(instances)
             if present:
                 instances = [present(i) for i in instances if isinstance(i, dict)]
             return {"instances": instances}

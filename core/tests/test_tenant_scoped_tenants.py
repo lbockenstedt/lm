@@ -162,6 +162,15 @@ def test_setup_tenants_injects_admin_when_default_absent():
     assert by_id["default"] == "ADMIN"
 
 
+def test_setup_tenants_carry_the_hub_tenant_key():
+    # Managed Devices matches a tenant record to its spoke bindings by the
+    # hub's key, not a JS case fold ("Straße" and "STRASSE" are one tenant).
+    c, hub, holder = _build({"Straße": {"name": "Straße GmbH"}})
+    holder.current = _global_admin()
+    keys = {t["id"]: t["tenant_key"] for t in c.get("/setup/tenants").json()["tenants"]}
+    assert keys == {"Straße": "strasse", "default": "default"}
+
+
 # ── GET details ──────────────────────────────────────────────────────────────
 def test_get_own_tenant_as_tenant_admin():
     c, hub, holder = _build(_acme_record())
