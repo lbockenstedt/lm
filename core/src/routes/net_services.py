@@ -289,7 +289,7 @@ def register(app, hub, ctx):
         except Exception:  # noqa: BLE001 - unresolvable spoke: fail closed
             return False
         # The spoke's owning tenant, and whether the caller may write to it.
-        owner = access.spoke_owner_tenant(hub, sid)
+        owner = access.source_owner_tenant(hub, sid)
         return bool(owner) and access._owned_spoke_writable(hub, sess, sid, owner)
 
     def _resolved_spoke(kind, request, tenant):
@@ -1415,6 +1415,10 @@ def register(app, hub, ctx):
         # The shared tenant with no prefixes sees the whole shared resolver.
         if not prefixes and access.tenant_is_shared(tid):
             return None
+        # A shared resolver sees global-table clients: drop own-VRF prefixes.
+        sid = _resolved_spoke("dns", request, tenant)
+        if not access.tenant_in(access.source_owner_tenant(hub, sid), tid):
+            prefixes = access.shared_slice_prefixes(hub, tid, prefixes or [], "dns")
         return list(prefixes or [])
 
     @app.get("/api/dns/stats")
@@ -1586,8 +1590,13 @@ def register(app, hub, ctx):
     # the /api/dns/ admin write gate in api.py). Assignments follow the DNS
     # record model: a tenant-admin may apply/remove a profile only for a device
     # IP or a subnet that lies entirely inside their own tenant subnets.
-    async def _dns_override_constrain(request, target):
-        """Check a tenant-admin may apply an override to this IP or subnet; 400 or 403 if not."""
+    async def _dns_override_constrain(request, target, spoke=None):
+        """Check a tenant-admin may apply an override to this IP or subnet; 400 or 403 if not.
+
+        ``spoke`` is the resolver the override lands on. On a resolver the
+        caller's tenant owns, any target is the tenant's, including subnets
+        that exist only in its own VRF; the shared-infrastructure cut applies
+        only on a shared resolver (the same rule as DNS records)."""
         # Global admins may target anything.
         sess = _session_user(request)
         if _is_admin(sess):
@@ -1599,10 +1608,13 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=400, detail="target must be an IP address or subnet")
         # A single IP follows the DNS record rule.
         if net.num_addresses == 1:
-            await _constrain_shared_write(request, {"ip": str(net.network_address)}, ["ip"], "DNS override")
+            await _constrain_shared_write(request, {"ip": str(net.network_address)}, ["ip"], "DNS override",
+                                          spoke=spoke)
+            return
+        if await _own_spoke_write(sess, spoke):
             return
         # A subnet must sit entirely inside one of the tenant's own prefixes.
-        own = _dns_prefix_nets(await access.resolve_owned_prefixes(hub, sess))
+        own = _dns_prefix_nets(await access.resolve_owned_prefixes(hub, sess, shared=True))
         if not any(net.version == n.version and net.subnet_of(n) for n in own):
             raise HTTPException(
                 status_code=403,
@@ -1705,13 +1717,14 @@ def register(app, hub, ctx):
         # Read the target and check the caller may use it.
         body = await _dns_override_body(request)
         target = body.get("target") or body.get("ip") or ""
-        await _dns_override_constrain(request, target)
+        dns_spoke = lambda: _dns_spoke_for_request(request, tenant)  # noqa: E731
+        await _dns_override_constrain(request, target, dns_spoke)
         # Build the assignment.
         payload = {"target": target, "profile": body.get("profile", ""),
                    "label": body.get("label", ""), "comment": body.get("comment", "")}
         # Moving an override: the caller must also be allowed the old target.
         if body.get("old_target"):
-            await _dns_override_constrain(request, body["old_target"])
+            await _dns_override_constrain(request, body["old_target"], dns_spoke)
             payload["old_target"] = body["old_target"]
         # Relay it.
         return await _relay_spoke(_dns_spoke_for_request(request, tenant),
@@ -1724,7 +1737,8 @@ def register(app, hub, ctx):
         # Read the target and check the caller may use it.
         body = await _dns_override_body(request)
         target = body.get("target") or body.get("ip") or ""
-        await _dns_override_constrain(request, target)
+        await _dns_override_constrain(request, target,
+                                      lambda: _dns_spoke_for_request(request, tenant))
         # Relay the removal.
         return await _relay_spoke(_dns_spoke_for_request(request, tenant),
                                   "DNS_OVERRIDE_UNASSIGN", {"target": target},
@@ -2962,41 +2976,63 @@ def register(app, hub, ctx):
     _dns_hosts_cache = {}
     _DNS_HOSTS_TTL = 60.0
 
-    async def _dns_hosts(nets):
+    async def _dns_hosts(nets, own_nets=None, owners=()):
         """A/AAAA hostnames from BOTH DNS sources — the DNS module (Unbound spoke)
         AND every connected OPNsense firewall's Unbound host-overrides. ``nets`` =
         list of ip_network to keep (only hosts whose IP is in one), or None to keep
         ALL hosts. Returns (hostnames:set, any_source_reachable:bool).
 
+        ``own_nets`` replaces ``nets`` for a source spoke owned by one of
+        ``owners`` (tenant ids): a tenant's own resolver or firewall serves its
+        own VRF, so it is matched on every prefix, while a shared source is
+        matched only on the VRF-sliced ``nets`` (see ``_filter_le_certs``). With
+        ``owners`` set, a source dedicated to any other tenant is skipped.
+
         Cached for ``_DNS_HOSTS_TTL`` seconds: the Certificates page calls this
         on every load, and each call pulls every DNS record plus every
         firewall's overrides."""
-        key = None if nets is None else tuple(sorted(str(n) for n in nets))
+        key = None if nets is None else (
+            tuple(sorted(str(n) for n in nets)),
+            None if own_nets is None else tuple(sorted(str(n) for n in own_nets)),
+            tuple(sorted(owners)))
         hit = _dns_hosts_cache.get(key)
         if hit and hit[0] > time.time():
             return set(hit[1]), hit[2]
-        hosts, any_source = await _dns_hosts_live(nets)
+        hosts, any_source = await _dns_hosts_live(nets, own_nets, owners)
         if any_source:
             _dns_hosts_cache[key] = (time.time() + _DNS_HOSTS_TTL, set(hosts), any_source)
         return hosts, any_source
 
-    async def _dns_hosts_live(nets):
+    async def _dns_hosts_live(nets, own_nets=None, owners=()):
         """Uncached body of :func:`_dns_hosts`."""
 
-        def _in(ip):
+        def _nets_for(sid):
+            """The networks to match a source spoke's records against.
+
+            In a scoped call (``owners`` set) a source dedicated to another
+            tenant contributes nothing: the same address can exist in that
+            tenant's VRF, so a prefix match would leak its hostnames."""
+            owner = access.source_owner_tenant(hub, sid) if owners else None
+            if not owner:
+                return nets
+            if any(access.tenant_in(owner, t) for t in owners):
+                return nets if own_nets is None else own_nets
+            return []
+
+        def _in(ip, src_nets):
             """True when the IP is inside one of the networks."""
             # A bad IP is never in range.
             try:
                 a = ipaddress.ip_address(str(ip).strip())
             except (ValueError, AttributeError):
                 return False
-            return any(a in n for n in (nets or []))
+            return any(a in n for n in (src_nets or []))
 
         # Hostnames found, and whether any source answered.
         hosts = set()
         any_source = False
 
-        def _collect(records, name_keys, ip_keys):
+        def _collect(records, name_keys, ip_keys, src_nets):
             """Add the A/AAAA hostnames from these records whose IP is in range."""
             # Skip non-dicts and non-address records.
             for r in records if isinstance(records, list) else []:
@@ -3012,42 +3048,84 @@ def register(app, hub, ctx):
                         break
                 # The first non-empty IP field; keep the name if it is in range (or no filter).
                 ip = next((r.get(k) for k in ip_keys if r.get(k)), None)
-                if name and (nets is None or (ip and _in(ip))):
+                if name and (nets is None or (ip and _in(ip, src_nets))):
                     hosts.add(name)
 
-        # The DNS module's records.
-        try:
-            # Certificate-issuance hostname enumeration (le module) — out of
-            # scope for the DNS tenant-routing fix above; certificates aren't
-            # tenant-scoped yet either (see the multi-tenant-spoke scan).
-            # Left on the legacy first-connected-spoke resolver.
-            dns_data = await _relay_spoke(_get_dns_spoke(hub), "DNS_LIST", log_name="le_dns_hosts")
-            any_source = True
-            _collect((dns_data or {}).get("records") or [], ("name",), ("value", "ip"))
-        except Exception:  # noqa: BLE001 — DNS module down; try the firewalls
-            pass
-        # The configured firewalls.
+        # At most this many source spokes are asked at once.
+        gate = asyncio.Semaphore(8)
+        # Sources asked, and sources skipped because their records can't
+        # match this tenant (shared ones cut by its VRF slice; other tenants').
+        n_asked = 0
+        skipped_shared = skipped_foreign = False
+
+        async def _ask(sids, call):
+            """Ask each source spoke once (bounded), one failure not stopping
+            the others; return (sid, reply) for the ones that answered.
+
+            In a scoped call a source whose records this tenant may not match
+            (another tenant's, or a shared one its VRF slice cuts out) is not
+            asked at all, so another tenant's spoke never gets a request."""
+            nonlocal any_source, n_asked, skipped_shared, skipped_foreign
+            asked = []
+            for s in sids:
+                if not owners or _nets_for(s) != []:
+                    asked.append(s)
+                elif access.source_owner_tenant(hub, s):
+                    skipped_foreign = True
+                else:
+                    skipped_shared = True
+            n_asked += len(asked)
+
+            async def _one(sid):
+                """One bounded call."""
+                async with gate:
+                    return await call(sid)
+
+            results = await asyncio.gather(*(_one(s) for s in asked), return_exceptions=True)
+            out = []
+            for sid, res in zip(asked, results):
+                if not isinstance(res, BaseException):
+                    any_source = True
+                    out.append((sid, res))
+            return out
+
+        # Every connected DNS spoke's records. Asking only the first connected
+        # one would miss a VRF tenant's own resolver whenever a shared one
+        # connected first.
+        dns_sids = list(hub.get_all_spokes_by_type("dns") or []) \
+            if hasattr(hub, "get_all_spokes_by_type") else []
+        if not dns_sids:
+            try:
+                dns_sids = [_get_dns_spoke(hub)]
+            except Exception:  # noqa: BLE001 — no DNS module; try the firewalls
+                dns_sids = []
+        for sid, dns_data in await _ask(
+                dns_sids, lambda s: _relay_spoke(s, "DNS_LIST", log_name="le_dns_hosts")):
+            _collect((dns_data or {}).get("records") or [], ("name",), ("value", "ip"),
+                     _nets_for(sid))
+        # Each configured, connected firewall's host overrides.
         try:
             firewalls = (hub.state.system_state.get("global_config", {}) or {}).get("firewalls", []) or []
         except Exception:  # noqa: BLE001
             firewalls = []
-        # Each connected firewall's host overrides, all at once; one failure
-        # does not stop the others.
         sids = [sid for sid in {fw.get("spoke_id") for fw in firewalls if fw.get("spoke_id")}
                 if hub._primary_key(sid) in getattr(hub, "active_connections", {})]
-        results = await asyncio.gather(
-            *(hub.request_response(sid, "OPNSENSE_GET_DNS_RECORDS", {}, timeout=60.0) for sid in sids),
-            return_exceptions=True)
-        for fres in results:
-            if isinstance(fres, BaseException):
-                continue
-            any_source = True
+        for sid, fres in await _ask(
+                sids, lambda s: hub.request_response(s, "OPNSENSE_GET_DNS_RECORDS", {}, timeout=60.0)):
             if isinstance(fres, list):
                 recs = fres
             else:
                 recs = (fres or {}).get("data") or (fres or {}).get("dns_records") \
                     or (fres or {}).get("records") or []
-            _collect(recs, ("hostname", "host", "name"), ("ip", "value", "server"))
+            _collect(recs, ("hostname", "host", "name"), ("ip", "value", "server"),
+                     _nets_for(sid))
+        # A skipped source (a shared one cut by the VRF slice, or another
+        # tenant's) is a known "no hosts", not an outage, so it must not
+        # trigger the caller's fail-open, but only when nothing else was
+        # asked. If the sources that were asked all failed, that is an outage
+        # and the caller still fails open.
+        if (skipped_shared or skipped_foreign) and not n_asked:
+            any_source = True
         return hosts, any_source
 
     def _le_certs_holder(data):
@@ -3107,18 +3185,19 @@ def register(app, hub, ctx):
         explicit_scope = bool(tenant and tid)
         if tenant and tid:
             # Explicit tenant selected → scope by its prefixes (admins included).
-            prefixes = await access.resolve_prefixes_for_tenant(hub, tid)
-            if not prefixes:
-                # No DNS prefixes for the tenant — but explicit cert OWNERSHIP
-                # (own or shared) must still surface certs, so don't fail closed
-                # unconditionally; fall through with an empty prefix set.
-                prefixes = []
+            # No prefixes doesn't fail closed: explicit cert OWNERSHIP (own or
+            # shared) must still surface certs, so fall through with none.
+            scope_tid = tid
+            raw = await access.resolve_prefixes_for_tenant(hub, tid) or []
         else:
             if not sess or _is_admin(sess):
                 return data
-            prefixes = await access.resolve_prefixes(hub, sess)
-            if not prefixes:
-                prefixes = []
+            scope_tid = access._session_tenant_id(sess)
+            raw = await access.resolve_prefixes(hub, sess) or []
+        # Shared DNS sources are matched on the VRF-sliced prefixes, the
+        # tenant's own resolver/firewall on all of them (_dns_hosts).
+        nets = _dns_prefix_nets(access.shared_slice_prefixes(hub, scope_tid, raw, "le"))
+        own_nets = _dns_prefix_nets(raw)
         # A tenant with its own LE spoke no longer sees the shared LE spoke's
         # certs: only certs explicitly owned by it remain.
         _vt = access._norm_tenant_id(tid if explicit_scope else _effective_tenant(request, None))
@@ -3126,14 +3205,6 @@ def register(app, hub, ctx):
         shared_hidden = (access.tenant_left_shared(hub, _vt, "certificates")
                          and access._norm_tenant_id(access.spoke_owner_tenant(hub, _le_sid)) != _vt)
 
-        # Parse the prefixes into networks.
-        import ipaddress
-        nets = []
-        for p in prefixes:
-            try:
-                nets.append(ipaddress.ip_network(p, strict=False))
-            except ValueError:
-                continue
         def _owner_match(cert):
             """Visibility from explicit ownership, or None when the cert has no
             owners (then the legacy DNS-subnet match decides)."""
@@ -3148,13 +3219,17 @@ def register(app, hub, ctx):
 
         # The DNS lookup (every DNS record + every firewall's overrides) is only
         # needed for certs with no explicit owners — skip it when there are none.
-        need_dns = bool(nets) and any(
+        need_dns = bool(nets or own_nets) and any(
             isinstance(c, dict) and _owner_match(c) is None
             for c in (_le_certs_holder(data) or []))
         # The tenant's DNS hostnames, and whether any DNS source answered.
-        tenant_hosts, any_source = await _dns_hosts(nets) if need_dns else (set(), True)
+        tenant_hosts, any_source = (await _dns_hosts(nets, own_nets, (scope_tid,))
+                                    if need_dns else (set(), True))
         if need_dns and not any_source:
-            return data  # both DNS sources unreachable → fail open
+            # DNS unreachable: fail open only for certs with no explicit owners;
+            # a cert owned by other tenants stays hidden.
+            return _le_with_certs(data, [c for c in (_le_certs_holder(data) or [])
+                                         if _owner_match(c) is not False])
 
         def _match(cert):
             """True when the caller should see this cert."""
@@ -3323,17 +3398,16 @@ def register(app, hub, ctx):
         admin or filter OFF → all DNS hostnames. Feeds the issue-cert domain dropdown."""
         # Non-admins with the filter on: only their own prefixes; otherwise no filter.
         sess = _session_user(request)
-        nets = None
+        nets = own_nets = None
+        owners = ()
         if sess and not _is_admin(sess) and access.filter_enabled(hub, "le"):
-            import ipaddress
-            nets = []
-            for p in (await access.resolve_owned_prefixes(hub, sess)) or []:
-                try:
-                    nets.append(ipaddress.ip_network(p, strict=False))
-                except ValueError:
-                    continue
+            # Shared DNS sources match VRF-sliced prefixes; the user's own
+            # tenants' resolvers/firewalls match all of them (_dns_hosts).
+            nets = _dns_prefix_nets(await access.resolve_owned_prefixes(hub, sess, shared=True))
+            own_nets = _dns_prefix_nets(await access.resolve_owned_prefixes(hub, sess))
+            owners = tuple(access._session_tenants(sess))
         # The matching hostnames plus one wildcard per parent domain.
-        hosts, _src = await _dns_hosts(nets)
+        hosts, _src = await _dns_hosts(nets, own_nets, owners)
         wildcards = sorted({f"*.{h.split('.', 1)[1]}" for h in hosts if "." in h})
         return {"hosts": sorted(hosts), "wildcards": wildcards}
 
@@ -5125,7 +5199,8 @@ def register(app, hub, ctx):
         """Add a DHCP reservation in Kea, then mirror it into NetBox."""
         # Read the body and check the caller may write it.
         body = await request.json()
-        await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP reservation")
+        await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP reservation",
+                                      spoke=lambda: _dhcp_write_spoke(request, tenant, body))
         # Relay it to the owning spoke, then write the reservation back to NetBox.
         spoke = await _dhcp_write_spoke(request, tenant, body)
         result = await _relay_spoke(spoke, "DHCP_ADD_RES", _dhcp_write_body(body), log_name="dhcp_add_reservation")
@@ -5154,7 +5229,8 @@ def register(app, hub, ctx):
         """Update a DHCP reservation in Kea, then mirror it into NetBox."""
         # Read the body and check the caller may write it.
         body = await request.json()
-        await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP reservation")
+        await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP reservation",
+                                      spoke=lambda: _dhcp_write_spoke(request, tenant, body))
         # Relay it to the owning spoke.
         spoke = await _dhcp_write_spoke(request, tenant, body)
         result = await _relay_spoke(spoke, "DHCP_UPDATE_RES", _dhcp_write_body(body), log_name="dhcp_update_reservation")
@@ -5171,7 +5247,8 @@ def register(app, hub, ctx):
         """Delete a DHCP reservation in Kea and clear its NetBox reservation flag."""
         # Read the body and check the caller may write it.
         body = await request.json()
-        await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP reservation")
+        await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP reservation",
+                                      spoke=lambda: _dhcp_write_spoke(request, tenant, body))
         # Relay it to the owning spoke.
         spoke = await _dhcp_write_spoke(request, tenant, body)
         result = await _relay_spoke(spoke, "DHCP_DEL_RES", _dhcp_write_body(body), log_name="dhcp_delete_reservation")

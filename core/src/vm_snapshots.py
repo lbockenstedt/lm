@@ -89,11 +89,13 @@ async def tenant_vms(hub, tenant: str) -> List[Dict[str, Any]]:
             owned.append(vm)
     # Subnet filter on: narrow the shared VMs to the tenant's prefixes.
     if access.filter_enabled(hub, "hypervisor"):
-        prefixes = await access.resolve_prefixes_for_tenant(hub, tenant)
-        if prefixes:
+        raw = await access.resolve_prefixes_for_tenant(hub, tenant)
+        if raw:
+            # Own-VRF prefixes can't match a shared host's VMs; tags/templates still can.
             rest = access.filter_hypervisor_vms(
-                rest, prefixes, template_pools=access._template_pools(hub),
-                tenant_tags=access._tenant_tag_set(hub, tenant))
+                rest, access.shared_slice_prefixes(hub, tenant, raw, "hypervisor"),
+                template_pools=access._template_pools(hub),
+                tenant_tags=access._tenant_tag_set(hub, tenant), empty_keeps_all=False)
     # Keep only VMs that survived, in original order.
     keep = {id(vm) for vm in owned + rest}
     vms = [vm for vm in vms if id(vm) in keep]

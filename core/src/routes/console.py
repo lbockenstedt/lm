@@ -473,13 +473,21 @@ def register(app, hub, ctx):
         return (body or {}).get("spoke_id") or hub.get_spoke_by_type("console")
 
     def _tenant_has_own_console(tid) -> bool:
-        """``tid`` has a console agent bound to it. Such a tenant uses its own
-        console servers only: shared-infra ports are never IP-routed to it, so
-        shared stays shared, not a mix. Exact match: one group member owning a
-        console must not cut the shared ports of the group's other members."""
-        # Look at every console spoke (connected or cached) for one dedicated to this tenant.
+        """Shared-infra console ports are hidden from ``tid``. Follows the
+        tenant's "Access to shared tenant" mode like ``access.tenant_left_shared``:
+        ``deny`` always hides them, ``allow`` never does, and ``auto`` hides them
+        once a console agent is bound to the tenant, so shared stays shared, not a
+        mix. Exact match: one group member owning a console must not cut the
+        shared ports of the group's other members."""
         if not tid:
             return False
+        # An explicit allow/deny mode wins over owning a console.
+        if not access.tenant_is_shared(tid) and \
+                access._norm_tenant_id(tid) != access._norm_tenant_id(access.ADMIN_TENANT_ID):
+            mode = access.tenant_shared_access(hub, tid)
+            if mode != "auto":
+                return mode == "deny"
+        # Look at every console spoke (connected or cached) for one dedicated to this tenant.
         sids = set(hub.get_all_spokes_by_type("console") or [])
         sids |= set(((getattr(hub, "warm_cache", None) or {}).get("console_ports") or {}))
         for sid in sids:
@@ -514,7 +522,8 @@ def register(app, hub, ctx):
         prefixes = []
         for t in tids:
             try:
-                prefixes += await access.resolve_prefixes_for_tenant(hub, t) or []
+                prefixes += access.shared_slice_prefixes(
+                    hub, t, await access.resolve_prefixes_for_tenant(hub, t) or [], "console")
             except Exception:  # noqa: BLE001
                 pass
         if not prefixes:
@@ -1284,7 +1293,8 @@ def register(app, hub, ctx):
         mask_prefixes = None
         if mask_scope and console_filter_on:
             try:
-                mask_prefixes = await access.resolve_prefixes_for_tenant(hub, mask_scope)
+                mask_prefixes = access.shared_slice_prefixes(
+                    hub, mask_scope, await access.resolve_prefixes_for_tenant(hub, mask_scope), "console")
             except Exception:  # noqa: BLE001 - prefix fetch best-effort; fail closed below
                 mask_prefixes = []
         # Connected console spokes; make sure each has its credentials. Set up the outputs.

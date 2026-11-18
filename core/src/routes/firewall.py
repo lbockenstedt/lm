@@ -566,7 +566,7 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=403,
                                     detail="On shared infrastructure an impairment cannot target an alias")
             _impair_targets(payload)
-            owned = await access.resolve_owned_prefixes(app.state.hub, _session_user(request))
+            owned = await access.resolve_owned_prefixes(app.state.hub, _session_user(request), shared=True)
             if not access.impairment_inside(payload, owned):
                 raise HTTPException(status_code=403,
                                     detail="On shared infrastructure every target must be inside your tenant's subnets")

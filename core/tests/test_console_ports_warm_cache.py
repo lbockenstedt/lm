@@ -111,6 +111,14 @@ class _FakeAccess:
         return []
 
     @staticmethod
+    def shared_slice_prefixes(hub, tenant_id, prefixes, module=""):
+        return prefixes
+
+    @staticmethod
+    def tenant_shared_access(hub, tenant_id):
+        return (getattr(hub, "shared_access", None) or {}).get(tenant_id, "auto")
+
+    @staticmethod
     def filter_record_by_prefixes(record, prefixes, fields):
         return record
 
@@ -329,3 +337,30 @@ def test_tenant_with_own_console_gets_no_shared_ports(monkeypatch):
 
     ra = c.get("/api/console/ports?tenant=ra").json()
     assert [(p["spoke_id"], p["port_id"]) for p in ra["ports"]] == [("con-shared", "ttyUSB0")]
+
+
+def test_console_shared_ports_follow_shared_access_mode(monkeypatch):
+    """The tenant's "Access to shared tenant" mode governs shared console
+    ports like every other module: ``deny`` hides them from a tenant with no
+    console of its own, ``allow`` keeps them for a tenant that has one."""
+    monkeypatch.setattr(console, "access", _SharedMaskAccess)
+    shared_port = _port("ttyUSB0", "core-sw", "core-sw")
+    shared_port["probe"]["identity"]["ip"] = "172.21.4.10"
+    hub = _Hub(connected=["con-shared", "con-dxp"],
+               ports_by_spoke={"con-shared": [shared_port],
+                               "con-dxp": [_port("ttyUSB1", "dxp-sw", "dxp-sw")]})
+    hub.state = _State(tenants={"con-shared": "shared", "con-dxp": "dxp"})
+    hub.shared_access = {"dxp": "allow", "ra": "deny"}
+    ctx = _ctx()
+    ctx._resolve_tenant = lambda request, explicit=None: explicit
+    app = FastAPI()
+    app.state.hub = hub
+    console.register(app, hub, ctx)
+    c = TestClient(app)
+
+    dxp = c.get("/api/console/ports?tenant=dxp").json()
+    assert sorted((p["spoke_id"], p["port_id"]) for p in dxp["ports"]) == [
+        ("con-dxp", "ttyUSB1"), ("con-shared", "ttyUSB0")]
+
+    ra = c.get("/api/console/ports?tenant=ra").json()
+    assert ra["ports"] == []
