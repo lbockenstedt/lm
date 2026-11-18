@@ -4,6 +4,7 @@ import asyncio
 import ast
 import http.client
 import json
+import logging
 import os
 import platform
 import re
@@ -13,6 +14,10 @@ from pathlib import Path
 
 from core.src.base_spoke import BaseSpoke
 
+# A fixed name: the agent loads this file as module lm_role_llm, and only a
+# name under the llm role's "LLM" stem (_ROLE_LOG_PREFIXES) reaches the
+# role's own log bucket on the hub.
+logger = logging.getLogger("LLMSpoke")
 
 MAX_PROMPT_BYTES = 64 * 1024
 MAX_RESPONSE_BYTES = 256 * 1024
@@ -22,6 +27,8 @@ SAMPLING_LIMITS = {"temperature": 2.0, "top_p": 1.0}
 # Start from the owner's CLI pin; Linux CPU artifacts still need qualification.
 DEFAULT_OLLAMA_VERSION = "0.40.16"
 SERVICE = "lm-llm-ollama.service"
+SERVICE_UNIT_PATH = Path("/etc/systemd/system") / SERVICE
+RUNTIME_BINARY_PATH = Path("/opt/lm-llm/bin/ollama")
 # Loopback-only port of SERVICE (its OLLAMA_HOST). Fixed, not a setting: it never leaves
 # the VM, and staying off Ollama's 11434 means a system Ollama can't be mistaken for ours.
 SERVING_PORT = 11438
@@ -70,6 +77,24 @@ def runtime_service(action):
     ).returncode == 0
 
 
+def runtime_failure_code():
+    """Classify a failed start without returning raw systemd output.
+
+    The missing codes mean nothing exists at the path, which unit staging or
+    the offline bundle repairs. A path that exists but is unusable (a
+    directory in place of the unit, a binary without execute permission) is
+    ``runtime_start_failed``: staging never overwrites an existing entry, so
+    "stage the unit" or "install the bundle" would be the wrong remediation.
+    """
+    if SERVICE_UNIT_PATH.is_symlink() and not SERVICE_UNIT_PATH.is_file():
+        return "runtime_unit_symlink"
+    if not SERVICE_UNIT_PATH.exists():
+        return "runtime_unit_missing"
+    if not RUNTIME_BINARY_PATH.exists():
+        return "runtime_binary_missing"
+    return "runtime_start_failed"
+
+
 def ollama_request(path, body=None, timeout=3, *, port=SERVING_PORT):
     """Read one bounded JSON reply without using HTTP proxies or redirects."""
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
@@ -108,6 +133,7 @@ class LlmSpoke(BaseSpoke):
         self.control_plane = None
         self._reporter = None
         self._service_started = False
+        self._runtime_issue = None
         self._startup = None
         self._health_failures = 0
         self._last_recovery = float("-inf")
@@ -139,9 +165,13 @@ class LlmSpoke(BaseSpoke):
             self._service_started = await asyncio.to_thread(runtime_service, action)
         except (OSError, subprocess.TimeoutExpired):
             self._service_started = False
-        return {"status": "SUCCESS"} if self._service_started else {
-            "status": "ERROR", "code": "runtime_unavailable",
-        }
+        if not self._service_started:
+            self._runtime_issue = await asyncio.to_thread(runtime_failure_code)
+            logger.warning("LLM runtime %s failed: %s", action, self._runtime_issue)
+            return {"status": "ERROR", "code": self._runtime_issue}
+        self._runtime_issue = None
+        logger.info("LLM runtime %s succeeded", action)
+        return {"status": "SUCCESS"}
 
     async def _recover_idle_runtime(self):
         """Restart only an idle, previously started runtime after repeated API failures."""
@@ -203,7 +233,12 @@ class LlmSpoke(BaseSpoke):
         """Report matching local models and capacity without returning any content."""
         hardware = {"capabilities": await asyncio.to_thread(cpu_capabilities)}
         if not self._service_started:
-            return {"status": "ERROR", "code": "runtime_not_started", **hardware}
+            if self._runtime_issue is not None:
+                self._runtime_issue = await asyncio.to_thread(runtime_failure_code)
+            return {"status": "ERROR",
+                    "code": "runtime_not_started",
+                    **({"detail_code": self._runtime_issue} if self._runtime_issue else {}),
+                    **hardware}
         try:
             models = await self._available_models()
         except RuntimeVersionMismatch:
