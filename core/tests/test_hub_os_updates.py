@@ -15,6 +15,7 @@ with no cached check result gets a synthetic ``checked: False`` /
 ``reason: "not checked yet"`` entry instead of vanishing.
 """
 import asyncio
+import logging
 import os
 import sys
 
@@ -888,6 +889,72 @@ async def test_cluster_node_that_does_not_return_stops_the_run(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["maintenance", "drain", "reboot"])
+async def test_cluster_reboot_that_fails_is_logged_at_error(monkeypatch, caplog, failure):
+    """The 'entering maintenance mode' line is INFO, so every way the reboot
+    can then fail must log at ERROR or the log sentinel never sees it."""
+    import hub_os_updates as hou
+    monkeypatch.setattr(hou, "_MAINT_MIGRATE_TIMEOUT_S", -1)
+    hub, _events = _cluster_hub(monkeypatch, [["vm:100"]] if failure == "drain" else [[]])
+    maint = hub._osu_maintenance
+
+    async def _maint(n, action):
+        if failure == "maintenance" and action == "enable":
+            return {"status": "ERROR", "message": "pmxcfs not quorate"}
+        if failure == "drain" and action == "enable":
+            return {"status": "SUCCESS", "ha_guests": ["vm:100"]}
+        return await maint(n, action)
+
+    async def _failing_request(target, cmd, data, timeout=None):
+        raise ConnectionError("ssh refused")
+    hub._osu_maintenance = _maint
+    if failure == "reboot":
+        # The real _osu_reboot, so its own ERROR line is part of what is counted.
+        del hub._osu_reboot
+        hub.request_response = _failing_request
+    with caplog.at_level(logging.INFO, logger="Hub"):
+        await hub.osu_apply_fleet(node_keys=["agent:pve1"], reboot_after=["agent:pve1"])
+        for _ in range(5):
+            await _drain()
+    assert hub._osu_state()["run"]["items"][0]["auto_reboot"].startswith("failed:")
+    # One failure, one ERROR line (not one per layer that noticed it).
+    assert len([r for r in caplog.records
+                if r.levelno == logging.ERROR and "pve1" in r.getMessage()
+                and "OS-UPDATE" in r.getMessage()]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["drain", "reboot"])
+async def test_cluster_reboot_failure_does_not_claim_maintenance_cleared_when_it_was_not(
+        monkeypatch, caplog, failure):
+    """If the maintenance-mode disable fails too, the node is still drained: the
+    run item and the log must say so, never 'cleared'."""
+    import hub_os_updates as hou
+    monkeypatch.setattr(hou, "_MAINT_MIGRATE_TIMEOUT_S", -1)
+    hub, _events = _cluster_hub(monkeypatch, [["vm:100"]])
+
+    async def _maint(n, action):
+        if action == "disable":
+            return {"status": "ERROR", "message": "pmxcfs busy"}
+        return {"status": "SUCCESS", "ha_guests": ["vm:100"] if failure == "drain" else []}
+
+    async def _bad_reboot(n, actor):
+        return {"status": "ERROR", "message": "ssh refused"}
+    hub._osu_maintenance = _maint
+    if failure == "reboot":
+        hub._osu_reboot = _bad_reboot
+    with caplog.at_level(logging.INFO, logger="Hub"):
+        await hub.osu_apply_fleet(node_keys=["agent:pve1"], reboot_after=["agent:pve1"])
+        for _ in range(5):
+            await _drain()
+    text = hub._osu_state()["run"]["items"][0]["auto_reboot"]
+    assert "maintenance mode NOT cleared: pmxcfs busy" in text
+    assert "mode cleared" not in text
+    assert [r for r in caplog.records
+            if r.levelno == logging.ERROR and "NOT cleared" in r.getMessage()]
+
+
+@pytest.mark.asyncio
 async def test_manual_deploy_to_a_cluster_node_uses_maintenance_mode(monkeypatch):
     hub, events = _cluster_hub(monkeypatch, [[]])
     await hub.osu_apply_fleet(node_keys=["agent:pve1"], actor="alice")  # no reboot_after
@@ -999,17 +1066,21 @@ async def test_vm_is_snapshotted_right_before_it_is_patched():
 
 
 @pytest.mark.asyncio
-async def test_a_failed_snapshot_means_the_node_is_not_patched():
+async def test_a_failed_snapshot_means_the_node_is_not_patched(caplog):
     hub = _vm_hub()
     hub.fail_snapshot = True
     await hub.osu_check_fleet(refresh=False)
     hub.sent.clear()
-    await hub.osu_apply_fleet(node_keys=["spoke:spoke-1"])
-    await _drain()
+    with caplog.at_level(logging.INFO, logger="Hub"):
+        await hub.osu_apply_fleet(node_keys=["spoke:spoke-1"])
+        await _drain()
     assert not [s for s in hub.sent if s[1] == "OS_UPDATE_APPLY"]
     item = hub._osu_state()["run"]["items"][0]
     assert item["status"] == "failed" and "storage full" in item["message"]
     assert item["cause"] == "pre-patch VM snapshot failed: storage full"
+    # One failure, one line: an ERROR that carries the reason, no WARNING beside it.
+    loud = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert [r.levelno for r in loud] == [logging.ERROR] and "storage full" in loud[0].getMessage()
 
 
 @pytest.mark.asyncio
@@ -1024,6 +1095,53 @@ async def test_storage_that_cannot_snapshot_is_patched_with_a_warning():
     assert [s for s in hub.sent if s[1] == "OS_UPDATE_APPLY"]
     item = hub._osu_state()["run"]["items"][0]
     assert item["status"] == "done" and "does not support snapshots" in item["warning"]
+
+
+@pytest.mark.asyncio
+async def test_a_spoke_that_cannot_snapshot_vms_still_patches_with_a_warning(caplog):
+    # The Client-Sim spokes host a cluster's agents but answer PXMX_VM_ACTION
+    # with "Unknown command": nothing to roll back to, so patch with a warning.
+    hub = _vm_hub()
+    hub.fail_snapshot = True
+    hub.fail_message = "Unknown command: PXMX_VM_ACTION"
+    await hub.osu_check_fleet(refresh=False)
+    hub.sent.clear()
+    with caplog.at_level(logging.INFO, logger="Hub"):
+        await hub.osu_apply_fleet(node_keys=["spoke:spoke-1"])
+        await _drain()
+    assert [s for s in hub.sent if s[1] == "OS_UPDATE_APPLY"]
+    item = hub._osu_state()["run"]["items"][0]
+    assert item["status"] == "done" and item["snapshot"] == ""
+    assert "cannot snapshot VMs" in item["warning"]
+    # Exactly one WARNING for the degraded patch, and it names the peer's reply.
+    loud = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert [r.levelno for r in loud] == [logging.WARNING]
+    assert "Unknown command: PXMX_VM_ACTION" in loud[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_os_update_log_levels_follow_the_outcome(caplog):
+    # A healthy node is INFO; a failed apply is ERROR (the log sentinel opens on
+    # it), and neither is a WARNING that feeds the repeated-warning backstop.
+    hub = _checked_hub()
+    await hub.osu_check_fleet(refresh=False)
+    with caplog.at_level(logging.INFO, logger="Hub"):
+        await hub.osu_apply_fleet(node_keys=["agent:guid-123"])
+        await _drain()
+        ok_lines = [r for r in caplog.records if "OS-UPDATE:" in r.getMessage() and "→ ok" in r.getMessage()]
+        assert ok_lines and all(r.levelno == logging.INFO for r in ok_lines)
+
+        async def _offline(target, cmd, data, timeout=None):
+            raise ConnectionError("spoke not connected")
+        hub.request_response = _offline
+        hub.active_connections.clear()
+        caplog.clear()
+        await hub.osu_apply_fleet(node_keys=["agent:guid-123"])
+        await _drain()
+    failed = [r for r in caplog.records if "→ FAILED" in r.getMessage()]
+    assert failed and all(r.levelno == logging.ERROR for r in failed)
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING
+                and "OS-UPDATE:" in r.getMessage()]
 
 
 @pytest.mark.asyncio

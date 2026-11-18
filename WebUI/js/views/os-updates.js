@@ -120,7 +120,7 @@ function renderOsUpdatesView(content) {
                 <div class="${sub}">
                     <div class="${subTitle}">Pre-patch VM snapshots</div>
                     <div class="flex flex-wrap items-center gap-3">
-                        <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer" title="Before patching a node that runs in a Proxmox VM, LM snapshots that VM (manual deploys and auto-patch). If the snapshot fails the node is not patched. Proxmox hosts themselves (bare metal) are patched without a snapshot."><input type="checkbox" id="osu-snap-enabled" class="w-4 h-4 text-green-600 rounded" checked>Snapshot VMs before patching, keep</label>
+                        <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer" title="Before patching a node that runs in a Proxmox VM, LM snapshots that VM (manual deploys and auto-patch). If the snapshot fails the node is not patched; a VM that cannot be snapshotted at all (storage without snapshot support, or a spoke without VM-action support) is patched with a warning. Proxmox hosts themselves (bare metal) are patched without a snapshot."><input type="checkbox" id="osu-snap-enabled" class="w-4 h-4 text-green-600 rounded" checked>Snapshot VMs before patching, keep</label>
                         <input type="number" id="osu-snap-keep" min="1" max="20" step="1" value="2" class="${inputCls} w-20" title="Older pre-patch snapshots (lm-prepatch-*) beyond this count are deleted">
                         <button data-action="saveSnapshot" class="${btnSecCls} ml-auto">Save</button>
                     </div>

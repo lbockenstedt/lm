@@ -165,12 +165,53 @@ def test_schedule_runs_when_due_and_records_the_result():
     assert vm_snapshots.due_schedules(hub, last + 24 * 3600) == [s["id"]]
 
 
+def test_a_failed_schedule_run_logs_once_with_each_vms_reason(caplog):
+    # take_snapshot does not log its own failure, so a scheduled run and a Run-now
+    # (both go through run_schedule) produce exactly one line, with the reason.
+    import logging
+    hub = _Hub(fail={"snapshot"})
+    s = vm_snapshots.save_schedule(hub, {"name": "Lab", "every_hours": 24, "keep": 2,
+                                         "tags": ["lab"]})
+    with caplog.at_level(logging.INFO, logger="Hub"):
+        res = _run(vm_snapshots.run_schedule(hub, s["id"]))
+    loud = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert res["status"] == "ERROR" and [r.levelno for r in loud] == [logging.ERROR]
+    assert "spoke-a" in loud[0].getMessage() and s["id"] in loud[0].getMessage()
+
+
 def test_schedule_waits_for_the_vm_list():
     hub = _Hub(vms=[])
     s = vm_snapshots.save_schedule(hub, {"name": "Lab", "every_hours": 1, "keep": 1,
                                          "vms": ["C/pve1/101"]})
     assert _run(vm_snapshots.run_schedule(hub, s["id"]))["status"] == "ERROR"
     assert vm_snapshots.list_schedules(hub)[0]["last_run"] == 0.0   # retried next tick
+
+
+def test_a_run_that_cannot_start_logs_once_from_run_now_and_from_the_loop(caplog, monkeypatch):
+    # Run-now discards run_schedule's result, so run_schedule itself must log; the
+    # loop must not add a second line for the same failure.
+    import logging
+    import sync_loop
+    hub = _Hub(vms=[])
+    s = vm_snapshots.save_schedule(hub, {"name": "Lab", "every_hours": 1, "keep": 1,
+                                         "vms": ["C/pve1/101"]})
+    with caplog.at_level(logging.INFO, logger="Hub"):
+        _run(vm_snapshots.run_schedule(hub, s["id"]))
+    loud = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(loud) == 1 and "hasn't loaded yet" in loud[0].getMessage()
+    assert s["id"] in loud[0].getMessage()
+
+    caplog.clear()
+    bodies = []
+
+    async def _capture(**kw):
+        bodies.append(kw["body"])
+
+    monkeypatch.setattr(sync_loop, "run_sync_loop", _capture)
+    _run(vm_snapshots.run_loop(hub))
+    with caplog.at_level(logging.INFO, logger="Hub"):
+        _run(bodies[0]())
+    assert len([r for r in caplog.records if r.levelno >= logging.WARNING]) == 1
 
 
 def test_editing_a_schedule_keeps_its_prefix_and_history():
@@ -209,6 +250,24 @@ def test_schedule_routes_crud():
                  json={"name": "Lab", "every_hours": 0, "keep": 3, "tags": ["lab"]}).status_code == 400
     assert c.delete(f"/api/vm-snapshots/schedules/{sid}").status_code == 200
     assert c.delete(f"/api/vm-snapshots/schedules/{sid}").status_code == 404
+
+
+def test_run_now_audit_line_is_info_so_a_failed_run_is_one_loud_line(caplog, monkeypatch):
+    # The route's "run now by" line only records who asked; the failure is run_schedule's.
+    import logging
+
+    async def _no_run(hub, sid, actor="schedule"):
+        return {"status": "SUCCESS"}
+
+    monkeypatch.setattr(vm_snapshots, "run_schedule", _no_run)
+    c, _ = _client()
+    sid = c.post("/api/vm-snapshots/schedules",
+                 json={"name": "Lab", "every_hours": 24, "keep": 3, "tags": ["lab"]}).json()["id"]
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="Hub"):
+        assert c.post(f"/api/vm-snapshots/schedules/{sid}/run").json() == {"status": "started"}
+    audit = [r for r in caplog.records if "run now by" in r.getMessage()]
+    assert [r.levelno for r in audit] == [logging.INFO]
 
 
 def test_schedule_routes_are_global_admin_only():
