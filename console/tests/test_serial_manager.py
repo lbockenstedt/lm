@@ -133,6 +133,15 @@ def test_find_by_identity_matches_on_mac_when_no_serial(tmp_path):
     assert found == "old-pid"
 
 
+def test_find_by_identity_skips_ports_still_plugged_in(tmp_path):
+    store = m.PortStore(path=tmp_path / "ports.json")
+    store.update("pid-1", probe={"identity": {"serial": "SN123"}})
+    assert store.find_by_identity({"serial": "SN123"}, exclude_port_id="new-pid",
+                                  skip_ports={"pid-1"}) is None
+    assert store.find_by_identity({"serial": "SN123"}, exclude_port_id="new-pid",
+                                  skip_ports={"other"}) == "pid-1"
+
+
 def test_find_by_identity_excludes_the_current_port_id(tmp_path):
     store = m.PortStore(path=tmp_path / "ports.json")
     store.update("pid-1", probe={"identity": {"serial": "SN123"}})
