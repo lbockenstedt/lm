@@ -164,3 +164,32 @@ def test_vrf_tenant_may_write_on_a_kea_it_owns_by_instance_record(monkeypatch):
     c = _build(_tenant_user("tenantA"), hub)
     assert c.post("/api/dhcp/reservation", json=body).status_code == 200
     assert [s for s, _c, _p in hub.forwarded] == ["dhcp-a"]
+
+
+def test_write_resolves_the_owning_spoke_once_per_request(monkeypatch):
+    """The shared-write gate and the relay both need the target spoke; the
+    resolver (which can probe every Kea) must run once, not once for each."""
+    import routes.net_services as ns
+
+    async def out_of_shared_scope(hub, sess, record, fields, spoke_id=None):
+        return False
+
+    monkeypatch.setattr(ns.access, "record_in_tenant_scope", out_of_shared_scope)
+    monkeypatch.setattr(ns.access, "spoke_owner_tenant", lambda hub, sid: "tenantA")
+    monkeypatch.setattr(ns.access, "_owned_spoke_writable", lambda hub, sess, sid, owner: True)
+
+    class CountingHub(FakeHub):
+        resolved = 0
+
+        def get_dhcp_spoke_for_tenant(self, tenant_id=None):
+            type(self).resolved += 1
+            return super().get_dhcp_spoke_for_tenant(tenant_id)
+
+    hub = CountingHub({"dhcp-a"}, module_metadata={"dhcp-a": {"tenant_id": "tenantA"}})
+    body = {"ip": "10.9.0.5", "mac": "aa:bb:cc:dd:ee:ff"}
+    c = _build(_tenant_user("tenantA"), hub)
+    for method, path in (("POST", "/api/dhcp/reservation"), ("PUT", "/api/dhcp/reservation"),
+                         ("DELETE", "/api/dhcp/reservation"), ("DELETE", "/api/dhcp/lease")):
+        CountingHub.resolved = 0
+        assert c.request(method, path, json=body).status_code == 200
+        assert CountingHub.resolved == 1, f"{method} {path} resolved the spoke {CountingHub.resolved}x"
