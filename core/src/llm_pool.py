@@ -73,6 +73,28 @@ def model_minimums(row):
     return values
 
 
+# Per-artifact sampling caps replace any model-name rule in the worker.
+SAMPLING_LIMITS = {"temperature": 2.0, "top_p": 1.0}
+# Worker worst case (agent/src/llm_qualification.py): two 20 s systemctl calls,
+# a 15 s listener wait, a 420 s pull, four 240 s fixtures, a 20 s stop and
+# short probes, about 1470 s. Keep headroom so a slow but live job is not
+# reported as an unknown outcome while the worker still holds its slot.
+QUALIFY_TIMEOUT = 1800
+
+
+def model_sampling(row):
+    """Return a profile's optional sampling caps as sorted pairs, or None if malformed."""
+    pairs = []
+    for field, limit in SAMPLING_LIMITS.items():
+        if field in row:
+            value = row[field]
+            # bool is an int subclass, and NaN fails both comparisons.
+            if type(value) not in (int, float) or not 0 <= value <= limit:
+                return None
+            pairs.append((field, float(value)))
+    return tuple(pairs)
+
+
 def qualification_result(data):
     """Keep only exact artifact identity and fixed, complete fixture results."""
     if not isinstance(data, Mapping) or not valid_model(data.get("model"), data.get("digest")):
@@ -223,7 +245,7 @@ class LlmPool:
                 job.update(state="failed", code="worker_changed")
                 return
             reply = await asyncio.wait_for(self.hub.request_response(
-                worker, "LLM_QUALIFY", {"candidate": key}, timeout=1440), 1445)
+                worker, "LLM_QUALIFY", {"candidate": key}, timeout=QUALIFY_TIMEOUT), QUALIFY_TIMEOUT + 5)
             envelope = reply.get("payload", {}) if isinstance(reply, Mapping) else None
             data = envelope.get("data", reply) if isinstance(envelope, Mapping) else None
             if not isinstance(data, Mapping):
@@ -475,13 +497,14 @@ class LlmPool:
         artifacts = self._job_models(data)
         if not artifacts:
             return {"status": "ERROR", "code": "invalid_request"}
-        for model, digest, minimums in artifacts:
+        for model, digest, minimums, sampling in artifacts:
             started = time.monotonic()
             job = {"kind": "inference", "state": "running", "model": model,
                    "digest": digest, "tier": "local"}
             self.active_jobs[id(job)] = job
             try:
-                result = await self._dispatch(tenant, prompt, model, digest, output_format, job, minimums)
+                result = await self._dispatch(
+                    tenant, prompt, model, digest, output_format, job, minimums, sampling)
                 if result is not None:
                     job.update(state="passed" if result["status"] == "SUCCESS" else "failed",
                                code=result.get("code"), metrics=result.get("metrics", {}),
@@ -500,7 +523,7 @@ class LlmPool:
         """Resolve an exact request or the operator's ordered local task profile."""
         if "task" not in data:
             model, digest = data.get("model"), data.get("digest")
-            return [(model, digest, (0, 0))] if valid_model(model, digest) else []
+            return [(model, digest, (0, 0), ())] if valid_model(model, digest) else []
         task = data["task"]
         if not isinstance(task, str) or "model" in data or "digest" in data:
             return []
@@ -508,13 +531,19 @@ class LlmPool:
         approved = profiles.get(task) if isinstance(profiles, dict) else None
         if not isinstance(approved, list):
             return []
-        return list(dict.fromkeys((row["model"], row["digest"], minimums) for row in approved[:8]
+        return list(dict.fromkeys((row["model"], row["digest"], minimums, sampling)
+                                  for row in approved[:8]
                                   if isinstance(row, dict)
                                   and valid_model(row.get("model"), row.get("digest"))
-                                  and (minimums := model_minimums(row)) is not None))
+                                  and (minimums := model_minimums(row)) is not None
+                                  and (sampling := model_sampling(row)) is not None))
 
-    async def _dispatch(self, tenant, prompt, model, digest, output_format, job, minimums):
+    async def _dispatch(self, tenant, prompt, model, digest, output_format, job, minimums, sampling=()):
         """Try one artifact across its eligible workers, or return no capacity."""
+        request = {"prompt": prompt, "model": model, "digest": digest, "format": output_format}
+        if sampling:
+            # Older workers ignore this key and keep Ollama's default sampling.
+            request["options"] = dict(sampling)
         # Rotate the starting point, but recheck all claims before each dispatch.
         workers = self._tenant_workers(tenant)
         offset = self.sequence % len(workers) if workers else 0
@@ -528,9 +557,7 @@ class LlmPool:
             try:
                 # A lost response is ambiguous. Do not replay on another worker.
                 reply = await asyncio.wait_for(self.hub.request_response(
-                    key, "LLM_COMPLETE",
-                    {"prompt": prompt, "model": model, "digest": digest, "format": output_format},
-                    timeout=930), timeout=935)
+                    key, "LLM_COMPLETE", request, timeout=930), timeout=935)
             except (TimeoutError, ConnectionError):
                 return {"status": "ERROR", "code": "dispatch_outcome_unknown"}
             finally:

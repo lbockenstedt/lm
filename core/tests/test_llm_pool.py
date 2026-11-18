@@ -230,6 +230,58 @@ def test_task_uses_next_operator_approved_artifact_when_first_cannot_accept():
     assert pool.hub.request_response.call_count == 1
 
 
+def test_task_profile_sampling_is_validated_forwarded_and_applied(monkeypatch):
+    """Sampling comes from the operator's profile row, never from the model's name."""
+    pool = make_pool()
+    state = pool.hub.state
+    state._mark_dirty = lambda: None
+    state.get_global_config = lambda: state.system_state.get("global_config", {})
+    app = FastAPI()
+    llm.register(app, pool.hub, SimpleNamespace(
+        _session_user=lambda request: {"role": "admin"}, _is_admin=lambda session: True))
+    row = {"model": JOB["model"], "digest": DIGEST}
+    with TestClient(app) as client:
+        path = "/api/llm/admin/settings"
+        for bad in ({"temperature": True}, {"temperature": 2.5}, {"top_p": -0.1}, {"top_p": "0.8"}):
+            assert client.post(path, json={"llm_task_models": {"summary": [
+                {**row, **bad}]}}).status_code == 400
+        assert client.post(path, json={"llm_task_models": {"summary": [
+            {**row, "temperature": 0.7, "top_p": 0.8}]}}).status_code == 200
+
+    pool.hub.request_response.return_value = {"status": "SUCCESS", "text": "summary"}
+    asyncio.run(pool.complete("tenant-a", {"prompt": "fixture", "task": "summary"}))
+    assert pool.hub.request_response.call_args.args[2]["options"] == {"temperature": 0.7, "top_p": 0.8}
+    asyncio.run(pool.complete("tenant-a", JOB))
+    assert "options" not in pool.hub.request_response.call_args.args[2]
+
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2]))
+    from agent.src import llm_spoke
+
+    sent = []
+
+    def fake_request(path, body=None, timeout=3):
+        """Record the generate options a Gemma-named artifact receives."""
+        if path == "/api/version":
+            return {"version": "0.40.16"}
+        if path == "/api/tags":
+            return {"models": [{"name": "gemma-test:cpu", "digest": DIGEST}]}
+        sent.append(body["options"])
+        return {"done": True, "done_reason": "stop", "model": "gemma-test:cpu", "response": "ok"}
+
+    monkeypatch.setattr(llm_spoke, "ollama_request", fake_request)
+    worker = llm_spoke.LlmSpoke("test", {"models": {"gemma-test:cpu": DIGEST}})
+    worker._service_started = True
+    job = {"prompt": "fixture", "model": "gemma-test:cpu", "digest": DIGEST}
+    assert asyncio.run(worker.handle_command("LLM_COMPLETE", job))["status"] == "SUCCESS"
+    assert "temperature" not in sent[-1] and "top_p" not in sent[-1]
+    asyncio.run(worker.handle_command("LLM_COMPLETE", {**job, "options": {"temperature": 0.7}}))
+    assert sent[-1] == {"temperature": 0.7, "num_gpu": 0, "num_predict": 1024}
+    for bad in ({"num_gpu": 1}, {"temperature": 3}, {"top_p": False}, ["temperature"]):
+        assert asyncio.run(worker.handle_command(
+            "LLM_COMPLETE", {**job, "options": bad}))["code"] == "invalid_request"
+    assert len(sent) == 2
+
+
 def test_certificate_bound_summary_only_falls_back_for_public_opt_in(monkeypatch):
     """Private or wrong-identity AB jobs cannot invoke cloud inference."""
     pool = make_pool()

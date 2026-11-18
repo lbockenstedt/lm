@@ -9,7 +9,7 @@ from fastapi import HTTPException, Request, Response
 from access import read_scope, request_effective_tenant, safe_external_url, same_tenant, tenant_is_shared
 import instance_vault
 from llm_cloud import TOKEN_LIMIT_FIELDS, valid_endpoint
-from llm_pool import HARDWARE_LIMITS, diagnostic, model_minimums, valid_model
+from llm_pool import HARDWARE_LIMITS, SAMPLING_LIMITS, diagnostic, model_minimums, model_sampling, valid_model
 
 
 POOL_SETTINGS = ("llm_task_models", "llm_ab_pr_repos", "llm_qualification_candidates", "llm_cloud_profiles")
@@ -24,6 +24,10 @@ ROUTING_FORM_SCHEMA = {
          "source": "models", "placeholder": "Select a reported model"},
         {"name": "vcpus", "label": "Minimum vCPUs", "type": "number", "maximum": HARDWARE_LIMITS["vcpus"]},
         {"name": "ram", "label": "Minimum RAM (bytes)", "type": "number", "maximum": HARDWARE_LIMITS["ram_bytes"]},
+        {"name": "temperature", "label": "Temperature (blank = default)", "type": "number",
+         "maximum": SAMPLING_LIMITS["temperature"], "step": 0.05},
+        {"name": "top_p", "label": "Top-p (blank = default)", "type": "number",
+         "maximum": SAMPLING_LIMITS["top_p"], "step": 0.05},
     ],
     "repo": [
         {"name": "repo", "label": "Repository", "required": True, "pattern": REPO_KEY, "placeholder": "owner/repo"},
@@ -60,7 +64,8 @@ def validate_pool_config(hub, config):
                 or not isinstance(models, list) or len(models) > 8
                 or any(not isinstance(row, dict) or not valid_model(row.get("model"), row.get("digest"))
                        or model_minimums(row) is None
-                       or row.keys() - {"model", "digest", "min_vcpus", "min_ram_bytes"}
+                       or model_sampling(row) is None
+                       or row.keys() - {"model", "digest", "min_vcpus", "min_ram_bytes", *SAMPLING_LIMITS}
                        for row in models)
                 for task, models in tasks.items()):
             raise HTTPException(400, "Task profiles require ordered lists of pinned model artifacts")
