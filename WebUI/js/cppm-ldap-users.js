@@ -23,18 +23,28 @@ function _cppm403Hint(status) {
 // has NO spoke connected (not an actual ClearPass API fault), so render the
 // SAME neutral, generic "No spoke connected" message every module uses — not a
 // red "ClearPass API Error" that misattributes a missing spoke to ClearPass.
-// Any other status keeps the API-error framing (+ the 403 credential hint).
-function _cppmErrorPanel(r, e) {
+// The exception is a 503 with Retry-After (sent to admins; the 5xx scrub drops
+// it for others): the last Access Tracker query failed and the hub holds back
+// the next one, so the panel shows why. Any other status keeps the API-error
+// framing (+ the 403 credential hint). The server detail can carry ClearPass
+// text, so it is escaped with safeHtml, loaded on demand (classic script).
+async function _cppmErrorPanel(r, e) {
+    const { safeHtml, rawHtml } = await import('./core/safe-html.js');
+    if (r.status === 503 && r.headers.get('Retry-After')) {
+        return String(safeHtml`<div class="p-6 text-center">
+            <p class="text-slate-500 font-medium text-sm">${e.detail || 'The last ClearPass query failed.'}</p>
+        </div>`);
+    }
     if (r.status === 503) {
         return `<div class="p-6 text-center">
             <p class="text-slate-500 font-medium text-sm">No spoke connected</p>
         </div>`;
     }
-    return `<div class="p-6 text-center">
+    return String(safeHtml`<div class="p-6 text-center">
         <p class="text-red-500 font-medium text-sm mb-1">ClearPass API Error (${r.status})</p>
         <p class="text-xs text-slate-500 font-mono">${e.detail || r.statusText}</p>
-        ${_cppm403Hint(r.status)}
-    </div>`;
+        ${rawHtml(_cppm403Hint(r.status))}
+    </div>`);
 }
 
 async function loadCPPMNACStatus() {
@@ -54,14 +64,23 @@ async function loadCPPMNACStatus() {
 
 // _renderCppmSessions() — the Access Tracker / NAC Status branch of
 // loadCPPMData. Extracted from the loader; the fetch lives here, the loading
-// placeholder + th/tableWrap helpers stay in the caller. Output HTML preserved.
+// placeholder + th/tableWrap helpers stay in the caller. ClearPass values are
+// escaped with safeHtml (a username is whatever the client typed); this is a
+// classic script, so the shared ES module is loaded on demand.
 async function _renderCppmSessions(container, subMenu, th, tableWrap) {
+    const { safeHtml } = await import('./core/safe-html.js');
     const limit = window._cppmSessionLimit || 200;
     const tparam = currentTenant && currentTenant !== 'default' ? `&tenant=${encodeURIComponent(currentTenant)}` : '';
     const r = await fetch(`/api/cppm/sessions?limit=${limit}${tparam}`);
     if (!r.ok) {
         const e = await r.json().catch(() => ({}));
-        container.innerHTML = _cppmErrorPanel(r, e);
+        if (r.status === 400 && String(e.detail || '').includes('Select a tenant')) {
+            container.innerHTML = `<div class="p-6 text-center">
+                <p class="text-slate-500 font-medium text-sm">Select a tenant to view Access Tracker authentications.</p>
+            </div>`;
+            return;
+        }
+        container.innerHTML = await _cppmErrorPanel(r, e);
         return;
     }
     const d = await r.json();
@@ -69,13 +88,23 @@ async function _renderCppmSessions(container, subMenu, th, tableWrap) {
     // client re-filter (its session-tenant prefixes are wrong once a
     // tenant is switched).
     const sessions = d.sessions || [];
-    // Admin combined view (2+ nac spokes): sessions are tagged _tenant by the
-    // merge fanout — see the matching comment in _renderCppmDevices.
-    const showSessTenantCol = sessions.some(s => s && s._tenant);
-    const cols = (showSessTenantCol ? ['Tenant'] : []).concat(
-        ['Username', 'MAC / Station', 'IP', 'Role', 'NAS', 'Port', 'Service', 'Start Time', 'State']);
-    const rows = sessions.map(s => `<tr class="border-b border-slate-100 hover:bg-slate-50">
-        ${showSessTenantCol ? `<td class="px-4 py-2 text-xs font-medium text-slate-500">${escapeHtml(s._tenant || '—')}</td>` : ''}
+    const recentHistoryAvailable = d.recent_window_complete !== undefined
+        ? d.recent_window_complete === true
+        : Boolean(d.window_start);
+    const sourceError = d.source_error === true;
+    const sessionWindowNote = sourceError
+        ? 'A ClearPass source did not respond; results and counts may be incomplete.'
+        : recentHistoryAvailable
+            ? 'Authentications started in the last 24 hours'
+            : 'Only active sessions available; update the CPPM spoke to include completed authentications';
+    const truncationNote = d.recent_window_truncated
+        ? ' The source scan reached its 10,000-record safety cap; older matching sessions may be omitted.'
+        : '';
+    const countLabel = d.total_is_lower_bound
+        ? `${sessions.length} shown (at least ${d.total} matches)`
+        : `${sessions.length} of ${d.total ?? sessions.length}`;
+    const cols = ['Username', 'MAC / Station', 'IP', 'Role', 'NAS', 'Port', 'Service', 'Start Time', 'State'];
+    const rows = sessions.map(s => safeHtml`<tr class="border-b border-slate-100 hover:bg-slate-50">
         <td class="px-4 py-2 font-medium">${s.username || '—'}</td>
         <td class="px-4 py-2 font-mono text-xs">${s.calling_station || s.mac || '—'}</td>
         <td class="px-4 py-2 font-mono text-xs">${s.ip || '—'}</td>
@@ -97,9 +126,10 @@ async function _renderCppmSessions(container, subMenu, th, tableWrap) {
         ${[50,100,200,500,1000].map(n => `<option value="${n}"${n===limit?' selected':''}>${n} records</option>`).join('')}
     </select>`;
     container.innerHTML = `<div class="flex justify-between items-center mb-1 px-1">
-        <h3 class="text-base font-semibold text-navy">Access Tracker <span class="text-xs text-slate-500 font-normal">(${sessions.length} of ${d.total ?? sessions.length})</span> ${helpIcon('cppm', null, 'NAC help')}</h3>
+        <div><h3 class="text-base font-semibold text-navy">Access Tracker <span class="text-xs text-slate-500 font-normal">(${countLabel})</span> ${helpIcon('cppm', null, 'NAC help')}</h3>
+        <p class="text-xs ${recentHistoryAvailable && !d.recent_window_truncated && !sourceError ? 'text-slate-500' : 'text-amber-600'}">${sessionWindowNote}${truncationNote}</p></div>
         <div class="flex items-center gap-2">${addServerButtonHtml('cppm', 'ClearPass')}${limitSel}${sessRefreshBtn}</div>
-    </div>` + tableWrap(th(cols) + `<tbody>${rows || `<tr><td colspan="${cols.length}" class="px-4 py-6 text-center text-slate-500">No active sessions</td></tr>`}</tbody>`);
+    </div>` + tableWrap(th(cols) + `<tbody>${rows || `<tr><td colspan="${cols.length}" class="px-4 py-6 text-center text-slate-500">No authentication records available in this window</td></tr>`}</tbody>`);
 }
 
 // _renderCppmDevices() — the My Devices / Unknown Devices branch of
@@ -111,7 +141,7 @@ async function _renderCppmDevices(container, subMenu, th, tableWrap) {
     const r = await fetch(isUnknown ? `/api/cppm/unknown-devices${tparam}` : `/api/cppm/devices${tparam}`);
     if (!r.ok) {
         const e = await r.json().catch(() => ({}));
-        container.innerHTML = _cppmErrorPanel(r, e);
+        container.innerHTML = await _cppmErrorPanel(r, e);
         return;
     }
     const d = await r.json();
@@ -194,7 +224,7 @@ async function _renderCppmMyUsers(container, th, tableWrap) {
     const r = await fetch(`/api/cppm/my-users${tparam}`);
     if (!r.ok) {
         const e = await r.json().catch(() => ({}));
-        container.innerHTML = _cppmErrorPanel(r, e);
+        container.innerHTML = await _cppmErrorPanel(r, e);
         return;
     }
     const d = await r.json();

@@ -1140,8 +1140,12 @@ def register(app, hub, ctx):
             else:
                 details["opnsense"] = {"status": "OFFLINE", "rules": [], "dhcp": None}
 
-        # Look up the VM's ClearPass policy on the NAC spoke (needs an IP).
-        cppm_spoke = hub.get_spoke_by_type("nac")
+        # Look up the VM's ClearPass policy on the caller's NAC source (needs an
+        # IP). A tenant gets its own or the shared ClearPass, an admin with no
+        # tenant selected the global one, and never another tenant's appliance:
+        # the same IP can exist in several tenants' VRFs.
+        cppm_spoke = hub.get_cppm_spoke_for_scope(
+            access.request_effective_tenant(sess, request))
         if cppm_spoke and ip:
             cppm_res_raw = await hub.request_response(cppm_spoke, "CPPM_GET_POLICY_BY_IP", {"ip": ip})
             cppm_res = cppm_res_raw.get("payload", {}).get("data", {}) if isinstance(cppm_res_raw, dict) else {}

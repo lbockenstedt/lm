@@ -326,11 +326,14 @@ class SearchIndexMixin:
             _gs = self.get_hypervisor_spoke()
             hypervisor = _gs if access.spoke_is_unbound(self, _gs) else None
             directory = self.get_spoke_by_type("directory")
+        # Resolve NAC through the tenant-aware registry helper. The generic
+        # first-spoke pick could otherwise select another tenant's ClearPass.
+        nac = self.get_cppm_spoke_for_scope(resolved if scoped else None)
         # Leg command -> spoke for this scope.
         return {
             "NETBOX_SEARCH": self.get_spoke_by_type("ipam"),
             "SEARCH_VMS": hypervisor,
-            "SEARCH_SESSIONS": access.scoped_spoke_of_type(self, resolved if scoped else None, "nac"),
+            "SEARCH_SESSIONS": nac,
             "SEARCH_USERS": directory,
             "SEARCH_DHCP": access.scoped_spoke_of_type(self, resolved if scoped else None, "firewall"),
         }

@@ -179,8 +179,9 @@ class InstanceRelocateMixin:
                                    *, reason: str) -> None:
         """Common tail of a relocation, whichever pass decided to make one:
         write the new spoke_id, push its config (the same plumbing a normal
-        reconnect already uses), and best-effort unload the old spoke if
-        nothing else still references it."""
+        reconnect already uses; for NAC, every NAC spoke is re-sent its
+        config), and best-effort unload the old spoke if nothing else still
+        references it."""
         # Point the instance at the new spoke and mark state for saving.
         name = inst.get("name") or inst.get("id") or "?"
         inst["spoke_id"] = new_sub_id
@@ -188,9 +189,16 @@ class InstanceRelocateMixin:
         # Log the move prominently (it changes where the product runs).
         logger.warning("[instance-relocate] %s '%s': %s from %s to %s",
                        storage_key, name, reason, old_active, new_sub_id)
-        # Push the instance's config to the new spoke.
+        # Push the config: NAC re-sends every NAC spoke its config, the old
+        # one included (reconcile_nac_spokes), so the hub knows the old spoke
+        # no longer holds this ClearPass; other products push the new spoke.
+        # The record, tenant and ClearPass stay the same, so the cached NAC
+        # data stays valid.
         try:
-            await self.push_config_to_spoke(new_sub_id)
+            if storage_key == "nac_instances":
+                await self.reconcile_nac_spokes(drop_caches=False)
+            else:
+                await self.push_config_to_spoke(new_sub_id)
         except Exception as e:  # noqa: BLE001
             # A config push failure is logged; the next reconnect will push again.
             logger.warning("[instance-relocate] config push to %s failed: %s", new_sub_id, e)

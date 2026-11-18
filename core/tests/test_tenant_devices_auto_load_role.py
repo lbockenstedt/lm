@@ -7,6 +7,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import routes.tenant_devices as tenant_devices
+from hub_spoke_registry import SpokeRegistryMixin
+from main import LabManagerHub
+from messaging.protocol import Message, MessageHeader, MessagePayload
 from routes.role_pool import PRODUCT_ROLE
 
 
@@ -24,6 +27,10 @@ class _State:
             "approved_modules": {}, "global_config": {},
         }
 
+    def get_global_config(self):
+        """The saved global config the routes write to."""
+        return self.system_state.setdefault("global_config", {})
+
     def get_spoke_tenant(self, sid):
         return self.system_state.get("module_metadata", {}).get(sid, {}).get("tenant_id")
 
@@ -34,9 +41,17 @@ class _State:
 class _Hub:
     _CMD_UNAUTHENTICATED = "unauthenticated"
 
+    # The production NAC push, so ``pushed`` reflects what reconcile really sends.
+    get_all_spokes_by_type = SpokeRegistryMixin.get_all_spokes_by_type
+    push_nac_config = LabManagerHub.push_nac_config
+    reconcile_nac_spokes = LabManagerHub.reconcile_nac_spokes
+
     def __init__(self):
         self.state = _State()
         self.approved_modules = {}
+        self._nac_unconfigured_spokes = set()
+        # One NAC push per spoke at a time (push_nac_config).
+        self._nac_push_locks = {}
         self.spoke_module_types = {}
         self.active_connections = {}
         self.sent = []
@@ -61,10 +76,17 @@ class _Hub:
             self.active_connections[sub_id] = object()
             self.spoke_module_types[sub_id] = module_type
             self.state.system_state["module_metadata"][sub_id] = {"module_type": module_type}
+            # A role sub-spoke is approved through its parent agent's vouch.
+            self.approved_modules[sub_id] = True
             return {"payload": {"data": {
                 "status": "SUCCESS", "sub_spoke_id": sub_id, "module_type": module_type}}}
         if cmd == "UNLOAD_ROLE":
             self.unload_role_calls.append((spoke_id, payload))
+            return {"payload": {"data": {"status": "SUCCESS"}}}
+        if cmd == "UPDATE_CONFIG":
+            # The NAC push: recorded like send_to_spoke; CPPMSpoke answers SUCCESS.
+            self.sent.append(Message(header=MessageHeader(sender_id="hub", destination_id=spoke_id),
+                                     payload=MessagePayload(type=cmd, data=payload)))
             return {"payload": {"data": {"status": "SUCCESS"}}}
         raise AssertionError(f"unexpected command {cmd}")
 
@@ -101,6 +123,7 @@ def _connect_role_subspoke(hub, sid, module_type, tenant="acme"):
     tenant onto (auth is checked against the base agent's tenant instead)."""
     hub.active_connections[sid] = object()
     hub.spoke_module_types[sid] = module_type
+    hub.approved_modules[sid] = True
     hub.state.system_state["module_metadata"][sid] = {"tenant_id": tenant, "module_type": module_type}
 
 
@@ -241,3 +264,60 @@ def test_tenant_firewall_save_pushes_the_whole_list_and_clears_the_old_spoke():
     c.delete("/tenant/devices/firewalls/c")
     c.delete("/tenant/devices/firewalls/b")
     assert lists() == [("fwA", [])]
+
+
+def test_tenant_admin_cannot_unbind_a_record_the_reconnect_push_hands_out():
+    """A spoke-less NAC instance or nw device is pushed to every spoke of its
+    module with no record bound to it (main.py push_config_to_spoke), which
+    can be outside the tenant, so a tenant-admin may not unbind one. A Global
+    Admin may; a firewall, with no such fallback, can still be parked (see
+    the firewall test above)."""
+    c, hub, holder = _build()
+    _connect_role_subspoke(hub, "nacA", "nac")
+    _connect_role_subspoke(hub, "nwA", "nw")
+    gc = hub.state.system_state["global_config"]
+    gc["nac_instances"] = [{"id": "n1", "name": "CPPM", "spoke_id": "nacA", "tenant_id": "acme"}]
+    gc["nw_devices"] = [{"id": "d1", "name": "SW1", "spoke_id": "nwA", "tenant_id": "acme",
+                         "object_type": "cx_switch", "address": "10.0.0.9"}]
+    holder.current = _sess(tenants=["acme"], tenant_id="acme")
+    for route, key, spoke in (("nac-instances/n1", "nac_instances", "nacA"),
+                              ("nw-devices/d1", "nw_devices", "nwA")):
+        for unbound in ("", None):
+            r = c.put(f"/tenant/devices/{route}", json={"config": {"spoke_id": unbound}})
+            assert r.status_code == 403, (route, unbound)
+            assert gc[key][0]["spoke_id"] == spoke
+    # Other edits still go through.
+    assert c.put("/tenant/devices/nac-instances/n1", json={"config": {"name": "CPPM-2"}}).status_code == 200
+    # A Global Admin may unbind.
+    holder.current = {"user": {"user_id": "admin", "permissions": {"admin": True}}}
+    assert c.put("/tenant/devices/nac-instances/n1", json={"config": {"spoke_id": ""}}).status_code == 200
+    assert gc["nac_instances"][0]["spoke_id"] == ""
+
+
+def test_deleting_a_spokeless_nac_record_resends_the_spoke_that_held_it():
+    """A spoke-less NAC record configures every NAC spoke with no record of
+    its own, so deleting it re-sends those spokes their config. With
+    another spoke-less record left, the spoke is sent that one; with none,
+    the spoke keeps the deleted record's ClearPass, so it is marked
+    unconfigured and stale and gets no NAC reads or writes."""
+    from hub_spoke_registry import nac_spoke_stale
+
+    def updates(hub):
+        """The hosts sent to nacA in UPDATE_CONFIG messages."""
+        return [m.payload.data["host"] for m in hub.sent
+                if m.header.destination_id == "nacA" and m.payload.type == "UPDATE_CONFIG"]
+
+    for others, expect_host in (([{"id": "h2", "name": "Hub 2", "spoke_id": "", "host": "cp-h2"}], "cp-h2"),
+                                ([], None)):
+        c, hub, holder = _build()
+        _connect_role_subspoke(hub, "nacA", "nac")
+        gc = hub.state.system_state["global_config"]
+        gc["nac_instances"] = [{"id": "h1", "name": "Hub", "spoke_id": "", "host": "cp-h1"}, *others]
+        hub.state.system_state["nac_config_pushed"] = {"nacA": "h1@cp-h1"}
+        holder.current = {"user": {"user_id": "admin", "permissions": {"admin": True}}}
+        r = c.delete("/tenant/devices/nac-instances/h1")
+        assert r.status_code == 200
+        assert r.json()["pushed"] is False
+        assert updates(hub) == ([expect_host] if expect_host else [])
+        assert nac_spoke_stale(hub, "nacA") is (expect_host is None)
+        assert ("nacA" in hub._nac_unconfigured_spokes) is (expect_host is None)

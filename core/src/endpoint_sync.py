@@ -34,8 +34,8 @@ from typing import Any, Dict, List, Optional
 # Shared scheduling helpers: compute the next delay and run the periodic loop.
 from sync_loop import next_schedule_delay, run_sync_loop  # sibling leaf
 
-# Unwraps a spoke's reply envelope into its payload.
-from access import unwrap_spoke  # sibling leaf (no main/api back-import)
+# Unwraps a spoke's reply envelope; tells whether a tenant still uses shared NAC.
+from access import tenant_left_shared, unwrap_spoke  # sibling leaf (no main/api back-import)
 
 # Use the hub's main logger so sync lines (incl. [sync-error]) land in the hub log.
 logger = logging.getLogger("Hub")
@@ -159,6 +159,20 @@ class EndpointSyncMixin:
         # Clamp to 1..16.
         return max(1, min(16, n))
 
+    def _cppm_spoke_for_sync(self, tenant_id: str) -> Optional[str]:
+        """The ClearPass spoke endpoint and NAD sync write ``tenant_id``'s data
+        to: its own spoke (``get_cppm_spoke_for_tenant``), else the shared
+        ClearPass while the tenant still uses shared NAC. A tenant that has
+        its own ClearPass (``auto``) or whose shared access is denied
+        (``access.tenant_left_shared``) gets None while its own spoke is
+        offline or also serves other tenants, so its endpoints and NADs never
+        land in a shared ClearPass it no longer uses. Its NAC pages follow
+        the same rule (``get_cppm_spokes_for_tenant``)."""
+        own = self.get_cppm_spoke_for_tenant(tenant_id)
+        if own or tenant_left_shared(self, tenant_id, "nac"):
+            return own
+        return self.get_cppm_spoke_for_shared()
+
     async def sync_tenant_endpoints(self, tenant_id: str,
                                     allow_mass_remove: bool = False) -> Dict[str, Any]:
         """Pull this tenant's endpoints from the configured IPAM source, push to CPPM.
@@ -183,7 +197,7 @@ class EndpointSyncMixin:
         # own ClearPass appliance), this must push to THIS tenant's spoke, not
         # whichever nac spoke happened to connect first — see
         # get_cppm_spoke_for_tenant's docstring.
-        nac = self.get_cppm_spoke_for_tenant(tenant_id) or self.get_cppm_spoke_for_shared()
+        nac = self._cppm_spoke_for_sync(tenant_id)
         # Need both spokes connected and the CPPM spoke configured; otherwise record an error
         # status.
         if not ipam or not nac or nac in self._nac_unconfigured_spokes:
@@ -337,7 +351,8 @@ class EndpointSyncMixin:
         Called from the LM/IPAM mutation routes (e.g. add/update/delete a
         NetBox device or IP) so a change made through the hub propagates to
         ClearPass immediately instead of waiting for the next scheduled cycle.
-        No-op when the sync is disabled or no CPPM spoke is connected — the one
+        No-op when the sync is disabled or the tenant has no usable CPPM spoke
+        (``_cppm_spoke_for_sync``) — the one
         ``enabled`` toggle controls all automatic sync behavior. Safe to call
         from an async route (spawns a task on the running loop); silently does
         nothing if there is no running loop.
@@ -345,8 +360,8 @@ class EndpointSyncMixin:
         # Automatic sync is off: do nothing.
         if not self._endpoint_sync_cfg().get("enabled", False):
             return
-        # No usable CPPM spoke: do nothing.
-        nac = self.get_spoke_by_type("nac")
+        # The tenant's own CPPM spoke (or the shared one it still uses) is not usable: do nothing.
+        nac = self._cppm_spoke_for_sync(tenant_id)
         if not nac or nac in self._nac_unconfigured_spokes:
             return
         # Start the sync in the background; with no running loop, silently skip.
@@ -381,8 +396,8 @@ class EndpointSyncMixin:
             # No secret: nothing to register.
             if not (radius or tacacs):
                 return {"status": "skipped", "message": "no RADIUS/TACACS secret in the tenant's vault bucket"}
-            # The ClearPass spoke for this tenant (or the shared one).
-            nac = self.get_cppm_spoke_for_tenant(tenant_id) or self.get_cppm_spoke_for_shared()
+            # The ClearPass spoke for this tenant (or the shared one it still uses).
+            nac = self._cppm_spoke_for_sync(tenant_id)
             if not nac or nac in self._nac_unconfigured_spokes:
                 return {"status": "skipped", "message": "CPPM spoke not connected"}
             # The tenant's NetBox prefixes as network objects (invalid ones ignored).
@@ -434,11 +449,11 @@ class EndpointSyncMixin:
             # Read config and the active source fresh.
             cfg = self._endpoint_sync_cfg()
             se = self._endpoint_sync_source()
-            nac = self.get_spoke_by_type("nac")
-            # Enabled, IPAM spoke connected, CPPM spoke connected and configured.
+            # Enabled, IPAM spoke connected, and at least one usable CPPM spoke
+            # (each tenant's sync then picks its own: _cppm_spoke_for_sync).
             return bool(cfg.get("enabled", False)
                         and self.get_spoke_by_type(se.get("module_type", "ipam"))
-                        and nac and nac not in self._nac_unconfigured_spokes)
+                        and self.get_nac_usable_spokes())
 
         async def _body():
             # Fan tenants out concurrently with a bounded semaphore.

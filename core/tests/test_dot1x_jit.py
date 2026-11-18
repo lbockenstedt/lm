@@ -156,6 +156,21 @@ def test_clearpass_local_user(hub):
     assert hub.cmds("CPPM_DELETE_LOCAL_USER")[0][2] == {"user_id": "amy"}
 
 
+def test_clearpass_user_needs_the_tenants_own_clearpass(hub):
+    """ClearPass local users are keyed by username alone, so a tenant that
+    only uses the shared ClearPass gets a clear error instead of a user that
+    could overwrite another tenant's. A tenant whose own ClearPass is offline
+    still gets "no spoke connected"."""
+    hub.get_cppm_spoke_for_tenant = lambda tid: None
+    hub.get_cppm_spoke_for_scope = lambda tid: "nac1"
+    with pytest.raises(dj.Dot1xJitError, match="tenant's own ClearPass"):
+        run(dj.provision(hub, "t1", "cs1", "amy-3", "amy", "clearpass"))
+    assert not hub.cmds("CPPM_CREATE_LOCAL_USER") and dj.list_accounts(hub) == []
+    hub.get_cppm_spoke_for_scope = lambda tid: None
+    with pytest.raises(dj.Dot1xJitError, match="no spoke connected"):
+        run(dj.provision(hub, "t1", "cs1", "amy-3", "amy", "clearpass"))
+
+
 def test_entra_uses_cloud_nac_with_chosen_password(hub, monkeypatch):
     seen = {}
 

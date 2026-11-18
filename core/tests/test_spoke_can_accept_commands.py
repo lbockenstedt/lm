@@ -388,3 +388,19 @@ async def test_same_websocket_reinstall_is_noop():
     await hub._install_pending_connection("lm-opnsense", ws)
     assert hub.active_connections["lm-opnsense"] is ws
     assert ws.closed is None
+
+
+async def test_pending_install_marks_the_nac_config_unknown():
+    """A new pending connection is a new spoke process, which no longer
+    holds the NAC config the hub sent the last one. A ghost that leaves an
+    authenticated connection in the slot changes nothing."""
+    hub = _PendingHub()
+    hub.state = type("S", (), {"system_state": {"nac_config_pushed": {"lm-cppm": "rec@h"}},
+                               "_mark_dirty": lambda self: None})()
+    ledger = hub.state.system_state["nac_config_pushed"]
+    await hub._install_pending_connection("lm-cppm", _FakeWs())
+    assert ledger == {"lm-cppm": ""}
+    ledger["lm-cppm"] = "rec@h"
+    hub.spoke_authenticated["lm-cppm"] = True
+    await hub._install_pending_connection("lm-cppm", _FakeWs())
+    assert ledger == {"lm-cppm": "rec@h"}

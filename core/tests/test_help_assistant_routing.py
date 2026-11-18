@@ -156,6 +156,13 @@ def test_final_synthesis_disables_tools():
     assert '"tools": None, "system": system, "role": "final"' in src
 
 
+def test_admin_fallback_search_uses_safe_global_nac_resolver():
+    """The admin-only fallback must not pick a tenant-bound NAC spoke."""
+    src = _loop_source()
+    assert '(hub.get_cppm_spoke_for_global(), "SEARCH_SESSIONS")' in src
+    assert '(hub.get_spoke_by_type("nac"), "SEARCH_SESSIONS")' not in src
+
+
 # ── Ask AI latency + follow-up regressions ────────────────────────────────
 # These lock in the two behaviours that made Ask AI slow, both of which were
 # invisible in code review and only showed up when the prompt was measured.

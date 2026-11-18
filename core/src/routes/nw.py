@@ -3758,11 +3758,20 @@ def register(app, hub, ctx):
 
     def _instance_crud(route_prefix: str, storage_key: str, payload_fn=None,
                        legacy_key: str = None, legacy_to_instance=None,
-                       topology_sync=None, validate=None, present=None):
+                       topology_sync=None, validate=None, present=None,
+                       reconcile=None):
         """Register GET/POST/PUT/DELETE /setup/<route_prefix>[/id] for one
         multi-instance product, mirroring the firewalls CRUD. Each instance is
         a dict with an `id` and `spoke_id`; on add/update the config is pushed
         to the bound spoke when `payload_fn` is provided and the spoke is up.
+
+        ``reconcile(hub)`` (optional, NAC) replaces that per-record push: after
+        every saved add, update and delete it re-sends every spoke of the
+        product its config, because moving or deleting a record changes what
+        other spokes should hold too. It returns ``{spoke primary key: id of
+        the record it confirmed}``. ``pushed`` then says whether a spoke
+        confirmed the saved record's config, or on delete whether the
+        record's spoke confirmed a new config.
 
         ``legacy_key``/``legacy_to_instance`` perform a one-shot migration of a
         pre-multi-instance single config (e.g. global_config.cppm / .netbox)
@@ -3780,7 +3789,14 @@ def register(app, hub, ctx):
         op = route_prefix.replace("-", "_")
         # A product with nothing to push (DNS/DHCP, scan credentials, AD) is
         # save-only: a save is simply "ok", never "spoke not connected".
-        save_only = not payload_fn and not topology_sync
+        save_only = not payload_fn and not topology_sync and not reconcile
+
+        def _record_sent(record, sent) -> bool:
+            """Whether a spoke confirmed ``record``'s own config in
+            ``reconcile`` (``sent`` maps spoke primary key to the id of the
+            record it confirmed)."""
+            rid = str(record.get("id") or "")
+            return bool(rid) and rid in sent.values()
 
         @app.get(f"/setup/{route_prefix}", operation_id=f"list_{op}")
         async def list_instances(request: Request):
@@ -3808,6 +3824,16 @@ def register(app, hub, ctx):
                         global_config[legacy_key] = {}
                         hub.state.system_state["global_config"] = global_config
                         hub.state._mark_dirty()
+                        # NAC: the new record now configures the spokes that ran
+                        # on the legacy config, which stay stale until they
+                        # confirm it, so send it now rather than on the next
+                        # reconnect or save. A failed push only costs that wait.
+                        if reconcile:
+                            try:
+                                await reconcile(hub)
+                            except Exception as e:  # noqa: BLE001
+                                logger.warning("%s: push after the legacy migration failed: %s",
+                                               route_prefix, e)
             # Tenant-scope the LIST: a non-admin sees only instances in the shared
             # tenant or their own tenant(s); other-tenant / unassigned instances
             # are admin-only. Object-level filtering + the add/write gates are
@@ -3895,10 +3921,15 @@ def register(app, hub, ctx):
                 global_config[storage_key] = instances
                 hub.state.system_state["global_config"] = global_config
                 hub.state._mark_dirty()
+                # NAC: re-send every spoke its config from the saved list.
+                if reconcile:
+                    pushed = _record_sent(new_inst, await reconcile(hub))
                 # Report whether it was pushed.
                 status = "ok" if pushed or save_only else "partial_success"
                 msg = ("Instance added." if save_only else
-                       "Instance added and pushed to spoke." if pushed else "Instance added; spoke not connected.")
+                       "Instance added and pushed to spoke." if pushed else
+                       "Instance added; no spoke confirmed it." if reconcile else
+                       "Instance added; spoke not connected.")
                 return {"status": status, "message": msg, "pushed": pushed,
                         "instance": present(new_inst) if present else new_inst}
             # Pass HTTP errors through; anything else is logged and returned as a 500.
@@ -3957,6 +3988,9 @@ def register(app, hub, ctx):
                 global_config[storage_key] = instances
                 hub.state.system_state["global_config"] = global_config
                 hub.state._mark_dirty()
+                # NAC: re-send every spoke its config, the old one included.
+                if reconcile:
+                    pushed = _record_sent(updated, await reconcile(hub))
                 # Moved off a spoke: unload the role there if nothing else uses it.
                 if route_prefix in PRODUCT_ROLE and old_spoke and old_spoke != updated.get("spoke_id"):
                     role, _mt = PRODUCT_ROLE[route_prefix]
@@ -3966,7 +4000,9 @@ def register(app, hub, ctx):
                     return {"status": "ok", "message": "Instance saved.", "pushed": False}
                 if pushed:
                     return {"status": "ok", "message": "Instance updated and pushed to spoke.", "pushed": True}
-                return {"status": "partial_success", "message": "Instance saved; associated spoke not connected.", "pushed": False}
+                message = ("Instance saved; no spoke confirmed it." if reconcile
+                           else "Instance saved; associated spoke not connected.")
+                return {"status": "partial_success", "message": message, "pushed": False}
             # Pass HTTP errors through; anything else is logged and returned as a 500.
             except HTTPException:
                 raise
@@ -3976,7 +4012,9 @@ def register(app, hub, ctx):
 
         @app.delete(f"/setup/{route_prefix}/{{instance_id}}", operation_id=f"delete_{op}")
         async def delete_instance(instance_id: str):
-            """Delete an instance; the spoke keeps its last config until re-pushed."""
+            """Delete an instance. Its spoke keeps its last config until
+            re-pushed, except with ``reconcile`` (NAC), which re-sends every
+            spoke its config at once."""
             # Find the instance; unknown ids are a 404.
             global_config = hub.state.system_state.get("global_config", {})
             instances = list(global_config.get(storage_key, []))
@@ -3993,6 +4031,13 @@ def register(app, hub, ctx):
             global_config[storage_key] = instances
             hub.state.system_state["global_config"] = global_config
             hub.state._mark_dirty()
+            # NAC: re-send every spoke its config, even for a spoke-less record
+            # (a spoke with no record of its own may have held it).
+            # pushed: the record's spoke confirmed a new config.
+            if reconcile:
+                sent = await reconcile(hub)
+                spoke = deleted.get("spoke_id")
+                pushed = bool(spoke) and hub._primary_key(spoke) in sent
             # Unload the product's role on its spoke if nothing else uses it.
             spoke_id = (deleted or {}).get("spoke_id")
             if route_prefix in PRODUCT_ROLE and spoke_id:
@@ -4002,16 +4047,11 @@ def register(app, hub, ctx):
                     "pushed": pushed}
 
     # ClearPass (NAC) instances, migrated from the old single "cppm" config.
+    # Every save re-sends every NAC spoke its config (LabManagerHub.
+    # reconcile_nac_spokes), so the hub always knows what each spoke holds.
     _instance_crud(
         "nac-instances", "nac_instances",
-        lambda inst: {
-            "host": inst.get("host"),
-            "client_id": inst.get("client_id"),
-            "client_secret": inst.get("client_secret"),
-            "user": inst.get("user"),
-            "password": inst.get("password"),
-            "verify_ssl": inst.get("verify_ssl", True),
-        },
+        reconcile=lambda h: h.reconcile_nac_spokes(),
         legacy_key="cppm",
         legacy_to_instance=lambda c: {
             "id": str(uuid.uuid4()),

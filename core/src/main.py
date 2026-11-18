@@ -148,7 +148,10 @@ from hub_vnc_console import HubVncConsoleMixin
 from hub_cert_distribution import HubCertDistributionMixin
 from hub_identity import HubIdentityMixin
 from hub_bug_store import HubBugStoreMixin
-from hub_spoke_registry import SpokeRegistryMixin
+from hub_spoke_registry import (
+    SpokeRegistryMixin, nac_spoke_stale, instance_records_for_spoke, record_nac_push,
+    mark_nac_push_unknown, nac_legacy_record,
+)
 from hub_statuspage import StatusPageMixin
 
 # Shared logging config (lm/core/src/logging_setup.py): one source of truth for
@@ -227,10 +230,12 @@ _H4_DROP = object()
 # LabManagerHub.push_config_to_spoke so a spoke that (re)connects — e.g. after
 # the hourly self-update restart — gets its bound instance re-pushed instead
 # of coming up unconfigured (the legacy keys are cleared by the migration).
-# `project` mirrors the payload_fn the Save path sends, so on-connect push and
-# manual Save push identical shapes. Keyed by the module_key used in
-# push_config_to_spoke (the _type_to_key map: nac→"cppm", ipam→"netbox",
-# directory→"ldap").
+# For IPAM and Directory, `project` mirrors the payload_fn the Save path
+# sends, so on-connect push and manual Save push identical shapes. NAC has no
+# separate Save payload: every NAC save, move and delete, and every reconnect,
+# goes through LabManagerHub.push_nac_config, which uses the "cppm" projection
+# below. Keyed by the module_key used in push_config_to_spoke (the
+# _type_to_key map: nac→"cppm", ipam→"netbox", directory→"ldap").
 # Per-module instance list key plus a projection to the spoke payload.
 _INSTANCE_CONFIG_SOURCES = {
     "cppm": ("nac_instances", lambda i: {
@@ -239,13 +244,11 @@ _INSTANCE_CONFIG_SOURCES = {
         "client_secret": i.get("client_secret"),
         "user": i.get("user"),
         "password": i.get("password"),
-        # MUST mirror _NAC_PAYLOAD (tenant_devices.py): the reconnect push runs
-        # through THIS projection, so dropping verify_ssl here re-enables TLS
-        # verification on every spoke restart (the client is reconstructed at
-        # the secure default) — silently defeating the per-instance "allow
-        # self-signed" toggle until the operator re-saves. Keep the two in sync.
-        # Coerce to a real bool (mirror tenant_devices._as_bool) so a string
-        # "false"/"0" can't be pushed and read as truthy by the spoke.
+        # Always sent: a spoke whose config lacks verify_ssl is rebuilt at the
+        # secure default, which would undo the per-instance "allow self-signed"
+        # toggle on every spoke restart. Coerced to a real bool, matching the
+        # cppm spoke's client._as_bool, so a string "false"/"0" is never read
+        # as truthy.
         "verify_ssl": (lambda v: True if v is None else (
             v.strip().lower() not in {"0", "false", "no", "off", "none", "null", ""}
             if isinstance(v, str) else bool(v)))(i.get("verify_ssl")),
@@ -1162,15 +1165,20 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         self._clone_watch: Dict[str, dict] = {}
         # NAC (CPPM) spokes that are CONNECTED but UNCONFIGURED — i.e. no
         # nac_instances entry is bound to this spoke (or the bound instance has
-        # no 'host'), so push_config_to_spoke never delivered an UPDATE_CONFIG
+        # no 'host'), so push_nac_config never delivered an UPDATE_CONFIG
         # with a usable host and the spoke's CPPMClient.host stays "". Querying
         # it every cycle returns "CPPM host not configured" forever, which the
         # endpoint_sync / realtime_ipam_nac_sync / cache_refresh loops would
         # otherwise spam into the hub log every cycle. Set in
-        # push_config_to_spoke (the single point the gap is detectable); cleared
-        # when a host-bearing config is pushed; read by the three nac query
+        # push_nac_config (the single point the gap is detectable); cleared
+        # when a host-bearing config is pushed; read by the nac query
         # loops to skip the spoke — one WARN at push time, not per-cycle INFO.
         self._nac_unconfigured_spokes: Set[str] = set()
+        # NAC config pushes: one lock per spoke primary key so pushes to a
+        # spoke run one at a time (push_nac_config), and strong refs for the
+        # connect-time push tasks (_push_nac_config_on_connect).
+        self._nac_push_locks: Dict[str, asyncio.Lock] = {}
+        self._nac_push_tasks: set = set()
         # { spoke_id: ConnectionTelemetry }
         self.spoke_telemetry: Dict[str, Dict[str, Any]] = {}
         # { spoke_id: TokenBucket } for rate limiting non-heartbeat messages
@@ -2777,7 +2785,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 await prior_ws.close(1008, "Replaced by a newer connection")
             except Exception:
                 pass
-        # Install the new connection with no key id yet.
+        # Install the new connection with no key id yet. A new connection is
+        # a new spoke process, which no longer holds the NAC config the hub
+        # sent the last one (mark_nac_push_unknown).
+        mark_nac_push_unknown(self, spoke_id)
         self.active_connections[pk] = websocket
         self.active_connection_key_ids[pk] = None
 
@@ -3633,9 +3644,19 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # BEFORE the generic instance branch (ldap is also a key there).
                 # Directory spoke: build the merged LDAP and Entra config.
                 config = self._ldap_config_for_spoke(spoke_id)
+            elif module_key == 'cppm':
+                # ClearPass (NAC): push_nac_config sends the config and
+                # records it once the spoke confirms. It runs as a task,
+                # because the connect path that calls this cannot wait for
+                # a reply. Handled BEFORE the generic instance branch (cppm
+                # is also a key there).
+                task = asyncio.create_task(self._push_nac_config_on_connect(spoke_id))
+                self._nac_push_tasks.add(task)
+                task.add_done_callback(self._nac_push_tasks.discard)
+                return
             elif module_key in _INSTANCE_CONFIG_SOURCES:
-                # NAC / IPAM / Directory migrated to multi-instance storage
-                # (nac_instances / ipam_instances / ldap_instances). The legacy
+                # IPAM migrated to multi-instance storage (ipam_instances), as
+                # NAC and Directory did (handled above). The legacy
                 # single-config keys (cppm/netbox/ldap) are cleared by that
                 # migration, so reading them here — as this used to — yields an
                 # empty dict and the spoke comes up UNCONFIGURED on every
@@ -3668,16 +3689,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # stops matching the moment the two sides are on different
                 # identity generations, and with the "never guess" fallback
                 # above that means NO config at all (not a wrong spoke's).
-                # Find the instance bound to this spoke, else an unbound one.
+                # Find the instance bound to this spoke, else an unbound one
+                # (the same records the NAC resolvers read).
                 storage_key, project = _INSTANCE_CONFIG_SOURCES[module_key]
                 gc = self.state.get_global_config()
                 instances = gc.get(storage_key, []) or []
-                inst = next((x for x in instances
-                             if isinstance(x, dict)
-                             and self._primary_key(x.get("spoke_id") or "") == pk), None)
-                if inst is None:
-                    inst = next((x for x in instances
-                                 if isinstance(x, dict) and not x.get("spoke_id")), None)
+                records = instance_records_for_spoke(self, instances, spoke_id)
+                inst = records[0] if records else None
                 # Overlay vault secrets and project the instance into the payload.
                 if inst is not None:
                     import instance_vault as _instance_vault
@@ -3700,35 +3718,6 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # Any other module: use its global config section.
                 config = self.state.get_global_config().get(module_key, {})
 
-            # NAC/CPPM config-delivery gate. A connected-but-unconfigured CPPM
-            # spoke (CPPMClient.host == "") returns "CPPM host not configured"
-            # for EVERY query, and the three nac query loops would spam that
-            # into the hub log every cycle. The gap is detectable right here —
-            # the resolved instance has no usable 'host' (or no instance is
-            # bound at all) — so mark the spoke unconfigured so those loops skip
-            # it (one WARN here, not per-cycle INFO) and skip pushing a hostless
-            # UPDATE_CONFIG (which would only keep the spoke returning the same
-            # error). Clear the flag only when a host-bearing config is pushed.
-            if module_key == "cppm":
-                # A CPPM config without a host is not pushed; warn once.
-                cppm_host = (config or {}).get("host") if isinstance(config, dict) else None
-                if not cppm_host:
-                    if spoke_id not in self._nac_unconfigured_spokes:
-                        logger.warning(
-                            "CPPM not configured for %s — no nac_instances entry "
-                            "bound to this spoke, or the bound instance has no "
-                            "'host'. NAC queries (endpoint sync, realtime NAC, "
-                            "dashboard cache) will be skipped until an instance "
-                            "with a host is bound in Setup → CPPM/NAC.",
-                            spoke_id)
-                        self._nac_unconfigured_spokes.add(spoke_id)
-                    return  # nothing useful to push — hostless config would keep
-                            # the spoke returning "CPPM host not configured"
-                # A usable host is available — clear any prior unconfigured flag
-                # so the query loops resume on the next cycle.
-                # Configured now: clear the warned flag.
-                self._nac_unconfigured_spokes.discard(spoke_id)
-
             # Nothing to push.
             if not config:
                 return
@@ -3748,6 +3737,177 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         except Exception as e:
             # Log any failure in the push.
             logger.error(f"Failed to push config to {spoke_id}: {e}")
+
+    async def push_nac_config(self, spoke_id: str) -> Optional[str]:
+        """Send NAC spoke ``spoke_id`` its ClearPass config (UPDATE_CONFIG) and,
+        once the spoke confirms it, remember what the spoke holds. Returns the
+        id of the NAC instance record whose config the spoke confirmed
+        (``LEGACY_NAC_RECORD_ID`` for the legacy single config), or None when
+        no config was confirmed.
+
+        The spoke gets the first NAC instance record that configures it
+        (``instance_records_for_spoke``), with vault secrets resolved and
+        projected by ``_INSTANCE_CONFIG_SOURCES["cppm"]``. With no NAC
+        instance at all it gets the legacy ``global_config["cppm"]``, which
+        the push ledger tracks like the hub's own record
+        (``hub_spoke_registry.nac_legacy_record``), and when every record is
+        bound to another spoke it gets nothing.
+
+        A config without a host is never sent: the spoke would only keep
+        answering "CPPM host not configured", which the three NAC query loops
+        (endpoint sync, realtime NAC, dashboard cache) would log every cycle.
+        The spoke is marked unconfigured instead, so those loops skip it, with
+        one warning. It still holds the last config it was sent, so a spoke
+        the hub had sent a record's config is now stale
+        (``hub_spoke_registry.nac_spoke_stale``) and gets no NAC reads or
+        writes until a NAC instance is bound to it again.
+
+        NAC reads and writes are routed by what each spoke holds, so a push
+        is recorded only when the spoke answers SUCCESS and has not
+        reconnected meanwhile (a new connection is a new process). A spoke
+        can refuse the command (its command queue is full, or the command
+        expired there) or not answer, and then still holds its old
+        ClearPass. While a different config is on its way the spoke counts
+        as stale (``mark_nac_push_unknown``). Pushes to one spoke run one at
+        a time (``_nac_push_locks``) and each reads the config inside the
+        lock, so an older config can never reach the spoke after a newer one.
+        """
+        # One push per spoke at a time, each sending the newest config.
+        pk = self._primary_key(spoke_id)
+        lock = self._nac_push_locks.setdefault(pk, asyncio.Lock())
+        async with lock:
+            # The config this spoke should hold now.
+            storage_key, project = _INSTANCE_CONFIG_SOURCES["cppm"]
+            gc = self.state.get_global_config()
+            instances = gc.get(storage_key, []) or []
+            records = instance_records_for_spoke(self, instances, spoke_id)
+            # A copy: the key recorded below must be the one sent, even if
+            # the stored record is edited in place while the spoke answers.
+            record = dict(records[0]) if records else None
+            if record is not None:
+                import instance_vault as _instance_vault
+                config = project(await _instance_vault.overlay(self, record, storage_key))
+            elif not instances:
+                # Pre-multi-instance deployment: the legacy single config,
+                # tracked in the push ledger as the hub's own record.
+                config = gc.get("cppm", {})
+                record = nac_legacy_record(gc)
+            else:
+                # Every record belongs to another spoke.
+                config = {}
+            # No host: send nothing, and say so once.
+            if not (isinstance(config, dict) and str(config.get("host") or "").strip()):
+                if spoke_id not in self._nac_unconfigured_spokes:
+                    logger.warning(
+                        "CPPM not configured for %s — no nac_instances entry "
+                        "bound to this spoke, or the bound instance has no "
+                        "'host'. NAC queries (endpoint sync, realtime NAC, "
+                        "dashboard cache) will be skipped until an instance "
+                        "with a host is bound in Setup → CPPM/NAC.", spoke_id)
+                    if nac_spoke_stale(self, spoke_id):
+                        logger.warning(
+                            "NAC spoke %s may still hold the ClearPass of a NAC "
+                            "instance that moved or was deleted; it answers no NAC "
+                            "reads or writes until a NAC instance is bound to it in "
+                            "Setup → NAC.", spoke_id)
+                    self._nac_unconfigured_spokes.add(spoke_id)
+                return None
+            # Configured: the query loops may use it again.
+            self._nac_unconfigured_spokes.discard(spoke_id)
+            # Stale until the spoke confirms, unless it already holds this config.
+            mark_nac_push_unknown(self, spoke_id, sending=record)
+            # Send it and wait for the spoke's answer.
+            import access as _access
+            websocket = self.active_connections.get(pk)
+            reply = _access.unwrap_spoke(await self.request_response(
+                spoke_id, "UPDATE_CONFIG", config, timeout=20))
+            if not (isinstance(reply, dict) and reply.get("status") == "SUCCESS"):
+                logger.warning(
+                    "NAC spoke %s did not confirm its ClearPass config: %s", spoke_id,
+                    reply.get("message") if isinstance(reply, dict) else reply)
+                return None
+            # A connection that replaced it meanwhile is a new process that
+            # holds only its .env; its own connect push sends it the config.
+            if self.active_connections.get(pk) is not websocket:
+                logger.warning(
+                    "NAC spoke %s reconnected before it confirmed its ClearPass "
+                    "config; the new connection is sent it again", spoke_id)
+                return None
+            # Confirmed: remember what the spoke now holds.
+            record_nac_push(self, spoke_id, record)
+            logger.info(f"Pushed cppm config to {spoke_id}")
+            return str((record or {}).get("id") or "")
+
+    async def _push_nac_config_on_connect(self, spoke_id: str) -> None:
+        """Push NAC spoke ``spoke_id`` its ClearPass config after it connects
+        or is approved, and try again while the spoke stays stale.
+
+        Runs as a task (``push_config_to_spoke``): the connect path cannot
+        wait for a reply, because the hub reads a spoke's replies only once
+        its message loop has started (see ``_push_zero_touch_session_key``).
+        A push the spoke does not confirm is tried again after 30 s and after
+        2 more minutes, while the same connection is up and the spoke is
+        still stale. After that the next reconnect or NAC save pushes again.
+        """
+        pk = self._primary_key(spoke_id)
+        websocket = self.active_connections.get(pk)
+        for delay in (0, 30, 120):
+            # Before a retry: stop when the connection changed or the spoke
+            # holds its config by now (a NAC save may have pushed it).
+            if delay:
+                await asyncio.sleep(delay)
+                if self.active_connections.get(pk) is not websocket or not nac_spoke_stale(self, spoke_id):
+                    return
+            # Push; a failure is logged and tried again.
+            try:
+                await self.push_nac_config(spoke_id)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Failed to push cppm config to {spoke_id}: {e}")
+            # Done once the spoke holds the config it should.
+            if not nac_spoke_stale(self, spoke_id):
+                return
+
+    async def reconcile_nac_spokes(self, *, drop_caches: bool = True) -> dict:
+        """Re-send every connected, approved NAC spoke its ClearPass config
+        (``push_nac_config``) after a NAC instance record is added, changed,
+        moved or deleted. A move or delete changes what other spokes should
+        hold too, not only the record's own spoke. The spokes are sent their
+        configs at the same time (at most 8 at once) and each reply is
+        awaited; a spoke that fails is logged and skipped. Returns
+        ``{spoke primary key: id of the record it confirmed}`` for the spokes
+        that confirmed a config (``LEGACY_NAC_RECORD_ID`` for the legacy
+        single config, which the legacy ``POST /setup/cppm-config`` sends
+        this way too).
+
+        Such a change can change which ClearPass answers for a tenant, so
+        the cached NAC lists are dropped too (``routes.cppm.drop_nac_caches``),
+        once the spokes have answered. A failover or rebalance keeps the
+        record, its tenant and its ClearPass, so instance relocation passes
+        ``drop_caches=False``: it runs every 30 s and must not reset the
+        Access Tracker query floor."""
+        # Approved NAC spokes only.
+        sids = [sid for sid in sorted(self.get_all_spokes_by_type("nac") or [])
+                if self.approved_modules.get(sid, False)]
+        sem = asyncio.Semaphore(8)
+
+        async def _push(sid):
+            """One spoke's push; at most 8 run at once."""
+            async with sem:
+                return await self.push_nac_config(sid)
+
+        # Push to all of them, then collect the confirmed record ids.
+        results = await asyncio.gather(*(_push(sid) for sid in sids), return_exceptions=True)
+        sent = {}
+        for sid, record_id in zip(sids, results):
+            if isinstance(record_id, BaseException):
+                logger.warning(f"Failed to push cppm config to {sid}: {record_id}")
+            elif record_id is not None:
+                sent[self._primary_key(sid)] = record_id
+        # Forget data read under the old ownership.
+        if drop_caches:
+            from routes.cppm import drop_nac_caches  # lazy: routes import the hub's api
+            drop_nac_caches(self)
+        return sent
 
     async def opn_config_for_spoke(self, spoke_id: str) -> Dict[str, Any]:
         """The UPDATE_CONFIG payload for an OPNsense spoke: its first bound
@@ -4423,6 +4583,29 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             "spokes_broadcast": spoke_count,
         }
 
+    def bind_spoke_tenant(self, spoke_id: str, tenant_id: str) -> None:
+        """Bind a spoke to a tenant (``state.set_spoke_tenant``) under the id given.
+
+        A NAC spoke that no NAC record configures serves the tenant it is
+        bound to (``_nac_spoke_serves_only``, ``get_cppm_spoke_for_tenant``,
+        ``_unbound_cppm_spoke``), so a new binding can give its ClearPass a
+        new owner. The cached NAC lists were read for the old owner, so they
+        are dropped (``routes.cppm.drop_nac_caches``). Re-binding to the same
+        tenant, which every PSK reconnect does, keeps them."""
+        # Store the new binding, remembering the old one.
+        old = self.state.get_spoke_tenant(spoke_id)
+        self.state.set_spoke_tenant(spoke_id, tenant_id)
+        # Same tenant (case and blank insensitive): nothing moved.
+        import access as _access
+        if _access.same_tenant(old, tenant_id):
+            return
+        # A NAC spoke moved (live type, else the type saved at registration).
+        meta = (self.state.system_state.get("module_metadata") or {}).get(spoke_id) or {}
+        module_type = self.spoke_module_types.get(self._primary_key(spoke_id)) or meta.get("module_type")
+        if module_type == "nac":
+            from routes.cppm import drop_nac_caches  # lazy: routes import the hub's api
+            drop_nac_caches(self)
+
     async def approve_and_bind_spoke(self, spoke_id: str, tenant_id: str) -> None:
         """Approve a spoke, bind it to a tenant, persist, and — if it is
         currently connected — push it the session key + APPROVED + config so it
@@ -4433,7 +4616,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Approve and bind in state, then persist immediately.
         pk = self._primary_key(spoke_id)
         self.state.register_module(pk, approved=True)
-        self.state.set_spoke_tenant(pk, tenant_id)
+        self.bind_spoke_tenant(pk, tenant_id)
         self.approved_modules[pk] = True
         await self.state.save_state_now()
         # If connected, provision a fresh session key, approve and push config.
@@ -5407,7 +5590,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Approve, bind and persist the spoke.
         pk = self._primary_key(spoke_id)
         self.state.register_module(pk, approved=True)
-        self.state.set_spoke_tenant(pk, tenant_hint)
+        self.bind_spoke_tenant(pk, tenant_hint)
         self.approved_modules[pk] = True
         await self.state.save_state_now()
         # Log and record the self-provision.
@@ -6415,7 +6598,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 spoke_id, "replaced_connection",
                 "newer connection took over (previous was unresponsive)",
             )
-            # Install the new socket and arm its liveness probe.
+            # Install the new socket and arm its liveness probe. The new
+            # process no longer holds the NAC config the hub sent the old one.
+            mark_nac_push_unknown(self, spoke_id)
             self.active_connections[pk] = websocket
             self.active_connection_key_ids[pk] = key_id
             self._arm_liveness_probe(spoke_id, websocket)
@@ -6425,7 +6610,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             except Exception:
                 pass
             return True
-        # Slot was free: install the new socket.
+        # Slot was free: install the new socket. A new process does not hold
+        # the NAC config the hub sent an earlier one.
+        mark_nac_push_unknown(self, spoke_id)
         self.active_connections[pk] = websocket
         self.active_connection_key_ids[pk] = key_id
         self._arm_liveness_probe(spoke_id, websocket)
@@ -10633,14 +10820,21 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             })
 
         # Prune groups that no longer exist in NetBox.
+        pruned = False
         for tid, cfg in list(self.state.tenant_state.get("tenants", {}).items()):
             if cfg.get("is_tenant_group") and tid not in seen:
                 self.state.delete_tenant(tid)
+                pruned = True
                 logger.info("Tenant sync: pruned tenant group %s (gone from NetBox)", tid)
 
         # Persist, refresh shared-tenant access and log.
         self.state._mark_dirty()
         _access.refresh_shared_tenant(self)
+        # A pruned group may have been the shared tenant, so drop the cached
+        # NAC lists, as deleting a tenant in Setup does.
+        if pruned:
+            from routes.cppm import drop_nac_caches  # lazy: routes import the hub's api
+            drop_nac_caches(self)
         logger.debug("Tenant sync: %d tenant group(s) from NetBox", len(groups))
 
     # ── IPAM → CPPM endpoint sync → core/src/endpoint_sync.py (EndpointSyncMixin) ──

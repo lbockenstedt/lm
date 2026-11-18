@@ -12,6 +12,7 @@ import types
 import time
 
 import search_index as si
+from hub_spoke_registry import SpokeRegistryMixin
 from search_index import (
     SearchIndexMixin,
     search_result_blob,
@@ -199,6 +200,17 @@ class _WarmHub(_FakeHub):
     def get_directory_spoke_for_tenant(self, resolved):
         return "spoke-dir"
 
+    def get_cppm_spoke_for_global(self):
+        """Return the fixture's explicitly safe global NAC source."""
+        return "spoke-nac-global"
+
+    def get_cppm_spokes_for_tenant(self, resolved):
+        """Return the fixture's tenant-visible NAC source."""
+        return [f"spoke-nac-{resolved}"]
+
+    # The real scope pick, over the two fixture sources above.
+    get_cppm_spoke_for_scope = SpokeRegistryMixin.get_cppm_spoke_for_scope
+
 
 def test_warm_scope_populates_every_leg():
     hub = _WarmHub(response={"payload": {"data": {"results": [{"name": "dev1"}]}}})
@@ -208,6 +220,20 @@ def test_warm_scope_populates_every_leg():
     for cmd in ("NETBOX_SEARCH", "SEARCH_VMS", "SEARCH_SESSIONS",
                 "SEARCH_USERS", "SEARCH_DHCP"):
         assert hub.search_index_leg_items(cmd, "k1") == [{"name": "dev1"}]
+
+
+def test_search_spoke_resolution_uses_safe_global_nac_source():
+    """Unscoped search never gets NAC from the generic first-spoke fallback."""
+    hub = _WarmHub()
+    legs = hub._resolve_search_spokes("default", is_admin=True)
+    assert legs["SEARCH_SESSIONS"] == "spoke-nac-global"
+
+
+def test_search_spoke_resolution_uses_tenant_visible_nac_source():
+    """A scoped search resolves its tenant's own/shared NAC spoke."""
+    hub = _WarmHub()
+    legs = hub._resolve_search_spokes("acme", is_admin=False)
+    assert legs["SEARCH_SESSIONS"] == "spoke-nac-acme"
 
 
 def test_warm_scope_noop_unknown_scope():

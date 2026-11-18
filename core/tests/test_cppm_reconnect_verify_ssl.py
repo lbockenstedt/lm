@@ -1,20 +1,16 @@
-"""Regression: the spoke-reconnect config projection must carry ``verify_ssl``.
+"""Regression: the spoke config projection must carry ``verify_ssl``.
 
-There are TWO code paths that project a stored NAC/IPAM instance into the
-``UPDATE_CONFIG`` payload sent to a spoke:
+``main._INSTANCE_CONFIG_SOURCES`` projects a stored NAC/IPAM instance into the
+``UPDATE_CONFIG`` payload sent to a spoke. For NAC it is the only projection:
+every Setup → NAC save, move and delete, the tenant-admin device routes and
+every spoke (re)connect send it through ``LabManagerHub.push_nac_config``.
 
-* the **Save** path — ``routes.tenant_devices._NAC_PAYLOAD`` / ``_IPAM_PAYLOAD``
-  (runs when the operator saves the instance form); and
-* the **reconnect** path — ``main._INSTANCE_CONFIG_SOURCES`` (runs from
-  ``push_config_to_spoke`` on every spoke (re)connect, e.g. the hourly
-  self-update restart).
-
-These MUST stay in sync. A prior bug dropped ``verify_ssl`` from the reconnect
-projection only: saving a self-signed ClearPass with "allow untrusted" worked
-immediately, but the very next spoke restart re-pushed a config WITHOUT
-``verify_ssl`` — and because the spoke reconstructs its client at the secure
-default (``verify=True``) on restart, TLS verification silently switched back on
-and every ``/api/session`` query failed ``CERTIFICATE_VERIFY_FAILED``.
+A prior bug dropped ``verify_ssl`` from the reconnect projection only: saving a
+self-signed ClearPass with "allow untrusted" worked immediately, but the very
+next spoke restart re-pushed a config WITHOUT ``verify_ssl`` — and because the
+spoke reconstructs its client at the secure default (``verify=True``) on
+restart, TLS verification silently switched back on and every
+``/api/session`` query failed ``CERTIFICATE_VERIFY_FAILED``.
 """
 import main
 
@@ -35,14 +31,14 @@ def test_cppm_reconnect_projection_forwards_verify_ssl_false():
 
 def test_cppm_reconnect_projection_defaults_verify_ssl_true_when_absent():
     out = _project("cppm", {"host": "172.16.1.16"})
-    assert out["verify_ssl"] is True  # secure default, mirrors _NAC_PAYLOAD
+    assert out["verify_ssl"] is True  # secure default
 
 
-def test_cppm_reconnect_projection_matches_nac_payload_keys():
-    from routes.tenant_devices import _NAC_PAYLOAD
+def test_cppm_projection_carries_every_connection_field():
     rec = {"host": "h", "client_id": "c", "client_secret": "s",
            "user": "u", "password": "p", "verify_ssl": False}
-    assert set(_project("cppm", rec)) == set(_NAC_PAYLOAD(rec))
+    assert set(_project("cppm", rec)) == {
+        "host", "client_id", "client_secret", "user", "password", "verify_ssl"}
 
 
 def test_netbox_reconnect_projection_forwards_verify_ssl():
@@ -53,7 +49,7 @@ def test_netbox_reconnect_projection_forwards_verify_ssl():
 
 # ── string-valued verify_ssl coercion (bool("false") is True trap) ───────────
 # verify_ssl can be persisted as a STRING ("false"/"0") — older UI, hand-edited
-# config, or a stringifying relay. Both projections must coerce to a real bool
+# config, or a stringifying relay. The projection must coerce to a real bool
 # so a truthy string can't be pushed and re-enable TLS verify on the spoke.
 def test_cppm_reconnect_projection_coerces_string_false():
     for falsey in ("false", "False", "0", "no", "off"):
@@ -64,16 +60,3 @@ def test_cppm_reconnect_projection_coerces_string_false():
 def test_cppm_reconnect_projection_coerces_string_true():
     out = _project("cppm", {"host": "172.16.1.16", "verify_ssl": "true"})
     assert out["verify_ssl"] is True
-
-
-def test_nac_payload_coerces_string_false():
-    from routes.tenant_devices import _NAC_PAYLOAD
-    assert _NAC_PAYLOAD({"host": "h", "verify_ssl": "false"})["verify_ssl"] is False
-    assert _NAC_PAYLOAD({"host": "h", "verify_ssl": "0"})["verify_ssl"] is False
-
-
-def test_save_and_reconnect_projections_agree_on_string_false():
-    from routes.tenant_devices import _NAC_PAYLOAD
-    rec = {"host": "h", "client_id": "c", "client_secret": "s",
-           "user": "u", "password": "p", "verify_ssl": "false"}
-    assert _NAC_PAYLOAD(rec)["verify_ssl"] == _project("cppm", rec)["verify_ssl"] is False

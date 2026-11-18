@@ -19,6 +19,9 @@ HOW A PAGE READ WORKS  (``cache_read``)
        ``INVALIDATED_WAIT_S`` for the refresh so the user sees their own
        change; if the spoke is slow, serve the old data badged stale.
     Concurrent reads of the same entry share ONE fetch (single-flight).
+    A job with a hard ``min_interval_s`` floor starts no fetch within that
+    floor of its last attempt, failed ones included: cases 1 and 3 serve the
+    cached data, and case 2 raises ``CacheFloorError`` with the seconds left.
 
 WHO KEEPS IT FRESH  (``run_cache_refresher_loop``)
     A background loop ticks every ``TICK_S``. It refreshes:
@@ -52,9 +55,10 @@ Audience: Hub developers.
 
 from __future__ import annotations
 
-# asyncio; logging; os paths; time; zlib CRC jitter; dataclasses; type hints.
+# asyncio; logging; ceil for retry times; os paths; time; zlib CRC jitter; dataclasses; type hints.
 import asyncio
 import logging
+import math
 import os
 import time
 import zlib
@@ -105,9 +109,33 @@ class CacheJob:
     from_feed: bool = False
     detail: bool = False
     # Slow-moving, expensive sources set this so a viewer being logged in
-    # doesn't refresh them faster than every ``refresh_s`` seconds.
+    # doesn't refresh them faster than every ``refresh_s`` seconds. It sets
+    # only the background cadence: a login kick, or ``cache_refresh()`` after
+    # a write, still refreshes at once (e.g. Entra after a group change).
     refresh_s: float = 0.0
+    # Opt-in hard floor between fetch attempts, for sources where every query
+    # is expensive on the vendor side (the 24-hour Access Tracker history
+    # pages through ClearPass). Unlike ``refresh_s`` it also holds for page
+    # reads, login kicks and ``cache_refresh()``, and it counts failed
+    # attempts too: inside the floor a read serves what is cached, or raises
+    # ``CacheFloorError`` when nothing is. Only ``cache_fetch_now`` and an
+    # admin ``cache_purge`` (which deletes the entry) get past it.
+    min_interval_s: float = 0.0
     _jitter: float = field(default=0.0, repr=False)
+
+
+class CacheFloorError(RuntimeError):
+    """A read found nothing cached, and the job's hard ``min_interval_s``
+    floor holds back another fetch because the last one failed recently.
+    ``retry_after`` is the whole seconds left on the floor; ``error`` is the
+    last failure."""
+
+    def __init__(self, retry_after: float, error: str):
+        """Keep the wait (rounded up) and the last failure for the reply."""
+        self.retry_after = math.ceil(retry_after)
+        self.error = error
+        super().__init__("The last query failed (%s); the next attempt is in %d s."
+                         % (error or "unknown error", self.retry_after))
 
 
 def _norm_tenants(tenants) -> Optional[Tuple[str, ...]]:
@@ -155,6 +183,13 @@ class WarmCacheMixin:
         self._cache_feeds: Dict[str, Callable[[Any], Iterable[CacheJob]]] = {}
         self._cache_read_jobs: Dict[Tuple[str, str], CacheJob] = {}
         self._cache_inflight: Dict[Tuple[str, str], asyncio.Task] = {}
+        # Fetches that warm_drop detached while they ran: they finish but
+        # store nothing.
+        self._cache_dropped: set = set()
+        # Failed attempts of floored jobs that have no entry to record them
+        # on: (ns, key) → (time, error, tenants). Cleared by the next success
+        # or a purge.
+        self._cache_failed: Dict[Tuple[str, str], Tuple[float, str, Tuple[str, ...]]] = {}
         self._cache_lane_sems: Dict[str, asyncio.Semaphore] = {}
         self._cache_global_sem: Optional[asyncio.Semaphore] = None
         # Tenant activity, kicks, wake event and timers.
@@ -272,22 +307,48 @@ class WarmCacheMixin:
         self.warm_cache.setdefault(namespace, {})[key] = entry
         self._warm_cache_file.schedule_save(namespace)
 
-    def warm_drop(self, ns_prefix: str, key_prefixes: tuple) -> int:
+    def warm_drop(self, ns_prefix: str, key_prefixes: tuple, *, exact: bool = False) -> int:
         """Delete entries (namespace starts ``ns_prefix``, key starts with any of
-        ``key_prefixes``). Returns the count dropped."""
-        # Drop matching keys and their read jobs from matching namespaces; save each changed one.
+        ``key_prefixes``, or equals one with ``exact``). Returns the count dropped.
+
+        The next read of a dropped key starts over, so everything else kept
+        for it goes too: its read job, the floor left by a failed fetch, and
+        any fetch still running. That fetch is detached: it finishes but
+        stores nothing (``_cache_fetch_store``), so data fetched before the
+        drop (for example from a NAC spoke that has since moved to another
+        tenant) cannot come back."""
+        def hit(ns, k):
+            """True when key ``k`` of namespace ``ns`` is being dropped."""
+            return ns.startswith(ns_prefix) and (
+                k in key_prefixes if exact else k.startswith(key_prefixes))
+
+        # Drop matching entries; save each changed namespace.
         n = 0
         for ns, entries in self.warm_cache.items():
-            if not ns.startswith(ns_prefix):
-                continue
-            dropped = [k for k in entries if k.startswith(key_prefixes)]
+            dropped = [k for k in entries if hit(ns, k)]
             for k in dropped:
                 del entries[k]
-                self._cache_read_jobs.pop((ns, k), None)
             if dropped:
                 n += len(dropped)
                 self._warm_cache_file.schedule_save(ns)
+        # Forget their read jobs and failure floors.
+        for k in [k for k in self._cache_read_jobs if hit(*k)]:
+            del self._cache_read_jobs[k]
+        for k in [k for k in self._cache_failed if hit(*k)]:
+            del self._cache_failed[k]
+        # Detach running fetches; a new read starts a fresh one.
+        for k in [k for k in self._cache_inflight if hit(*k)]:
+            self._cache_dropped.add(self._cache_inflight.pop(k))
         return n
+
+    def cache_keys(self, ns: str) -> set:
+        """Every key of namespace ``ns`` the cache keeps anything for: an
+        entry, a read job, a failure floor or a running fetch (all of which
+        ``warm_drop`` removes)."""
+        keys = set(self.warm_cache.get(ns) or {})
+        for store in (self._cache_read_jobs, self._cache_failed, self._cache_inflight):
+            keys.update(k for n, k in store if n == ns)
+        return keys
 
     def warm_invalidate(self, ns_prefix: str, key_prefixes: tuple) -> int:
         """Mark matching entries as needing a refresh but KEEP their data:
@@ -327,7 +388,8 @@ class WarmCacheMixin:
     # ── the page read ────────────────────────────────────────────────────────
 
     async def cache_read(self, ns: str, key: str, fetch: Fetch, *, tenants=None,
-                         lane: str = "", detail: bool = False) -> Any:
+                         lane: str = "", detail: bool = False,
+                         min_interval_s: float = 0.0) -> Any:
         """Serve ``(ns, key)`` from cache; see the module docstring for the
         three cases (present / missing / invalidated).
 
@@ -336,22 +398,28 @@ class WarmCacheMixin:
         ``tenants`` — who can see this data (see ``CacheJob``).
         ``detail``  — True for drill-down data (one VM, one device): it is
         refreshed only while its tenant is active and evicted after a week
-        unread."""
+        unread.
+        ``min_interval_s`` — the job's hard refresh floor (see ``CacheJob``)."""
         # Register the read job and look up the entry.
         key = str(key)
-        job = self._cache_remember(ns, key, fetch, tenants, lane, detail)
+        job = self._cache_remember(ns, key, fetch, tenants, lane, detail, min_interval_s)
         entry = self.warm_cache.get(ns, {}).get(key)
         now = time.time()
         # Note the read time.
         if isinstance(entry, dict):
             entry["read_at"] = now
+        # Seconds a hard floor still holds back another fetch (0: none).
+        held = self._cache_floor_left(job, entry, now)
         # Missing: fetch and wait.
         if not isinstance(entry, dict) or "data" not in entry:
+            # Inside the floor after a failure there is nothing to serve.
+            if held:
+                raise CacheFloorError(held, self._cache_failed.get((ns, key), (0.0, "", ()))[1])
             # Nothing to show yet — this one read must wait.
             return await asyncio.shield(self._cache_spawn(job, foreground=True))
-        # Invalidated: wait briefly for a refresh.
+        # Invalidated: wait briefly for a refresh, unless the floor holds it.
         fetched = entry.get("fetched_at") or 0
-        if not fetched:
+        if not fetched and not held:
             # Invalidated by a write: give the refresh a moment so the user
             # sees their own change, else fall through to the old data.
             task = self._cache_spawn(job, foreground=True)
@@ -359,8 +427,8 @@ class WarmCacheMixin:
                 return await asyncio.wait_for(asyncio.shield(task), INVALIDATED_WAIT_S)
             except Exception:  # noqa: BLE001 - timeout or spoke error → serve old data
                 return self.warm_get(ns, key)
-        # Old entry: refresh in the background.
-        if now - fetched >= self._cache_interval(job):
+        # Old entry: refresh in the background, unless the floor holds it.
+        if not held and now - fetched >= self._cache_interval(job):
             self._cache_spawn(job)
         # Return cached data.
         return entry["data"]
@@ -369,7 +437,9 @@ class WarmCacheMixin:
                               lane: str = "", detail: bool = False) -> Any:
         """Fetch live NOW (joining any in-flight fetch), store, and return it.
         For security checks that must not trust a possibly-old copy (e.g. a
-        write's ownership guard after a cache miss). Errors propagate."""
+        write's ownership guard after a cache miss). Errors propagate. It
+        ignores a job's ``min_interval_s`` floor, so floored sources must not
+        use it."""
         # Register and fetch in the foreground.
         job = self._cache_remember(ns, str(key), fetch, tenants, lane, detail)
         return await asyncio.shield(self._cache_spawn(job, foreground=True))
@@ -409,7 +479,8 @@ class WarmCacheMixin:
 
     # ── single-flight fetch ──────────────────────────────────────────────────
 
-    def _cache_remember(self, ns, key, fetch, tenants, lane, detail) -> CacheJob:
+    def _cache_remember(self, ns, key, fetch, tenants, lane, detail,
+                        min_interval_s=0.0) -> CacheJob:
         """Return the read job for (ns, key), creating or updating it; marks its tenants as recently
         active.
         """
@@ -420,12 +491,14 @@ class WarmCacheMixin:
         # Create the job if it is new.
         job = self._cache_read_jobs.get((ns, key))
         if job is None:
-            job = CacheJob(ns, key, fetch, t, lane or ns, False, detail, _jitter_for(ns, key))
+            job = CacheJob(ns, key, fetch, t, lane or ns, False, detail,
+                           min_interval_s=min_interval_s, _jitter=_jitter_for(ns, key))
             self._cache_read_jobs[(ns, key)] = job
         else:
             # Latest closure wins (it captures the latest request context).
             job.fetch, job.tenants, job.lane = fetch, t, (lane or ns)
             job.detail = job.detail or detail
+            job.min_interval_s = max(job.min_interval_s, min_interval_s)
         return job
 
     def _cache_spawn(self, job: CacheJob, *, foreground: bool = False) -> asyncio.Task:
@@ -444,9 +517,10 @@ class WarmCacheMixin:
 
         def _done(t, k=k):
             """Clear the in-flight slot and mark any exception as retrieved."""
-            # Clear only our own slot.
+            # Clear only our own slot (warm_drop may have given it to a new fetch).
             if self._cache_inflight.get(k) is t:
                 self._cache_inflight.pop(k, None)
+            self._cache_dropped.discard(t)
             if not t.cancelled():
                 t.exception()  # mark retrieved: background failures are recorded, not raised
         task.add_done_callback(_done)
@@ -474,25 +548,43 @@ class WarmCacheMixin:
             return await self._cache_fetch_store(job)
 
     async def _cache_fetch_store(self, job: CacheJob) -> Any:
-        """Fetch the job's data and store it; on failure record the error and re-raise."""
+        """Fetch the job's data and store it; on failure record the error and re-raise.
+
+        A fetch that ``warm_drop`` detached while it ran records nothing: its
+        data or error belongs to the dropped key. A caller already waiting on
+        it still gets the result."""
         # Fetch; cancellation propagates.
         try:
             data = await job.fetch()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            # Dropped while running: no error or floor for the next fetch.
+            if asyncio.current_task() in self._cache_dropped:
+                raise
             # Failure: record it on the existing entry.
+            err = str(exc)[:300] or exc.__class__.__name__
             entry = self.warm_cache.get(job.ns, {}).get(job.key)
             if isinstance(entry, dict):
-                entry["error"] = str(exc)[:300] or exc.__class__.__name__
+                entry["error"] = err
                 entry["error_at"] = time.time()
-            elif not job.from_feed:
+            else:
+                # No entry to record it on: a floored job keeps the attempt
+                # here, so its floor also spaces out retries after a failure.
+                if job.min_interval_s:
+                    self._cache_failed[(job.ns, job.key)] = (
+                        time.time(), err, tuple(job.tenants or ()))
                 # Never fetched successfully (bad id, unsupported endpoint,
                 # spoke down on first open): don't keep retrying it forever.
-                self._cache_read_jobs.pop((job.ns, job.key), None)
+                if not job.from_feed:
+                    self._cache_read_jobs.pop((job.ns, job.key), None)
             logger.debug("hub cache: refresh %s/%s failed: %s", job.ns, job.key, exc)
             raise
-        # Success: store it.
+        # Dropped while running: return the data but do not store it.
+        if asyncio.current_task() in self._cache_dropped:
+            return data
+        # Success: forget any entry-less failure, then store it.
+        self._cache_failed.pop((job.ns, job.key), None)
         await self.warm_set(job.ns, job.key, data, tenants=job.tenants, detail=job.detail)
         return data
 
@@ -525,9 +617,9 @@ class WarmCacheMixin:
         return any(t in scopes for t in tenants)
 
     def _cache_interval(self, job: CacheJob, scopes: Optional[set] = None) -> float:
-        """Return the job's refresh interval: active or idle."""
+        """Return the job's refresh interval: active or idle, never below its floors."""
         base = ACTIVE_INTERVAL_S if self._cache_is_active(job.tenants, scopes) else IDLE_INTERVAL_S
-        return max(base, job.refresh_s)
+        return max(base, job.refresh_s, job.min_interval_s)
 
     def cache_kick_tenant(self, tenant_id: Optional[str]) -> None:
         """Login hook: refresh everything this tenant (None → admin) can see on
@@ -579,6 +671,19 @@ class WarmCacheMixin:
             return max(self._cache_kicked.values(), default=0.0)
         return max((self._cache_kicked.get(t, 0.0) for t in job.tenants), default=0.0)
 
+    def _cache_floor_left(self, job: CacheJob, entry, now: float) -> float:
+        """Return the seconds ``job``'s hard ``min_interval_s`` floor still
+        holds back another fetch, counted from its last attempt: a fetch
+        (kept in ``stale_from`` while invalidated) or a failure, including a
+        failure with no entry to record it on. 0 when there is no floor."""
+        if not job.min_interval_s:
+            return 0.0
+        e = entry if isinstance(entry, dict) else {}
+        failed_at = self._cache_failed.get((job.ns, job.key), (0.0, "", ()))[0]
+        last_try = max(e.get("fetched_at") or 0, e.get("stale_from") or 0,
+                       e.get("error_at") or 0, failed_at)
+        return max(0.0, last_try + job.min_interval_s - now) if last_try else 0.0
+
     def _cache_job_due(self, job: CacheJob, now: float, scopes: set) -> bool:
         """Return True when the job should be refreshed on this tick."""
         # Not while a fetch is running.
@@ -590,19 +695,24 @@ class WarmCacheMixin:
         active = self._cache_is_active(job.tenants, scopes)
         if not job.from_feed and not active:
             return False   # read-only scopes refresh only while someone is looking
-        # Entry times and the relevant kick.
+        # Never inside a hard floor, whatever kicked or invalidated it.
         entry = self.warm_cache.get(job.ns, {}).get(job.key)
+        if self._cache_floor_left(job, entry, now):
+            return False
+        # Entry times and the relevant kick.
         fetched = (entry or {}).get("fetched_at") or 0
+        error_at = (entry or {}).get("error_at") or 0
         kicked = self._cache_kicked_at(job)
         # Kicked since the last attempt: due.
-        if kicked > fetched and kicked > ((entry or {}).get("error_at") or 0):
+        if kicked > fetched and kicked > error_at:
             return True
         # Never fetched and never failed: due.
-        if not fetched and not (entry or {}).get("error_at"):
+        if not fetched and not error_at:
             return True
         # Otherwise due once the interval plus jitter has passed since the last attempt.
-        interval = max(ACTIVE_INTERVAL_S if active else IDLE_INTERVAL_S, job.refresh_s)
-        last_try = max(fetched, (entry or {}).get("error_at") or 0)
+        interval = max(ACTIVE_INTERVAL_S if active else IDLE_INTERVAL_S,
+                       job.refresh_s, job.min_interval_s)
+        last_try = max(fetched, error_at)
         return now - last_try >= interval + job._jitter
 
     async def cache_refresh_tick(self) -> int:
@@ -670,26 +780,37 @@ class WarmCacheMixin:
         """After a write: invalidate ``ns`` entries (exact namespace) whose key
         starts with any of ``key_prefixes`` (or equals one, with ``exact``)
         and refresh them NOW. Readers in the next few seconds wait for the new
-        data. Returns refreshes started."""
+        data. Returns refreshes started.
+
+        The one exception is a job with a hard ``min_interval_s`` floor that
+        was tried (fetched or failed) within it: its entry stays as it is and
+        no fetch starts. Jobs with only ``refresh_s`` (a background cadence)
+        still refresh at once."""
         def match(k: str) -> bool:
             """Return True if key k matches, exactly or by prefix."""
             return k in key_prefixes if exact else k.startswith(tuple(key_prefixes))
 
-        # Invalidate matching entries, keeping their data.
+        # Matching jobs, and the keys a hard floor holds back.
+        now = time.time()
         entries = self.warm_cache.get(ns) or {}
+        jobs = [job for job in self._cache_collect_jobs() if job.ns == ns and match(job.key)]
+        held = {job.key for job in jobs
+                if self._cache_floor_left(job, entries.get(job.key), now)}
+        # Invalidate the other matching entries, keeping their data.
         for k, e in entries.items():
-            if match(k) and isinstance(e, dict) and e.get("fetched_at"):
+            if match(k) and k not in held and isinstance(e, dict) and e.get("fetched_at"):
                 e["stale_from"] = e["fetched_at"]
                 e["fetched_at"] = 0
-        # Start refreshes for matching jobs; no running loop stops early.
+        # Start refreshes for the other matching jobs; no running loop stops early.
         n = 0
-        for job in self._cache_collect_jobs():
-            if job.ns == ns and match(job.key):
-                try:
-                    self._cache_spawn(job)
-                    n += 1
-                except RuntimeError:  # no running loop (sync caller at startup)
-                    break
+        for job in jobs:
+            if job.key in held:
+                continue
+            try:
+                self._cache_spawn(job)
+                n += 1
+            except RuntimeError:  # no running loop (sync caller at startup)
+                break
         return n
 
     async def cache_wait_idle(self, timeout: float = 15.0) -> bool:
@@ -719,6 +840,11 @@ class WarmCacheMixin:
                     hit = True
             if hit:
                 self._warm_cache_file.schedule_save(ns)
+        # Forget failed first fetches in scope too: a purge starts over, so
+        # the floor no longer holds them back (as for a deleted entry).
+        for k, (_, _, tenants) in list(self._cache_failed.items()):
+            if tenant_id is None or tenant_id in tenants:
+                del self._cache_failed[k]
         # Refresh what was purged.
         self.cache_kick_tenant(tenant_id)
         return n
