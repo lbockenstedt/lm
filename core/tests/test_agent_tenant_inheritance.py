@@ -122,6 +122,7 @@ def test_creates_entry_when_agent_unknown(tmp_path):
     _inherit(hub, "new-ag", "spoke-y")
 
     assert state.system_state["agent_config"]["new-ag"]["client_simulation"]["tenant_id"] == "t-2"
+    assert state.system_state["agent_config"]["new-ag"]["display_name_source"] == "auto"
 
 
 def test_no_op_when_agent_id_empty(tmp_path):

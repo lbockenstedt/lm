@@ -969,18 +969,25 @@ async function openAgentConfigModal(agentId, currentLabel) {
         </div>
     `;
     _mountModal(modal);
+    const displayNameInput = modal.querySelector('#agent-cfg-display-name');
+    displayNameInput.addEventListener('input', () => {
+        displayNameInput.dataset.operatorEdited = 'true';
+    });
 }
 
 async function saveAgentConfig(agentId) {
-    const displayName = document.getElementById('agent-cfg-display-name').value.trim();
+    const displayNameInput = document.getElementById('agent-cfg-display-name');
     const csEnabled = document.getElementById('agent-cfg-cs-enabled').checked;
     const tenantId = document.getElementById('agent-cfg-tenant').value;
     const cronEl = document.getElementById('agent-cfg-crontab');
     try {
         const body = {
-            display_name: displayName || agentId,
             client_simulation: { enabled: csEnabled, tenant_id: tenantId },
         };
+        if (displayNameInput.dataset.operatorEdited === 'true') {
+            body.display_name = displayNameInput.value.trim() || agentId;
+            body.display_name_edited = true;
+        }
         // Only send managed_crontab when the field is present (this modal) so
         // other callers of this endpoint don't inadvertently clear it.
         if (cronEl) body.managed_crontab = cronEl.value;
@@ -1008,22 +1015,19 @@ async function saveAgentConfig(agentId) {
  * row does. A Proxmox agent's binding lives in client_simulation.tenant_id (per-
  * agent config), not on a spoke approval, so this writes via the agent config
  * API rather than /setup/approve_spoke. Generic (agent-type spoke) agents use
- * openSpokeAssignModal directly. We read the current config first so saving the
- * tenant preserves display_name + the CS-enabled flag (stashed in hidden inputs)
- * — changing the tenant must never wipe the other config. */
+ * openSpokeAssignModal directly. The API merges the tenant update into the
+ * stored config, so this form does not resubmit the display name. */
 async function openAgentAssignModal(agentId, currentTenantId) {
     const modal = document.createElement('div');
     modal.id = 'agent-assign-modal';
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
 
-    let displayName = '';
     let csEnabled = false;
     let tenantId = currentTenantId || '';
     try {
         const res = await fetch(`/api/pxmx/agents/${encodeURIComponent(agentId)}/config`, { credentials: 'same-origin' });
         if (res.ok) {
             const cfg = (await res.json()).config || {};
-            displayName = cfg.display_name || '';
             const cs = cfg.client_simulation || {};
             csEnabled = !!cs.enabled;
             tenantId = cs.tenant_id || tenantId;
@@ -1041,8 +1045,6 @@ async function openAgentAssignModal(agentId, currentTenantId) {
         }
     } catch (e) { console.error('Error fetching tenants for agent assign:', e); }
 
-    const safeDn = (displayName || '').replace(/"/g, '&quot;');
-
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
@@ -1053,9 +1055,8 @@ async function openAgentAssignModal(agentId, currentTenantId) {
             </div>
             <div class="p-6 space-y-4">
                 <div class="text-xs text-slate-500 font-mono mb-2">${_spokeLabelFor(agentId)}</div>
-                <input type="hidden" id="agent-assign-dn" value="${safeDn}">
                 <input type="hidden" id="agent-assign-cs" value="${csEnabled ? '1' : '0'}">
-                <p class="text-xs text-slate-500">Binds this Proxmox node agent to a tenant so its telemetry appears in that tenant's VM Server. The agent's display name and Client-Simulation setting are preserved.</p>
+                <p class="text-xs text-slate-500">Binds this Proxmox node agent to a tenant so its telemetry appears in that tenant's VM Server. Existing agent settings are preserved.</p>
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 font-bold">Tenant</label>
                     <select id="agent-assign-tenant" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
@@ -1075,14 +1076,12 @@ async function openAgentAssignModal(agentId, currentTenantId) {
 
 async function saveAgentTenant(agentId) {
     const tenantId = document.getElementById('agent-assign-tenant').value;
-    const displayName = document.getElementById('agent-assign-dn').value;
     const csEnabled = document.getElementById('agent-assign-cs').value === '1';
     try {
         const res = await fetch(`/api/pxmx/agents/${encodeURIComponent(agentId)}/config`, {
             method: 'POST', credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                display_name: displayName || agentId,
                 client_simulation: { enabled: csEnabled, tenant_id: tenantId },
             }),
         });
@@ -1286,7 +1285,7 @@ async function openSpokeMetadataModal(spokeId, currentName, approved) {
                 <div class="text-xs text-slate-500 font-mono mb-4">${_spokeLabelFor(spokeId)}</div>
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 font-bold">Display Name</label>
-                    <input type="text" id="meta-display-name" value="${safeName}" placeholder="e.g. Core Firewall" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    <input type="text" id="meta-display-name" data-operator-edited="false" value="${safeName}" placeholder="e.g. Core Firewall" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                 </div>
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 font-bold">Description</label>
@@ -1312,10 +1311,15 @@ async function openSpokeMetadataModal(spokeId, currentName, approved) {
         </div>
     `;
     _mountModal(modal);
+    const displayNameInput = modal.querySelector('#meta-display-name');
+    displayNameInput.addEventListener('input', () => {
+        displayNameInput.dataset.operatorEdited = 'true';
+    });
 }
 
 async function saveSpokeMetadata(spokeId) {
-    const displayName = document.getElementById('meta-display-name').value;
+    const displayNameInput = document.getElementById('meta-display-name');
+    const displayName = displayNameInput.value;
     const description = document.getElementById('meta-description').value;
     const hostname = document.getElementById('meta-hostname').value;
 
@@ -1327,6 +1331,7 @@ async function saveSpokeMetadata(spokeId) {
                 spoke_id: spokeId,
                 metadata: {
                     display_name: displayName,
+                    display_name_edited: displayNameInput.dataset.operatorEdited === 'true',
                     description: description
                 }
             })
@@ -1344,6 +1349,7 @@ async function saveSpokeMetadata(spokeId) {
                 body: JSON.stringify({
                     spoke_id: spokeId,
                     display_name: displayName,
+                    display_name_edited: displayNameInput.dataset.operatorEdited === 'true',
                     hostname: hostname
                 })
             });
