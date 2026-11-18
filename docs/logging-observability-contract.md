@@ -57,6 +57,7 @@ Two consequences every module must respect:
     because the hub route answered (and logged) the failure. When the
     path's first segment names a module (`/api/dhcp/...`), the line also
     names the module the route relays to, so AppBuilder looks there too.
+    A spoke's own log never gets that hint for its own module's routes.
   - `log_volume_triage` (default on) with `log_volume_threshold` (default
     10): a WARNING message repeated at least that many times in the window
     counts as an error.
