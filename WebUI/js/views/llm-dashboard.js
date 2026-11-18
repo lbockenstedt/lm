@@ -28,7 +28,8 @@ function routingFields(fields, choices) {
         if (field.type === 'checkbox') {
             return safeHtml`<label><input name="${field.name}" type="checkbox"> ${field.label}</label>`;
         }
-        const bounds = field.type === 'number' ? safeHtml` min="0" max="${field.maximum}" step="1"` : '';
+        const bounds = field.type === 'number'
+            ? safeHtml` min="0" max="${field.maximum}" step="${field.step || 1}"` : '';
         const pattern = field.pattern ? safeHtml` pattern="${field.pattern}"` : '';
         const length = field.maxlength ? safeHtml` maxlength="${field.maxlength}"` : '';
         return safeHtml`<label>${field.label} <input name="${field.name}" type="${field.type || 'text'}"
@@ -48,7 +49,8 @@ function routingMarkup(config, models, tenants) {
         <p>New models are appended in priority order. To change priority, remove and re-add a model.</p>
         ${Object.entries(config.llm_task_models).map(([task, rows]) => rows.map((row, index) => safeHtml`
             <div>${task} — ${index + 1}. <span title="${row.digest}">${row.model}</span>
-                (${row.min_vcpus || 0} vCPUs, ${row.min_ram_bytes || 0} RAM bytes minimum)
+                (${row.min_vcpus || 0} vCPUs, ${row.min_ram_bytes || 0} RAM bytes minimum;
+                temperature ${row.temperature ?? 'default'}, top-p ${row.top_p ?? 'default'})
                 <button type="button" data-action="removeModel" data-task="${task}" data-index="${index}" class="hpe-btn hpe-btn-secondary">Remove</button>
             </div>`))}
         <form data-submit="addModel" class="flex flex-wrap items-end gap-2">
@@ -142,7 +144,7 @@ async function openSettings(root, isCurrent, onSave, workers) {
         }
         delegate(root, {
             addModel: form => save(() => {
-                const { task, artifact, vcpus, ram } = form.elements;
+                const { task, artifact, vcpus, ram, temperature, top_p: topP } = form.elements;
                 const selected = artifact.value;
                 const model = selected && models[Number(selected)];
                 if (!model) throw new Error('Select a reported model.');
@@ -153,6 +155,9 @@ async function openSettings(root, isCurrent, onSave, workers) {
                 return { llm_task_models: { ...config.llm_task_models, [task.value]: [...rows, {
                     model: model.name, digest: model.digest,
                     min_vcpus: Number(vcpus.value), min_ram_bytes: Number(ram.value),
+                    // Blank sampling fields keep Ollama's defaults for this artifact.
+                    ...(temperature.value === '' ? {} : { temperature: Number(temperature.value) }),
+                    ...(topP.value === '' ? {} : { top_p: Number(topP.value) }),
                 }] } };
             }),
             removeModel: button => save(() => {

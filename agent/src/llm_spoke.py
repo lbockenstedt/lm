@@ -17,9 +17,14 @@ from core.src.base_spoke import BaseSpoke
 MAX_PROMPT_BYTES = 64 * 1024
 MAX_RESPONSE_BYTES = 256 * 1024
 INFERENCE_TIMEOUT = 900
+# Sampling caps a hub task profile may set; mirrors core/src/llm_pool.py SAMPLING_LIMITS.
+SAMPLING_LIMITS = {"temperature": 2.0, "top_p": 1.0}
 # Start from the owner's CLI pin; Linux CPU artifacts still need qualification.
 DEFAULT_OLLAMA_VERSION = "0.40.16"
 SERVICE = "lm-llm-ollama.service"
+# Loopback-only port of SERVICE (its OLLAMA_HOST). Fixed, not a setting: it never leaves
+# the VM, and staying off Ollama's 11434 means a system Ollama can't be mistaken for ours.
+SERVING_PORT = 11438
 CATALOG = Path("/etc/lm/llm-models.json")
 BUNDLE_CATALOG = Path("/opt/lm-llm/llm-models.json")
 
@@ -50,6 +55,13 @@ def cpu_capabilities():
     return result
 
 
+def valid_sampling(options):
+    """Accept only the bounded sampling caps a hub task profile can set."""
+    return (isinstance(options, dict) and options.keys() <= SAMPLING_LIMITS.keys()
+            and all(type(value) in (int, float) and 0 <= value <= SAMPLING_LIMITS[key]
+                    for key, value in options.items()))
+
+
 def runtime_service(action):
     """Operate only the dedicated service, never the system's generic Ollama."""
     return subprocess.run(
@@ -58,7 +70,7 @@ def runtime_service(action):
     ).returncode == 0
 
 
-def ollama_request(path, body=None, timeout=3, *, port=11438):
+def ollama_request(path, body=None, timeout=3, *, port=SERVING_PORT):
     """Read one bounded JSON reply without using HTTP proxies or redirects."""
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
@@ -250,13 +262,16 @@ class LlmSpoke(BaseSpoke):
             return {"status": "ERROR", "code": "runtime_unavailable"}
         prompt, model, digest = (data.get(key) for key in ("prompt", "model", "digest"))
         output_format = data.get("format", "text")
+        sampling = data.get("options", {})
         if (not isinstance(prompt, str) or not prompt.strip()
                 or len(prompt.encode("utf-8", errors="replace")) > MAX_PROMPT_BYTES
                 or not isinstance(model, str) or not isinstance(digest, str)
-                or output_format not in ("text", "json", "python")):
+                or output_format not in ("text", "json", "python")
+                or not valid_sampling(sampling)):
             return {"status": "ERROR", "code": "invalid_request"}
         # Assign before the first await; a stale hub snapshot cannot overbook the VM.
-        job = self._job = asyncio.create_task(self._complete(prompt, model, digest, output_format))
+        job = self._job = asyncio.create_task(
+            self._complete(prompt, model, digest, output_format, sampling))
         job.add_done_callback(self._release)
         return await asyncio.shield(job)
 
@@ -265,7 +280,7 @@ class LlmSpoke(BaseSpoke):
         if self._job is job:
             self._job = None
 
-    async def _complete(self, prompt, model, digest, output_format):
+    async def _complete(self, prompt, model, digest, output_format, sampling=None):
         """Recheck the pinned model immediately before calling local inference."""
         try:
             # An inventory failure is retryable: no prompt was dispatched.
@@ -278,11 +293,9 @@ class LlmSpoke(BaseSpoke):
             return {"status": "ERROR", "code": "model_unavailable"}
         try:
             # CPU only, no tools, one bounded response, then normal idle eviction.
+            # Sampling comes only from the hub task profile, never from the model name.
             body = {"model": model, "prompt": prompt, "stream": False, "think": False,
-                    "options": {"num_gpu": 0, "num_predict": 1024}}
-            if model.split("/")[-1].casefold().startswith("gemma"):
-                # Match the sampling caps that stopped unstable Gemma drafts in CLI trials.
-                body["options"].update(temperature=0.7, top_p=0.8)
+                    "options": {**(sampling or {}), "num_gpu": 0, "num_predict": 1024}}
             if output_format == "json":
                 body["format"] = "json"
             result = await asyncio.to_thread(ollama_request, "/api/generate", body, INFERENCE_TIMEOUT)

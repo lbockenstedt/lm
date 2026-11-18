@@ -74,6 +74,18 @@ def test_serving_unit_never_prunes_read_only_store():
     assert "ProtectSystem=strict" in unit.splitlines()
 
 
+def test_units_listen_on_the_ports_the_role_calls():
+    """The role and qualification reach each runtime only on its unit's loopback port."""
+    from agent.src import llm_qualification, llm_spoke
+
+    units = Path(__file__).resolve().parents[1]
+    for name, port in (("lm-llm-ollama.service", llm_spoke.SERVING_PORT),
+                       ("lm-llm-candidate.service", llm_qualification.PORT)):
+        lines = (units / name).read_text(encoding="utf-8").splitlines()
+        assert f"Environment=OLLAMA_HOST=127.0.0.1:{port}" in lines, name
+    assert llm_qualification.BASELINE_PORT == llm_spoke.SERVING_PORT != llm_qualification.PORT
+
+
 def test_candidate_bundle_is_runtime_only(tmp_path):
     """A candidate stages only its runtime; a bundled model store is refused."""
     source, destination = tmp_path / "candidate.tar", tmp_path / "candidate"
