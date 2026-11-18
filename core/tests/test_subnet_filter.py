@@ -688,3 +688,180 @@ def test_scoped_spoke_of_type_never_falls_back_to_shared():
     assert _access.scoped_spoke_of_type(hub, "dxp", "nac") == "shr-spoke"
     hub.active_connections.add("cen-spoke")
     assert _access.scoped_spoke_of_type(hub, "central", "nac") == "cen-spoke"
+
+
+
+def test_scoped_firewall_pick_follows_own_firewall_record():
+    # central's firewall is a firewalls record on an unbound spoke: the pick
+    # (global search's SEARCH_DHCP leg) goes to that spoke, not to None.
+    hub = _left_shared_hub()
+    hub.state.system_state["global_config"] = {"firewalls": [
+        {"id": "fw-c", "tenant_id": "central", "spoke_id": "opn-1"}]}
+    hub.spoke_module_types = {"opn-1": "firewall"}
+    hub.active_connections = {"opn-1"}
+    hub.approved_modules = {"opn-1": True}
+    hub.get_spoke_by_type = lambda t: "opn-1"
+    assert _access.scoped_spoke_of_type(hub, "central", "firewall") == "opn-1"
+    hub.active_connections = set()
+    assert _access.scoped_spoke_of_type(hub, "central", "firewall") is None
+
+
+# ── A tenant in its own VRF cannot use shared infrastructure ────────────────
+# Shared infra sits in the global table. A prefix that NetBox puts only in the
+# tenant's own VRF must not match a shared firewall/Kea/Proxmox record with the
+# same address in the global table. NetBox itself stays shared.
+
+class _OwnVrfPrefixHub(_PrefixHub):
+    """dxp: 10.0.0.0/8 only in its own VRF (id 7), 192.168.5.0/24 global."""
+    _ROWS = {"dxp": [{"prefix": "10.0.0.0/8", "vrf_id": 7},
+                     {"prefix": "192.168.5.0/24", "vrf_id": None}],
+             "vrfonly": [{"prefix": "10.0.0.0/8", "vrf_id": 7}]}
+
+    async def request_response(self, spoke_id, command, payload, **kwargs):
+        return {"payload": {"data": {"prefixes": self._ROWS.get(payload.get("tenant"), [])}}}
+
+
+def _own_vrf_hub():
+    return _OwnVrfPrefixHub(FakeState(system_state={}, tenants={
+        "dxp": {"netbox_tenant_slug": "dxp"},
+        "vrfonly": {"netbox_tenant_slug": "vrfonly"},
+    }))
+
+
+def test_shared_firewall_rules_ignore_own_vrf_prefixes():
+    rules = {"rules": [{"source": "10.20.0.5", "destination": "8.8.8.8"},
+                       {"source": "192.168.5.9", "destination": "8.8.8.8"}]}
+    out = asyncio.run(filter_fw(_own_vrf_hub(), {"a": _admin_session()}, _FakeRequest("a"),
+                                rules, "rules", explicit_tenant="dxp"))
+    assert out["rules"] == [{"source": "192.168.5.9", "destination": "8.8.8.8"}]
+
+
+def test_vrf_only_tenant_sees_nothing_on_shared_firewall():
+    rules = {"rules": [{"source": "10.20.0.5", "destination": "8.8.8.8"}]}
+    out = asyncio.run(filter_fw(_own_vrf_hub(), {"a": _admin_session()}, _FakeRequest("a"),
+                                rules, "rules", explicit_tenant="vrfonly"))
+    assert out["rules"] == []
+
+
+def test_vrf_only_tenant_keeps_category_tagged_firewall_records():
+    # The admin tagged some shared-firewall records with the tenant's category:
+    # they stay visible even though no address matches; untagged ones stay hidden.
+    def _fw(data, endpoint):
+        return asyncio.run(filter_fw(_own_vrf_hub(), {"a": _admin_session()}, _FakeRequest("a"),
+                                     data, endpoint, explicit_tenant="vrfonly"))
+
+    rules = {"rules": [{"source": "10.20.0.5", "destination": "8.8.8.8"},
+                       {"source": "any", "destination": "any", "category": "vrfonly"}]}
+    nat = {"nat": [{"target": "webhost"}, {"target": "dxphost", "category": "vrfonly"}]}
+    aliases = {"aliases": [{"content": "10.20.0.5"},
+                           {"content": "10.20.0.6", "category": "vrfonly"}]}
+    assert _fw(rules, "rules")["rules"] == [rules["rules"][1]]
+    assert _fw(nat, "nat")["nat"] == [nat["nat"][1]]
+    assert _fw(aliases, "aliases")["aliases"] == [aliases["aliases"][1]]
+
+
+def test_vrf_only_tenant_single_record_gate_keeps_own_source():
+    from simulations.tenant_filter import OWN_SOURCE_MARKER
+    hub = _own_vrf_hub()
+    own, shared = {"ip": "10.20.0.5", OWN_SOURCE_MARKER: True}, {"ip": "10.20.0.6"}
+
+    def _gate(rec):
+        return asyncio.run(_access.gate_record_tenant(
+            hub, {"a": _admin_session()}, _FakeRequest("a"), rec, "nac", ["ip"],
+            explicit_tenant="vrfonly"))
+
+    assert _gate(own) == own
+    assert _gate(shared) is None
+
+
+def test_vrf_only_tenant_cannot_write_shared_firewall_rule():
+    hub, sess = _own_vrf_hub(), _user_session("vrfonly")
+    rule = {"source": "10.20.0.5", "destination": "8.8.8.8"}
+    assert not asyncio.run(_access.fw_rule_in_tenant_scope(hub, sess, "rules", None, rule))
+    assert not asyncio.run(_access.record_in_tenant_scope(hub, sess, {"ip": "10.20.0.5"}, ["ip"]))
+
+
+def test_netbox_view_keeps_own_vrf_prefixes():
+    rows = {"prefixes": [{"prefix": "10.0.0.0/8"}]}
+    out = asyncio.run(filter_session(_own_vrf_hub(), {"u": _user_session("vrfonly")},
+                                     _QSRequest("u"), rows, "netbox", ["prefix"]))
+    assert out["prefixes"] == [{"prefix": "10.0.0.0/8"}]
+
+
+def test_vrf_only_tenant_on_shared_hypervisor_keeps_only_overrides():
+    vms = {"vms": [{"name": "in-vrf", "ips": ["10.20.0.5"]},
+                   {"name": "tmpl", "ips": ["10.20.0.6"], "pool": "Templates"},
+                   {"name": "tagged", "ips": ["10.20.0.7"], "tags": ["vrfonly"]}]}
+    out = asyncio.run(filter_tenant(_own_vrf_hub(), {"a": _admin_session()}, _FakeRequest("a"),
+                                    vms, "hypervisor", ["ips"], explicit_tenant="vrfonly"))
+    assert [v["name"] for v in out["vms"]] == ["tmpl", "tagged"]
+
+
+def test_vrf_only_tenant_keeps_own_clearpass_rows_in_merged_nac_list():
+    # CPPM routes merge the tenant's own ClearPass rows (marked) with the shared
+    # ClearPass's rows, without a spoke id. A VRF-only tenant matches none of
+    # the shared rows but must still see its own.
+    from simulations.tenant_filter import OWN_SOURCE_MARKER
+    rows = {"endpoints": [{"ip": "10.20.0.5", OWN_SOURCE_MARKER: True, "name": "own"},
+                          {"ip": "10.20.0.6", "name": "shared"}]}
+    explicit = asyncio.run(filter_tenant(
+        _own_vrf_hub(), {"a": _admin_session()}, _FakeRequest("a"), rows, "nac", ["ip"],
+        explicit_tenant="vrfonly"))
+    session = asyncio.run(filter_session(
+        _own_vrf_hub(), {"u": _user_session("vrfonly")}, _QSRequest("u"), rows, "nac", ["ip"]))
+    assert [r["name"] for r in explicit["endpoints"]] == ["own"]
+    assert [r["name"] for r in session["endpoints"]] == ["own"]
+
+
+def test_vrf_tenant_reads_its_own_instance_spoke_uncut():
+    # vrfonly configured its own Kea as a dhcp_instances record on a spoke
+    # with no tenant binding. Its records are in its VRF, so neither the
+    # selected-tenant nor the session read path may cut them; a spoke that
+    # also serves a shared (blank-tenant) record stays shared.
+    hub = _own_vrf_hub()
+    gc = hub.state.system_state.setdefault("global_config", {})
+    gc["dhcp_instances"] = [{"tenant_id": "vrfonly", "spoke_id": "kea-own"},
+                           {"tenant_id": "vrfonly", "spoke_id": "kea-mixed"},
+                           {"tenant_id": "", "spoke_id": "kea-mixed"}]
+    rows = {"records": [{"ip": "10.20.0.5", "name": "own"}]}
+
+    def _read(spoke_id):
+        explicit = asyncio.run(filter_tenant(
+            hub, {"a": _admin_session()}, _FakeRequest("a"), rows, "dhcp", ["ip"],
+            explicit_tenant="vrfonly", spoke_id=spoke_id))
+        session = asyncio.run(filter_session(
+            hub, {"u": _user_session("vrfonly")}, _QSRequest("u"), rows, "dhcp", ["ip"],
+            spoke_id=spoke_id))
+        return explicit["records"], session["records"]
+
+    assert _read("kea-own") == (rows["records"], rows["records"])
+    assert _read("kea-mixed") == ([], [])
+
+
+class _WarmOwnVrfHub(_OwnVrfPrefixHub):
+    """Own-VRF hub with a dict-backed warm cache shared across "restarts"."""
+
+    def __init__(self, state, warm):
+        super().__init__(state)
+        self._warm = warm
+
+    def warm_get(self, ns, key="_"):
+        return self._warm.get((ns, key))
+
+    async def warm_set(self, ns, key, data, **kwargs):
+        self._warm[(ns, key)] = data
+
+
+def test_vrf_cut_holds_after_hub_restart_without_netbox_fetch():
+    # A session keeps its cached prefixes across a hub restart, so the first
+    # shared read after the restart can run before any NetBox fetch. The VRFs
+    # saved with the hub cache must still cut the own-VRF prefix.
+    warm = {}
+    state = _own_vrf_hub().state
+    before = _WarmOwnVrfHub(state, warm)
+    asyncio.run(_access.fetch_tenant_prefixes(before, "vrfonly"))
+    restarted = _WarmOwnVrfHub(state, warm)
+    assert _access.shared_slice_prefixes(restarted, "vrfonly", ["10.0.0.0/8"]) == []
+    # Rows without vrf_id (an older spoke's warm list) must not forget known VRFs.
+    _access._note_prefix_vrfs(restarted, "vrfonly", [{"prefix": "10.0.0.0/8"}])
+    assert _access.shared_slice_prefixes(restarted, "vrfonly", ["10.0.0.0/8"]) == []
