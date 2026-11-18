@@ -133,7 +133,14 @@ def test_llm_dashboard_uses_reported_model_and_launches_qualification(hub_url_an
             ]}))
             page.goto(base + "/")
             page.wait_for_function("window.lmCoreLoaded && typeof currentUser !== 'undefined' && !!currentUser")
-            page.evaluate("setView('llm')")
+            # The nav entry is a button: it must carry its icon and span the nav like its div siblings.
+            # The fake hub cannot serve the status poll, so build the dynamic nav directly.
+            page.evaluate("_rebuildMainNav([], [])")
+            nav = page.locator("#nav-llm")
+            nav.wait_for()
+            assert nav.locator("svg").count() == 1
+            assert nav.bounding_box()["width"] == page.locator("#nav-security").bounding_box()["width"]
+            nav.click()
             page.get_by_text("CPU Worker", exact=True).wait_for()
             with page.expect_request(lambda req: req.url.endswith("/admin/qualify")) as qualification:
                 page.get_by_role("button", name="Qualify", exact=True).click()
