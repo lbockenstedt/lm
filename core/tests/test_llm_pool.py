@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -202,6 +203,108 @@ def test_unavailable_runtime_still_reports_guest_capacity():
     assert worker["capabilities"] == capabilities
     pool.forget("a")
     assert not next(row for row in pool.dashboard()["workers"] if row["name"] == "Worker a")["capabilities"]
+
+
+@pytest.mark.parametrize("code", ["runtime_unit_missing", "runtime_unit_symlink"])
+def test_worker_issue_logs_only_transitions(caplog, code):
+    """Repeated failure reports do not flood logs; recovery is visible."""
+    pool = make_pool()
+    socket = pool.hub.active_connections["a"]
+    failure = {"status": "ERROR", "code": code}
+    recovery = {"status": "SUCCESS", "models": {JOB["model"]: DIGEST},
+                "available": True}
+
+    with caplog.at_level(logging.INFO, logger="llm_pool"):
+        pool.report("a", socket, failure)
+        pool.report("a", socket, failure)
+        pool.report("a", socket, recovery)
+
+    assert caplog.text.count(f"LLM worker Worker a (a) unavailable: {code}") == 1
+    assert f"LLM worker Worker a (a) recovered from {code}" in caplog.text
+    assert pool.worker_issues.get("a") is None
+
+
+def test_runtime_start_reply_is_logged_with_stable_code(caplog):
+    """The hub records start failures without logging the raw reply."""
+    pool = make_pool()
+    pool.hub.request_response.return_value = {
+        "payload": {"data": {"status": "ERROR", "code": "runtime_binary_missing"}}
+    }
+
+    with caplog.at_level(logging.WARNING, logger="llm_pool"):
+        asyncio.run(pool._start_runtime("a", pool.hub.active_connections["a"]))
+
+    assert "LLM worker Worker a (a) runtime start rejected: runtime_binary_missing" in caplog.text
+
+
+@pytest.mark.parametrize(("report", "expected"), [
+    ({"status": "ERROR", "code": []}, "runtime_unavailable"),
+    ({"status": "ERROR", "code": {"x": 1}}, "runtime_unavailable"),
+    ({"status": "ERROR", "code": "runtime_not_started", "detail_code": []},
+     "runtime_not_started"),
+    ({"status": "ERROR", "code": "runtime_not_started", "detail_code": {}},
+     "runtime_not_started"),
+])
+def test_malformed_status_codes_fall_back_without_raising(report, expected):
+    """Unhashable JSON codes map to a stable issue instead of raising TypeError."""
+    pool = make_pool()
+    pool.hub.state.system_state["module_metadata"]["a"]["tenant_id"] = ""
+
+    pool.report("a", pool.hub.active_connections["a"], report)
+
+    assert pool.worker_issues["a"]["code"] == expected
+
+
+@pytest.mark.parametrize(("reply", "outcome"), [
+    ({"status": "ERROR", "message": "Timed out waiting for spoke response"},
+     "Timed out waiting for spoke response"),
+    ({"status": "ERROR", "message": "Timed out waiting for spoke response",
+      "updating": True, "draining": True}, "Timed out waiting for spoke response"),
+    ({"payload": {"data": {"status": "ERROR", "code": "busy"}}}, "busy"),
+    ({"payload": {"data": {"status": "ERROR", "code": ["runtime_binary_missing"]}}},
+     "unrecognised reply"),
+    ({"payload": {"data": ["not", "an", "object"]}}, "unrecognised reply"),
+])
+def test_unconfirmed_runtime_start_is_logged_as_unknown_outcome(caplog, reply, outcome):
+    """A timeout, busy or malformed start reply never claims the runtime failed."""
+    pool = make_pool()
+    pool.hub.request_response.return_value = reply
+
+    with caplog.at_level(logging.WARNING, logger="llm_pool"):
+        asyncio.run(pool._start_runtime("a", pool.hub.active_connections["a"]))
+
+    assert f"LLM worker Worker a (a) runtime start outcome unknown: {outcome}" in caplog.text
+    assert "rejected" not in caplog.text
+    # Only the next status report changes the issue or the retry schedule.
+    assert not pool.worker_issues and not pool.start_attempts
+
+
+@pytest.mark.parametrize("revoke", ["unbind", "unapprove"])
+def test_runtime_start_never_reaches_unbound_or_unapproved_worker(revoke):
+    """Revoking the tenant or approval also stops a start that is already scheduled."""
+    pool = make_pool()
+    socket = pool.hub.active_connections["b"]
+    report = {"status": "ERROR", "code": "runtime_not_started"}
+
+    def revoke_worker():
+        """Unassign the worker's tenant or withdraw its approval."""
+        if revoke == "unbind":
+            pool.hub.state.system_state["module_metadata"]["b"]["tenant_id"] = ""
+        else:
+            pool.hub.approved_modules["b"] = False
+
+    async def exercise():
+        """Revoke between scheduling and sending, then report again."""
+        pool.report("b", socket, report)
+        assert "b" in pool.start_attempts
+        revoke_worker()
+        await asyncio.sleep(0)
+        pool.start_attempts.clear()
+        pool.report("b", socket, report)
+        await asyncio.sleep(0)
+
+    asyncio.run(exercise())
+    pool.hub.request_response.assert_not_called()
 
 
 def test_pool_uses_shared_only_for_tenant_without_its_own_pool():
@@ -501,10 +604,22 @@ def test_worker_detects_corrupted_indentation_and_version_drift(monkeypatch):
     assert calls == ["/api/version"]
 
 
-def test_runtime_start_requires_current_approved_tenant_socket():
+@pytest.mark.parametrize(("detail_code", "expected", "should_start"), [
+    (None, "runtime_not_started", True),
+    ("runtime_start_failed", "runtime_start_failed", True),
+    ("runtime_unit_missing", "runtime_unit_missing", False),
+    ("runtime_unit_symlink", "runtime_unit_symlink", False),
+    ("runtime_binary_missing", "runtime_binary_missing", False),
+    # Known codes that are not stop causes cannot end the start retry.
+    ("runtime_version_mismatch", "runtime_not_started", True),
+    ("runtime_unavailable", "runtime_not_started", True),
+])
+def test_runtime_start_retries_only_recoverable_failures(detail_code, expected, should_start):
     """Only an approved, bound role can cause its runtime to start."""
     pool = make_pool()
     report = {"status": "ERROR", "code": "runtime_not_started"}
+    if detail_code:
+        report["detail_code"] = detail_code
 
     async def exercise():
         """Send authenticated, stale, and repeated reports."""
@@ -514,4 +629,9 @@ def test_runtime_start_requires_current_approved_tenant_socket():
         await asyncio.sleep(0)
 
     asyncio.run(exercise())
-    pool.hub.request_response.assert_awaited_once_with("b", "LLM_START_RUNTIME", {}, timeout=25)
+    assert pool.worker_issues["b"]["code"] == expected
+    if should_start:
+        pool.hub.request_response.assert_awaited_once_with(
+            "b", "LLM_START_RUNTIME", {}, timeout=25)
+    else:
+        pool.hub.request_response.assert_not_awaited()

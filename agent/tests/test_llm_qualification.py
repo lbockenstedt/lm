@@ -48,6 +48,76 @@ def test_worker_checks_local_runtime_pin_before_advertising_models(
         assert probes == ["/api/version"]
 
 
+def test_runtime_start_failure_codes_are_actionable(tmp_path, monkeypatch):
+    """Identify a missing unit or binary without exposing systemd output."""
+    unit = tmp_path / "lm-llm-ollama.service"
+    binary = tmp_path / "ollama"
+    monkeypatch.setattr(llm_spoke, "SERVICE_UNIT_PATH", unit)
+    monkeypatch.setattr(llm_spoke, "RUNTIME_BINARY_PATH", binary)
+
+    assert llm_spoke.runtime_failure_code() == "runtime_unit_missing"
+    unit.symlink_to("/dev/null")
+    assert llm_spoke.runtime_failure_code() == "runtime_unit_symlink"
+    unit.unlink()
+    unit.symlink_to(tmp_path / "missing-unit")
+    assert llm_spoke.runtime_failure_code() == "runtime_unit_symlink"
+    unit.unlink()
+    unit.write_text("[Service]\n", encoding="utf-8")
+    assert llm_spoke.runtime_failure_code() == "runtime_binary_missing"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    binary.chmod(0o755)
+    assert llm_spoke.runtime_failure_code() == "runtime_start_failed"
+
+
+def test_unusable_runtime_paths_are_not_reported_missing(tmp_path, monkeypatch):
+    """A unit or binary that exists but cannot be used is not "missing"."""
+    unit = tmp_path / "lm-llm-ollama.service"
+    binary = tmp_path / "ollama"
+    monkeypatch.setattr(llm_spoke, "SERVICE_UNIT_PATH", unit)
+    monkeypatch.setattr(llm_spoke, "RUNTIME_BINARY_PATH", binary)
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    binary.chmod(0o644)
+
+    # Staging skips an existing directory, so "stage the unit" cannot fix it.
+    unit.mkdir()
+    assert llm_spoke.runtime_failure_code() == "runtime_start_failed"
+    # A present binary without execute permission needs no bundle install.
+    unit.rmdir()
+    unit.write_text("[Service]\n", encoding="utf-8")
+    assert llm_spoke.runtime_failure_code() == "runtime_start_failed"
+
+
+def test_failed_runtime_start_is_reported_in_worker_status(monkeypatch):
+    """The periodic status frame exposes the stable start failure code."""
+    monkeypatch.setattr(llm_spoke, "runtime_service", lambda _action: False)
+    monkeypatch.setattr(llm_spoke, "runtime_failure_code", lambda: "runtime_unit_missing")
+    worker = llm_spoke.LlmSpoke("test-worker", {})
+
+    result = asyncio.run(worker._run_service_start("start"))
+
+    assert result == {"status": "ERROR", "code": "runtime_unit_missing"}
+    status = asyncio.run(worker.get_status())
+    assert status["code"] == "runtime_not_started"
+    assert status["detail_code"] == "runtime_unit_missing"
+
+
+def test_worker_status_reclassifies_repaired_runtime_preconditions(monkeypatch):
+    """A fixed unit or binary changes the detail code and lets the hub retry."""
+    current_code = ["runtime_unit_missing"]
+    monkeypatch.setattr(llm_spoke, "runtime_failure_code", lambda: current_code[0])
+    monkeypatch.setattr(llm_spoke, "cpu_capabilities", lambda: {"mode": "cpu"})
+    worker = llm_spoke.LlmSpoke("test-worker", {})
+    worker._runtime_issue = "runtime_unit_missing"
+
+    first = asyncio.run(worker.get_status())
+    current_code[0] = "runtime_start_failed"
+    repaired = asyncio.run(worker.get_status())
+
+    assert first["code"] == repaired["code"] == "runtime_not_started"
+    assert first["detail_code"] == "runtime_unit_missing"
+    assert repaired["detail_code"] == "runtime_start_failed"
+
+
 @pytest.mark.parametrize(("fault", "expected"), [
     (None, "qualified"),
     ("indentation", "fixture_mismatch"),
