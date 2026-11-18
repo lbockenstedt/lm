@@ -254,7 +254,7 @@ def test_impairment_on_shared_firewall_must_be_inside_tenant_subnet():
     tenant = {"user": {"tenant_id": "t1"}}
     saved = (access.write_scope, access.resolve_owned_prefixes, access.fw_rule_in_tenant_scope)
 
-    async def owned(hub_, sess):
+    async def owned(hub_, sess, shared=False):
         return ["10.1.0.0/24"]
 
     async def overlaps(*a):
@@ -281,7 +281,7 @@ def test_impairment_targets_on_shared_firewall_all_inside_and_no_alias():
     hub.replies[("sp-1", "OPNSENSE_EDIT_IMPAIRMENT")] = lambda p: {"status": "SUCCESS", "uuid": "i3"}
     saved = (access.write_scope, access.resolve_owned_prefixes, access.fw_rule_in_tenant_scope)
 
-    async def owned(hub_, sess):
+    async def owned(hub_, sess, shared=False):
         return ["192.0.2.0/24"]
 
     async def overlaps(*a):
@@ -315,7 +315,7 @@ def test_shared_firewall_tenant_sees_and_changes_only_impairments_wholly_inside(
     import access
     saved = (access.resolve_owned_prefixes, access._owned_spoke_writable)
 
-    async def owned(hub_, sess):
+    async def owned(hub_, sess, shared=False):
         return ["192.0.2.0/24"]
     access.resolve_owned_prefixes = owned
     access._owned_spoke_writable = lambda *a, **k: None

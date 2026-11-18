@@ -114,3 +114,53 @@ def test_merged_rows_carry_the_spoke_tag_the_write_path_needs():
     leases = c.get("/api/dhcp/leases").json()["leases"]
     assert len(leases) == 2
     assert {l["_spoke"] for l in leases} == {"dhcp-a", "dhcp-b"}
+
+
+def test_vrf_tenant_may_write_reservations_on_its_own_kea(monkeypatch):
+    """A subnet a tenant has only in its own VRF is cut from shared writes,
+    but a reservation landing on the tenant's OWN Kea is the tenant's
+    whatever its address: every reservation route passes its target spoke."""
+    import routes.net_services as ns
+
+    async def out_of_shared_scope(hub, sess, record, fields, spoke_id=None):
+        return False
+
+    monkeypatch.setattr(ns.access, "record_in_tenant_scope", out_of_shared_scope)
+    monkeypatch.setattr(ns.access, "spoke_owner_tenant",
+                        lambda hub, sid: {"dhcp-a": "tenantA"}.get(sid))
+    monkeypatch.setattr(ns.access, "_owned_spoke_writable",
+                        lambda hub, sess, sid, owner: owner == sess["user"]["tenant_id"])
+    hub = FakeHub({"dhcp-a", "dhcp-b"},
+                  module_metadata={"dhcp-a": {"tenant_id": "tenantA"},
+                                   "dhcp-b": {"tenant_id": "tenantB"}})
+    body = {"ip": "10.9.0.5", "mac": "aa:bb:cc:dd:ee:ff"}
+
+    c = _build(_tenant_user("tenantA"), hub)
+    for method in ("POST", "PUT", "DELETE"):
+        assert c.request(method, "/api/dhcp/reservation", json=body).status_code == 200
+    assert [s for s, _c, _p in hub.forwarded] == ["dhcp-a"] * 3
+
+    # The same write from a tenant with no Kea of its own is still refused.
+    hub.forwarded.clear()
+    c = _build(_tenant_user("tenantC"), hub)
+    assert c.post("/api/dhcp/reservation", json=body).status_code in (403, 503)
+    assert not hub.forwarded
+
+
+def test_vrf_tenant_may_write_on_a_kea_it_owns_by_instance_record(monkeypatch):
+    """A Kea the tenant configured itself (a ``dhcp_instances`` record) on a
+    spoke with no tenant binding is still the tenant's own: the same records
+    route its writes, so the shared-VRF cut must not refuse them."""
+    import routes.net_services as ns
+
+    async def out_of_shared_scope(hub, sess, record, fields, spoke_id=None):
+        return False
+
+    monkeypatch.setattr(ns.access, "record_in_tenant_scope", out_of_shared_scope)
+    hub = FakeHub({"dhcp-a"},
+                  dhcp_instances=[{"tenant_id": "tenantA", "spoke_id": "dhcp-a"}])
+    body = {"ip": "10.9.0.5", "mac": "aa:bb:cc:dd:ee:ff"}
+
+    c = _build(_tenant_user("tenantA"), hub)
+    assert c.post("/api/dhcp/reservation", json=body).status_code == 200
+    assert [s for s, _c, _p in hub.forwarded] == ["dhcp-a"]

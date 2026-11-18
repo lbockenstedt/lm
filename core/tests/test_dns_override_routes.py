@@ -277,3 +277,29 @@ def test_firewall_write_scope_covers_every_tenant_the_user_holds(monkeypatch):
         return asyncio.run(access.fw_rule_in_tenant_scope(None, sess, endpoint, None, rec))
     assert ok("10.1.0.5") and ok("10.3.0.5")
     assert not ok("10.2.0.5")
+
+
+def test_tenant_cannot_override_a_subnet_only_in_its_own_vrf(monkeypatch):
+    """The shared resolver serves the global table: a subnet inside a prefix the
+    tenant has only in its own VRF is not the tenant's there."""
+    monkeypatch.setattr(ns.access, "tenant_prefix_vrfs", lambda hub, tid: {"10.1.0.0/24": {"7"}})
+    client, hub = _client(admin=False)
+    r = client.post("/api/dns/override-assignment",
+                    json={"target": "10.1.0.0/25", "profile": "PAVO-DEVICE"})
+    assert r.status_code == 403
+    assert hub.forwarded == []
+
+
+def test_vrf_tenant_may_override_its_vrf_subnet_on_its_own_resolver(monkeypatch):
+    """On a resolver the tenant owns, its own-VRF subnets are its own: the
+    shared-infrastructure cut applies only on a shared resolver."""
+    monkeypatch.setattr(ns.access, "tenant_prefix_vrfs", lambda hub, tid: {"10.1.0.0/24": {"7"}})
+    monkeypatch.setattr(ns.access, "spoke_owner_tenant", lambda hub, sid: "t-a")
+    monkeypatch.setattr(ns.access, "_owned_spoke_writable", lambda hub, sess, sid, owner: owner == "t-a")
+    client, hub = _client(admin=False)
+    r = client.post("/api/dns/override-assignment",
+                    json={"target": "10.1.0.0/25", "profile": "PAVO-DEVICE"})
+    assert r.status_code == 200
+    r = client.request("DELETE", "/api/dns/override-assignment", json={"target": "10.1.0.0/25"})
+    assert r.status_code == 200
+    assert [c for _s, c, _p in hub.forwarded] == ["DNS_OVERRIDE_ASSIGN", "DNS_OVERRIDE_UNASSIGN"]

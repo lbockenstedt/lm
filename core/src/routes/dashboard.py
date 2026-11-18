@@ -371,7 +371,9 @@ def register(app, hub, ctx):
         # Scope the VM + active-session counts by the tenant so the dashboard
         # matches the (tenant-scoped) hypervisor + Access Tracker views, not the
         # global totals.
-        sess_prefixes = await _resolve_prefixes_for_tenant(hub, scoping.get("tenant_id"))
+        raw_prefixes = await _resolve_prefixes_for_tenant(hub, scoping.get("tenant_id"))
+        # Shared hosts and the shared NAC sit in the global table: drop own-VRF prefixes.
+        sess_prefixes = access.shared_slice_prefixes(hub, scoping.get("tenant_id"), raw_prefixes)
         # Hypervisor VMs attribute by Proxmox TAG and template-pool too, NOT just
         # subnet — a VM tagged for this tenant on a SHARED host (whose IPs are off
         # the tenant's subnets, or which reports no live IP) must still count.
@@ -381,11 +383,12 @@ def register(app, hub, ctx):
         # (e.g. LRB showing 4 VMs instead of its real count). No prefixes → count
         # the spoke-side tag-filtered list as-is (same as the hypervisor branch,
         # which returns unfiltered when a tenant has none).
-        if _filter_enabled(hub, "hypervisor") and sess_prefixes:
+        if _filter_enabled(hub, "hypervisor") and raw_prefixes:
             all_vms = access.filter_hypervisor_vms(
                 all_vms, sess_prefixes,
                 template_pools=access._template_pools(hub),
-                tenant_tags=access._tenant_tag_set(hub, scoping.get("tenant_id")))
+                tenant_tags=access._tenant_tag_set(hub, scoping.get("tenant_id")),
+                empty_keeps_all=False)
         # Union in the whole-host PINNED-agent VMs UNCONDITIONALLY (they were
         # fetched scoped to an agent pinned to THIS tenant, so every one is owned
         # regardless of subnet/tag). Deduped by unique_id against the filtered
@@ -856,6 +859,7 @@ def register(app, hub, ctx):
         if nb_slug:
             try:
                 prefixes = await _resolve_prefixes_for_tenant(hub, resolved) or []
+                prefixes = access.firewall_dhcp_prefixes(hub, resolved, prefixes)
             except Exception as e:
                 logger.warning(f"search: prefix fetch for '{resolved}' failed: {e}")
         payload["prefixes"] = prefixes  # opnsense DHCP filter

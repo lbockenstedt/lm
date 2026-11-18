@@ -8,6 +8,7 @@ error / empty). The request path and background loop delegate to exactly these
 pieces, so this locks the behaviour the WebUI depends on.
 """
 import asyncio
+import types
 import time
 
 import search_index as si
@@ -264,3 +265,24 @@ def test_kick_warm_schedules_and_populates():
     asyncio.run(_run())
     assert hub.search_index_leg_items("NETBOX_SEARCH", "k1") == [{"name": "dev1"}]
     assert hub._search_warming == set()  # cleared by done-callback
+
+
+def test_scope_payload_drops_own_vrf_prefixes_for_shared_firewall(monkeypatch):
+    """The DHCP leg reads the shared firewall (global table): a prefix the
+    tenant has only in its own VRF is dropped; its own firewall keeps it."""
+    import access
+    vrfs = {"10.9.0.0/16": {"7"}, "10.1.0.0/24": {""}}
+
+    async def by_tenant(hub, tid):
+        return ["10.1.0.0/24", "10.9.0.0/16"]
+    monkeypatch.setattr(access, "resolve_prefixes_for_tenant", by_tenant)
+    monkeypatch.setattr(access, "tenant_prefix_vrfs", lambda hub, tid: vrfs)
+    monkeypatch.setattr(access, "tenant_has_own_spoke", lambda h, t, m: False)
+    hub, scope = SearchIndexMixin(), {"nb_slug": "dxp", "resolved": "dxp"}
+    gc = {"firewalls": []}
+    hub.state = types.SimpleNamespace(system_state={"global_config": gc},
+                                      get_spoke_tenant=lambda _sid: "")
+    assert asyncio.run(hub._search_scope_payload(scope))["prefixes"] == ["10.1.0.0/24"]
+    # Its own firewall, configured as a firewalls record on an unbound spoke.
+    gc["firewalls"] = [{"id": "fw-1", "tenant_id": "dxp", "spoke_id": "fw-spoke"}]
+    assert asyncio.run(hub._search_scope_payload(scope))["prefixes"] == ["10.1.0.0/24", "10.9.0.0/16"]
