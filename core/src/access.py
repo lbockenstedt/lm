@@ -2082,7 +2082,9 @@ def clear_prefix_cache(hub) -> None:
 
 # Warm-cache namespace persisting each NetBox scope's prefix VRFs, so the VRF
 # cut of shared infrastructure holds right after a hub restart (a session can
-# keep its cached prefixes across a restart without a NetBox fetch).
+# keep its cached prefixes across a restart without a NetBox fetch). An
+# entry's time is the scope's last live read, which ``_scope_vrfs`` compares
+# with the NetBox cache feed's copy.
 _PREFIX_VRF_NS = "tenant_prefix_vrfs"
 
 # Hub-cache namespace where the NetBox cache feed (``routes.netbox.nb_cache_feed``)
@@ -2106,12 +2108,12 @@ def _feed_prefix_rows(hub, key):
     return rows if isinstance(rows, list) else None
 
 
-def _note_prefix_vrfs(hub, key, rows) -> None:
+def _note_prefix_vrfs(hub, key, rows) -> bool:
     """Remember the NetBox VRF id of each prefix row under scope ``key``
     (``{prefix: {vrf id}}``; "" is the global table). Rows without
     ``vrf_id`` (an older netbox spoke) leave the VRF unknown: VRF names
     need not be unique. Rows that carry no VRF at all keep what is already
-    known rather than forgetting it."""
+    known rather than forgetting it. True when the rows named a VRF."""
     vrfs: Dict[str, set] = {}
     for p in rows or []:
         if not (isinstance(p, dict) and p.get("prefix") and "vrf_id" in p):
@@ -2124,24 +2126,31 @@ def _note_prefix_vrfs(hub, key, rows) -> None:
             continue
         vrfs.setdefault(net, set()).add(vrf)
     # Store them on the hub.
-    if vrfs:
-        try:
-            vars(hub).setdefault("_tenant_prefix_vrfs", {})[key] = vrfs
-        except TypeError:
-            pass
+    if not vrfs:
+        return False
+    try:
+        vars(hub).setdefault("_tenant_prefix_vrfs", {})[key] = vrfs
+    except TypeError:
+        return False
+    return True
 
 
 async def _persist_prefix_vrfs(hub, key) -> None:
-    """Save scope ``key``'s known prefix VRFs with the hub cache when they
-    differ from the saved copy; a forgotten scope (``_forget_prefix_vrfs``)
-    empties it. Best effort: a hub without a warm cache skips."""
+    """Save scope ``key``'s known prefix VRFs with the hub cache; a forgotten
+    scope (``_forget_prefix_vrfs``) empties the copy. Called after every live
+    read that named VRFs, and saved even when nothing changed, because the
+    save's time is what ``_scope_vrfs`` compares with the NetBox cache feed's
+    copy: skipping an unchanged save let an older feed copy beat a newer read
+    that found the VRFs an earlier read had saved. That is at most one save
+    per scope per prefix-cache period (``_PREFIX_CACHE_TTL``, or sooner after
+    a prefix change clears that cache), as the feed itself saves on every
+    refresh, and the hub cache debounces the disk write.
+    Best effort: a hub without a warm cache skips."""
     try:
         vrfs = vars(hub).get("_tenant_prefix_vrfs", {}).get(key)
         if vrfs is None:
             return
-        saved = {p: sorted(v) for p, v in vrfs.items()}
-        if (hub.warm_get(_PREFIX_VRF_NS, key) or {}) != saved:
-            await hub.warm_set(_PREFIX_VRF_NS, key, saved)
+        await hub.warm_set(_PREFIX_VRF_NS, key, {p: sorted(v) for p, v in vrfs.items()})
     except Exception:  # noqa: BLE001 - persistence must never break a prefix read
         pass
 
@@ -2149,8 +2158,8 @@ async def _persist_prefix_vrfs(hub, key) -> None:
 async def _forget_prefix_vrfs(hub, key) -> None:
     """Forget scope ``key``'s prefix VRFs, and the copy saved with the hub
     cache: NetBox answered that the scope has no prefixes left, so it uses no
-    VRF either. The NetBox cache feed's copy, which ``_scope_vrfs`` reads
-    first, empties on the feed's next read of the scope."""
+    VRF either. That saved answer is newer than the NetBox cache feed's copy,
+    so ``_scope_vrfs`` counts it until the feed reads the scope again."""
     try:
         vars(hub).setdefault("_tenant_prefix_vrfs", {})[key] = {}
     except TypeError:
@@ -2190,20 +2199,42 @@ def _scope_prefix_vrfs(hub, key) -> Dict[str, set]:
     return store.get(key) or {}
 
 
+def _read_vrfs_newer_than_feed(hub, key):
+    """The VRF ids scope ``key``'s last live read (``fetch_tenant_prefixes``)
+    saved with the hub cache, when that read is newer than the NetBox cache
+    feed's copy of its prefixes; else None. The feed's copy wins a tie, and
+    whenever either time is unknown. The saved copy is read rather than the
+    in-memory one because a failed read fills the in-memory one from the
+    feed's copy (``_from_warm``)."""
+    try:
+        saved = hub.warm_get(_PREFIX_VRF_NS, key)
+        read_at = hub.warm_last_fetched_at(_PREFIX_VRF_NS, key)
+        feed_at = hub.warm_last_fetched_at(_PREFIX_FEED_NS, key)
+    except Exception:  # noqa: BLE001 - a hub without a warm cache
+        return None
+    if not (isinstance(saved, dict) and read_at and feed_at and read_at > feed_at):
+        return None
+    return {str(v) for vrfs in saved.values() if isinstance(vrfs, list) for v in vrfs}
+
+
 def _scope_vrfs(hub, key) -> set:
-    """The VRF ids scope ``key`` has prefixes in. They come from the NetBox
-    cache feed's copy of its prefixes when the hub cache holds one, since the
-    feed reads every tenant whether or not a page has asked about it, and
-    its copy is at most one feed cycle old (5 minutes). Without a copy, or when
-    the copy carries no ``vrf_id`` (an older netbox spoke), they come from
-    the VRFs ``fetch_tenant_prefixes`` last read."""
+    """The VRF ids scope ``key`` has prefixes in, from the newer of two
+    copies: the NetBox cache feed's copy of its prefixes, which the feed
+    refreshes for every tenant whether or not a page has asked about it (at
+    most one feed cycle, 5 minutes, old), and the VRFs a live read
+    (``fetch_tenant_prefixes``) last found. So NetBox answering that a tenant
+    has no prefixes left, or that they moved to another VRF, counts from that
+    read on, not from the feed's next copy (lm#1992). Without a feed copy, or
+    when it carries no ``vrf_id`` (an older netbox spoke), the VRFs the hub
+    last read count."""
     rows = _feed_prefix_rows(hub, key)
     if rows is not None:
         vrfs = {str(p["vrf_id"] or "") for p in rows
                 if isinstance(p, dict) and p.get("prefix") and "vrf_id" in p}
         # An empty copy is NetBox answering "no prefixes": no VRFs either.
         if vrfs or not rows:
-            return vrfs
+            newer = _read_vrfs_newer_than_feed(hub, key)
+            return vrfs if newer is None else newer
     return set().union(*_scope_prefix_vrfs(hub, key).values())
 
 
@@ -2214,11 +2245,12 @@ def _shared_vrfs(hub) -> set:
     Each NetBox tenant counts once (two hub tenants on one NetBox tenant share
     every prefix, so they are one user), and tenant groups don't count (their
     prefixes are their members'). A tenant's VRFs come from ``_scope_vrfs``:
-    the NetBox cache feed's copy of its prefixes, so the answer does not
-    depend on which tenants a page has read since the hub started. Until a
-    tenant has a copy, the VRFs the hub read for it count, including the
-    copies saved with the hub cache, and a tenant NetBox says has no prefixes
-    left stops counting (``fetch_tenant_prefixes``). Any VRF two tenants use
+    the newer of the NetBox cache feed's copy of its prefixes and the hub's
+    last live read of them, so the answer does not depend on which tenants a
+    page has read since the hub started, and a tenant NetBox says has no
+    prefixes left stops counting from that read on (``fetch_tenant_prefixes``).
+    Until a tenant has a feed copy, the VRFs the hub read for it count,
+    including the copies saved with the hub cache. Any VRF two tenants use
     counts as shared, even one shared infrastructure does not serve (such as
     a VRF two tenants of one customer share)."""
     users: Dict[str, set] = {}
@@ -2336,8 +2368,10 @@ async def fetch_tenant_prefixes(hub, tenant_id) -> list:
         data = unwrap_spoke(result)
         rows = data.get("prefixes", []) if isinstance(data, dict) else []
         out = [p["prefix"] for p in rows if p.get("prefix")]
-        if out:
-            _note_prefix_vrfs(hub, key, rows)
+        # Save the VRFs only when this read named some: rows from an older
+        # spoke would otherwise re-stamp what the hub knew from an older read
+        # (or the feed's copy) as this read's answer.
+        if out and _note_prefix_vrfs(hub, key, rows):
             await _persist_prefix_vrfs(hub, key)
         if not out:
             # A SUCCESS reply with an empty list is a tenant that simply has no
