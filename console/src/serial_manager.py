@@ -29,7 +29,7 @@ import threading
 import time
 # Path for state files; typing helpers.
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Collection, Dict, List, Optional
 
 # Optional pyserial; None until the role's requirements are installed.
 try:  # pyserial is installed on the node by the agent's LOAD_ROLE (requirements.txt)
@@ -413,7 +413,8 @@ class PortStore:
         assignments such as DPA TCP ports across all known ports)."""
         return dict(self._data)
 
-    def find_by_identity(self, identity: Dict[str, Any], exclude_port_id: str = "") -> Optional[str]:
+    def find_by_identity(self, identity: Dict[str, Any], exclude_port_id: str = "",
+                         skip_ports: Collection[str] = ()) -> Optional[str]:
         """Find an existing port_id (other than ``exclude_port_id``) whose
         persisted ``probe.identity`` matches on a field that identifies the
         DEVICE ITSELF (serial number or MAC learned by logging into it) rather
@@ -421,6 +422,10 @@ class PortStore:
         automatically when it reappears under a new port_id — e.g. a reboot
         renumbers /dev/ttyUSBn, or the cable gets moved to a different adapter —
         without leaving the old port_id behind as an orphaned duplicate.
+
+        ``skip_ports`` are port_ids the caller says still exist (enumerated): such
+        a port is a sibling, not an orphan (the member consoles of one VSF/VC
+        stack all report the stack's serial/MAC), so it never matches.
 
         Hostname is deliberately NOT a match key here (see
         test_find_by_identity_with_no_identifying_fields_returns_none):
@@ -432,9 +437,9 @@ class PortStore:
         mac = str((identity or {}).get("mac") or "").strip().lower()
         if not serial and not mac:
             return None
-        # Return the first other port whose saved identity has the same serial or MAC.
+        # Return the first other absent port whose saved identity has the same serial or MAC.
         for pid, rec in self._data.items():
-            if pid == exclude_port_id:
+            if pid == exclude_port_id or pid in skip_ports:
                 continue
             ident = (rec.get("probe") or {}).get("identity") or {}
             if serial and str(ident.get("serial") or "").strip() == serial:

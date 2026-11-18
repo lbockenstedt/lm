@@ -99,7 +99,23 @@ serial ports from the hub WebUI's **Console** view (an xterm.js terminal in the 
 - `PortStore` (`ports.json`) persists every port's settings/probe/alias/tenant keyed by `port_id`, and
   `find_by_identity()` reconciles a device that reappears under a *different* port_id (reboot renumbering,
   cable moved to another adapter) by matching on serial or MAC learned from a logged-in identify — **never**
-  hostname alone, which collides too easily to trust for a silent alias/tenant merge.
+  hostname alone, which collides too easily to trust for a silent alias/tenant merge. Only a port that is
+  **no longer enumerated** counts as the old record, and its alias/tenant move to the new port. A match that
+  is still enumerated is a sibling and keeps its own record (settings, probe, DPA port): the member consoles
+  of one VSF/VC stack all report the stack's serial/MAC, and deleting the match on every identify made them
+  wipe each other. Being enumerated is the only evidence used, because a failed probe (also set on every
+  restart) or a long gap since the last identify can just be a user session, a locked port or missing
+  credentials, and the delete cannot be undone. "Enumerated" means a fresh port inventory taken at that moment
+  (off the event loop), not the periodic cache, which can be out of date; if that enumeration fails no record is
+  retired, and the next identify reconciles it. The old record is also deleted only after its port has stayed
+  missing for 15 minutes (`_ORPHAN_GRACE_S`, counted in memory, so a restart restarts the wait), because one
+  inventory that omits it can be an adapter resetting, a sibling unplugged for a moment or a partial listing;
+  every fresh port inventory (the auto-identify scan takes one each scan interval) settles the wait, so the
+  delete does not depend on the new port being identified again. A port that is back on the bus is forgotten,
+  and the alias/tenant carry to the new port at once.
+  Known limit: a cable moved between two always-present
+  adapters leaves the old record behind as a stale entry; the new port still gets the alias/tenant, because
+  they are device-level (the `DeviceCache` is keyed by serial), so sibling consoles to one device share them.
 - `DeviceCache` (`devices.json`) is a second, **device-identity-keyed** (serial, then MAC — same rule) warm
   cache, independent of `port_id` entirely. It survives what `ports.json` can't: a code update that changes
   `derive_port_id`'s own format (which would otherwise orphan every existing record on the next deploy), or
