@@ -42,7 +42,11 @@ of serving with an unapproved version.
 ## API and diagnostics
 
 - `GET /api/llm/models?tenant=…` returns the selected tenant's model digests
-  and readiness issues from current reports.
+  and readiness issues from current reports. Any member of the tenant can read it.
+- `POST /api/llm/complete` and `POST /api/llm/check` run a job on a CPU slot,
+  so they need edit access to the tenant (a write user, tenant admin, or global
+  admin); a view-only member gets 403. AppBuilder uses its own
+  certificate-bound path, not these routes.
 - `POST /api/llm/complete?tenant=…` accepts `model`, `digest`, `prompt`, and
   optional `format` (`text`, `json`, or `python`). JSON must be an object or
   array. Python drafts are syntax-checked but never executed. Outputs are

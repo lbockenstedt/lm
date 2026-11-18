@@ -6,7 +6,8 @@ import re
 
 from fastapi import HTTPException, Request, Response
 
-from access import read_scope, request_effective_tenant, safe_external_url, same_tenant, tenant_is_shared
+from access import (read_scope, request_effective_tenant, safe_external_url, same_tenant,
+                    tenant_is_shared, write_scope)
 import instance_vault
 from llm_cloud import TOKEN_LIMIT_FIELDS, valid_endpoint
 from llm_pool import HARDWARE_LIMITS, SAMPLING_LIMITS, diagnostic, model_minimums, model_sampling, valid_model
@@ -180,8 +181,13 @@ def register(app, hub, ctx):
             raise HTTPException(409, "Candidate is not configured or its worker is unavailable")
         return {"status": "accepted"}
 
-    def scoped_tenant(request, tenant):
-        """Require an authenticated session and a concrete tenant scope."""
+    def scoped_tenant(request, tenant, run=False):
+        """Require a session in a concrete tenant; running a job also needs write access.
+
+        Inference holds a CPU slot that other users, possibly in other tenants on
+        Shared workers, are waiting for, so it is an action: a view-only member may
+        list models but not run them.
+        """
         session = ctx._session_user(request)
         if not session:
             raise HTTPException(401, "Authentication required")
@@ -191,6 +197,8 @@ def register(app, hub, ctx):
                 or not hub.state.get_tenant(effective)
                 or read_scope(session, effective) != "full"):
             raise HTTPException(403, "Select a tenant you can access")
+        if run and write_scope(session, effective) != "full":
+            raise HTTPException(403, "Running LLM jobs requires edit access to this tenant")
         return effective
 
     @app.get("/api/llm/models")
@@ -205,12 +213,12 @@ def register(app, hub, ctx):
     async def complete(request: Request, response: Response, data: dict, tenant: str = None):
         """Run a bounded completion in the caller's selected tenant."""
         response.headers["Cache-Control"] = "no-store"
-        return await hub.llm_pool.complete(scoped_tenant(request, tenant), data)
+        return await hub.llm_pool.complete(scoped_tenant(request, tenant, run=True), data)
 
     @app.post("/api/llm/check")
     async def check(request: Request, response: Response, data: dict, tenant: str = None):
         """Replay a synthetic regression fixture through an exact model in the pool."""
-        effective = scoped_tenant(request, tenant)
+        effective = scoped_tenant(request, tenant, run=True)
         response.headers["Cache-Control"] = "no-store"
         fixture = data.get("fixture")
         if fixture == "indentation":

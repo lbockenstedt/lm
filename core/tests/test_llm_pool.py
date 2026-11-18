@@ -390,6 +390,26 @@ def test_api_rejects_forged_tenant_before_dispatch():
         assert response.headers["cache-control"] == "no-store"
 
 
+@pytest.mark.parametrize("permissions", [{}, {"edit": True}])
+def test_view_only_member_lists_models_but_cannot_run_jobs(permissions):
+    """Inference holds a shared CPU slot, so it needs the write tier, not tenant membership."""
+    pool = make_pool()
+    pool.hub.llm_pool = pool
+    pool.hub.request_response.return_value = {"status": "SUCCESS", "text": "ok"}
+    session = {"user": {"tenant_id": "tenant-a", "tenants": ["tenant-a"], "permissions": permissions}}
+    app = FastAPI()
+    llm.register(app, pool.hub, SimpleNamespace(_session_user=lambda request: session))
+    with TestClient(app) as client:
+        assert client.get("/api/llm/models").status_code == 200
+        ran = client.post("/api/llm/complete", json=JOB).status_code
+        checked = client.post("/api/llm/check", json={**JOB, "fixture": "json"}).status_code
+    if permissions:
+        assert ran == checked == 200
+    else:
+        assert ran == checked == 403
+        assert pool.hub.request_response.call_count == 0
+
+
 def test_prompts_and_completions_are_not_debug_logged():
     """Both sides of the relay use the full-redaction command policy."""
     assert _redact("LLM_COMPLETE", JOB) == {"<redacted>": True}
@@ -404,7 +424,7 @@ def test_fixture_reports_semantic_indentation_corruption():
         {"status": "SUCCESS", "text": "def classify(value):\n    if value > 0:\n        return 1\n    return 0\n"},
         {"status": "SUCCESS", "text": "def classify(value):\n    if value > 0:\n        return 1\n        return 0\n"},
     ]
-    session = {"user": {"tenant_id": "tenant-a", "tenants": ["tenant-a"]}}
+    session = {"user": {"tenant_id": "tenant-a", "tenants": ["tenant-a"], "permissions": {"edit": True}}}
     app = FastAPI()
     llm.register(app, pool.hub, SimpleNamespace(_session_user=lambda request: session))
     body = {**JOB, "fixture": "indentation", "prompt": "must not be forwarded"}
