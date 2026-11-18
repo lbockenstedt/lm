@@ -2794,9 +2794,25 @@ def register(app, hub, ctx):
             known_modules = hub.state.system_state.get("known_modules", [])
             if spoke_id not in known_modules:
                 raise HTTPException(status_code=404, detail=f"Spoke '{spoke_id}' not found in known_modules: {known_modules}")
+            spoke_pk = hub._primary_key(spoke_id)
 
+            # The display-name editor is operator intent; do not let callers
+            # claim the internal auto-name marker in the same payload.
+            if isinstance(metadata, dict):
+                metadata = dict(metadata)
+                display_name_edited = metadata.pop("display_name_edited", False) is True
+                metadata.pop("display_name_source", None)
+                current = (hub.state.system_state.get("module_metadata", {}).get(spoke_pk, {})
+                           or {})
+                current_name = (current.get("display_name")
+                                or hub.state.system_state.get("module_names", {}).get(spoke_pk)
+                                or spoke_id)
+                if ("display_name" in metadata
+                        and (display_name_edited
+                             or metadata["display_name"] != current_name)):
+                    metadata["display_name_source"] = "operator"
             # Merge the metadata and mark state for saving.
-            hub.state.update_module_metadata(spoke_id, metadata)
+            hub.state.update_module_metadata(spoke_pk, metadata)
             hub.state._mark_dirty()
 
             return {"status": "ok", "message": f"Metadata for spoke {spoke_id} updated."}
@@ -2815,7 +2831,8 @@ def register(app, hub, ctx):
         """Return the stored metadata for one spoke, or 404."""
         # Read the spoke's metadata.
         hub = app.state.hub
-        metadata = hub.state.system_state.get("module_metadata", {}).get(spoke_id, {})
+        spoke_pk = hub._primary_key(spoke_id)
+        metadata = hub.state.system_state.get("module_metadata", {}).get(spoke_pk, {})
         if not metadata:
             raise HTTPException(status_code=404, detail="Spoke metadata not found")
         return {"metadata": metadata}

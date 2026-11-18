@@ -597,16 +597,133 @@ def test_role_sub_spokes_get_distinct_display_names(tmp_path):
     assert state.system_state["module_names"] == names
 
 
-def test_legacy_sub_spoke_bare_hostname_name_is_healed(tmp_path):
+def test_legacy_sub_spoke_name_without_provenance_is_preserved(tmp_path):
+    """A pre-marker hostname-like label may be operator-owned; do not guess."""
     state = _fresh_state(tmp_path)
     hub = _ReconcileHub(state, _make_km())
     u = str(_uuid.uuid4())
     reconcile(hub, "lrb-agent-proxy", u, "lrb-agent")
     pk = hub._primary_key("lrb-agent-proxy")
+    # Simulate a row persisted before display_name_source was introduced.
+    state.system_state["module_metadata"][pk].pop("display_name_source")
     state.update_module_metadata(pk, {"display_name": "lrb-agent"})
-    reconcile(hub, "lrb-agent-proxy", u, "lrb-agent")
-    assert state.system_state["module_metadata"][pk]["display_name"] == "lrb-agent-proxy"
-    # An operator-chosen name is never overridden.
-    state.update_module_metadata(pk, {"display_name": "Console Lab"})
-    reconcile(hub, "lrb-agent-proxy", u, "lrb-agent")
+    reconcile(hub, "lrb-agent-proxy", u, "renamed-host")
+    assert state.system_state["module_metadata"][pk]["display_name"] == "lrb-agent"
+    # New operator edits are explicitly marked and remain stable too.
+    state.set_module_name(pk, "Console Lab")
+    reconcile(hub, "lrb-agent-proxy", u, "renamed-again")
     assert state.system_state["module_metadata"][pk]["display_name"] == "Console Lab"
+
+
+# ── Host rename: hub-derived display names follow the hostname ───────────────
+
+def _name(state, hub, spoke_id):
+    """Display name stored for spoke_id (resolved to its primary key)."""
+    return state.system_state["module_metadata"][hub._primary_key(spoke_id)]["display_name"]
+
+
+def test_host_rename_moves_auto_display_names_of_agent_and_role_sub_spoke(tmp_path):
+    """Generic agent installed as agent-<host> with an llm role sub-spoke
+    (agent-<host>-llm). The sub-spoke gets {host}-{role}, not the parent's
+    bare hostname, and after the OS host is renamed both hub-derived names
+    follow the new hostname instead of keeping the old one."""
+    state = _fresh_state(tmp_path)
+    hub = _ReconcileHub(state, _make_km())
+    base, sub = str(_uuid.uuid4()), str(_uuid.uuid4())
+    reconcile(hub, "agent-mybox", base, "mybox")
+    reconcile(hub, "agent-mybox-llm", sub, "mybox", parent_spoke_id="agent-mybox")
+    assert _name(state, hub, "agent-mybox") == "mybox"
+    assert _name(state, hub, "agent-mybox-llm") == "mybox-llm"
+    # The host is renamed; the pinned ids keep the install-time hostname.
+    reconcile(hub, "agent-mybox", base, "mybox03")
+    reconcile(hub, "agent-mybox-llm", sub, "mybox03", parent_spoke_id="agent-mybox")
+    assert _name(state, hub, "agent-mybox") == "mybox03"
+    assert _name(state, hub, "agent-mybox-llm") == "mybox03-llm"
+    # module_names (read by get_module_name consumers) is kept in step.
+    assert state.system_state["module_names"][base] == "mybox03"
+    assert state.system_state["module_names"][sub] == "mybox03-llm"
+    assert _events_of(hub, base, "hostname_changed")
+
+
+def test_host_rename_keeps_operator_display_names(tmp_path):
+    """An operator rename is never overwritten by a host rename."""
+    state = _fresh_state(tmp_path)
+    hub = _ReconcileHub(state, _make_km())
+    base, sub = str(_uuid.uuid4()), str(_uuid.uuid4())
+    reconcile(hub, "agent-mybox", base, "mybox")
+    reconcile(hub, "agent-mybox-llm", sub, "mybox", parent_spoke_id="agent-mybox")
+    state.set_module_name(base, "GPU Box")
+    state.set_module_name(sub, "GPU Box LLM")
+    reconcile(hub, "agent-mybox", base, "mybox03")
+    reconcile(hub, "agent-mybox-llm", sub, "mybox03", parent_spoke_id="agent-mybox")
+    assert _name(state, hub, "agent-mybox") == "GPU Box"
+    assert _name(state, hub, "agent-mybox-llm") == "GPU Box LLM"
+
+
+def test_host_rename_keeps_operator_names_that_match_auto_names(tmp_path):
+    """An operator can pin the current hostname as a display name."""
+    state = _fresh_state(tmp_path)
+    hub = _ReconcileHub(state, _make_km())
+    base, sub = str(_uuid.uuid4()), str(_uuid.uuid4())
+    reconcile(hub, "agent-mybox", base, "mybox")
+    reconcile(hub, "agent-mybox-llm", sub, "mybox", parent_spoke_id="agent-mybox")
+    state.set_module_name(base, "mybox")
+    state.set_module_name(sub, "mybox-llm")
+
+    reconcile(hub, "agent-mybox", base, "mybox03")
+    reconcile(hub, "agent-mybox-llm", sub, "mybox03", parent_spoke_id="agent-mybox")
+
+    assert _name(state, hub, "agent-mybox") == "mybox"
+    assert _name(state, hub, "agent-mybox-llm") == "mybox-llm"
+
+
+def test_pinned_agent_id_suffix_is_not_treated_as_an_auto_name(tmp_path):
+    """A pinned --id suffix can be an operator label, not a hostname."""
+    state = _fresh_state(tmp_path)
+    hub = _ReconcileHub(state, _make_km())
+    install_uuid = str(_uuid.uuid4())
+    reconcile(hub, "agent-lab", install_uuid, "node1")
+    state.set_module_name(hub._primary_key("agent-lab"), "lab")
+
+    reconcile(hub, "agent-lab", install_uuid, "node1")
+    reconcile(hub, "agent-lab", install_uuid, "node2")
+
+    assert _name(state, hub, "agent-lab") == "lab"
+
+
+def test_legacy_agent_id_name_is_preserved_when_old_hostname_is_unknown(tmp_path):
+    """Without hostname provenance, an agent-id suffix may be operator-owned."""
+    state = _fresh_state(tmp_path)
+    hub = _ReconcileHub(state, _make_km())
+    base, sub = str(_uuid.uuid4()), str(_uuid.uuid4())
+    reconcile(hub, "agent-mybox", base, "mybox")
+    reconcile(hub, "agent-mybox-llm", sub, "mybox")
+    state.update_module_metadata(base, {"display_name": "mybox", "hostname": "mybox03"})
+    state.update_module_metadata(sub, {"display_name": "mybox", "hostname": "mybox03",
+                                       "parent_name": "agent-mybox", "role_name": "llm"})
+    reconcile(hub, "agent-mybox", base, "mybox03")
+    reconcile(hub, "agent-mybox-llm", sub, "mybox03")
+    assert _name(state, hub, "agent-mybox") == "mybox"
+    assert _name(state, hub, "agent-mybox-llm") == "mybox"
+
+
+def test_agent_host_rename_moves_auto_display_name_only(tmp_path):
+    """Relayed pxmx agent: a display_name that is just the old hostname (the
+    unpinned agent id) follows a clone-and-rename; an operator name stays."""
+    state = _fresh_state(tmp_path)
+    hub = _ReconcileHub(state, _make_km())
+    ac = state.system_state["agent_config"]
+    ac["node1"] = {"display_name": "node1", "display_name_source": "auto",
+                   "hostname": "node1", "install_uuid": "AU-1"}
+    ac["node7"] = {"display_name": "Rack 4 PVE", "display_name_source": "operator",
+                   "hostname": "node7", "install_uuid": "AU-7"}
+    ac["node9"] = {"display_name": "node9", "display_name_source": "operator",
+                   "hostname": "node9", "install_uuid": "AU-9"}
+    hub.install_uuid_index.update({"AU-1": "node1", "AU-7": "node7"})
+    hub.install_uuid_index["AU-9"] = "node9"
+    reconcile(hub, "node2", "AU-1", "node2", is_agent=True, parent_spoke_id="pxmx-1")
+    reconcile(hub, "node8", "AU-7", "node8", is_agent=True, parent_spoke_id="pxmx-1")
+    reconcile(hub, "node10", "AU-9", "node10", is_agent=True, parent_spoke_id="pxmx-1")
+    assert ac["AU-1"]["display_name"] == "node2"
+    assert ac["AU-7"]["display_name"] == "Rack 4 PVE"
+    assert ac["AU-9"]["display_name"] == "node9"

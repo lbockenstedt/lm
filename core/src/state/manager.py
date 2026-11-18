@@ -635,8 +635,9 @@ class StateManager:
             self._mark_dirty()
 
     def set_module_name(self, module_id: str, name: str):
-        """Set a module's display name."""
-        self.update_module_metadata(module_id, {"display_name": name})
+        """Set an operator-owned display name, even if it matches the hostname."""
+        self.update_module_metadata(
+            module_id, {"display_name": name, "display_name_source": "operator"})
 
     def get_module_name(self, module_id: str) -> str:
         """Return a module's display name, defaulting to its id."""

@@ -63,6 +63,63 @@ _UUID_COLLISION_LIVE_WINDOW_S = 90
 _UUID_BINDING_LIVE_WINDOW_S = _UUID_COLLISION_LIVE_WINDOW_S
 
 
+def _subspoke_role(spoke_id: str, hostname: str,
+                   parent_spoke_id: Optional[str], meta: dict) -> str:
+    """Role suffix of a multi-role agent's role sub-spoke, or "" for a base spoke.
+
+    A role sub-spoke reports the SAME hostname as its base agent, so the
+    role is what keeps their display names apart. Sources, most explicit
+    first: the parent id claimed on this connect (id ``{parent}-{role}``,
+    the same prefix test _link_role_subspoke uses), the ``role_name`` that
+    _link_role_subspoke stamped on an earlier connect, then the legacy
+    ``{hostname}-{role}`` id shape. The last one alone missed the generic
+    agent's ``agent-{host}-{role}`` ids, so those sub-spokes were named
+    with the bare hostname, identical to their parent.
+    """
+    sid = spoke_id or ""
+    # Explicit parent claim on this connect.
+    if parent_spoke_id and sid.startswith(parent_spoke_id + "-"):
+        return sid[len(parent_spoke_id) + 1:]
+    # Role stamped by an earlier _link_role_subspoke.
+    if meta.get("role_name"):
+        return str(meta["role_name"])
+    # Legacy "{hostname}-{role}" id.
+    if hostname and sid.lower().startswith(hostname.lower() + "-"):
+        return sid[len(hostname) + 1:]
+    return ""
+
+
+def _auto_display_name(hostname: str, role: str) -> str:
+    """Display name the hub derives for a spoke from its declared hostname:
+    the hostname itself, or ``{hostname}-{role}`` for a role sub-spoke."""
+    return f"{hostname}-{role}" if role else hostname
+
+
+def _previous_auto_names(old_host: str, hostname: str, role: str) -> set:
+    """Return old names that may have been derived by the hub.
+
+    The caller must also check the persisted auto-name marker; these values
+    alone cannot distinguish an operator name that happens to match a host.
+    The set holds:
+      * the last recorded hostname, bare or ``{old}-{role}``;
+      * for a role sub-spoke, the bare current hostname (the legacy seed
+        shared with its base agent, before sub-spokes got ``-{role}``);
+
+    Do not infer a name from an ``agent-`` id: installers allow operators to
+    pin arbitrary ids, so the suffix may itself be an operator-assigned name.
+    """
+    names = set()
+    # Last recorded hostname.
+    if old_host:
+        names.add(old_host)
+        if role:
+            names.add(f"{old_host}-{role}")
+    # Legacy bare-hostname sub-spoke seed.
+    if role and hostname:
+        names.add(hostname)
+    return names
+
+
 class HubIdentityMixin:
     """Correlate spokes/agents by stable install_uuid so a cloned+renamed box is
     recognized and its approval / tenant binding / per-agent config / key
@@ -513,6 +570,13 @@ class HubIdentityMixin:
         events. Safe to call with an empty install_uuid (.env unwritable): it only
         records hostname when known, no correlation.
 
+        Display name: seeded from the declared hostname on first contact
+        (``{hostname}-{role}`` for a role sub-spoke), and moved to the new
+        hostname on a host rename while it is still a hub-derived name
+        (``_previous_auto_names``). An operator rename is never overwritten.
+        ``parent_spoke_id`` is the parent a spoke claims at auth (role
+        sub-spokes); for spokes it only feeds the role in that name.
+
         CC2 guard: the spoke path passes ``migrate_if`` set by the caller ONLY
         when the connecting box proved it owns the OLD id's secret (verified in
         handle_connection via ``get_valid_key(old_id, secret)`` before this call).
@@ -630,29 +694,33 @@ class HubIdentityMixin:
             "hostname": hostname or "",
             "install_uuid": (install_uuid or "") if owns_uuid else "",
         }
-        # First contact: seed the display name from the box's DECLARED hostname
-        # rather than letting update_module_metadata default it to the raw id.
-        # A brand-new entry otherwise gets display_name=module_id, surfacing an
-        # opaque guid in the UI — and for a replayed test-feed spoke that id is
-        # its SOURCE spoke_id, so the fleet shows "<tenant>-<UUID>" instead of the
-        # real host name the feeder sent as hostname. Only on a genuinely new
-        # module and only when a hostname was declared; a later operator rename
-        # is never overridden (the entry then already exists, so this is skipped).
-        # Role sub-spokes (id "{host}-{role}") report the SAME hostname as their
-        # base agent, so seed them with the connect-id to keep the registry rows
-        # distinguishable. A legacy row still carrying the bare hostname is healed.
-        # Is this a role sub-spoke ("{host}-{role}")? Pick the seed display name accordingly.
-        _is_sub = bool(hostname) and new_id.lower().startswith(hostname.lower() + "-")
-        _seed = new_id if _is_sub else hostname
-        # Current metadata.
-        _meta = self.state.system_state.get("module_metadata", {}) or {}
-        # New module with a declared hostname: seed the display name.
-        if hostname and new_pk not in _meta:
-            _persist["display_name"] = _seed
-        # Heal a legacy sub-spoke row that still shows the bare hostname.
-        elif _is_sub and (_meta.get(new_pk, {}) or {}).get("display_name") == hostname:
-            _persist["display_name"] = new_id
-        # Save the metadata.
+        # Display name the hub derives from the DECLARED hostname (see
+        # _auto_display_name). Re-read after any migration above so a renamed
+        # box's carried-over row (and its old hostname) is what we compare.
+        _cur = (self.state.system_state.get("module_metadata") or {}).get(new_pk)
+        if hostname:
+            _old_host = (_cur or {}).get("hostname") or ""
+            _role = _subspoke_role(new_id, hostname, parent_spoke_id, _cur or {})
+            _auto = _auto_display_name(hostname, _role)
+            # Set it (1) on first contact, rather than letting
+            # update_module_metadata default display_name to the raw id, which
+            # surfaces an opaque guid (or, for a replayed test-feed spoke, its
+            # SOURCE id) in the UI; and (2) when a known row still shows a name
+            # the hub derived from an older hostname (or the legacy bare-hostname
+            # sub-spoke seed). Without (2) a renamed host raised hostname_changed
+            # but kept its old name everywhere in the UI. An unmarked legacy
+            # name is ambiguous: an operator may have chosen the hostname
+            # itself, so only explicit auto provenance can move it.
+            if _cur is None:
+                _persist["display_name"] = _auto
+                _persist["display_name_source"] = "auto"
+            elif (_cur.get("display_name_source") == "auto"
+                  and _cur.get("display_name") != _auto
+                  and _cur.get("display_name") in
+                  _previous_auto_names(_old_host, hostname, _role)):
+                _persist["display_name"] = _auto
+                _persist["display_name_source"] = "auto"
+        # Save the metadata (update_module_metadata also syncs module_names).
         self.state.update_module_metadata(new_pk, _persist)
 
         # Lazy guid-primary arm: relocate this spoke's hub-side state from its
@@ -881,6 +949,16 @@ class HubIdentityMixin:
 
         # Save current hostname and uuid for the next comparison.
         cfg_new = ac.setdefault(new_pk, {})
+        # A display name that is just the previous hostname follows the host
+        # rename (unpinned pxmx agents use the hostname as their id, and
+        # _inherit_agent_tenant seeds display_name with that id and marks it
+        # auto. Read after migration so the carried-over row is compared.
+        _old_host = cfg_new.get("hostname") or ""
+        legacy_name = (self.state.system_state.get("agent_display_names") or {}).get(new_pk)
+        if cfg_new.get("display_name_source") == "auto" and not legacy_name \
+                and hostname and _old_host and _old_host != hostname \
+                and cfg_new.get("display_name") == _old_host:
+            cfg_new["display_name"] = hostname
         cfg_new["hostname"] = hostname or ""
         cfg_new["install_uuid"] = install_uuid or ""
         self.state._mark_dirty()

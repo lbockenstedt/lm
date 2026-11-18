@@ -90,6 +90,9 @@ class _FakeState:
 
     def set_module_name(self, spoke_id, name):
         self.system_state.setdefault("module_names", {})[spoke_id] = name
+        self.system_state.setdefault("module_metadata", {}).setdefault(
+            spoke_id, {})["display_name"] = name
+        self.system_state["module_metadata"][spoke_id]["display_name_source"] = "operator"
 
 
 class _FakeHub:
@@ -190,6 +193,71 @@ def test_rename_spoke_accepts_valid_inputs(tmp_path):
                cookies={"lm_session": tok})
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "ok"
+
+
+def test_rename_host_keeps_unchanged_auto_display_name(tmp_path):
+    """Changing only the hostname must not pin the submitted auto name."""
+    hub = _FakeHub(tmp_path, known_modules=["dns-spoke-1"], connected=["dns-spoke-1"])
+    hub.state.system_state["module_metadata"] = {
+        "dns-spoke-1": {"display_name": "dns-spoke-1", "display_name_source": "auto"},
+    }
+    c = _build_app(hub)
+    tok = _mint_admin(hub)
+
+    r = c.post("/setup/spoke-name", json={
+        "spoke_id": "dns-spoke-1",
+        "display_name": "dns-spoke-1",
+        "display_name_edited": False,
+        "hostname": "dns-renamed",
+    }, cookies={"lm_session": tok})
+
+    assert r.status_code == 200, r.text
+    assert hub.state.system_state["module_metadata"]["dns-spoke-1"] == {
+        "display_name": "dns-spoke-1",
+        "display_name_source": "auto",
+    }
+
+
+def test_rename_host_reads_auto_name_from_primary_key(tmp_path):
+    """A guid-primary spoke keeps its existing auto name on a host rename."""
+    hub = _FakeHub(tmp_path, known_modules=["dns-spoke-1"], connected=["guid-1"])
+    hub.spoke_id_alias["dns-spoke-1"] = "guid-1"
+    hub.state.system_state["module_metadata"] = {
+        "guid-1": {"display_name": "dns-spoke-1", "display_name_source": "auto"},
+    }
+    c = _build_app(hub)
+    tok = _mint_admin(hub)
+
+    r = c.post("/setup/spoke-name", json={
+        "spoke_id": "dns-spoke-1",
+        "display_name": "dns-spoke-1",
+        "display_name_edited": False,
+        "hostname": "dns-renamed",
+    }, cookies={"lm_session": tok})
+
+    assert r.status_code == 200, r.text
+    assert hub.state.system_state["module_metadata"] == {
+        "guid-1": {"display_name": "dns-spoke-1", "display_name_source": "auto"},
+    }
+
+
+def test_rename_spoke_can_pin_unchanged_display_name(tmp_path):
+    """An explicit display-name edit can pin the same text as the auto name."""
+    hub = _FakeHub(tmp_path, known_modules=["dns-spoke-1"])
+    hub.state.system_state["module_metadata"] = {
+        "dns-spoke-1": {"display_name": "dns-spoke-1", "display_name_source": "auto"},
+    }
+    c = _build_app(hub)
+    tok = _mint_admin(hub)
+
+    r = c.post("/setup/spoke-name", json={
+        "spoke_id": "dns-spoke-1",
+        "display_name": "dns-spoke-1",
+        "display_name_edited": True,
+    }, cookies={"lm_session": tok})
+
+    assert r.status_code == 200, r.text
+    assert hub.state.system_state["module_metadata"]["dns-spoke-1"]["display_name_source"] == "operator"
 
 
 def test_provision_rejects_bad_agent_id(tmp_path):
