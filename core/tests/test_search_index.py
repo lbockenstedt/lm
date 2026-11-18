@@ -268,8 +268,8 @@ def test_kick_warm_schedules_and_populates():
 
 
 def test_scope_payload_drops_own_vrf_prefixes_for_shared_firewall(monkeypatch):
-    """The DHCP leg reads the shared firewall (global table): a prefix the
-    tenant has only in its own VRF is dropped; its own firewall keeps it."""
+    """The DHCP leg reads the shared firewall (common routing domain): a prefix
+    the tenant has only in its own VRF is dropped; its own firewall keeps it."""
     import access
     vrfs = {"10.9.0.0/16": {"7"}, "10.1.0.0/24": {""}}
 

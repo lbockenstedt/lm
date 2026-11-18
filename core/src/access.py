@@ -1674,9 +1674,9 @@ def tenant_has_own_firewall(hub, tenant_id) -> bool:
 
 def firewall_dhcp_prefixes(hub, tenant_id, prefixes):
     """The prefixes global search's firewall DHCP leg filters on. A shared
-    firewall serves the global table, so a prefix the tenant has only in its
-    own VRF is dropped; a tenant with its own firewall (bound spoke or its own
-    ``firewalls`` record) keeps them all.
+    firewall serves the common routing domain (``shared_slice_prefixes``), so a
+    prefix the tenant has only in its own VRF is dropped; a tenant with its own
+    firewall (bound spoke or its own ``firewalls`` record) keeps them all.
 
     Keeping them all holds in every shared-access mode: that leg is sent only
     to the tenant's own firewall spoke (``scoped_spoke_of_type`` never falls
@@ -2085,6 +2085,26 @@ def clear_prefix_cache(hub) -> None:
 # keep its cached prefixes across a restart without a NetBox fetch).
 _PREFIX_VRF_NS = "tenant_prefix_vrfs"
 
+# Hub-cache namespace where the NetBox cache feed (``routes.netbox.nb_cache_feed``)
+# keeps every hub tenant's prefix list, keyed by NetBox scope key. The feed
+# refreshes each tenant in the background whether or not anyone is logged in,
+# and caches only successful reads. Before the unified hub cache (dc0e1981)
+# it was "nb_netbox_prefixes", whose old copies a hub may still hold, unrefreshed.
+_PREFIX_FEED_NS = "nb_prefixes"
+
+
+def _feed_prefix_rows(hub, key):
+    """The prefix rows the NetBox cache feed last stored for scope ``key``, or
+    None when the hub cache holds none."""
+    try:
+        data = unwrap_spoke(hub.warm_get(_PREFIX_FEED_NS, key))
+    except Exception:  # noqa: BLE001 - a hub without a warm cache
+        return None
+    if isinstance(data, dict) and "data" in data and "prefixes" not in data:
+        data = data["data"]
+    rows = data.get("prefixes") if isinstance(data, dict) else None
+    return rows if isinstance(rows, list) else None
+
 
 def _note_prefix_vrfs(hub, key, rows) -> None:
     """Remember the NetBox VRF id of each prefix row under scope ``key``
@@ -2113,24 +2133,48 @@ def _note_prefix_vrfs(hub, key, rows) -> None:
 
 async def _persist_prefix_vrfs(hub, key) -> None:
     """Save scope ``key``'s known prefix VRFs with the hub cache when they
-    differ from the saved copy. Best effort: a hub without a warm cache skips."""
+    differ from the saved copy; a forgotten scope (``_forget_prefix_vrfs``)
+    empties it. Best effort: a hub without a warm cache skips."""
     try:
         vrfs = vars(hub).get("_tenant_prefix_vrfs", {}).get(key)
-        if not vrfs:
+        if vrfs is None:
             return
         saved = {p: sorted(v) for p, v in vrfs.items()}
-        if hub.warm_get(_PREFIX_VRF_NS, key) != saved:
+        if (hub.warm_get(_PREFIX_VRF_NS, key) or {}) != saved:
             await hub.warm_set(_PREFIX_VRF_NS, key, saved)
     except Exception:  # noqa: BLE001 - persistence must never break a prefix read
         pass
+
+
+async def _forget_prefix_vrfs(hub, key) -> None:
+    """Forget scope ``key``'s prefix VRFs, and the copy saved with the hub
+    cache: NetBox answered that the scope has no prefixes left, so it uses no
+    VRF either. The NetBox cache feed's copy, which ``_scope_vrfs`` reads
+    first, empties on the feed's next read of the scope."""
+    try:
+        vars(hub).setdefault("_tenant_prefix_vrfs", {})[key] = {}
+    except TypeError:
+        return
+    await _persist_prefix_vrfs(hub, key)
+
+
+def _prefix_vrf_key(hub, tenant_id) -> str:
+    """The scope key ``tenant_id``'s prefix VRFs are stored under, the same key
+    ``fetch_tenant_prefixes`` caches by: its NetBox tenant slug, or
+    ``group:<slug>`` for a tenant group."""
+    scope = netbox_tenant_scope(hub, tenant_id)
+    return scope.get("tenant") or ("group:" + str(scope.get("tenant_group")))
 
 
 def tenant_prefix_vrfs(hub, tenant_id) -> Dict[str, set]:
     """``{prefix: {vrf ids}}`` last fetched for ``tenant_id`` by
     ``fetch_tenant_prefixes``, else the copy saved with the hub cache (warm
     after a restart); empty when unknown."""
-    scope = netbox_tenant_scope(hub, tenant_id)
-    key = scope.get("tenant") or ("group:" + str(scope.get("tenant_group")))
+    return _scope_prefix_vrfs(hub, _prefix_vrf_key(hub, tenant_id))
+
+
+def _scope_prefix_vrfs(hub, key) -> Dict[str, set]:
+    """``tenant_prefix_vrfs`` for a scope ``key`` (``_prefix_vrf_key``)."""
     try:
         store = vars(hub).setdefault("_tenant_prefix_vrfs", {})
     except TypeError:
@@ -2146,17 +2190,61 @@ def tenant_prefix_vrfs(hub, tenant_id) -> Dict[str, set]:
     return store.get(key) or {}
 
 
+def _scope_vrfs(hub, key) -> set:
+    """The VRF ids scope ``key`` has prefixes in. They come from the NetBox
+    cache feed's copy of its prefixes when the hub cache holds one, since the
+    feed reads every tenant whether or not a page has asked about it, and
+    its copy is at most one feed cycle old (5 minutes). Without a copy, or when
+    the copy carries no ``vrf_id`` (an older netbox spoke), they come from
+    the VRFs ``fetch_tenant_prefixes`` last read."""
+    rows = _feed_prefix_rows(hub, key)
+    if rows is not None:
+        vrfs = {str(p["vrf_id"] or "") for p in rows
+                if isinstance(p, dict) and p.get("prefix") and "vrf_id" in p}
+        # An empty copy is NetBox answering "no prefixes": no VRFs either.
+        if vrfs or not rows:
+            return vrfs
+    return set().union(*_scope_prefix_vrfs(hub, key).values())
+
+
+def _shared_vrfs(hub) -> set:
+    """NetBox VRF ids that more than one tenant has prefixes in: a common VRF,
+    which shared infrastructure serves just like the global table.
+
+    Each NetBox tenant counts once (two hub tenants on one NetBox tenant share
+    every prefix, so they are one user), and tenant groups don't count (their
+    prefixes are their members'). A tenant's VRFs come from ``_scope_vrfs``:
+    the NetBox cache feed's copy of its prefixes, so the answer does not
+    depend on which tenants a page has read since the hub started. Until a
+    tenant has a copy, the VRFs the hub read for it count, including the
+    copies saved with the hub cache, and a tenant NetBox says has no prefixes
+    left stops counting (``fetch_tenant_prefixes``). Any VRF two tenants use
+    counts as shared, even one shared infrastructure does not serve (such as
+    a VRF two tenants of one customer share)."""
+    users: Dict[str, set] = {}
+    for tid in _scope_tenant_ids(hub):
+        key = _prefix_vrf_key(hub, tid)
+        for vrf in _scope_vrfs(hub, key):
+            users.setdefault(vrf, set()).add(key)
+    return {vrf for vrf, keys in users.items() if len(keys) > 1}
+
+
 def shared_slice_prefixes(hub, tenant_id, prefixes, module: str = "", spoke_id=None) -> list:
-    """``prefixes`` with every prefix that lives only in a non-global NetBox VRF
-    removed, for slicing SHARED infrastructure (a shared firewall, Kea,
+    """``prefixes`` with every prefix that lives only in the tenant's own NetBox
+    VRF removed, for slicing SHARED infrastructure (a shared firewall, Kea,
     Unbound, Proxmox, ClearPass, …) down to ``tenant_id``.
 
-    Owner-directed: shared infrastructure sits in the global routing table. A
-    tenant that moves into its own VRF can no longer use it, even when its
-    addresses overlap global ones; only NetBox stays shared. Without this, a
-    VRF tenant's 10.x prefixes matched the shared firewall's rules for the same
-    10.x addresses in the global table, and the tenant saw rules that were not
-    its own. ``netbox`` is exempt: NetBox scopes by its own tenant and VRF.
+    Owner-directed: shared infrastructure serves the common routing domain,
+    which is NetBox's global table or a VRF that several tenants share
+    (``_shared_vrfs``). A tenant that moves into its own VRF, one no other
+    tenant has prefixes in, can no longer use it, even when its addresses
+    overlap common ones; only NetBox stays shared. Without this, a VRF
+    tenant's 10.x prefixes matched the shared firewall's rules for the same
+    10.x addresses, and the tenant saw rules that were not its own. Every
+    tenant can sit in a VRF: cutting every non-global VRF also cut the common
+    VRF the shared DNS and DHCP serve, and emptied those views for every
+    tenant, the Admin tenant included. ``netbox`` is exempt: NetBox scopes by
+    its own tenant and VRF.
 
     A prefix whose VRF is unknown (older netbox spoke, never fetched) is
     kept, which is the behaviour before VRFs were read. Known VRFs are saved
@@ -2170,14 +2258,18 @@ def shared_slice_prefixes(hub, tenant_id, prefixes, module: str = "", spoke_id=N
     if spoke_id and tenant_in(source_owner_tenant(hub, spoke_id), tenant_id):
         return list(prefixes)
     vrfs = tenant_prefix_vrfs(hub, tenant_id)
+    if not vrfs:
+        return list(prefixes)
+    common = _shared_vrfs(hub) | {""}
     out = []
     for p in prefixes:
         try:
             known = vrfs.get(str(ipaddress.ip_network(str(p), strict=False)))
         except ValueError:
             known = None
-        # Keep a prefix in the global table ("") or with an unknown VRF.
-        if not known or "" in known:
+        # Keep a prefix with an unknown VRF, or in the global table ("") or a
+        # VRF another tenant shares.
+        if not known or known & common:
             out.append(p)
     return out
 
@@ -2223,15 +2315,11 @@ async def fetch_tenant_prefixes(hub, tenant_id) -> list:
         return prefixes
 
     def _from_warm():
-        # Last-known prefixes for this scope (same cache the NetBox page uses),
-        # so a restarting/unreachable spoke doesn't make a tenant look empty.
-        """Last-known prefixes for this scope from the warm cache, or []."""
+        """Last-known prefixes for this scope from the NetBox cache feed's
+        copy (the cache the NetBox page uses), or [], so a restarting or
+        unreachable spoke doesn't make a tenant look empty."""
         try:
-            cached = hub.warm_get("nb_netbox_prefixes", key)
-            data = unwrap_spoke(cached) if cached is not None else None
-            if isinstance(data, dict) and "data" in data and "prefixes" not in data:
-                data = data["data"]
-            rows = (data or {}).get("prefixes") or []
+            rows = _feed_prefix_rows(hub, key) or []
             _note_prefix_vrfs(hub, key, rows)
             return [p["prefix"] for p in rows if p.get("prefix")]
         except Exception:
@@ -2261,7 +2349,16 @@ async def fetch_tenant_prefixes(hub, tenant_id) -> list:
             (logger.info if ok_empty else logger.warning)(
                 "fetch_tenant_prefixes tenant=%s payload=%s spoke=%s returned none (resp=%s)",
                 tenant_id, payload, spoke_id, str(data)[:200])
-            return _remember(_from_warm(), _PREFIX_CACHE_TTL if ok_empty else _PREFIX_FAIL_TTL)
+            if ok_empty:
+                # NetBox answered that the scope has no prefixes, so it uses
+                # no VRF either: otherwise a tenant that removed its last
+                # prefix from a shared VRF kept that VRF common for good. No
+                # cached copy overrides that answer. The spoke turns every
+                # NetBox failure into an ERROR envelope, so a failed read never
+                # gets here and forgets nothing.
+                await _forget_prefix_vrfs(hub, key)
+                return _remember([], _PREFIX_CACHE_TTL)
+            return _remember(_from_warm(), _PREFIX_FAIL_TTL)
         return _remember(out, _PREFIX_CACHE_TTL)
     # Request failed: last-known prefixes, retried sooner.
     except Exception as e:
@@ -2269,11 +2366,11 @@ async def fetch_tenant_prefixes(hub, tenant_id) -> list:
         return _remember(_from_warm(), _PREFIX_FAIL_TTL)
 
 
-async def _tenant_networks(hub) -> Dict[str, List[Any]]:
-    """{tenant_id: [ip_network]} from each tenant's NetBox prefixes (tenant
-    groups excluded; the built-in Admin tenant always included)."""
-    # Every non-group tenant id.
-    tenants = (hub.state.tenant_state or {}).get("tenants", {}) or {}
+def _scope_tenant_ids(hub) -> List[str]:
+    """Every non-group tenant id, plus the built-in Admin tenant: the tenants
+    whose NetBox prefixes own addresses (``_tenant_networks``) and share VRFs
+    (``_shared_vrfs``)."""
+    tenants = (getattr(hub.state, "tenant_state", None) or {}).get("tenants", {}) or {}
     tids = [str(tid) for tid, c in tenants.items()
             if not (isinstance(c, dict) and c.get("is_tenant_group"))]
     if ADMIN_TENANT_ID not in tids:
@@ -2285,6 +2382,13 @@ async def _tenant_networks(hub) -> Dict[str, List[Any]]:
         # DHCP/ARP discovery whose IP falls in one of them is wrongly dropped
         # or mis-attributed to another tenant's broader prefix.
         tids.append(ADMIN_TENANT_ID)
+    return tids
+
+
+async def _tenant_networks(hub) -> Dict[str, List[Any]]:
+    """{tenant_id: [ip_network]} from each tenant's NetBox prefixes (tenant
+    groups excluded; the built-in Admin tenant always included)."""
+    tids = _scope_tenant_ids(hub)
     # Fetch every tenant's prefixes concurrently, at most 8 at a time.
     nets_by_tid: Dict[str, List[Any]] = {}
     if fetch_tenant_prefixes is not None and tids:

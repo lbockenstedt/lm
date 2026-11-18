@@ -1431,7 +1431,7 @@ def register(app, hub, ctx):
         # The shared tenant with no prefixes sees the whole shared resolver.
         if not prefixes and access.tenant_is_shared(tid):
             return None
-        # A shared resolver sees global-table clients: drop own-VRF prefixes.
+        # A shared resolver serves the common routing domain: drop own-VRF prefixes.
         sid = _resolved_spoke("dns", request, tenant)
         if not access.tenant_in(access.source_owner_tenant(hub, sid), tid):
             prefixes = access.shared_slice_prefixes(hub, tid, prefixes or [], "dns")

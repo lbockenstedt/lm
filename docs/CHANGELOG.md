@@ -12,6 +12,10 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ## Week of 2026-11-16
 
+### Users & access
+
+- **Tenants in a shared VRF see their DNS and DHCP again.** Since shared infrastructure started ignoring prefixes a tenant has only in its own VRF, every prefix outside NetBox's global table was cut, including a VRF all tenants share. Where every tenant sits in a VRF, the DNS and DHCP pages went empty for every tenant, the Admin tenant a Global Admin starts on included. A VRF that more than one tenant has prefixes in now counts as common, like the global table; a VRF only one tenant uses is still its own and still cut (DXP's, for example). Which VRFs are common is decided from every tenant's prefixes in the hub's background NetBox cache, so it does not depend on which tenants were opened since the hub started. See [architecture-topology.md](architecture-topology.md).
+
 ### OS Updates
 
 - **VMs hosted behind a spoke that cannot snapshot are patched, with a warning.** A node whose VM sits on a cluster whose agents dial a spoke without VM-action support (the Client-Sim spokes) used to fail every run with "Unknown command: PXMX_VM_ACTION" and was never patched. It now patches with a warning on the run item, like storage that cannot snapshot; a snapshot that fails for any other reason still blocks patching.
