@@ -20,7 +20,7 @@ install script or overwrite the serving binary to run a trial.
 Load **LLM Worker (CPU)** in the agent role picker. Unloading the role
 drains active work and stops its service without deleting models.
 
-On a fresh worker, pass `--llm-bundle /path/to/serving.tar --llm-bundle-sha256 <trusted-sha256>` to the agent installer. The offline archive contains executable `bin/ollama`, its runtime libraries under `lib/`, a digest catalog `llm-models.json`, and the approved `models/manifests/` and `models/blobs/`. Use regular files, not links. The installer verifies the archive, stages a read-only model store, and never replaces an existing runtime. The bundle catalog is used only if neither the role config nor `/etc/lm/llm-models.json` supplies a catalog.
+On a fresh worker, pass `--llm-bundle /path/to/serving.tar --llm-bundle-sha256 <trusted-sha256>` to the agent installer. The offline archive contains executable `bin/ollama`, its runtime libraries under `lib/`, a digest catalog `llm-models.json`, and the approved `models/manifests/` and `models/blobs/`. Use regular files, not links: Ollama 0.40.16 writes `models/manifests-v2/` entries as links, so ship the regular-file `models/manifests/` tree instead. The installer verifies the archive, stages a read-only model store, and never replaces an existing runtime. The serving unit sets `OLLAMA_NOPRUNE=1`, because Ollama's startup pruning exits when it cannot remove an empty directory or unused blob from that store. The bundle catalog is used only if neither the role config nor `/etc/lm/llm-models.json` supplies a catalog.
 
 Set `/etc/lm/llm-models.json` to a JSON object mapping exact installed model
 names, including the tag, to their approved 64-character lowercase digests.

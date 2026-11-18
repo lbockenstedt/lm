@@ -5,6 +5,7 @@ import io
 import os
 import stat
 import tarfile
+from pathlib import Path
 
 import pytest
 
@@ -64,6 +65,13 @@ def test_rejected_offline_bundle_is_not_installed(tmp_path, bad_bundle):
         stage_bundle(source, "0" * 64 if bad_bundle == "digest" else digest, destination)
     assert not destination.exists()
     assert not (tmp_path / "outside").exists()
+
+
+def test_serving_unit_never_prunes_read_only_store():
+    """Ollama 0.40.16 exits at startup when pruning cannot write the staged bundle store."""
+    unit = (Path(__file__).resolve().parents[1] / "lm-llm-ollama.service").read_text(encoding="utf-8")
+    assert "Environment=OLLAMA_NOPRUNE=1" in unit.splitlines()
+    assert "ProtectSystem=strict" in unit.splitlines()
 
 
 def test_candidate_bundle_is_runtime_only(tmp_path):

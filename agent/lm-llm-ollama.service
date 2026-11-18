@@ -13,6 +13,8 @@ Environment=OLLAMA_NO_CLOUD=1
 Environment=OLLAMA_NUM_PARALLEL=1
 Environment=OLLAMA_MAX_LOADED_MODELS=1
 Environment=OLLAMA_KEEP_ALIVE=5m
+# A staged bundle store is read-only; startup pruning exits when it cannot remove an empty directory or unused blob.
+Environment=OLLAMA_NOPRUNE=1
 EnvironmentFile=-/opt/lm-llm/bundle.env
 ExecStart=/opt/lm-llm/bin/ollama serve
 Restart=on-failure
