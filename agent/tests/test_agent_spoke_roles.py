@@ -42,6 +42,7 @@ def test_role_map_has_all_roles_with_correct_module_types():
         "le":         "certificates",
         "console":    "console",
         "henet":      "henet",
+        "llm":        "llm",
         "statuspage": "statuspage",
         "proxy":      "proxy",
         "truenas":    "storage",
@@ -55,7 +56,7 @@ def test_role_map_has_all_roles_with_correct_module_types():
         assert got_mtype == mtype, f"{role}: module_type {got_mtype!r} != {mtype!r}"
         assert cls_name, f"{role}: empty class name"
         # in-repo roles have no clone URL; the siblings do (incl. le).
-        if role in ("dns", "dhcp", "console", "henet", "statuspage", "proxy"):
+        if role in ("dns", "dhcp", "console", "henet", "statuspage", "proxy", "llm"):
             assert repo_url is None, f"{role} should be in-repo (no repo_url)"
         else:
             assert isinstance(repo_url, str) and repo_url.startswith("https://"), \

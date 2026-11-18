@@ -2250,7 +2250,7 @@ def create_app(hub):
     from routes import (
         setup, firewall, nw, cppm, pxmx, ws_transport, console, pxmx_vm, dashboard, setup_admin, ldap, netbox, tenants_users, auth, setup_misc, agents, net_services, admin_cache, help_assistant, sim_assistant, request_assistant, exec as exec_routes, os_updates as os_updates_routes, self_backup, tenant_devices, oidc, templates, azure_nsg, oci_nsg as oci_nsg_routes, cloud_nac as cloud_nac_routes, nac_users as nac_users_routes, directory_entra as directory_entra_routes, directory_ad as directory_ad_routes, key_vault as key_vault_routes, oci_vault as oci_vault_routes, cred_vault as cred_vault_routes, notifications as notifications_routes, collab, truenas, onboarding, test_feed as test_feed_routes,
     hub_watchdog as hub_watchdog_routes, hub_tls_verify as hub_tls_verify_routes, netbox_sso as netbox_sso_routes, security as security_routes, client_debug as client_debug_routes, admin_ops as admin_ops_routes,
-    cert_monitor as cert_monitor_routes, syslog as syslog_routes, monitoring as monitoring_routes, vm_snapshots as vm_snapshots_routes,
+    cert_monitor as cert_monitor_routes, syslog as syslog_routes, monitoring as monitoring_routes, vm_snapshots as vm_snapshots_routes, llm,
     )
     # Each route module registers its routes using the shared context.
     security_routes.register(app, hub, ctx)
@@ -2289,6 +2289,7 @@ def create_app(hub):
     netbox_sso_routes.register(app, hub, ctx)
     setup_misc.register(app, hub, ctx)
     agents.register(app, hub, ctx)
+    llm.register(app, hub, ctx)
     net_services.register(app, hub, ctx)
     admin_cache.register(app, hub, ctx)
     help_assistant.register(app, hub, ctx)

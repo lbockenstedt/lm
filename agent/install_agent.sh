@@ -14,6 +14,10 @@
 #   Roles: dns | henet | dhcp | network | netbox | opnsense | ldap | simulation | cppm | proxmox | le
 #   (--roles is a comma-list; --role <one> is accepted as a backward-compat alias.
 #    Omit both for a bare agent that loads roles later via the hub WebUI.)
+#   --llm-bundle <tar> --llm-bundle-sha256 <digest> stages an approved offline
+#    serving bundle on a fresh worker; it does not replace an installed runtime.
+#   --llm-candidate-bundle <tar> --llm-candidate-bundle-sha256 <digest> stages a
+#    vetted runtime-only qualification candidate the same way, once.
 #
 #   --hub is optional: omit it (or pass "auto") to let the agent auto-discover the
 #   hub via mDNS/DNS (BaseControlPlane._resolve_hub_url).
@@ -67,6 +71,10 @@ AGENT_COLOCATED=false
 # — never a hard failure.
 ONBOARDING_PSK=""
 TENANT_ID_HINT=""
+LLM_BUNDLE=""
+LLM_BUNDLE_SHA256=""
+LLM_CANDIDATE_BUNDLE=""
+LLM_CANDIDATE_BUNDLE_SHA256=""
 
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
@@ -84,9 +92,24 @@ while [[ "$#" -gt 0 ]]; do
         --tls-ca-cert) TLS_CA_CERT="$2"; shift ;;
         --onboarding-psk) ONBOARDING_PSK="$2"; shift ;;
         --tenant-hint)     TENANT_ID_HINT="$2"; shift ;;
+        --llm-bundle) LLM_BUNDLE="$2"; shift ;;
+        --llm-bundle-sha256) LLM_BUNDLE_SHA256="$2"; shift ;;
+        --llm-candidate-bundle) LLM_CANDIDATE_BUNDLE="$2"; shift ;;
+        --llm-candidate-bundle-sha256) LLM_CANDIDATE_BUNDLE_SHA256="$2"; shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac; shift
 done
+# Print an offline LLM bundle's absolute path; the archive and its trusted digest come together.
+llm_bundle_path() {
+    [[ -z "$1$2" ]] && return 0
+    if [[ ! -f "$1" || ! "$2" =~ ^[a-f0-9]{64}$ ]]; then
+        echo "Supply each local LLM bundle with its trusted lowercase SHA-256" >&2
+        return 1
+    fi
+    if [[ "$1" = /* ]]; then echo "$1"; else echo "$PWD/$1"; fi
+}
+LLM_BUNDLE="$(llm_bundle_path "$LLM_BUNDLE" "$LLM_BUNDLE_SHA256")"
+LLM_CANDIDATE_BUNDLE="$(llm_bundle_path "$LLM_CANDIDATE_BUNDLE" "$LLM_CANDIDATE_BUNDLE_SHA256")"
 
 # Accept a bare hub IP/host for --hub (e.g. `--hub 172.16.1.31` == `--hub
 # wss://172.16.1.31:443`). A ws://|wss:// scheme or the "auto" sentinel is left
@@ -381,6 +404,7 @@ stage_role() {
         henet)      ROLE_REQ="$INSTALL_DIR/henet/requirements.txt" ;;   # in-repo (websockets); manages HE.NET public DNS, no local server
         dhcp)       ROLE_REQ="$INSTALL_DIR/dhcp/requirements.txt" ;;
         console)    ROLE_REQ="$INSTALL_DIR/console/requirements.txt" ;;   # in-repo (pyserial); agent runs as root so /dev/tty* needs no dialout
+        llm)        ;;  # in-repo role; vetted runtime and model bytes are staged separately
         statuspage) ROLE_REQ="$INSTALL_DIR/statuspage/requirements.txt" ;;   # in-repo (fastapi/uvicorn); serves the public status page on its own port
         proxy)      ROLE_REQ="$INSTALL_DIR/proxy/requirements.txt" ;;   # in-repo (aiohttp); per-tenant edge WebUI reverse proxy (no client-cert prompt)
         network)    ROLE_REPO="https://github.com/lbockenstedt/nw.git";        ROLE_CLONE_DIR="nw";       ROLE_REQ="$INSTALL_DIR/nw/requirements.txt" ;;
@@ -394,7 +418,7 @@ stage_role() {
                     ROLE_APT="certbot python3-certbot-dns-cloudflare python3-certbot-dns-route53 openssl" ;;
         truenas)    ROLE_REPO="https://github.com/lbockenstedt/truenas.git";    ROLE_CLONE_DIR="truenas";  ROLE_REQ="$INSTALL_DIR/truenas/requirements.txt" ;;   # sibling repo; requirements.txt pins truenas-api-client (official WS JSON-RPC client) + websockets
         zabbix)    ROLE_REPO="https://github.com/lbockenstedt/zabbix.git";    ROLE_CLONE_DIR="zabbix";  ROLE_REQ="$INSTALL_DIR/zabbix/requirements.txt" ;;   # sibling repo; requirements.txt pins zabbix-api-client (official WS JSON-RPC client) + websockets
-        *) echo "❌ Unknown role '$role'"; echo "Valid: dns henet dhcp network netbox opnsense ldap simulation cppm proxmox le console statuspage proxy truenas zabbix"; exit 1 ;;
+        *) echo "❌ Unknown role '$role'"; echo "Valid: dns henet dhcp network netbox opnsense ldap simulation cppm proxmox le console statuspage proxy truenas zabbix llm"; exit 1 ;;
     esac
 
     if [[ -n "$ROLE_REPO" ]]; then
@@ -596,6 +620,15 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
+# Stage the disabled unit so an agent installed without roles can load it later.
+if [[ -n "$LLM_BUNDLE" ]]; then
+    python3 "$INSTALL_DIR/agent/src/llm_install.py" "$LLM_BUNDLE" "$LLM_BUNDLE_SHA256"
+fi
+if [[ -n "$LLM_CANDIDATE_BUNDLE" ]]; then
+    python3 "$INSTALL_DIR/agent/src/llm_install.py" --candidate "$LLM_CANDIDATE_BUNDLE" "$LLM_CANDIDATE_BUNDLE_SHA256"
+fi
+install -m 0644 "$INSTALL_DIR/agent/lm-llm-ollama.service" /etc/systemd/system/lm-llm-ollama.service
+install -m 0644 "$INSTALL_DIR/agent/lm-llm-candidate.service" /etc/systemd/system/lm-llm-candidate.service
 systemctl daemon-reload
 
 # The legacy Generic Leaf Agent was already purged early (retire_legacy_agent,

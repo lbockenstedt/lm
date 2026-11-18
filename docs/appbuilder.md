@@ -13,6 +13,9 @@ A standalone autonomous bot that polls GitHub repos for issues labeled `automate
 
 ## What it does
 
+Advisory PR summaries can opt into [hub-owned LLM routing](llm.md) per repository
+without changing AppBuilder's model picker or final review policy.
+
 AppBuilder is two things wearing one hat: (1) an autonomous bot that watches your GitHub
 repos for issues labeled `automated-fix`, generates a code fix with an LLM, verifies it,
 and opens a PR (or pushes directly on a trusted repo); and (2) the LLM engine behind the

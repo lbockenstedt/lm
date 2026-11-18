@@ -71,6 +71,7 @@ _LOGSAFE_COMMANDS = frozenset({
 # ``PASSWORD`` / ``PUSH_CONFIG`` substring heuristic catches the arbitrary
 # agent-command relay's user-supplied types too (e.g. NETBOX_RESET_ADMIN_PASSWORD).
 _FULLY_REDACT_COMMANDS = frozenset({
+    "LLM_COMPLETE",
     "SET_PASSWORD", "SET_USER_PASSWORD", "RESET_PASSWORD", "CONSOLE_PUSH_CONFIG",
     # The AD connection (with its bind password) rides nested in ``ad``.
     "AD_DISCOVER", "AD_TEST", "AD_SEARCH_USERS",

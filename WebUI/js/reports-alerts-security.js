@@ -1255,6 +1255,9 @@ function initView(viewId, subView) {
         case 'security':
             loadSecurityData();
             break;
+        case 'llm':
+            VIEW_LOADERS.llm();
+            break;
         case 'syslog':
             lmViews.syslog(document.getElementById('syslog-content'), subView || 'Search');
             break;
