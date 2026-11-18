@@ -292,6 +292,22 @@ def register(app, hub, ctx):
         owner = access.source_owner_tenant(hub, sid)
         return bool(owner) and access._owned_spoke_writable(hub, sess, sid, owner)
 
+    def _once(factory):
+        """Wrap an async factory so one request resolves it once.
+
+        Only a result is remembered: an exception propagates and the next call
+        retries, so the write gate still fails closed and the route still
+        raises the real error, as before. The DHCP write routes resolve the
+        owning spoke for the gate and again to relay; this keeps that one
+        lookup (it may probe every Kea spoke) instead of two."""
+        done = []
+
+        async def get():
+            if not done:
+                done.append(await factory())
+            return done[0]
+        return get
+
     def _resolved_spoke(kind, request, tenant):
         """The single dns/dhcp spoke serving this request, or None (offline,
         or an admin merge across spokes)."""
@@ -4972,10 +4988,11 @@ def register(app, hub, ctx):
         """Delete an active DHCP lease from Kea's lease database."""
         # Read the body and check the caller may write it.
         body = await request.json()
+        write_spoke = _once(lambda: _dhcp_write_spoke(request, tenant, body))
         await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP lease",
-                                      spoke=lambda: _dhcp_write_spoke(request, tenant, body))
+                                      spoke=write_spoke)
         # Relay it to the spoke that owns it, without the routing keys.
-        spoke = await _dhcp_write_spoke(request, tenant, body)
+        spoke = await write_spoke()
         return await _relay_spoke(spoke, "DHCP_DEL_LEASE", _dhcp_write_body(body), log_name="dhcp_delete_lease")
 
     # Fields an IP or MAC may be under.
@@ -5199,10 +5216,11 @@ def register(app, hub, ctx):
         """Add a DHCP reservation in Kea, then mirror it into NetBox."""
         # Read the body and check the caller may write it.
         body = await request.json()
+        write_spoke = _once(lambda: _dhcp_write_spoke(request, tenant, body))
         await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP reservation",
-                                      spoke=lambda: _dhcp_write_spoke(request, tenant, body))
+                                      spoke=write_spoke)
         # Relay it to the owning spoke, then write the reservation back to NetBox.
-        spoke = await _dhcp_write_spoke(request, tenant, body)
+        spoke = await write_spoke()
         result = await _relay_spoke(spoke, "DHCP_ADD_RES", _dhcp_write_body(body), log_name="dhcp_add_reservation")
         return _with_writeback(result, await _reservation_netbox_writeback(body))
 
@@ -5229,10 +5247,11 @@ def register(app, hub, ctx):
         """Update a DHCP reservation in Kea, then mirror it into NetBox."""
         # Read the body and check the caller may write it.
         body = await request.json()
+        write_spoke = _once(lambda: _dhcp_write_spoke(request, tenant, body))
         await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP reservation",
-                                      spoke=lambda: _dhcp_write_spoke(request, tenant, body))
+                                      spoke=write_spoke)
         # Relay it to the owning spoke.
-        spoke = await _dhcp_write_spoke(request, tenant, body)
+        spoke = await write_spoke()
         result = await _relay_spoke(spoke, "DHCP_UPDATE_RES", _dhcp_write_body(body), log_name="dhcp_update_reservation")
         # A re-addressed reservation leaves a stale mac_address behind on the
         # OLD NetBox IP, which the next sync would faithfully turn back into a
@@ -5247,10 +5266,11 @@ def register(app, hub, ctx):
         """Delete a DHCP reservation in Kea and clear its NetBox reservation flag."""
         # Read the body and check the caller may write it.
         body = await request.json()
+        write_spoke = _once(lambda: _dhcp_write_spoke(request, tenant, body))
         await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP reservation",
-                                      spoke=lambda: _dhcp_write_spoke(request, tenant, body))
+                                      spoke=write_spoke)
         # Relay it to the owning spoke.
-        spoke = await _dhcp_write_spoke(request, tenant, body)
+        spoke = await write_spoke()
         result = await _relay_spoke(spoke, "DHCP_DEL_RES", _dhcp_write_body(body), log_name="dhcp_delete_reservation")
         # Without clearing the NetBox mac_address the next sync would simply
         # recreate the reservation the operator just deleted.

@@ -1676,7 +1676,12 @@ def firewall_dhcp_prefixes(hub, tenant_id, prefixes):
     """The prefixes global search's firewall DHCP leg filters on. A shared
     firewall serves the global table, so a prefix the tenant has only in its
     own VRF is dropped; a tenant with its own firewall (bound spoke or its own
-    ``firewalls`` record) keeps them all."""
+    ``firewalls`` record) keeps them all.
+
+    Keeping them all holds in every shared-access mode: that leg is sent only
+    to the tenant's own firewall spoke (``scoped_spoke_of_type`` never falls
+    back to a shared firewall once the tenant owns one, ``allow`` included),
+    and an own firewall serves the tenant's VRF."""
     if tenant_has_own_firewall(hub, tenant_id):
         return list(prefixes or [])
     return shared_slice_prefixes(hub, tenant_id, prefixes or [], "firewall")
@@ -2550,7 +2555,8 @@ async def filter_session(hub, sessions: dict, request: "Request", data, module: 
     if spoke_of is not None:
         return await filter_by_source_spoke(
             hub, sessions, request, data, spoke_of,
-            lambda d: filter_session(hub, sessions, request, d, module, ip_fields))
+            lambda d, sid=None: filter_session(hub, sessions, request, d, module, ip_fields,
+                                               spoke_id=sid))
     # Dedicated-spoke data: all or nothing.
     visible = _owned_spoke_visible(hub, sessions, request, spoke_id, None)
     if visible is not None:
@@ -3124,8 +3130,8 @@ async def filter_tenant(hub, sessions: dict, request: "Request", data, module: s
     if spoke_of is not None:
         return await filter_by_source_spoke(
             hub, sessions, request, data, spoke_of,
-            lambda d: filter_tenant(hub, sessions, request, d, module, ip_fields,
-                                    explicit_tenant, shared_source),
+            lambda d, sid=None: filter_tenant(hub, sessions, request, d, module, ip_fields,
+                                              explicit_tenant, shared_source, spoke_id=sid),
             explicit_tenant)
     # Dedicated-spoke data: all or nothing.
     visible = _owned_spoke_visible(hub, sessions, request, spoke_id, explicit_tenant)
@@ -3225,29 +3231,35 @@ async def filter_by_source_spoke(hub, sessions: dict, request: "Request", data, 
     """The dedicated-spoke rule for a list aggregated across spokes. Each item's
     source spoke is ``spoke_of(item)``: an item from a tenant-dedicated spoke is
     kept whole or dropped (``_owned_spoke_visible``); the rest go through
-    ``await ip_filter(data)``, the usual IP/prefix filter. Order is preserved."""
+    ``await ip_filter(part, spoke_id)``, the usual IP/prefix filter, one source
+    spoke at a time: the spoke id lets the filter see a tenant's own instance
+    on an unbound spoke (``source_owner_tenant``) as the tenant's own, not cut
+    like shared data. Order is preserved."""
     # Locate the record list; without one, just IP-filter.
     container, key = _find_list_slot(data)
     if container is None:
         return await ip_filter(data)
-    # Sort items into dedicated-visible, dedicated-hidden, and the rest.
+    # Sort items into dedicated-visible, dedicated-hidden, and the rest (by source spoke).
     lst = container if key is None else container[key]
     verdict: Dict[Any, Optional[bool]] = {}
-    owned, rest = set(), []
+    owned: set = set()
+    rest: Dict[Any, list] = {}
     for item in lst:
         sid = spoke_of(item) if isinstance(item, dict) else None
         if sid not in verdict:
             verdict[sid] = _owned_spoke_visible(hub, sessions, request, sid, explicit_tenant)
         if verdict[sid] is None:
-            rest.append(item)
+            rest.setdefault(sid, []).append(item)
         elif verdict[sid]:
             owned.add(id(item))
-    # All from shared spokes: plain IP filter.
-    if len(rest) == len(lst):
-        return await ip_filter(data)
-    # IP-filter the rest, then merge back in original order.
-    out = await ip_filter(rest if key is None else _replace_slot(data, container, key, rest))
-    c2, k2 = _find_list_slot(out)
-    kept = owned | {id(i) for i in ((c2 if k2 is None else c2[k2]) if c2 is not None else [])}
+    # All from one shared spoke: plain IP filter.
+    if len(rest) <= 1 and sum(len(part) for part in rest.values()) == len(lst):
+        return await ip_filter(data, next(iter(rest), None))
+    # IP-filter each spoke's items, then merge back in original order.
+    kept = set(owned)
+    for sid, part in rest.items():
+        out = await ip_filter(part if key is None else _replace_slot(data, container, key, part), sid)
+        c2, k2 = _find_list_slot(out)
+        kept |= {id(i) for i in ((c2 if k2 is None else c2[k2]) if c2 is not None else [])}
     merged = [i for i in lst if id(i) in kept]
     return merged if key is None else _replace_slot(data, container, key, merged)
