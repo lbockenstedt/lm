@@ -11,6 +11,8 @@ from pathlib import Path
 
 
 MANIFEST = Path("/etc/lm/llm-qualification.json")
+# Loopback ports set by OLLAMA_HOST in lm-llm-candidate.service and lm-llm-ollama.service
+# (llm_spoke.SERVING_PORT); private to the VM, so fixed rather than configured.
 PORT = 11439
 BASELINE_PORT = 11438
 CANDIDATE_SERVICE = "lm-llm-candidate.service"
