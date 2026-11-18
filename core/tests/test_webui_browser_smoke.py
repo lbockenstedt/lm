@@ -142,13 +142,16 @@ def test_llm_dashboard_uses_reported_model_and_launches_qualification(hub_url_an
             page.get_by_label("Task", exact=True).fill("pr_summary")
             page.get_by_label("Approved model").select_option("0")
             page.get_by_label("Minimum vCPUs").fill("16")
+            page.get_by_label("Temperature", exact=False).fill("0.7")
             with page.expect_request(lambda req: req.url.endswith("/admin/settings")
                                      and req.method == "POST") as save:
                 page.get_by_role("button", name="Add model", exact=True).click()
             assert save.value.post_data_json == {"llm_task_models": {"pr_summary": [
-                {"model": "trial:cpu", "digest": digest, "min_vcpus": 16, "min_ram_bytes": 0},
+                {"model": "trial:cpu", "digest": digest, "min_vcpus": 16, "min_ram_bytes": 0,
+                 "temperature": 0.7},
             ]}}
             page.get_by_text("16 vCPUs, 0 RAM bytes minimum", exact=False).wait_for()
+            page.get_by_text("temperature 0.7, top-p default", exact=False).wait_for()
             page.get_by_label("Repository", exact=True).fill("not-a-repository")
             repository = page.get_by_label("Repository", exact=True)
             assert repository.evaluate("(input) => input.validity.patternMismatch")
