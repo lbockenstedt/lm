@@ -1358,6 +1358,9 @@ def register(app, hub, ctx):
             if legacy:
                 cfg = dict(cfg)
                 cfg["display_name"] = legacy
+        if cfg.get("display_name_source"):
+            cfg = dict(cfg)
+            cfg.pop("display_name_source", None)
         return {"config": cfg}
 
     @app.post("/api/pxmx/agents/{agent_id}/config")
@@ -1373,7 +1376,11 @@ def register(app, hub, ctx):
         try:
             # Read the requested display name, Client Simulation settings and tenant.
             data = await request.json()
-            display_name = (data.get("display_name") or "").strip() or None
+            display_name_edited = data.get("display_name_edited") is True
+            display_name = (data.get("display_name") or "").strip()
+            if display_name_edited and not display_name:
+                display_name = agent_id
+            display_name = display_name or None
             cs = data.get("client_simulation") or {}
             tenant_in = (cs.get("tenant_id") or "").strip() or None
             # Merge onto any existing client_simulation so a tenant/enabled-only
@@ -1401,8 +1408,10 @@ def register(app, hub, ctx):
                 cron_val = "" if cron_val is None else str(cron_val)
 
             # Persist (merge with any existing entry so partial updates keep fields).
-            if display_name:
+            if display_name and (display_name_edited
+                                 or display_name != entry.get("display_name")):
                 entry["display_name"] = display_name
+                entry["display_name_source"] = "operator"
             entry["client_simulation"] = cs_cfg
             if has_cron:
                 entry["managed_crontab"] = cron_val

@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+import pytest
 
 from routes import pxmx
 
@@ -110,3 +111,39 @@ def test_admin_passes_the_gate_on_every_route():
     for method, path, body in _MANAGEMENT_ROUTES:
         r = _call(client, method, path, body)
         assert r.status_code != 403, f"{method.upper()} {path} should pass the admin gate, got 403"
+
+
+@pytest.mark.parametrize(
+    ("name_fields", "expected_name", "expected_source"),
+    [
+        ({"display_name": "node-a1", "display_name_edited": False}, "node-a1", "auto"),
+        ({"display_name": "node-a1", "display_name_edited": True}, "node-a1", "operator"),
+        ({"display_name": "", "display_name_edited": True}, "a1", "operator"),
+        ({}, "node-a1", "auto"),
+    ],
+)
+def test_agent_config_only_pins_explicit_display_name_edits(
+        monkeypatch, name_fields, expected_name, expected_source):
+    """Client-Sim and crontab saves preserve an untouched auto-derived name."""
+    async def _push(_hub, _agent_id, _push_cfg):
+        return True, False
+
+    monkeypatch.setattr(pxmx, "push_pxmx_agent_config", _push)
+    monkeypatch.setattr(pxmx, "bust_pxmx_agents_cache", lambda: None)
+    client, hub = _build(admin=True)
+    hub.state.system_state["agent_config"] = {
+        "a1": {"display_name": "node-a1", "display_name_source": "auto"},
+    }
+
+    payload = {
+        "client_simulation": {"enabled": True, "tenant_id": "tenant-a"},
+        "managed_crontab": "",
+        **name_fields,
+    }
+    response = client.post("/api/pxmx/agents/a1/config", json=payload)
+
+    assert response.status_code == 200, response.text
+    entry = hub.state.system_state["agent_config"]["a1"]
+    assert entry["display_name"] == expected_name
+    assert entry["display_name_source"] == expected_source
+    assert entry["client_simulation"]["tenant_id"] == "tenant-a"

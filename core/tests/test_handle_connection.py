@@ -130,13 +130,14 @@ def test_rename_migrates_only_with_proof_of_old_ids_secret(secret_for_old_id, ex
                   pre=lambda hub: hub.install_uuid_index.update({"u1": "oldspk"}))
     reconcile = called(run, "_reconcile_spoke_identity")[0]
     assert reconcile[1] == ["spk", "u1", ""]
-    assert reconcile[2] == [("'migrate_if'", expect_migrate)]
+    assert reconcile[2] == [("'migrate_if'", expect_migrate), ("'parent_spoke_id'", None)]
 
 
 def test_rename_never_migrates_without_a_secret():
     run = connect(auth={**AUTH, "secret": None},
                   pre=lambda hub: hub.install_uuid_index.update({"u1": "oldspk"}))
-    assert called(run, "_reconcile_spoke_identity")[0][2] == [("'migrate_if'", False)]
+    assert called(run, "_reconcile_spoke_identity")[0][2] == [("'migrate_if'", False),
+                                                              ("'parent_spoke_id'", None)]
 
 
 def test_state_lands_under_guid_when_reconcile_arms_guid_primary():
@@ -293,6 +294,8 @@ def test_parent_auto_approve_requires_signed_vouch(vouched):
     approvals = called(run, "approve_and_bind_spoke")
     assert approvals == ([("approve_and_bind_spoke", ["par-role", "t1"], [])] if vouched else [])
     assert ("parent_auto_approve" if vouched else "parent_vouch_failed") in events(run)
+    # The claimed parent reaches reconcile, which names the sub-spoke {host}-{role}.
+    assert ("'parent_spoke_id'", "par") in called(run, "_reconcile_spoke_identity")[0][2]
 
 
 def test_approved_subspoke_skips_the_vouch():
