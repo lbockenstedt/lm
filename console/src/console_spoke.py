@@ -65,6 +65,12 @@ except ImportError:  # loaded as a package (agent role loader) or from repo root
 # Module logger.
 logger = logging.getLogger("ConsoleSpoke")
 
+# How long a saved port record that matches a device identified on another port must stay missing
+# from the bus, across identifies, before it is deleted as "moved". One inventory that omits it
+# can be an adapter resetting, a sibling unplugged for a moment or a partial listing, and the
+# delete cannot be undone; a cable that really moved stays missing. Its alias/tenant carry over at once.
+_ORPHAN_GRACE_S = 15 * 60.0
+
 
 def _real_hostname(value: Any) -> str:
     """``value`` stripped, or '' if empty or a placeholder/factory-default name."""
@@ -122,6 +128,10 @@ class ConsoleSpoke(BaseSpoke):
         self._ports_cache: Optional[List[Dict[str, Any]]] = None
         self._ports_cache_ts: float = 0.0
         self._enum_lock: Optional[asyncio.Lock] = None
+        # port_id -> when its saved record was first seen matching a device identified on another
+        # port while its own port was missing from the bus (see _ORPHAN_GRACE_S). In memory only:
+        # a restart just restarts the wait.
+        self._absent_since: Dict[str, float] = {}
         # Auto-identify (fingerprint) state. Credentials are pushed (signed) by
         # the hub via CONSOLE_SET_CREDENTIALS and held in memory only (never
         # logged/persisted). The background loop probes each newly-seen port once.
@@ -293,7 +303,27 @@ class ConsoleSpoke(BaseSpoke):
         async with self._enum_lock:
             if self._ports_cache is not None and (time.monotonic() - self._ports_cache_ts) <= max_age:
                 return self._ports_cache
-            return await asyncio.to_thread(self._enumerate_ports_sync)
+            ports = await asyncio.to_thread(self._enumerate_ports_sync)
+        # Every fresh inventory (the autoprobe scan takes one every few seconds) also settles any
+        # record waiting out its grace period, so a delete never depends on another identify.
+        self._retire_orphans({p["port_id"] for p in ports})
+        return ports
+
+    def _retire_orphans(self, present: set) -> None:
+        """Settle the records tracked in ``_absent_since`` against a fresh inventory: a port
+        that is back on the bus is forgotten (its wait starts over if it goes missing again);
+        one still missing after ``_ORPHAN_GRACE_S`` is deleted, its device having been
+        identified on another port (alias/tenant were carried over when it was first noticed)."""
+        # Forget ports that are back; delete those that stayed missing for the whole wait.
+        now = time.monotonic()
+        for pid, since in list(self._absent_since.items()):
+            if pid in present:
+                del self._absent_since[pid]
+            elif now - since >= _ORPHAN_GRACE_S:
+                del self._absent_since[pid]
+                self.store.delete(pid)
+                logger.info("console: dropped the record of port %s, missing for %d min and its "
+                            "device was identified on another port", pid, int(now - since) // 60)
 
     def _enum_cached(self) -> List[Dict[str, Any]]:
         """Last-known port list from the warm cache, without touching the serial
@@ -1107,19 +1137,42 @@ class ConsoleSpoke(BaseSpoke):
         identity = (probe.get("identity") or {}) if new_ident else {}
         if identity:
             fields: Dict[str, Any] = {}
-            # Same device on a different port: move alias and tenant, drop the old entry.
-            old_pid = self.store.find_by_identity(identity, exclude_port_id=port_id)
+            # Same device on a different port that is gone: move alias and tenant at once, and
+            # drop the old entry once it has stayed gone for _ORPHAN_GRACE_S. A match that is
+            # still enumerated is a sibling, not a move (the member consoles of one VSF/VC stack
+            # all report the stack's serial/MAC), so it is skipped;
+            # deleting it made two ports wipe each other's records, probe, baud and DPA
+            # assignment on every identify. Being enumerated is the only evidence used: a
+            # failed probe (set on every restart too) or a long gap since the last identify can
+            # just be a user session, a locked port or missing credentials, and the delete
+            # cannot be undone. A cable moved between two always-present adapters therefore
+            # leaves the old record behind as a stale entry; its alias/tenant still reach the
+            # new port through the serial-keyed DeviceCache. The proof that a record's port is
+            # gone is a fresh inventory taken right now (off the event loop), not the cache: an
+            # old cache can list a port as absent that has since been plugged back in. If the
+            # enumeration fails, nothing is retired; the next identify reconciles it.
+            old_pid = ""
+            try:
+                present = {p["port_id"] for p in await self._enumerate_ports()}
+            except Exception as e:  # noqa: BLE001
+                logger.warning("console: port enumeration failed, keeping port records: %s", e)
+            else:
+                old_pid = self.store.find_by_identity(identity, exclude_port_id=port_id,
+                                                      skip_ports=present)
             if old_pid:
                 old = self.store.get(old_pid)
                 if old.get("alias") and not self.store.get(port_id).get("alias"):
                     fields["alias"] = old["alias"]
                 if old.get("tenant_id") and not self.store.get(port_id).get("tenant_id"):
                     fields["tenant_id"] = old["tenant_id"]
-                self.store.delete(old_pid)
-                logger.info("console: device %s reappeared on port %s (was %s) — carried "
-                            "alias/tenant forward, dropped the old port record",
-                            identity.get("hostname") or identity.get("serial")
-                            or identity.get("mac") or "?", port_id, old_pid)
+                # Start the old record's wait; _retire_orphans deletes it once the port has
+                # stayed missing for _ORPHAN_GRACE_S (and forgets it if the port comes back).
+                if old_pid not in self._absent_since:
+                    self._absent_since[old_pid] = time.monotonic()
+                    logger.info("console: device %s reappeared on port %s (was %s) — carried "
+                                "alias/tenant forward, the old port record goes if it stays "
+                                "missing", identity.get("hostname") or identity.get("serial")
+                                or identity.get("mac") or "?", port_id, old_pid)
             # Otherwise fill gaps from the device cache.
             else:
                 # No live port_id matched — but the DEVICE itself may still be

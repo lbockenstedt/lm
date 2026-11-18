@@ -33,8 +33,20 @@ from test_serial_manager import _FakeSerial  # noqa: E402
 
 
 @pytest.fixture()
-def spoke(monkeypatch, tmp_path):
+def plugged(monkeypatch):
+    """The port_ids the fake serial bus reports; a test appends the ones plugged in.
+    Empty by default, so a record whose port is not listed counts as gone."""
+    ports: list = []
+    monkeypatch.setattr(cs, "enumerate_ports", lambda: [{"port_id": p} for p in ports])
+    return ports
+
+
+@pytest.fixture()
+def spoke(monkeypatch, tmp_path, plugged):
     monkeypatch.setattr(sm, "serial", _FakeSerial)
+    # No wait before an absent port's record is deleted, so a test sees the delete on the first
+    # identify; the tests of the wait itself set it back.
+    monkeypatch.setattr(cs, "_ORPHAN_GRACE_S", 0.0)
     _FakeSerial.Serial.instances = []
     sp = cs.ConsoleSpoke("console-1", {"console_monitor": False, "auto_identify": False})
     sp.store = sm.PortStore(path=tmp_path / "ports.json")
@@ -48,6 +60,12 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+def _inventory(spoke):
+    """Take a fresh port inventory, as the autoprobe scan does every few seconds; it also
+    settles the records waiting out their grace period."""
+    _run(spoke._enumerate_ports())
+
+
 # ── Reconciliation on identify ──────────────────────────────────────────────
 
 def test_reappearing_device_carries_alias_forward_and_drops_old_record(spoke):
@@ -59,6 +77,7 @@ def test_reappearing_device_carries_alias_forward_and_drops_old_record(spoke):
         "identity": {"hostname": "MIA-SW-AOSS", "serial": "TW94HKZ1Y2"},
         "logged_in": True,
     }))
+    _inventory(spoke)
 
     assert spoke.store.get("new-pid")["alias"] == "MIA-SW-AOSS"
     assert spoke.store.get("new-pid")["tenant_id"] == "lrb"
@@ -73,6 +92,7 @@ def test_reconcile_matches_on_mac_when_no_serial(spoke):
         "identity": {"mac": "38:21:C7:FC:8E:E0"},  # case differs — must still match
         "logged_in": True,
     }))
+    _inventory(spoke)
 
     assert spoke.store.get("new-pid")["alias"] == "OLKS-MGMTSW"
     assert spoke.store.get("old-pid") == {}
@@ -86,9 +106,153 @@ def test_reconcile_never_overwrites_an_alias_already_set_on_the_new_port(spoke):
     _run(spoke._emit_probe_result("new-pid", {
         "identity": {"serial": "SN123"}, "logged_in": True,
     }))
+    _inventory(spoke)
 
     assert spoke.store.get("new-pid")["alias"] == "operator-set-this-already"
     assert spoke.store.get("old-pid") == {}, "old record still retires even though alias wasn't copied"
+
+
+def test_live_sibling_with_same_serial_is_not_treated_as_an_orphan(spoke, plugged):
+    """Member consoles of one VSF/VC stack report the stack's serial/MAC. Both
+    ports are plugged in and answering, so neither is the other's orphan:
+    identifying one must not delete the other's record (settings, probe, DPA
+    port). Alias/tenant are device-level (DeviceCache is keyed by serial), so the
+    second console to the same device inherits them, as it did before."""
+    plugged.extend(["port-a", "port-b"])
+    stack = {"hostname": "ACSW01-VC", "serial": "STACKSN"}
+    spoke.store.update("port-a", alias="ACSW01", tenant_id="dxp", settings={"baud": 9600},
+                       dpa_ssh_port=8003)
+    _run(spoke._emit_probe_result("port-a", {"identity": dict(stack), "logged_in": True}))
+
+    _run(spoke._emit_probe_result("port-b", {"identity": dict(stack), "logged_in": True}))
+
+    kept = spoke.store.get("port-a")
+    assert kept["alias"] == "ACSW01" and kept["dpa_ssh_port"] == 8003
+    assert kept["settings"] == {"baud": 9600}
+    assert kept["probe"]["identity"]["serial"] == "STACKSN"
+    sibling = spoke.store.get("port-b")
+    assert sibling["probe"]["identity"]["serial"] == "STACKSN"
+    assert sibling["alias"] == "ACSW01" and sibling["tenant_id"] == "dxp"
+
+
+def test_enumerated_port_is_kept_however_stale_so_nothing_is_deleted_on_weak_evidence(spoke, plugged):
+    """A failed probe (also set on every restart) or a long gap since the last
+    identify can just be a user session, a locked port or missing credentials, and
+    the delete cannot be undone. So an enumerated match is always kept, even when it
+    is stale and was last identified days ago (e.g. the cable moved to another
+    always-present adapter); the new port still gets alias/tenant from the
+    serial-keyed device cache."""
+    plugged.extend(["old-pid", "new-pid"])
+    long_ago = __import__("time").time() - 30 * 86400
+    spoke.store.update("old-pid", alias="MIA-SW", tenant_id="dxp", dpa_ssh_port=8003,
+                       probe={"identity": {"serial": "SN123"}, "stale": True,
+                              "identified_at": long_ago})
+    spoke.devices.remember({"serial": "SN123"}, port_id="old-pid", alias="MIA-SW",
+                           tenant_id="dxp")
+
+    _run(spoke._emit_probe_result("new-pid", {"identity": {"serial": "SN123"}, "logged_in": True}))
+
+    assert spoke.store.get("old-pid")["dpa_ssh_port"] == 8003
+    assert spoke.store.get("new-pid")["alias"] == "MIA-SW"
+    assert spoke.store.get("new-pid")["tenant_id"] == "dxp"
+
+
+def test_sibling_ports_do_not_wipe_each_other_when_identified_in_turn(spoke, plugged):
+    """The ping-pong seen on a live console server: A, B, A identifying in turn
+    each deleted the previous port's record."""
+    plugged.extend(["port-a", "port-b"])
+    stack = {"serial": "STACKSN"}
+    for pid in ("port-a", "port-b", "port-a"):
+        spoke.store.update(pid, dpa_ssh_port=8001 if pid == "port-a" else 8002)
+        _run(spoke._emit_probe_result(pid, {"identity": dict(stack), "logged_in": True}))
+    assert spoke.store.get("port-a")["dpa_ssh_port"] == 8001
+    assert spoke.store.get("port-b")["dpa_ssh_port"] == 8002
+
+
+def test_reconcile_still_moves_a_record_whose_port_is_absent_from_the_bus(spoke, plugged):
+    plugged.append("new-pid")
+    spoke.store.update("old-pid", alias="MIA-SW", probe={"identity": {"serial": "SN123"}})
+
+    _run(spoke._emit_probe_result("new-pid", {"identity": {"serial": "SN123"}, "logged_in": True}))
+    _inventory(spoke)
+
+    assert spoke.store.get("new-pid")["alias"] == "MIA-SW"
+    assert spoke.store.get("old-pid") == {}
+
+
+def test_a_missing_port_keeps_its_record_until_it_has_stayed_missing_for_the_grace_period(
+        spoke, plugged, monkeypatch):
+    """One inventory that omits a sibling (an adapter resetting, a brief unplug, a partial
+    listing) is not proof it moved, and the delete cannot be undone. Alias/tenant carry over at
+    once; the record is deleted only after the port has stayed missing for the whole wait."""
+    monkeypatch.setattr(cs, "_ORPHAN_GRACE_S", 600.0)
+    plugged.append("port-b")
+    spoke.store.update("port-a", alias="ACSW01", dpa_ssh_port=8003, settings={"baud": 9600},
+                       probe={"identity": {"serial": "STACKSN"}})
+    ident = {"identity": {"serial": "STACKSN"}, "logged_in": True}
+
+    _run(spoke._emit_probe_result("port-b", ident))
+    assert spoke.store.get("port-b")["alias"] == "ACSW01"
+    _inventory(spoke)  # a later inventory inside the wait changes nothing
+    assert spoke.store.get("port-a")["dpa_ssh_port"] == 8003
+
+    # Once the port has been missing for the whole wait, an inventory alone deletes the record;
+    # it does not depend on port-b being identified again (that can be a day away).
+    spoke._absent_since["port-a"] -= 601
+    _inventory(spoke)
+    assert spoke.store.get("port-a") == {}
+    assert "port-a" not in spoke._absent_since
+
+
+def test_a_port_that_comes_back_is_forgotten_and_never_deleted(spoke, plugged, monkeypatch):
+    monkeypatch.setattr(cs, "_ORPHAN_GRACE_S", 600.0)
+    plugged.append("port-b")
+    spoke.store.update("port-a", dpa_ssh_port=8003, probe={"identity": {"serial": "STACKSN"}})
+    _run(spoke._emit_probe_result("port-b", {"identity": {"serial": "STACKSN"}, "logged_in": True}))
+    spoke._absent_since["port-a"] -= 601  # the wait would be over
+
+    plugged.append("port-a")  # but it is back on the bus at the next inventory
+    _inventory(spoke)
+    assert "port-a" not in spoke._absent_since
+    assert spoke.store.get("port-a")["dpa_ssh_port"] == 8003
+
+    plugged.remove("port-a")  # missing again: nothing deletes it until a new wait is started
+    _inventory(spoke)
+    assert spoke.store.get("port-a")["dpa_ssh_port"] == 8003
+
+
+def test_a_stale_port_cache_is_not_proof_that_a_port_is_gone(spoke, plugged):
+    """The cache from the last monitor pass listed the sibling as absent, but it has since
+    been plugged back in. Only a fresh inventory may authorise the delete."""
+    spoke._ports_cache = [{"port_id": "new-pid"}]
+    plugged.extend(["old-pid", "new-pid"])
+    spoke.store.update("old-pid", dpa_ssh_port=8003, probe={"identity": {"serial": "SN123"}})
+
+    _run(spoke._emit_probe_result("new-pid", {"identity": {"serial": "SN123"}, "logged_in": True}))
+
+    assert spoke.store.get("old-pid")["dpa_ssh_port"] == 8003
+
+
+def test_nothing_is_retired_when_the_port_enumeration_fails(spoke, monkeypatch):
+    """No inventory means no proof any port is gone (a wedged USB bus, a hub LLM identify
+    right after a restart): keep every record. Alias/tenant still arrive through the
+    device cache, and the next identify reconciles."""
+    calls = []
+
+    def _flaky():
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("bus wedged")
+        return []
+    monkeypatch.setattr(cs, "enumerate_ports", _flaky)
+    spoke.store.update("port-a", alias="ACSW01", dpa_ssh_port=8003,
+                       probe={"identity": {"serial": "STACKSN"}})
+    spoke.devices.remember({"serial": "STACKSN"}, port_id="port-a", alias="ACSW01")
+
+    _run(spoke._emit_probe_result("port-b", {"identity": {"serial": "STACKSN"}, "logged_in": True}))
+
+    assert spoke.store.get("port-a")["dpa_ssh_port"] == 8003
+    assert spoke.store.get("port-b")["alias"] == "ACSW01"
 
 
 def test_no_reconcile_when_no_matching_prior_identity(spoke):
