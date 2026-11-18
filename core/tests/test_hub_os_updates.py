@@ -78,6 +78,15 @@ def test_tenant_node_keys_are_their_spokes_and_agents_never_the_hub():
     assert hub.osu_tenant_node_keys({"t1"}) == {"spoke:s1", "agent:a1"}
 
 
+def test_tenant_node_keys_ignore_id_case_and_never_match_an_unassigned_node():
+    hub = _FakeHub(
+        connections={"s1": object(), "s2": object()}, agent_info={},
+        module_metadata={"s1": {"display_name": "one", "tenant_id": "Acme"},
+                         "s2": {"display_name": "two"}})
+    assert hub.osu_tenant_node_keys({"acme"}) == {"spoke:s1"}
+    assert hub.osu_tenant_node_keys({""}) == set()
+
+
 def test_targets_skip_an_agent_on_a_spoke_host():
     hub = _FakeHub(
         connections={"spoke-1": object()},
@@ -440,18 +449,58 @@ async def test_state_persists_and_an_inflight_run_loads_as_interrupted(tmp_path)
     hub.cache_dir = str(tmp_path)
     await hub.osu_check_fleet(refresh=False)
     st = hub._osu_state()
-    st["run"] = {"status": "running", "done": 0, "total": 2, "current": "x",
+    st["run"] = {"status": "running", "done": 0, "total": 3, "current": "x",
                  "items": [{"key": "a", "status": "applying"},
-                           {"key": "b", "status": "queued"}]}
+                           {"key": "b", "status": "queued"},
+                           {"key": "c", "status": "rebooting"}]}
     await hub._osu_file().flush_now()
     fresh = _checked_hub()
     fresh.cache_dir = str(tmp_path)
     fresh.osu_load_state()
     run = fresh._osu_state()["run"]
     assert run["status"] == "interrupted"
-    assert [i["status"] for i in run["items"]] == ["interrupted", "skipped"]
+    # A node cut off mid-reboot is interrupted too, never left "rebooting" in a run that is over.
+    assert [i["status"] for i in run["items"]] == ["interrupted", "skipped", "interrupted"]
+    assert "rebooting" in run["items"][2]["message"] and "updating" in run["items"][0]["message"]
     node = next(n for n in fresh.osu_snapshot()["nodes"] if n["kind"] == "spoke")
     assert node["checked"] is True and node["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_run_saved_before_reboot_state_keeps_flagging_a_bad_reboot(tmp_path):
+    """The auto_reboot texts the earlier code wrote map to the state the page badges on; texts that
+    report no problem, and items that already have a state, are left alone."""
+    texts = {
+        "failed: no route — maintenance mode cleared": "failed",
+        "failed: Timed out waiting for spoke response — maintenance mode cleared": "unconfirmed",
+        "failed: maintenance mode: busy": "not_started",
+        # The earlier code never turned maintenance mode off after an enable with no answer.
+        "failed: maintenance mode: Timed out waiting for spoke response": "drained",
+        "failed: maintenance mode: Spoke s1 connection closed/blocked mid-send: boom": "drained",
+        "failed: maintenance mode: Spoke s1 is not connected": "not_started",
+        "failed: guests did not move off in time (vm1) — not rebooted, maintenance mode cleared":
+            "not_started",
+        "failed: guests did not move off in time (vm1) — not rebooted, maintenance mode NOT cleared: x":
+            "drained",
+        "failed: did not come back within 20 min — left in maintenance mode, rest of the run stopped":
+            "drained",
+        "rebooted, but maintenance mode NOT cleared: x": "drained",
+        "failed: node can't be rebooted from LM (needs an LM update)": "not_started",
+        "not rebooted: the Proxmox agent needs an update before it can reboot safely": "not_started",
+        "scheduled": None, "rebooted (cluster maintenance mode)": None, "not needed": None,
+    }
+    hub = _checked_hub()
+    hub.cache_dir = str(tmp_path)
+    items = [{"key": f"n{i}", "status": "done", "auto_reboot": t} for i, t in enumerate(texts)]
+    items.append({"key": "kept", "status": "done", "auto_reboot": "failed: x", "reboot_state": "ok"})
+    hub._osu_state()["run"] = {"status": "finished", "items": items}
+    await hub._osu_file().flush_now()
+    fresh = _checked_hub()
+    fresh.cache_dir = str(tmp_path)
+    fresh.osu_load_state()
+    got = fresh._osu_state()["run"]["items"]
+    assert [i.get("reboot_state") for i in got[:-1]] == list(texts.values())
+    assert got[-1]["reboot_state"] == "ok"
 
 
 # ── auto-patch ───────────────────────────────────────────────────────────────
@@ -571,6 +620,86 @@ async def test_autoreboot_reboots_spokes_before_patching_the_hub_and_the_hub_las
                       ("apply", "hub"), ("reboot", "hub", "auto-reboot")]
     items = {i["key"]: i.get("auto_reboot") for i in hub._osu_state()["run"]["items"]}
     assert items == {"spoke:s1": "scheduled", "spoke:s2": None, "hub:hub": "scheduled"}
+    states = {i["key"]: i.get("reboot_state") for i in hub._osu_state()["run"]["items"]}
+    assert states == {"spoke:s1": "ok", "spoke:s2": None, "hub:hub": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_reboot_by_hand_ends_the_failed_auto_reboot_mark():
+    """After a failed auto-reboot, a Reboot click that fails changes nothing and one that goes
+    through clears the node's "reboot failed" mark, so the page stops flagging it for good."""
+    hub, _ = _autoreboot_hub({"s1": 3, "s2": 0, "hub": 0})
+    up = [False]
+
+    async def _reboot(n, actor):
+        return {"status": "SUCCESS"} if up[0] else {"status": "ERROR", "message": "no route"}
+    hub._osu_reboot = _reboot
+    await hub.osu_apply_fleet(node_keys=["spoke:s1"], reboot_after=["spoke:s1"])
+    await _drain()
+    item = hub._osu_state()["run"]["items"][0]
+    assert (item["reboot_state"], item["auto_reboot"]) == ("failed", "failed: no route")
+    assert (await hub.osu_reboot_node("spoke:s1", actor="me"))["status"] == "ERROR"
+    assert item["reboot_state"] == "failed"
+    up[0] = True
+    assert (await hub.osu_reboot_node("spoke:s1", actor="me"))["status"] == "SUCCESS"
+    assert (item["reboot_state"], item["auto_reboot"]) == ("ok", "scheduled by hand")
+
+
+@pytest.mark.asyncio
+async def test_an_unanswered_reboot_stays_flagged_until_a_reboot_by_hand_goes_through():
+    hub, _ = _autoreboot_hub({"s1": 3, "s2": 0, "hub": 0})
+    up = [False]
+
+    async def _reboot(n, actor):
+        if up[0]:
+            return {"status": "SUCCESS"}
+        return {"status": "ERROR", "state": "unconfirmed",
+                "message": "Timed out waiting for spoke response"}
+    hub._osu_reboot = _reboot
+    await hub.osu_apply_fleet(node_keys=["spoke:s1"], reboot_after=["spoke:s1"])
+    await _drain()
+    item = hub._osu_state()["run"]["items"][0]
+    assert item["reboot_state"] == "unconfirmed"
+    up[0] = True
+    assert (await hub.osu_reboot_node("spoke:s1", actor="me"))["status"] == "SUCCESS"
+    assert (item["reboot_state"], item["auto_reboot"]) == ("ok", "scheduled by hand")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind, outcome, expected", [
+    ("spoke", {"payload": {"data": {"status": "SUCCESS"}}}, "ok"),
+    ("spoke", ConnectionError("Spoke s1 is not connected"), "not_started"),
+    ("spoke", ConnectionError("Spoke s1 connection closed/blocked mid-send: boom"), "unconfirmed"),
+    ("spoke", {"status": "ERROR", "message": "Timed out waiting for spoke response"}, "unconfirmed"),
+    ("spoke", {"status": "ERROR", "message": "Timed out waiting for spoke response",
+               "updating": True, "draining": True}, "not_started"),
+    ("agent", {"payload": {"data": {"status": "ERROR", "message": "Agent response timeout"}}},
+     "unconfirmed"),
+    ("spoke", {"payload": {"data": {"status": "ERROR", "message": "ssh refused"}}}, "failed"),
+    ("spoke", RuntimeError("boom"), "failed"),
+    ("hub", {"status": "ERROR", "message": "timed out"}, "failed"),
+])
+async def test_reboot_command_says_whether_it_was_never_sent_unanswered_or_refused(
+        monkeypatch, kind, outcome, expected):
+    """request_response raises ConnectionError "not connected" when nothing went out (never
+    rebooted) but "closed/blocked mid-send" when the frame may have gone out; it answers a timeout
+    with a plain ERROR reply (the command may have run: check the node) and an updating spoke with
+    the same text plus ``draining`` (it skipped the send: nothing went out). A reply from the
+    spoke itself is a clear failure, and a local hub reboot cannot "time out"."""
+    hub = _checked_hub()
+
+    async def _request(target, cmd, data, timeout=None):
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+    hub.request_response = _request
+    if kind == "hub":
+        import os_update
+        monkeypatch.setattr(os_update, "reboot_node", lambda: outcome)
+    node = {"kind": kind, "id": "s1", "label": "S1", "spoke_id": "s1", "agent_id": "a1"}
+    res = await hub._osu_reboot(node, "me")
+    assert res["state"] == expected
+    assert (res["status"] == "SUCCESS") == (expected == "ok")
 
 
 @pytest.mark.asyncio
@@ -864,6 +993,28 @@ async def test_cluster_node_reboots_in_maintenance_mode_one_at_a_time(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_cluster_node_shows_as_rebooting_only_while_it_reboots(monkeypatch):
+    hub, _events = _cluster_hub(monkeypatch, [[]])
+    seen = []
+    maint = hub._osu_maintenance
+
+    async def _watch(n, action):
+        seen.append((action, hub._osu_state()["run"]["items"][0]["status"]))
+        return await maint(n, action)
+    hub._osu_maintenance = _watch
+    await hub.osu_apply_fleet(node_keys=["agent:pve1"], reboot_after=["agent:pve1"])
+    for _ in range(10):
+        await _drain()
+    # Patched, then rebooting through maintenance mode, then done again: the patch succeeded and
+    # auto_reboot says how the reboot went.
+    assert seen[0] == ("enable", "rebooting")
+    item = hub._osu_state()["run"]["items"][0]
+    assert item["status"] == "done" and item["auto_reboot"] == "rebooted (cluster maintenance mode)"
+    # It did reboot, so the run item no longer says one is due (the page shows it as updated).
+    assert item["reboot_required"] is False
+
+
+@pytest.mark.asyncio
 async def test_cluster_node_without_pending_reboot_is_left_alone(monkeypatch):
     hub, events = _cluster_hub(monkeypatch, [], reboot_required=False)
     await hub.osu_apply_fleet(node_keys=["agent:pve1"], reboot_after=["agent:pve1"])
@@ -965,6 +1116,170 @@ async def test_manual_deploy_to_a_cluster_node_uses_maintenance_mode(monkeypatch
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("manual", [False, True])
+async def test_cluster_reboot_that_raises_fails_the_item_and_never_strands_the_run(
+        monkeypatch, caplog, manual):
+    """An unexpected error inside the reboot cycle is a failed reboot (logged at
+    ERROR, the rest of the run stops), not an exception that leaves the run
+    "running" with a node stuck "rebooting"."""
+    hub, _events = _cluster_hub(monkeypatch, [[]])
+
+    async def _boom(n, actor):
+        raise RuntimeError("proxmox exploded")
+    hub._osu_reboot = _boom
+    with caplog.at_level(logging.ERROR, logger="Hub"):
+        if manual:
+            hub._osu_state()["run"] = None
+            await hub.osu_reboot_node("agent:pve1", actor="alice")
+        else:
+            await hub.osu_apply_fleet(node_keys=["agent:pve1", "agent:pve2"],
+                                      reboot_after=["agent:pve1", "agent:pve2"])
+        for _ in range(8):
+            await _drain()
+    run = hub._osu_state()["run"]
+    first = run["items"][0]
+    assert run["status"] != "running" and first["status"] in ("done", "failed")
+    assert first["auto_reboot"].startswith("failed: unexpected error: proxmox exploded")
+    assert first["auto_reboot"].endswith("maintenance mode cleared")
+    assert first["reboot_state"] == "failed"
+    assert [r for r in caplog.records if "failed unexpectedly" in r.getMessage()]
+    if not manual:
+        # The node may be left drained, so the next node is not touched.
+        assert run["items"][1]["status"] == "skipped"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario, expected", [
+    ("ok", "ok"),
+    ("enable_fails", "not_started"),
+    ("enable_times_out", "not_started"),
+    ("enable_times_out_stuck", "drained"),
+    ("enable_mid_send", "not_started"),
+    ("enable_mid_send_stuck", "drained"),
+    ("drain_timeout", "not_started"),
+    ("drain_timeout_stuck", "drained"),
+    ("reboot_fails", "failed"),
+    ("reboot_fails_stuck", "drained"),
+    ("reboot_times_out", "drained"),
+    ("reboot_unsent", "not_started"),
+    ("never_returns", "drained"),
+    ("disable_fails", "drained"),
+    ("raises", "failed"),
+    ("raises_stuck", "drained"),
+    ("raises_before_reboot", "not_started"),
+    ("raises_after_reboot", "failed"),
+])
+async def test_cluster_reboot_state_says_how_the_reboot_ended(monkeypatch, scenario, expected):
+    """The operator's next step differs: never rebooted (look at why), reboot failed (retry it),
+    or left in maintenance mode (take it out of maintenance, do not reboot again, which is also
+    how a cluster node whose reboot got no answer reads: see the test below). An unexpected error
+    is "not rebooted" before the reboot command was sent and "failed" after it, and either way
+    "drained" unless the node could be handed back."""
+    import hub_os_updates as hou
+    drain = scenario.startswith("drain_timeout")
+    if drain:
+        monkeypatch.setattr(hou, "_MAINT_MIGRATE_TIMEOUT_S", -1)
+    if scenario == "never_returns":
+        monkeypatch.setattr(hou, "_REBOOT_RETURN_TIMEOUT_S", -1)
+    hub, _events = _cluster_hub(monkeypatch, [["vm:100"]] if drain else [[]],
+                                back_after=99 if scenario == "never_returns" else 1)
+    maint = hub._osu_maintenance
+    stuck = scenario.endswith("stuck") or scenario == "disable_fails"
+
+    async def _maint(n, action):
+        if action == "enable" and scenario == "enable_fails":
+            return {"status": "ERROR", "message": "pmxcfs not quorate"}
+        if action == "enable" and scenario.startswith("enable_times_out"):
+            return {"status": "ERROR", "message": "Timed out waiting for spoke response"}
+        if action == "enable" and scenario.startswith("enable_mid_send"):
+            return {"status": "ERROR", "message": "Spoke pve1 connection closed/blocked mid-send: x"}
+        if action == "enable" and scenario == "raises_before_reboot":
+            raise RuntimeError("enable exploded")
+        if action == "disable" and scenario == "raises_stuck":
+            raise RuntimeError("agent gone")
+        if action == "disable" and stuck:
+            return {"status": "ERROR", "message": "pmxcfs busy"}
+        return await maint(n, action)
+
+    async def _bad_reboot(n, actor):
+        if scenario.startswith("raises"):
+            raise RuntimeError("proxmox exploded")
+        res = {"status": "ERROR", "message": "ssh refused"}
+        # _osu_reboot names the state it classified; a reply without one counts as "failed".
+        if scenario in ("reboot_times_out", "reboot_unsent"):
+            res["state"] = "unconfirmed" if scenario == "reboot_times_out" else "not_started"
+        return res
+
+    async def _bad_check(target, refresh):
+        raise RuntimeError("check exploded")
+    hub._osu_maintenance = _maint
+    if scenario.startswith(("reboot_fails", "reboot_times_out", "reboot_unsent")) \
+            or scenario in ("raises", "raises_stuck"):
+        hub._osu_reboot = _bad_reboot
+    if scenario == "raises_after_reboot":
+        hub._osu_check_one = _bad_check
+    await hub.osu_apply_fleet(node_keys=["agent:pve1"], reboot_after=["agent:pve1"])
+    for _ in range(8):
+        await _drain()
+    assert hub._osu_state()["run"]["items"][0]["reboot_state"] == expected
+
+
+@pytest.mark.asyncio
+async def test_cluster_reboot_with_no_answer_keeps_the_node_drained_and_stops_the_run(monkeypatch):
+    """The reboot command may be running, so the node is not handed back (its guests could move
+    back, and the next node start, while it goes down): no disable is sent, the next node is
+    skipped, and the node reads as left in maintenance mode."""
+    hub, events = _cluster_hub(monkeypatch, [[]])
+
+    async def _no_answer(n, actor):
+        events.append(("reboot", n["id"], actor))
+        return {"status": "ERROR", "message": "Timed out waiting for spoke response",
+                "state": "unconfirmed"}
+    hub._osu_reboot = _no_answer
+    await hub.osu_apply_fleet(node_keys=["agent:pve1", "agent:pve2"],
+                              reboot_after=["agent:pve1", "agent:pve2"])
+    for _ in range(8):
+        await _drain()
+    assert ("maint", "pve1", "disable") not in events
+    assert not any(e[1] == "pve2" for e in events)
+    run = hub._osu_state()["run"]
+    first, second = run["items"]
+    assert first["reboot_state"] == "drained"
+    assert "reboot not confirmed" in first["auto_reboot"] and "left in maintenance" in first["auto_reboot"]
+    assert second["status"] == "skipped"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("skipped", ["enable", "reboot"])
+async def test_a_request_skipped_for_an_updating_spoke_reads_as_not_sent(monkeypatch, skipped):
+    """request_response answers an updating (draining) spoke at once with a real timeout's text
+    plus ``draining``, sending nothing. That is "not rebooted", not a lost command, and a skipped
+    maintenance request leaves nothing to undo (no disable is sent for it)."""
+    hub, _events = _cluster_hub(monkeypatch, [[]])
+    for name in ("_osu_maintenance", "_osu_reboot"):
+        delattr(hub, name)  # the real ones, over the faked request_response below
+    sent = []
+
+    async def _request(target, cmd, data, timeout=None):
+        action = data.get("action", "")
+        sent.append((cmd, action))
+        skip = (action == "enable") if skipped == "enable" else (cmd == "AGENT_OS_REBOOT")
+        if skip:
+            return {"status": "ERROR", "message": "Timed out waiting for spoke response",
+                    "updating": True, "draining": True}
+        return {"payload": {"data": {"status": "SUCCESS", "ha_guests": []}}}
+    hub.request_response = _request
+    await hub.osu_apply_fleet(node_keys=["agent:pve1"], reboot_after=["agent:pve1"])
+    for _ in range(8):
+        await _drain()
+    item = hub._osu_state()["run"]["items"][0]
+    assert item["reboot_state"] == "not_started"
+    assert "nothing was sent" in item["auto_reboot"] and "Timed out" not in item["auto_reboot"]
+    assert sent == [("AGENT_OS_MAINTENANCE", "enable")] + (
+        [] if skipped == "enable" else [("AGENT_OS_REBOOT", ""), ("AGENT_OS_MAINTENANCE", "disable")])
+
+
+@pytest.mark.asyncio
 async def test_reboot_button_on_a_cluster_node_uses_maintenance_mode(monkeypatch):
     hub, events = _cluster_hub(monkeypatch, [["vm:100"], []])
     hub._osu_state()["run"] = None
@@ -977,6 +1292,7 @@ async def test_reboot_button_on_a_cluster_node_uses_maintenance_mode(monkeypatch
     run = hub._osu_state()["run"]
     assert run["status"] == "finished"
     assert run["items"][0]["auto_reboot"] == "rebooted (cluster maintenance mode)"
+    assert run["items"][0]["reboot_state"] == "ok"
 
 
 # ── footer "Pending Reboot" alert ────────────────────────────────────────────
@@ -1181,3 +1497,25 @@ def test_tenant_node_keys_follow_an_agents_own_pinned_tenant():
         "a1": {"client_simulation": {"tenant_id": "t1"}},
         "a2": {"client_simulation": {"tenant_id": "t2"}}}
     assert hub.osu_tenant_node_keys({"t1"}) == {"agent:a1"}
+
+
+def test_snapshot_names_each_nodes_tenant_never_an_id():
+    hub = _FakeHub(
+        connections={"s1": object(), "s2": object(), "s3": object(), "s4": object()},
+        agent_info={"a1": {"spoke_id": "s1", "hostname": "pve1"}},
+        module_metadata={"s1": {"display_name": "one", "tenant_id": "t1"},
+                         "s2": {"display_name": "two", "tenant_id": "default"},
+                         "s3": {"display_name": "three"},
+                         "s4": {"display_name": "four", "tenant_id": "T1"}})
+    # get_tenant matches the id's case exactly, as the real StateManager does.
+    hub.state.get_tenant = lambda tid: {"t1": {"name": "Acme"}}.get(tid)
+    hub.state.tenant_state = {"tenants": {"t1": {"name": "Acme"}}}
+    # The agent's own pinned tenant beats its spoke's tenant.
+    hub.state.system_state["agent_config"] = {"a1": {"client_simulation": {"tenant_id": "t2"}}}
+    got = {n["id"]: (n["tenant"], n["tenant_key"]) for n in hub.osu_snapshot()["nodes"]}
+    # A tenant that no longer exists reads "Unknown tenant", never its id; the id
+    # stays only as the (hidden, case-folded) grouping key, since names need not be unique.
+    # "T1" and "t1" are one tenant: same name, same key.
+    assert got == {"s1": ("Acme", "t1"), "s2": ("ADMIN", "default"), "s3": ("", ""),
+                   "s4": ("Acme", "t1"), "a1": ("Unknown tenant", "t2"), "hub": ("", "")}
+    assert "t2" not in {n["tenant"] for n in hub.osu_snapshot()["nodes"]}
