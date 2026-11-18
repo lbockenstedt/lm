@@ -12,7 +12,9 @@ Provision the approved Ollama 0.40.16 runtime at `/opt/lm-llm/bin/ollama` and
 stage approved, CPU-compatible weights in `/var/lib/lm-llm/models`. The agent
 installer stages the dedicated unit without enabling it independently. It binds
 loopback port 11438, disables cloud, and uses one slot with no artificial CPU
-cap. For either runtime, obtain the correct Linux architecture release from
+cap. The port is fixed rather than a setting: it never leaves the VM, and
+keeping off Ollama's default 11434 means a system Ollama is never mistaken for
+the worker's runtime. For either runtime, obtain the correct Linux architecture release from
 the approved distribution channel, verify the archive against an independently
 trusted SHA-256, and stage the full extracted bundle (including runtime libraries)
 in a root-owned, non-writable-by-service directory. Do not use an unversioned
@@ -85,7 +87,11 @@ with `task: "pr_summary"`, `tenant`, `model`, `url` (public HTTPS
 tenant's Vault bucket. Select `max_tokens` (default) or `max_completion_tokens`
 according to the endpoint and model. LM sends one capped request, never
 resubmitting to negotiate this field. Cloud profiles do not expose or store inline keys.
-# Qualification and fleet telemetry
+The hub does not re-check repository visibility itself; it relies on the AB
+client bound to that certificate, so enable `allow_public_cloud` only on
+certificate mappings held by an AB you trust to report it.
+
+## Qualification and fleet telemetry
 
 Global admins can use **LLM** to inspect worker readiness, active jobs, and the latest 200 finished attempts. The dashboard JSON is available at `GET /api/llm/admin/dashboard`; it contains no prompts, generated text, credentials, or provider URLs. History resets on hub restart; export it to a downstream system for longer-term analysis.
 

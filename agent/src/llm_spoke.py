@@ -22,6 +22,9 @@ SAMPLING_LIMITS = {"temperature": 2.0, "top_p": 1.0}
 # Start from the owner's CLI pin; Linux CPU artifacts still need qualification.
 DEFAULT_OLLAMA_VERSION = "0.40.16"
 SERVICE = "lm-llm-ollama.service"
+# Loopback-only port of SERVICE (its OLLAMA_HOST). Fixed, not a setting: it never leaves
+# the VM, and staying off Ollama's 11434 means a system Ollama can't be mistaken for ours.
+SERVING_PORT = 11438
 CATALOG = Path("/etc/lm/llm-models.json")
 BUNDLE_CATALOG = Path("/opt/lm-llm/llm-models.json")
 
@@ -67,7 +70,7 @@ def runtime_service(action):
     ).returncode == 0
 
 
-def ollama_request(path, body=None, timeout=3, *, port=11438):
+def ollama_request(path, body=None, timeout=3, *, port=SERVING_PORT):
     """Read one bounded JSON reply without using HTTP proxies or redirects."""
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
