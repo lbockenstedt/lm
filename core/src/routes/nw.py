@@ -803,6 +803,17 @@ def _should_warn_scan_source(tenant_id, source, now=None):
     return True
 
 
+def _snmp_silent_hosts(results):
+    """Sorted "address (name)" labels of scanned hosts where every SNMP
+    community was tried and none answered (``snmp_ok`` False). ``None`` means
+    SNMP was never tried or was cut off, so those hosts are left out. False
+    cannot tell a silent device from a probe error on the spoke, which the
+    scanner swallows; the caller words the log accordingly. A host the spoke
+    lists twice (identified and reachable) is named once."""
+    return sorted({f"{d.get('address')} ({d.get('hostname') or d.get('object_type') or 'unnamed'})"
+                   for d in results if isinstance(d, dict) and d.get("snmp_ok") is False})
+
+
 async def sync_dns_instance_topology(hub, instances, spoke_id,
                                      worker_secret=""):
     """Push Setup's DNS server list to its connected DNS Management spoke."""
@@ -2797,11 +2808,25 @@ def register(app, hub, ctx):
         # LLDP crawling can reach past the targets: never add an address NetBox
         # assigns to another tenant (a just-relocated device is still recorded
         # there until its next NetBox push).
+        pinged_hosts = (pinged.get("identified") or []) + (pinged.get("reachable") or [])
         foreign = await access.foreign_tenant_ips(hub, tenant_id, {
-            str(d.get("address") or "").strip() for d in identified + reachable},
+            str(d.get("address") or "").strip() for d in identified + reachable + pinged_hosts},
             own_vrf_only=own_agent) - moved_addrs
         identified = [d for d in identified if str(d.get("address") or "").strip() not in foreign]
         reachable = [d for d in reachable if str(d.get("address") or "").strip() not in foreign]
+        # Name the hosts that got no SNMP answer from any community, so "found
+        # but not monitored" can be told apart from "SNMP never tried". The
+        # scanner also stores False when its probe itself errored (it swallows
+        # every exception), so this is not proof that the device is at fault:
+        # other hosts verifying in the same scan show the probe works. The
+        # ping-only probe tries every community too, so its hosts are named as
+        # well. Logged after the foreign-tenant filter so another tenant's host
+        # is never named.
+        silent = _snmp_silent_hosts(identified + reachable + [
+            d for d in pinged_hosts if str(d.get("address") or "").strip() not in foreign])
+        if silent:
+            logger.info("nw scan tenant=%s SNMP: %d hosts got no answer from any community (%d shown): %s",
+                        tenant_id, len(silent), min(len(silent), 25), silent[:25])
 
         # Existing addresses for this tenant (dedup) — an identified device that
         # is already in the fleet (own or shared) is reported but not re-added.
