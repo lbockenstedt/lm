@@ -467,4 +467,12 @@ def test_5xx_line_names_the_module_its_route_relays_to():
 
 def test_loop_tags_5xx_lines_with_the_module_map():
     src = open(os.path.join(_SRC, "main.py")).read()
-    assert "_sentinel_5xx_lines(wide, self._SENTINEL_MODULE_TYPES)" in src
+    assert "_sentinel_5xx_lines(wide, self._SENTINEL_MODULE_TYPES,\n" in src
+    assert "source=module)" in src
+
+
+def test_5xx_line_in_a_spokes_own_log_names_no_relay():
+    # The dhcp spoke's own log: the route is the spoke's, it relays nowhere.
+    out = main._sentinel_5xx_lines([_access(502)], main.LabManagerHub._SENTINEL_MODULE_TYPES,
+                                   source="dhcp")
+    assert out == ["[http-5xx] ERROR - POST /api/dhcp/ha/discover returned 502"]
