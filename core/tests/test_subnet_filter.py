@@ -9,6 +9,8 @@ merged with the defaults). The actual prefix-matching lives in
 ``simulations/tenant_filter.py`` and is exercised by an integration test (TODO).
 """
 
+import itertools
+
 from access import (
     filter_config,
     filter_enabled,
@@ -881,7 +883,9 @@ def test_vrf_tenant_keeps_own_instance_rows_in_a_merged_multi_spoke_list():
 
 
 class _WarmOwnVrfHub(_OwnVrfPrefixHub):
-    """Own-VRF hub with a dict-backed warm cache shared across "restarts"."""
+    """Own-VRF hub with a dict-backed warm cache shared across "restarts".
+    Each write is stamped from a counter rather than the wall clock, so a
+    later write always reads as newer."""
 
     def __init__(self, state, warm):
         super().__init__(state)
@@ -890,8 +894,15 @@ class _WarmOwnVrfHub(_OwnVrfPrefixHub):
     def warm_get(self, ns, key="_"):
         return self._warm.get((ns, key))
 
+    def warm_last_fetched_at(self, ns, key="_"):
+        return self._warm.get(("fetched_at", ns, key))
+
     async def warm_set(self, ns, key, data, **kwargs):
         self._warm[(ns, key)] = data
+        self._warm[("fetched_at", ns, key)] = next(_WARM_CLOCK)
+
+
+_WARM_CLOCK = itertools.count(1)
 
 
 def test_vrf_cut_holds_after_hub_restart_without_netbox_fetch():
@@ -988,6 +999,7 @@ def _reread(hub, tid, reply):
 def _feed(warm, key, rows):
     """Store ``rows`` as the NetBox cache feed's copy of scope ``key``'s prefixes."""
     warm[("nb_prefixes", key)] = {"status": "SUCCESS", "prefixes": rows}
+    warm[("fetched_at", "nb_prefixes", key)] = next(_WARM_CLOCK)
 
 
 def test_a_tenant_that_leaves_a_shared_vrf_stops_making_it_common():
@@ -1029,6 +1041,42 @@ def test_feed_copy_of_a_tenants_prefixes_beats_an_older_read():
     assert _access.shared_slice_prefixes(hub, "lab1", lab1) == []
     _feed(warm, "lab2", [{"prefix": "172.21.0.0/24"}])
     assert _access.shared_slice_prefixes(hub, "lab1", lab1) == lab1
+
+
+def test_a_read_newer_than_the_feed_copy_beats_it():
+    # The feed copied lab2's prefix in VRF 3, then NetBox answered a newer
+    # read that lab2 has no prefixes left: VRF 3 is lab1's own from that
+    # answer on, not from the feed's next copy, and after a restart too
+    # (lm#1992). A failed read, which falls back to the feed's copy for
+    # lab2's own list, does not bring the older copy back. A read that finds
+    # lab2 back in VRF 3 after a newer feed copy said it had none counts,
+    # although an older read had saved the same VRFs.
+    warm, lab1 = {}, ["172.31.200.0/22"]
+    _feed(warm, "lab2", _COMMON_VRF_ROWS["lab2"])
+    hub = _common_vrf_hub(warm, fetch=False)
+    asyncio.run(_access.fetch_tenant_prefixes(hub, "lab1"))
+    assert _access.shared_slice_prefixes(hub, "lab1", lab1) == lab1
+    _reread(hub, "lab2", {"status": "SUCCESS", "prefixes": []})
+    assert _access.shared_slice_prefixes(hub, "lab1", lab1) == []
+    assert _access.shared_slice_prefixes(_common_vrf_hub(warm, fetch=False), "lab1", lab1) == []
+    _reread(hub, "lab2", {"status": "ERROR", "message": "NetBox timed out"})
+    assert _access.shared_slice_prefixes(hub, "lab1", lab1) == []
+    _reread(hub, "lab2", {"status": "SUCCESS", "prefixes": _COMMON_VRF_ROWS["lab2"]})
+    _feed(warm, "lab2", [])
+    assert _access.shared_slice_prefixes(hub, "lab1", lab1) == []
+    _reread(hub, "lab2", {"status": "SUCCESS", "prefixes": _COMMON_VRF_ROWS["lab2"]})
+    assert _access.shared_slice_prefixes(hub, "lab1", lab1) == lab1
+
+
+def test_a_read_without_vrf_ids_does_not_beat_the_feed_copy():
+    # An older netbox spoke's read carries no vrf_id, so it says nothing about
+    # VRFs: the VRFs an earlier read found must not be saved again as this
+    # read's answer and beat the feed's newer copy (lab2 moved to VRF 9).
+    warm, lab1 = {}, ["172.31.200.0/22"]
+    hub = _common_vrf_hub(warm)
+    _feed(warm, "lab2", [{"prefix": "172.21.0.0/24", "vrf_id": 9}])
+    _reread(hub, "lab2", {"status": "SUCCESS", "prefixes": [{"prefix": "172.21.0.0/24"}]})
+    assert _access.shared_slice_prefixes(hub, "lab1", lab1) == []
 
 
 def test_prefix_reads_ignore_the_pre_unified_hub_cache_copies():
