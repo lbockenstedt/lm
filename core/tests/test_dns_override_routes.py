@@ -280,8 +280,8 @@ def test_firewall_write_scope_covers_every_tenant_the_user_holds(monkeypatch):
 
 
 def test_tenant_cannot_override_a_subnet_only_in_its_own_vrf(monkeypatch):
-    """The shared resolver serves the global table: a subnet inside a prefix the
-    tenant has only in its own VRF is not the tenant's there."""
+    """The shared resolver serves the common routing domain: a subnet inside a
+    prefix the tenant has only in its own VRF is not the tenant's there."""
     monkeypatch.setattr(ns.access, "tenant_prefix_vrfs", lambda hub, tid: {"10.1.0.0/24": {"7"}})
     client, hub = _client(admin=False)
     r = client.post("/api/dns/override-assignment",
