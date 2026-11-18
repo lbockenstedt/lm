@@ -163,6 +163,15 @@ def test_role_prefixes_cover_known_role_loggers():
                 f"role {role!r} logger {n!r} not covered by prefixes {prefixes}")
 
 
+def test_llm_role_logger_reaches_its_role_bucket():
+    """The llm role's runtime diagnostics relay under its own sub-spoke, not
+    the base agent: the module's logger must match the llm prefixes whatever
+    name the module is loaded under (lm_role_llm on an agent)."""
+    import llm_spoke
+    prefixes = _ROLE_LOG_PREFIXES["llm"]
+    assert any(llm_spoke.logger.name.startswith(p) for p in prefixes)
+
+
 def test_shared_loggers_not_claimed_by_any_role():
     # HubDiscovery/DepGuard/UpdateRecovery live in BOTH lm/core and pxmx → they
     # must NOT be matched by any role's prefix list, so they fall to the base
