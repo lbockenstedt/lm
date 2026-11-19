@@ -9,6 +9,8 @@ import asyncio
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import cert_distribution as cd  # noqa: E402
@@ -29,9 +31,17 @@ _KEY = "-----BEGIN PRIVATE KEY-----\nK\n-----END PRIVATE KEY-----\n"
 _CHAIN = "-----BEGIN CERTIFICATE-----\nC\n-----END CERTIFICATE-----\n"
 
 
+def _le_list_certs(certs):
+    """LE_LIST_CERTS spoke return, certs nested under the spoke's ``data``."""
+    return {"payload": {"data": {"status": "SUCCESS", "data": {"certs": certs}}}}
+
+
 def _fake_rr(responses):
-    """``responses`` maps (spoke_id, command) → raw request_response result."""
+    """``responses`` maps (spoke_id, command) → raw request_response result.
+    LE_LIST_CERTS answers with no certs unless a test stubs it, so by default
+    no spoke holds its own cert and every primary spoke is a target."""
     calls = []
+    responses = {(_LE, "LE_LIST_CERTS"): _le_list_certs([]), **responses}
 
     async def rr(spoke_id, command, data=None, timeout=None):
         calls.append({"spoke": spoke_id, "cmd": command, "data": data})
@@ -110,6 +120,88 @@ def test_includes_all_module_types_not_just_cert_capable():
         rr, push, _primary([("dns-spoke-1", "dns")]),
         _LE, _WILDCARD, None, {}, install_on_hub=_install_on_hub_ok()))
     assert any(c["spoke"] == "dns-spoke-1" for c in pcalls)
+
+
+def test_no_claim_set_still_skips_spoke_with_its_own_cert():
+    """The hub's issue path (_distribute_mtls_materials) passes no claim set,
+    so the fan-out reads it from LE_LIST_CERTS: a spoke with its own LE cert
+    (ab) keeps its identity and gets no wildcard client cert. The lookup used
+    to call an undefined ``_unwrap``, so ab was always pushed the wildcard."""
+    rr, _ = _fake_rr({
+        (_LE, "LE_LIST_CERTS"): _le_list_certs([
+            {"domain": "ab.lab.example.com",
+             "targets": [{"module_type": "ab", "identifier": "ab-spoke-1"}]}]),
+        (_LE, "LE_GET_CERT"): _le_get_cert_ok()})
+    push, pcalls = _fake_push({})
+    _run(cd.distribute_mtls_materials_to_all_spokes(
+        rr, push, _primary([(_AGENT, "agent"), ("ab-spoke-1", "ab")]),
+        _LE, _WILDCARD, None, {}, install_on_hub=_install_on_hub_ok()))
+    assert [c["spoke"] for c in pcalls] == [_AGENT]
+
+
+@pytest.mark.parametrize("listed", [
+    {"status": "ERROR", "message": "busy"},
+    {"status": "SUCCESS", "data": {"count": 1}},
+    {"status": "SUCCESS", "data": {"certs": None}},
+    {"status": "SUCCESS", "data": {"certs": ["ab.lab.example.com"]}},
+], ids=["error", "no-list", "null-list", "bad-entry"])
+def test_failed_claim_lookup_writes_no_stale_spoke_but_installs_the_hub(listed):
+    """When LE_LIST_CERTS fails or its cert list can't be read (missing, null,
+    or holding something that is not a cert record), no spoke's claim is
+    known, so no stale spoke is pushed and one ERROR says so; the hourly sweep
+    retries. Pushing anyway could overwrite a spoke's own cert. The hub's
+    CA-only install needs no claims, so a stale hub is still installed (the
+    lookup failure used to skip it too)."""
+    rr, calls = _fake_rr({
+        (_LE, "LE_LIST_CERTS"): {"payload": {"data": listed}},
+        (_LE, "LE_GET_CERT"): _le_get_cert_ok()})
+    push, pcalls = _fake_push({})
+    hub_installs = []
+
+    async def install_on_hub(domain, fullchain, privkey, chain, identifier="",
+                             ca_only=False):
+        hub_installs.append(ca_only)
+        return {"status": "SUCCESS", "message": "installed on hub"}
+
+    state = {}
+    summary = _run(cd.distribute_mtls_materials_to_all_spokes(
+        rr, push, _primary([(_AGENT, "agent")]), _LE, _WILDCARD, None, state,
+        install_on_hub=install_on_hub))
+    assert pcalls == [] and hub_installs == [True]
+    assert state == {f"mtls|{_WILDCARD}|hub": _H}
+    assert [(s["identifier"], s["status"]) for s in summary] == [
+        (None, "ERROR"), ("hub", "SUCCESS")]
+    assert summary[0]["mtls"] and "1 stale spoke(s) not written" in summary[0]["message"]
+
+
+def test_failed_claim_lookup_with_the_hub_current_pulls_nothing():
+    """With the hub current, a stale spoke the failed lookup can't clear is
+    the only work left, so no cert is pulled and only the ERROR is returned."""
+    rr, calls = _fake_rr({
+        (_LE, "LE_LIST_CERTS"): {"payload": {"data": {"status": "ERROR", "message": "busy"}}},
+        (_LE, "LE_GET_CERT"): _le_get_cert_ok()})
+    push, pcalls = _fake_push({})
+    state = {f"mtls|{_WILDCARD}|hub": _H}
+    summary = _run(cd.distribute_mtls_materials_to_all_spokes(
+        rr, push, _primary([(_AGENT, "agent")]), _LE, _WILDCARD, _H, state,
+        install_on_hub=_install_on_hub_ok()))
+    assert pcalls == [] and not [c for c in calls if c["cmd"] == "LE_GET_CERT"]
+    assert len(summary) == 1 and summary[0]["status"] == "ERROR"
+
+
+def test_failed_claim_lookup_still_skips_when_all_current():
+    """Claims are needed only to write a stale spoke: with every target
+    current, a failed LE_LIST_CERTS still reports the all-current skip rather
+    than a failure (it used to return ERROR before checking)."""
+    rr, calls = _fake_rr({
+        (_LE, "LE_LIST_CERTS"): {"payload": {"data": {"status": "ERROR", "message": "busy"}}}})
+    push, pcalls = _fake_push({})
+    state = {f"mtls|{_WILDCARD}|{_AGENT}": _H, f"mtls|{_WILDCARD}|hub": _H}
+    summary = _run(cd.distribute_mtls_materials_to_all_spokes(
+        rr, push, _primary([(_AGENT, "agent")]), _LE, _WILDCARD, _H, state,
+        install_on_hub=_install_on_hub_ok()))
+    assert len(summary) == 1 and summary[0]["status"] == "SUCCESS" and summary[0]["skipped"]
+    assert pcalls == [] and not [c for c in calls if c["cmd"] == "LE_GET_CERT"]
 
 
 def test_non_wildcard_is_a_noop():
@@ -304,6 +396,8 @@ def test_unreachable_stamped_spoke_is_left_alone_no_repush():
         calls.append({"spoke": spoke_id, "cmd": command})
         if command == "SPOKE_GET_MTLS_STATUS":
             raise TimeoutError("spoke did not answer")
+        if command == "LE_LIST_CERTS":
+            return _le_list_certs([])
         return {"payload": {"data": {"status": "ERROR", "message": "no stub"}}}
 
     push, pcalls = _fake_push({})
