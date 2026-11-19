@@ -2373,7 +2373,7 @@ def register(app, hub, ctx):
         # Narrow to the selected tenant, if any.
         selected = str(request.query_params.get("tenant") or "").strip()
         if selected:
-            ids = [t for t in ids if t == selected]
+            ids = [t for t in ids if access.same_tenant(t, selected)]
         # Runtime status kept by the hub, and credential sets by id (for names).
         runtime = getattr(hub, "nw_scan_runtime", {}) or {}
         gc = hub.state.system_state.get("global_config", {}) or {}
