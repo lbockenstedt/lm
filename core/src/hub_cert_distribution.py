@@ -20,7 +20,7 @@ import tempfile
 # time.time() stamps when an in-flight install started.
 import time
 # Type hints.
-from typing import Tuple
+from typing import Any, Dict, Optional, Tuple
 
 # Shared periodic-loop runner (stagger, delay, error handling).
 from sync_loop import run_sync_loop  # sibling leaf

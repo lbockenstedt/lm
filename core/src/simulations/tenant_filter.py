@@ -40,7 +40,7 @@ import ipaddress
 # Regular expressions find IPs in free-text fields and split token lists.
 import re
 # Type hints only.
-from typing import Any, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 # Reserved per-record marker: a truthy value means the caller has already
 # attributed this record to the REQUESTING tenant's own data source, so it must

@@ -15,6 +15,7 @@ CI/tooling changes are omitted unless they change what an operator sees.
 ### Users & access
 
 - **Tenants in a shared VRF see their DNS and DHCP again.** Since shared infrastructure started ignoring prefixes a tenant has only in its own VRF, every prefix outside NetBox's global table was cut, including a VRF all tenants share. Where every tenant sits in a VRF, the DNS and DHCP pages went empty for every tenant, the Admin tenant a Global Admin starts on included. A VRF that more than one tenant has prefixes in now counts as common, like the global table; a VRF only one tenant uses is still its own and still cut (DXP's, for example). Which VRFs are common is decided from every tenant's prefixes in the hub's background NetBox cache, so it does not depend on which tenants were opened since the hub started. See [architecture-topology.md](architecture-topology.md).
+- **Generate certificate names the path it can't write.** When the hub can't write the SSO key's directory, Settings → Azure → SSO → Generate certificate now says which path it needs write access to, instead of a bare "Internal server error". See [entra-sso.md](entra-sso.md#troubleshooting).
 
 ### OS Updates
 
@@ -83,6 +84,10 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 - **Feed and load-test spokes never act on the hub's own box.** The feeder runs as a child of the receiving hub, so OS updates, a reboot or a Remote Console command sent to one of its spokes acted on the hub itself, under a production spoke's name. These synthetic spokes now refuse host commands, skip hub pushes that would write files or restart them, and never write the host's `.env` or cert directory (a load test used to write its recovery PSK into the host's `.env`). The hub also leaves them out of OS Updates, Remote Console, mTLS cert issuance, the hub URL, hub-contact watchdog and Hub TLS Verification pushes (listed as `skipped`), and code updates. See [lm-hub.md](lm-hub.md#synthetic-spokes-have-no-host-of-their-own).
 - **Stop feed no longer reports an error.** Stop sends the feeder SIGTERM, which used to kill it outright, so the status showed `stopped · exit -15` in red. The feeder now exits cleanly and the status reads `stopped`, even while a poll of a slow source is still waiting. Once Stop is clicked the feeder starts no new token rotation, and one already in flight is allowed to finish first, so the new tokens are kept (Stop now kills a feeder that is still running after 75 seconds, up from 10). A load test stopped with SIGTERM also exits cleanly.
+
+### Simulations
+
+- **Learned-value approvals are saved again.** Since Aug 6 a stable Learning-lab row's proposal never reached Setup → Simulations → Learned Values, approving one left it in the queue, and rejecting one failed with a server error. All three work again. The first pass after the update proposes each known-good whose proposal was lost, including those whose row no longer learns; one rejected before Aug 6 may be proposed once more, and rejecting it again is final. A proposal now carries the floor learned with its count. When several sites learn the same alert, the tenant keeps the best of them (the highest count, then a learned floor) and proposes it once. See [cs.md](cs.md).
 
 ### WebUI
 

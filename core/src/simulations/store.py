@@ -103,6 +103,41 @@ _DEFAULT_HYPERVISORS_CONFIG: Dict[str, Any] = {
 }
 
 
+def _same_count(p: Any, count: Any) -> bool:
+    """True when proposal ``p``'s count equals ``count``; a missing or
+    malformed value on either side counts as different."""
+    try:
+        return int(p["count"]) == int(count)
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _drop_published(pending: Dict[str, Any], published: Dict[str, Any]) -> None:
+    """Remove each queued proposal that approving would add nothing to: its
+    count equals its alert's published op, and it has no floor or the
+    published one.
+
+    A proposal with no floor is dropped on its count alone, so approving it
+    can never clear a known floor. One with a floor the published value lacks
+    or differs from stays queued, as approving it gives consumers that floor.
+    A missing or malformed value on either side counts as different, so that
+    proposal stays queued.
+    """
+    # Collect the matching keys first, then remove them.
+    same = []
+    for ak, p in pending.items():
+        gv = published.get(ak)
+        if not isinstance(gv, dict) or not _same_count(p, gv.get("op")):
+            continue
+        try:
+            if p.get("floor") is None or int(p["floor"]) == int(gv["floor"]):
+                same.append(ak)
+        except (KeyError, TypeError, ValueError):
+            pass
+    for ak in same:
+        del pending[ak]
+
+
 class SimulationsStore:
     """Per-tenant JSON store for hub-owned Client-Sim config (see module docstring).
 
@@ -580,9 +615,10 @@ class SimulationsStore:
     # that a Reset-to-known-good restores to. Keyed per ALERT (alert_type:alert_id
     # — no site, so it's shared across a tenant's sites): ``{count, clients,
     # knobs, time_to_stable_s, achieved_at, buffer}`` (see
-    # sim_quota.known_good_from_state). Recorded when a learning-ON quota reaches
-    # phase==stable; a copy is proposed to the global pending queue for admin
-    # approval.
+    # sim_quota.known_good_from_state), plus ``proposal_checked`` once the
+    # adaptive controller has queued its global proposal. Recorded when a
+    # learning-ON quota reaches phase==stable; a copy is proposed to the global
+    # pending queue for admin approval.
     async def get_known_good(self, tenant_id: str) -> Dict[str, Any]:
         """Return a copy of the tenant's known-good records, keyed per alert."""
         # Copy so callers cannot change the stored state; non-dicts give an empty dict.
@@ -1156,11 +1192,18 @@ class SimulationsStore:
         return dict(v) if isinstance(v, dict) else {}
 
     async def set_global_learned_values(self, mapping: Dict[str, Any]) -> None:
-        """Replace the published global learned values and persist them."""
-        # Store a copy under the lock and save.
+        """Replace the published global learned values and persist them.
+
+        A queued proposal that approving would now add nothing to (see
+        _drop_published) is removed in the same save.
+        """
+        # Store a copy under the lock, drop the proposals it settles, and save.
         async with self._lock:
-            self._global()["global_learned_values"] = (
-                dict(mapping) if isinstance(mapping, dict) else {})
+            published = dict(mapping) if isinstance(mapping, dict) else {}
+            self._global()["global_learned_values"] = published
+            pending = await self.get_global_learned_pending()
+            _drop_published(pending, published)
+            self._global()["global_learned_pending"] = pending
             await self._asave()
 
     # ── GLOBAL learned-value APPROVAL QUEUE (pending → admin approves → global) ──
@@ -1171,11 +1214,89 @@ class SimulationsStore:
     # under ``__global__``. Auto-proposing here (not straight into
     # global_learned_values) is the "admin must approve before it goes to every
     # tenant" gate the operator asked for.
+    # The controller proposes while an admin approves or rejects, so each edit is
+    # one step under the lock on the current queue. A caller that read the queue,
+    # awaited, and wrote its copy back would undo the other side's edit.
     async def get_global_learned_pending(self) -> Dict[str, Any]:
         """Return a copy of the learned values awaiting admin approval, keyed per alert."""
         # Copy; non-dicts give an empty dict.
         v = self._global().get("global_learned_pending")
         return dict(v) if isinstance(v, dict) else {}
+
+    async def propose_global_learned(self, proposals: Dict[str, Any]) -> None:
+        """Add or replace proposals in the approval queue and persist them.
+
+        Each alert's queue entry is its newest proposal, except that one with
+        no floor doesn't replace a queued one of the same count that has a
+        floor: it would only lose the floor. A proposal that approving would
+        add nothing to (its count is the published op, and it has no floor or
+        the published one; see _drop_published) removes that alert's queued
+        entry instead. Any other queued entry like that is removed too: the
+        old approve path published a proposal without saving its removal. The
+        published values are read here, under the lock, not by the caller: an
+        admin can approve the same count while the controller sweeps, and a copy
+        read before that would let an identical proposal back into the queue.
+        """
+        # Put the proposals into the current queue under the lock, drop the ones
+        # approving would add nothing to, and save when the queue changed.
+        async with self._lock:
+            published = await self.get_global_learned_values()
+            before = await self.get_global_learned_pending()
+            pending = dict(before)
+            for ak, p in proposals.items():
+                q = pending.get(ak)
+                if (p.get("floor") is None and isinstance(q, dict)
+                        and q.get("floor") is not None and _same_count(p, q.get("count"))):
+                    continue
+                pending[ak] = p
+            _drop_published(pending, published)
+            if pending != before:
+                self._global()["global_learned_pending"] = pending
+                await self._asave()
+
+    async def approve_global_learned(self, keys: List[str], now: float) -> List[str]:
+        """Move the named proposals into the published values and persist both.
+
+        A missing proposal, or one with no count, is skipped and stays queued.
+        Returns the keys that were published.
+        """
+        async with self._lock:
+            # Current copies of both registries.
+            pending = await self.get_global_learned_pending()
+            published = await self.get_global_learned_values()
+            approved = []
+            # Publish each valid proposal and take it off the queue.
+            for ak in keys:
+                p = pending.get(ak)
+                if not isinstance(p, dict) or p.get("count") is None:
+                    continue
+                published[ak] = {
+                    "op": int(p["count"]),
+                    "floor": int(p["floor"]) if p.get("floor") is not None else None,
+                    "knobs": dict(p.get("knobs") or {}),
+                    "time_to_stable_s": p.get("time_to_stable_s"),
+                    "source_tenant": str(p.get("source_tenant") or ""),
+                    "published_at": now,
+                }
+                pending.pop(ak, None)
+                approved.append(ak)
+            # Save both registries together when anything moved.
+            if approved:
+                self._global()["global_learned_values"] = published
+                self._global()["global_learned_pending"] = pending
+                await self._asave()
+            return approved
+
+    async def reject_global_learned(self, key: str) -> bool:
+        """Drop one proposal from the approval queue; True when it was queued."""
+        # Remove it under the lock and save only when it was there.
+        async with self._lock:
+            pending = await self.get_global_learned_pending()
+            if pending.pop(key, None) is None:
+                return False
+            self._global()["global_learned_pending"] = pending
+            await self._asave()
+            return True
 
     # ── GLOBAL simulation sharing (stacking) + N/A hide (Setup → Simulations) ──
     # Platform-wide (all tenants) authoritative per-sim shareable/stackable map

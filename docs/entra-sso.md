@@ -157,6 +157,7 @@ authenticates to **Azure Resource Manager**, which is RBAC (not Graph):
 | Symptom | Cause / fix |
 |---|---|
 | `could not load OIDC client private key` | Cert not generated — Settings → Azure → SSO → Generate certificate. |
+| Generate certificate: `cannot write to <key path> — the hub process needs write access to that directory` | Give the hub process write access to that directory, then Generate certificate again. |
 | `token exchange failed: HTTP 401 — AADSTS700027` | Uploaded cert doesn't match the current key (regenerated after upload). Re-download `.cer` and re-upload; thumbprints must match. |
 | Sign-in `50011` redirect mismatch | Redirect URI in the app must exactly equal the one in the SSO card. |
 | Group picker `Authorization_RequestDenied` | Missing `Group.Read.All` (Application) + admin consent. |
