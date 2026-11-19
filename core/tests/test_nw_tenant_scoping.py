@@ -874,8 +874,8 @@ def test_scan_with_only_stored_sets_picked_ignores_the_bucket_conflict(monkeypat
 
 
 def test_scan_schedules_flag_a_run_the_bucket_conflict_refuses(monkeypatch, tmp_path):
-    """The schedule row says the run is refused (and why), not discovery-only;
-    a schedule that picks only stored sets is not flagged."""
+    """The schedule row carries the bucket conflict (and why), not
+    discovery-only; a schedule that picks only stored sets is not flagged."""
     c, hub = _build(monkeypatch, tmp_path, gc_extra=_two_acme_buckets(
         nw_tenant_cfg={"othercorp": {"scan": {"credential_ids": ["c-other"]}}}))
     hub.state.system_state["global_config"]["cred_vault"]["secrets"].update(
@@ -886,6 +886,25 @@ def test_scan_schedules_flag_a_run_the_bucket_conflict_refuses(monkeypatch, tmp_
     assert "Move a secret out" in rows["acme"]["vault_error"]
     assert rows["acme"]["discovery_only"] is False
     assert rows["othercorp"]["vault_error"] == ""
+
+
+def test_scan_schedules_report_the_bucket_conflict_of_a_schedule_that_cannot_run(monkeypatch, tmp_path):
+    """The conflict is a configuration error, not a run's outcome: a disabled
+    schedule (acme) and an enabled one with no nw agent (beta) carry it too,
+    are not called discovery-only, and the list still answers."""
+    c, hub = _build(monkeypatch, tmp_path, gc_extra=_two_acme_buckets(nw_tenant_cfg={
+        "acme": {"scan_schedule": {"enabled": False}},
+        "beta": {"scan_schedule": {"enabled": True}}}))
+    hub.state.system_state["global_config"]["cred_vault"]["secrets"].update(
+        {"BETA": {}, "beta": {}})
+    tok = _mint(hub, "admin", tenants=[], admin=True)
+    r = c.get("/api/nw/scan-schedules", cookies={"lm_session": tok})
+    assert r.status_code == 200, r.text
+    rows = {s["tenant_id"]: s for s in r.json()["schedules"]}
+    assert rows["acme"]["enabled"] is False and rows["beta"]["enabled"] is True
+    for tid in ("acme", "beta"):
+        assert "Move a secret out" in rows[tid]["vault_error"]
+        assert rows[tid]["discovery_only"] is False
 
 
 # ── background sweep: gateway pass, then ping-first host sweep ─────────────
