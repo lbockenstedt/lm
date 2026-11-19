@@ -3913,7 +3913,17 @@ def register(app, hub, ctx):
                 scope = access.tenant_scope_ids(req_tenant)
                 instances = [i for i in instances
                              if isinstance(i, dict) and access.in_tenant_scope(i.get("tenant_id"), scope)]
-                if storage_key == "nw_scan_credentials":
+                # The tenant's vault logins, only for a tenant the caller may
+                # scan: an admin any, anyone else one of their own (as
+                # _nw_caller_tenant and the scan route allow). The filters
+                # above never see these rows, so without this check a
+                # non-admin naming another tenant would get its secret names
+                # and vault_error (rule 6.4). The auth middleware keeps
+                # /setup/* Global-Admin-only today; this guards the non-admin
+                # path in case the list is ever opened to tenants.
+                if storage_key == "nw_scan_credentials" and (
+                        _is_admin(sess)
+                        or access.tenant_among(req_tenant, access._session_tenants(sess))):
                     # Several vault buckets naming the tenant: list the stored
                     # sets and say why no vault login is offered.
                     try:
