@@ -43,7 +43,7 @@ import logging
 from typing import Any, Dict, List, Tuple
 
 # Unwrap spoke replies; shared schedule and loop helpers.
-from access import unwrap_spoke  # sibling leaf (no main/api back-import)
+from access import push_tenant_key, raw_tenant_id, unwrap_spoke  # sibling leaf (no main/api back-import)
 from sync_loop import next_schedule_delay, run_sync_loop  # sibling leaf
 
 # Log to the hub's logger.
@@ -320,11 +320,21 @@ class TruenasDiscoverySyncMixin:
         ``sync_tenant_truenas_devices`` (not ``sync_tenant_devices``) to avoid
         an MRO clash with ``FwDiscoverySyncMixin.sync_tenant_devices`` /
         ``NwDiscoverySyncMixin.sync_tenant_nw_devices``. Best-effort."""
-        # Pull everything, keep this tenant's devices, and push them.
+        # The tenant the target names. A blank one, or one that names several
+        # stored twins, is pushed nowhere: get_tenant ignores surrounding
+        # spaces, so a replace=True push under " ACME" would land on "ACME"
+        # and delete that tenant's devices.
+        key = push_tenant_key(self, tenant_id)
+        if not key:
+            return {"tenant_id": raw_tenant_id(tenant_id), "status": "skipped",
+                    "pushed": 0, "errors": 0, "skipped": 0, "deleted": 0,
+                    "discovered_total": 0, "message": "tenant id names no single tenant"}
+        # Pull everything, keep this tenant's devices (grouped as the full
+        # cycle groups them, so both push the same set), and push them.
         records, _errors = await self._truenas_pull_appliances()
-        devices = [self._truenas_device_record(a)
-                   for a in records if str(a.get("tenant_id") or "") == tenant_id]
-        return await self._truenas_push_tenant(tenant_id, devices)
+        devices = [self._truenas_device_record(a) for a in records
+                   if push_tenant_key(self, a.get("tenant_id")) == key]
+        return await self._truenas_push_tenant(key, devices)
 
     async def run_truenas_discovery_sync_all(self) -> Dict[str, Any]:
         """One full cycle: pull the appliance fleet from every storage spoke,
@@ -333,10 +343,11 @@ class TruenasDiscoverySyncMixin:
         tenant-authoritative). Best-effort: never raises."""
         # Pull all appliances.
         records, pull_errors = await self._truenas_pull_appliances()
-        # Group by tenant; drop unattributed appliances.
+        # Group by the tenant each tag names (access.push_tenant_key); drop
+        # unattributed appliances and tags that name several tenants.
         buckets: Dict[str, List[Dict[str, Any]]] = {}
         for app in records:
-            tid = str(app.get("tenant_id") or "").strip()
+            tid = push_tenant_key(self, app.get("tenant_id"))
             if not tid:
                 continue
             buckets.setdefault(tid, []).append(self._truenas_device_record(app))

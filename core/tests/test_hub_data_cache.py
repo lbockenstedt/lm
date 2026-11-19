@@ -346,6 +346,13 @@ def test_interval_is_fast_while_active_and_slow_while_idle():
     assert hub._cache_interval(admin_only, {ALL_SCOPE}) == wc.ACTIVE_INTERVAL_S
 
 
+def test_interval_is_fast_for_active_tenant_in_any_capitalisation():
+    """A logged-in user assigned "TA" keeps "tA"'s data on the fast cycle
+    (tenant ids compare canonically, fleet rule 6.1)."""
+    job = CacheJob("ns", "k", _Fetch(), ("tA",))
+    assert _Hub()._cache_interval(job, {"TA"}) == wc.ACTIVE_INTERVAL_S
+
+
 def test_due_respects_active_and_idle_age():
     hub = _Hub()
     job = CacheJob("ns", "k", _Fetch(), ("tA",), from_feed=True)
@@ -532,6 +539,21 @@ def test_tenant_refresh_button_only_refreshes_entries_it_can_see():
     assert fa.calls == 1 and fb.calls == 0
     assert hub.warm_get("nb_devices", "ka") == "A2"
     assert hub.warm_get("nb_devices", "kb") == "old"
+
+
+def test_tenant_refresh_button_matches_tenant_in_any_capitalisation():
+    """A session assigned "TA" refreshes the entries stamped "tA" (tenant ids
+    compare canonically, fleet rule 6.1), never tB's."""
+    hub = _Hub()
+    fa, fb = _Fetch("A2"), _Fetch("B2")
+    now = time.time()
+    for key, tid, f in (("ka", "tA", fa), ("kb", "tB", fb)):
+        hub.warm_cache.setdefault("nb_devices", {})[key] = {
+            "data": "old", "fetched_at": now, "tenants": [tid]}
+        hub._cache_remember("nb_devices", key, f, (tid,), "", False)
+    r = _client(hub, {"user": {"tenant_id": "TA"}}).post("/auth/cache/refresh?module=netbox_devices")
+    assert r.json()["refreshed"] == 1
+    assert fa.calls == 1 and fb.calls == 0
 
 
 def test_footer_status_is_ready_when_everything_is_cached():

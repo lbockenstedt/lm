@@ -500,8 +500,9 @@ def ldap_tenant_slug(hub, tenant_id: str) -> str:
     directory aligned), then a stored ``slug``, else the tenant_id itself — then
     LOWER-CASES it to match the server's canonical OU RDN (``ou=lrb,<base>``).
     Callers compare with :func:`tenant_slug_matches` (case-insensitive)."""
-    # Look up the tenant config and pick the slug source.
-    tid = str(tenant_id or "").strip()
+    # Look up the tenant config and pick the slug source. The id is looked up
+    # as given: stripped, a legacy " ACME " would get its twin "ACME"'s OU.
+    tid = raw_tenant_id(tenant_id)
     if not tid:
         return ""
     try:
@@ -516,8 +517,10 @@ def tenant_slug_matches(a, b) -> bool:
 
     The single normalization used everywhere a tenant is matched across LDAP ↔
     NetBox ↔ LM — never a case-sensitive ``==`` (case must not be usable to
-    bypass a guard or to mismatch two names for the same tenant)."""
-    return str(a or "").strip().casefold() == str(b or "").strip().casefold()
+    bypass a guard or to mismatch two names for the same tenant). Goes through
+    _norm_tenant_id, so it fails closed as same_tenant does for two stored
+    tenants that differ only by case or surrounding spaces."""
+    return _norm_tenant_id(a or "") == _norm_tenant_id(b or "")
 
 
 def resolve_module_tenant(is_admin_flag, acting_tenants, requested, label="module"):
@@ -544,9 +547,11 @@ def resolve_module_tenant(is_admin_flag, acting_tenants, requested, label="modul
 
     ``label`` customizes the human-facing error messages only (e.g. "NAC",
     "DNS") — it never affects the resolution logic."""
-    # Normalize the requested tenant and the caller's own tenants.
+    # Normalize the requested tenant; the caller's own tenants stay as stored
+    # (blanks dropped), so a legacy tenant spelt with surrounding spaces is
+    # told apart from its stripped twin as tenant_slug_matches tells them apart.
     req = str(requested or "").strip()
-    acting = [str(t).strip() for t in (acting_tenants or []) if str(t).strip()]
+    acting = [str(t) for t in (acting_tenants or []) if str(t).strip()]
     # Global admin: any tenant, but one must be named.
     if is_admin_flag:
         if not req:
@@ -928,7 +933,7 @@ def groups_and_tenants_for_membership(hub, member_of) -> tuple:
             seen_groups.add(gid)
             group_ids.append(gid)
             for tid in grp.get("tenants") or []:
-                t = str(tid).strip()
+                t = raw_tenant_id(tid)
                 if t and t not in seen_tenants:
                     seen_tenants.add(t)
                     tenant_ids.append(t)
@@ -1139,7 +1144,7 @@ def read_scope(sess, tenant_id) -> str:
         return "filtered"
     # Own tenant: full; anything else: deny.
     allowed = (sess or {}).get("user", {}).get("tenants") or []
-    if allowed and tenant_id in allowed:
+    if tenant_among(tenant_id, allowed):
         return "full"
     return "deny"
 
@@ -1166,7 +1171,7 @@ def write_scope(sess, tenant_id) -> str:
         return "constrained" if can_edit_shared(sess) else "deny"
     # Own tenant: full for write users; anything else: deny.
     allowed = (sess or {}).get("user", {}).get("tenants") or []
-    if allowed and tenant_id in allowed:
+    if tenant_among(tenant_id, allowed):
         return "full" if has_edit_access(sess) else "deny"
     return "deny"
 
@@ -1187,6 +1192,42 @@ _SHARED_TENANT_ID = None
 # normalised ``group:<slug>`` -> normalised member tenant ids (incl. sub-groups).
 # Cached for the same reason as the shared id (no hub handle).
 _GROUP_MEMBERS: dict = {}
+# Casefolded ids that tenants spelt differently share: "acme" when "ACME" and
+# "acme" (or " ACME ") are stored, or "default" when a "Default" record sits
+# beside the built-in Admin tenant. All were saved before StateManager kept
+# ids unique. A twin deleted since still counts while the other is stored
+# (retired_twin_ids). _norm_tenant_id compares those tenants by exact spelling
+# so a member of one never matches the other. Cached for the same reason.
+_AMBIGUOUS_TENANT_IDS: frozenset = frozenset()
+
+
+def retired_twin_ids(tenant_state) -> list:
+    """The ids of deleted tenants that differed from a tenant still stored, or
+    from the built-in "default", only by case or surrounding spaces, as
+    StateManager.delete_tenant keeps them in ``retired_twin_ids``. A deleted
+    tenant's per-module records stay tagged with its id, so the access checks
+    keep telling that id apart from the survivor's (_case_collisions,
+    match_tenant_id). Anything but a list holds none."""
+    ids = tenant_state.get("retired_twin_ids") if isinstance(tenant_state, dict) else None
+    return [str(t) for t in ids if t is not None] if isinstance(ids, list) else []
+
+
+def _case_collisions(tenants: dict, retired=()) -> frozenset:
+    """Casefolded ids that two or more tenant spellings share, counting the
+    built-in Admin tenant ("default"), which exists without a stored record,
+    and a deleted twin's id in ``retired`` while a spelling it shares a key
+    with is still stored: otherwise records still tagged with the deleted id
+    would come to name the survivor."""
+    spellings = {ADMIN_TENANT_ID: {ADMIN_TENANT_ID}}
+    for tid in tenants:
+        key = str(tid).strip().casefold()
+        if key:
+            spellings.setdefault(key, set()).add(str(tid))
+    for tid in retired:
+        key = str(tid).strip().casefold()
+        if key in spellings:
+            spellings[key].add(str(tid))
+    return frozenset(key for key, seen in spellings.items() if len(seen) > 1)
 
 
 def _compute_group_members(tenants: dict) -> dict:
@@ -1224,21 +1265,38 @@ def _compute_group_members(tenants: dict) -> dict:
     return out
 
 
+def first_shared_tenant(tenants) -> Optional[str]:
+    """The id of the first record in ``tenants`` flagged shared, or None.
+
+    A legacy record whose id is blank is skipped: a blank id names no tenant,
+    and as the shared tenant it would canonicalise to "" (the UNASSIGNED
+    marker), putting every unassigned record in every tenant's scope."""
+    return next((tid for tid, cfg in (tenants or {}).items()
+                 if str(tid).strip() and isinstance(cfg, dict) and cfg.get("shared")), None)
+
+
 def refresh_shared_tenant(hub):
     """Recompute + cache the single shared-tenant id from tenant state. Returns
     the id (or None). Safe to call often; called on state load + tenant writes."""
-    global _SHARED_TENANT_ID, _GROUP_MEMBERS
+    global _SHARED_TENANT_ID, _GROUP_MEMBERS, _AMBIGUOUS_TENANT_IDS
     try:
-        # Tenant records, then the cached group membership.
-        tenants = (getattr(hub.state, "tenant_state", {}) or {}).get("tenants", {}) or {}
+        # Tenant records, the ids that only case or spaces tell apart (first,
+        # as the group keys below are built with _norm_tenant_id), then the
+        # cached group membership.
+        tenant_state = getattr(hub.state, "tenant_state", {}) or {}
+        tenants = tenant_state.get("tenants", {}) or {}
+        ambiguous = _case_collisions(tenants, retired_twin_ids(tenant_state))
+        if ambiguous and ambiguous != _AMBIGUOUS_TENANT_IDS:
+            logger.warning("Tenants that differ only by case or surrounding spaces (or from the "
+                           "built-in 'default', or from a deleted twin) %s: each is matched by "
+                           "its exact spelling only", sorted(ambiguous))
+        _AMBIGUOUS_TENANT_IDS = ambiguous
         try:
             _GROUP_MEMBERS = _compute_group_members(tenants)
         except Exception:  # noqa: BLE001
             _GROUP_MEMBERS = {}
-        # The first tenant flagged shared.
-        _SHARED_TENANT_ID = next(
-            (tid for tid, cfg in tenants.items()
-             if isinstance(cfg, dict) and cfg.get("shared")), None)
+        # The first tenant flagged shared, never a blank id.
+        _SHARED_TENANT_ID = first_shared_tenant(tenants)
     except Exception:
         _SHARED_TENANT_ID = None
     return _SHARED_TENANT_ID
@@ -1253,14 +1311,32 @@ def _norm_tenant_id(tenant_id) -> str:
     """Canonical comparison form for a tenant id: stripped and casefolded.
 
     Tenant ids reach us from three places that disagree about capitalisation —
-    the picker query string (``?tenant=Default``), the tenant records
-    themselves, and per-resource bindings/tags — so every comparison between
-    them must go through here. Comparing raw strings meant a tenant recorded as
-    ``"Default"`` did not match the ``"default"`` the ADMIN scope is built
-    from, making that tenant's own resources invisible to it.
+    the picker query string, the tenant records themselves, and per-resource
+    bindings/tags — so every comparison between them must go through here.
+    Comparing raw strings meant a resource tagged ``"acme"`` was invisible to
+    the tenant recorded as ``"ACME"``.
 
-    ``None`` and blanks both canonicalise to ``""``, the UNASSIGNED marker."""
-    return "" if tenant_id is None else str(tenant_id).strip().casefold()
+    ``None`` and blanks both canonicalise to ``""``, the UNASSIGNED marker.
+
+    Fails closed for tenants spelt differently that share a canonical id (see
+    _AMBIGUOUS_TENANT_IDS): their ids keep their exact spelling, surrounding
+    spaces included, so neither tenant, nor any other spelling of it, matches
+    the other."""
+    if tenant_id is None:
+        return ""
+    raw = str(tenant_id)
+    key = raw.strip().casefold()
+    return raw if key in _AMBIGUOUS_TENANT_IDS else key
+
+
+def with_tenant_keys(rows) -> list:
+    """Copies of the dict ``rows``, each with ``tenant_key``: its tenant_id in
+    the form the hub compares tenant ids (_norm_tenant_id), so the WebUI
+    groups tenants as the hub does instead of re-deriving the case rules in JS
+    (Managed Devices). Copies, so the key is never stored; anything that is not
+    a dict passes through unchanged."""
+    return [dict(r, tenant_key=_norm_tenant_id(r.get("tenant_id"))) if isinstance(r, dict) else r
+            for r in rows]
 
 
 def tenant_is_shared(tenant_id) -> bool:
@@ -1276,6 +1352,141 @@ def same_tenant(a, b) -> bool:
     — even when it is shared (shared may manage others, but must not claim a
     tenant's nodes away from that tenant's own coordinator)."""
     return _norm_tenant_id(a) == _norm_tenant_id(b)
+
+
+def tenant_among(tenant_id, tenants) -> bool:
+    """True if ``tenant_id`` is set and is one of ``tenants`` (a session
+    user's own tenant list), compared as same_tenant compares (fleet rule
+    6.1). A raw ``in`` let a tenant admin assigned "ACME" be refused a
+    record or spoke tagged "acme" that the hub's scope filters
+    (in_tenant_scope) already count as theirs. Strict: the shared tenant
+    matches only when it is in the list."""
+    key = _norm_tenant_id(tenant_id)
+    return bool(key) and any(_norm_tenant_id(t) == key for t in (tenants or ()))
+
+
+def granted_tenants(tenants) -> list:
+    """A user's tenant grants without blank ones. A blank grant ("" or only
+    spaces) names no tenant, and as a picker selection it would read as no
+    selection at all (tenant_scope_ids). Anything other than a list, tuple
+    or set grants nothing."""
+    if not isinstance(tenants, (list, tuple, set)):
+        return []
+    return [t for t in tenants if t is not None and str(t).strip()]
+
+
+def raw_tenant_id(value) -> str:
+    """A tenant id exactly as stored or given: "" when blank, otherwise with
+    any surrounding spaces kept. Stripping it before a compare or a write
+    would turn a legacy " ACME " into its twin "ACME" (_AMBIGUOUS_TENANT_IDS);
+    same_tenant, tenant_among and tenant_in ignore the spaces themselves
+    whenever no such twin exists."""
+    if value is None:
+        return ""
+    raw = str(value)
+    return raw if raw.strip() else ""
+
+
+def tenant_key_in(mapping, tenant_id):
+    """The key of ``mapping`` (keyed by tenant id) that names ``tenant_id``:
+    its exact spelling, else the first key same_tenant matches, which is
+    never a legacy twin's. None when none does or ``tenant_id`` is blank."""
+    tid = raw_tenant_id(tenant_id)
+    if not tid or not mapping:
+        return None
+    if tid in mapping:
+        return tid
+    return next((k for k in mapping if same_tenant(k, tid)), None)
+
+
+def push_tenant_key(hub, tenant_id) -> str:
+    """The tenant id a per-tenant sync push for ``tenant_id`` goes under
+    (NetBox devices and access-tracker records, ClearPass endpoints and
+    network devices): the stored tenant id it names (StateManager.tenant_key:
+    its exact spelling, else its one case or space variant), else the id as
+    given (a tenant with no record, which the push skips as unbound). "" for
+    a blank id, and for one that names several stored twins and so neither.
+    The pushes find the tenant's NetBox slug with get_tenant, which ignores
+    surrounding spaces, but key their record sets, and pick the ClearPass
+    spoke, by stored id. Under any other spelling a replace=True push for
+    " ACME" would replace "ACME"'s devices with another set (an empty one for
+    a "Sync now" target), or send ACME's endpoints to the shared ClearPass."""
+    tid = raw_tenant_id(tenant_id)
+    if not tid:
+        return ""
+    try:
+        return hub.state.tenant_key(tid) or tid
+    except ValueError:
+        logger.warning("tenant id %r names several tenants; not synced", tid)
+        return ""
+
+
+def drop_blank_grants(user):
+    """A copy of a session's user record without blank tenant grants.
+
+    "tenants" keeps only granted_tenants, and a blank tenant_id becomes the
+    first remaining grant (or None). Applied wherever a session's user is
+    built or restored (login, OIDC, impersonation, API tokens, the saved
+    sessions file), so a blank grant stored before the routes refused one
+    never reaches a scope check. A non-dict is returned unchanged."""
+    if not isinstance(user, dict):
+        return user
+    out = dict(user)
+    if out.get("tenants") is not None:
+        out["tenants"] = granted_tenants(out["tenants"])
+    tid = out.get("tenant_id")
+    if tid is not None and not str(tid).strip():
+        grants = granted_tenants(out.get("tenants"))
+        out["tenant_id"] = grants[0] if grants else None
+    return out
+
+
+def match_tenant_id(tenant_id, known, retired=()):
+    """The id in ``known`` that ``tenant_id`` names, or None.
+
+    The exact spelling wins. Otherwise the single id in ``known`` equal to it
+    ignoring case and surrounding spaces, as _norm_tenant_id compares ids.
+    Raises ValueError when several ids match that way (tenants saved before
+    StateManager kept ids unique) instead of guessing which one is meant: the
+    caller would act on another tenant's record. It raises too when one does
+    and so does a deleted twin's id in ``retired`` (retired_twin_ids): the
+    access checks still tell the two apart, and a repeated delete of the
+    deleted twin must not remove the survivor. A blank id names nothing."""
+    # A blank id names nothing; the exact spelling wins.
+    if tenant_id is None or not str(tenant_id).strip():
+        return None
+    raw = str(tenant_id)
+    if raw in known:
+        return raw
+    # Otherwise the ids equal to it ignoring case and spaces: several is ambiguous.
+    key = raw.strip().casefold()
+    hits = sorted(str(k) for k in known if str(k).strip().casefold() == key)
+    if len(hits) > 1:
+        raise ValueError(f"tenant id '{raw}' matches {len(hits)} tenants that differ only by case "
+                         f"or surrounding spaces ({', '.join(map(repr, hits))}); use the exact id")
+    # So is one beside a deleted twin's id (one stored again is a plain tenant).
+    gone = sorted(str(r) for r in retired
+                  if str(r).strip().casefold() == key and str(r) not in known)
+    if hits and gone:
+        raise ValueError(f"tenant id '{raw}' differs only by case or surrounding spaces from "
+                         f"tenant '{hits[0]}' and from deleted tenant(s) "
+                         f"{', '.join(map(repr, gone))}; use the exact id")
+    return hits[0] if hits else None
+
+
+def goes_with_deleted_tenant(tenant_id, deleted, remaining) -> bool:
+    """Whether a user's grant or a spoke's tag goes with tenant ``deleted``.
+
+    It does when it is ``deleted`` in any case or surrounding spaces, unless
+    it is exactly the id of a tenant in ``remaining`` (ids still stored, plus
+    the built-in "default"), such as a legacy "acme" beside "ACME" or the
+    built-in "default" beside a "Default" record: that one names the twin.
+    A third spelling ("Acme") named neither twin while both existed (access
+    compares ambiguous ids by exact spelling), but left behind it would name
+    the survivor and widen what its holder sees, so it goes too."""
+    if tenant_id is None or str(tenant_id) in remaining:
+        return False
+    return str(tenant_id).strip().casefold() == str(deleted).strip().casefold()
 
 
 def tenant_may_manage(manager_tenant, target_tenant) -> bool:
@@ -1315,33 +1526,38 @@ ADMIN_ONLY_OWNER = "<admin only>"
 def tenant_scope_ids(requested) -> Optional[set]:
     """Effective tenant ids for a picker selection.
 
-    ``None`` (no ``?tenant=`` at all) means an unscoped programmatic call: no
-    filtering. ``default`` expands to ``{"", "default"}`` plus the shared
-    tenant. Any other id expands to itself plus the shared tenant.
+    ``None`` or ``""`` (no ``?tenant=`` at all) means an unscoped
+    programmatic call: no filtering. ``default`` expands to
+    ``{"", "default"}`` plus the shared tenant. Any other id expands to itself
+    plus the shared tenant. An id of only spaces names no tenant, so it gets
+    the shared tenant alone: a blank tenant reaching here (a legacy blank
+    record or grant) must fail closed, not widen to the whole fleet.
 
     Every id in the returned set is canonicalised by ``_norm_tenant_id``; the
     set is only ever consumed by ``in_tenant_scope``, which canonicalises the
     resource side the same way, so the two can never disagree on spelling.
     """
-    # No selection (or blank) means unscoped.
-    if requested is None:
+    # No selection means unscoped.
+    if requested is None or requested == "":
         return None
     normalized = _norm_tenant_id(requested)
-    if not normalized:
-        return None
 
-    # Admin covers unassigned + default; others cover themselves (and group members).
-    if normalized == ADMIN_TENANT_ID:
+    # Blank names no tenant; Admin covers unassigned + default; others cover
+    # themselves (and group members).
+    if not normalized:
+        scope = set()
+    elif normalized == ADMIN_TENANT_ID:
         scope = {"", ADMIN_TENANT_ID}
     else:
         scope = {normalized}
         # A tenant GROUP selection covers every member tenant underneath it.
         scope |= _GROUP_MEMBERS.get(normalized, set())
 
-    # Shared infra is always in scope.
-    shared_id = shared_tenant_id()
+    # Shared infra is always in scope. A blank shared id names no tenant, so
+    # it never adds "" (every unassigned record) to the scope.
+    shared_id = _norm_tenant_id(shared_tenant_id())
     if shared_id:
-        scope.add(_norm_tenant_id(shared_id))
+        scope.add(shared_id)
     return scope
 
 
@@ -1457,7 +1673,7 @@ def spoke_visible_to_session(sess, tenant_id) -> bool:
         return True
     # Otherwise the user's own tenants.
     allowed = (sess or {}).get("user", {}).get("tenants") or []
-    return bool(allowed) and tenant_id in allowed
+    return tenant_among(tenant_id, allowed)
 
 
 def hypervisor_owned_by_caller(hub, sess, spoke_id: str) -> bool:
@@ -1491,12 +1707,7 @@ def hypervisor_owned_by_caller(hub, sess, spoke_id: str) -> bool:
     if not spoke_tenant:
         return False
     # Caller's tenants (falling back to their primary tenant).
-    user = (sess or {}).get("user", {}) or {}
-    allowed = [str(t).strip() for t in (user.get("tenants") or []) if str(t).strip()]
-    if not allowed:
-        primary = str(user.get("tenant_id") or "").strip()
-        allowed = [primary] if primary else []
-    return spoke_tenant in allowed
+    return tenant_among(spoke_tenant, _session_tenants(sess))
 
 
 def spoke_owner_tenant(hub, spoke_id) -> Optional[str]:
@@ -1509,7 +1720,7 @@ def spoke_owner_tenant(hub, spoke_id) -> Optional[str]:
         return None
     try:
         # The spoke's bound tenant; shared or none means no owner.
-        tid = str(hub.state.get_spoke_tenant(spoke_id) or "").strip()
+        tid = raw_tenant_id(hub.state.get_spoke_tenant(spoke_id))
     except Exception:  # noqa: BLE001
         return None
     if not tid or tenant_is_shared(tid):
@@ -1524,12 +1735,12 @@ def tenant_in(tenant, selected) -> bool:
 
 
 def _session_tenants(sess) -> list:
-    """The session user's tenant ids, falling back to their primary tenant_id."""
+    """The session user's tenant ids as stored (raw_tenant_id), falling back
+    to their primary tenant_id."""
     user = (sess or {}).get("user", {}) or {}
-    tids = [str(t).strip() for t in (user.get("tenants") or []) if str(t).strip()]
-    if not tids and str(user.get("tenant_id") or "").strip():
-        tids = [str(user["tenant_id"]).strip()]
-    return tids
+    tids = [t for t in map(raw_tenant_id, user.get("tenants") or []) if t]
+    primary = raw_tenant_id(user.get("tenant_id"))
+    return tids or ([primary] if primary else [])
 
 
 def _session_tenant_id(sess) -> str:
@@ -1551,7 +1762,7 @@ def firewall_owner_tenant(hub, firewall_id) -> Optional[str]:
     if not fw:
         return None
     # Its own dedicated tenant, else its spoke's.
-    tid = str(fw.get("tenant_id") or "").strip()
+    tid = raw_tenant_id(fw.get("tenant_id"))
     if tid and not tenant_is_shared(tid):
         return tid
     return spoke_owner_tenant(hub, fw.get("spoke_id"))
@@ -1573,17 +1784,19 @@ def source_owner_tenant(hub, spoke_id) -> Optional[str]:
     owner = spoke_owner_tenant(hub, spoke_id)
     if owner or not spoke_id:
         return owner
-    # Tenants of the instance records on this spoke.
+    # Tenants of the instance records on this spoke, one per tenant as
+    # same_tenant compares them (a legacy " ACME " twin stays apart from "ACME").
     try:
         gc = hub.state.system_state.get("global_config", {}) or {}
     except Exception:  # noqa: BLE001
         return None
-    tids = {str(r.get("tenant_id") or "").strip()
-            for key in _INSTANCE_LISTS for r in (gc.get(key) or [])
-            if isinstance(r, dict) and r.get("spoke_id") == spoke_id}
+    tids = {_norm_tenant_id(t): t for t in (
+        raw_tenant_id(r.get("tenant_id"))
+        for key in _INSTANCE_LISTS for r in (gc.get(key) or [])
+        if isinstance(r, dict) and r.get("spoke_id") == spoke_id)}
     if len(tids) != 1:
         return None
-    tid = tids.pop()
+    tid = next(iter(tids.values()))
     return None if not tid or tenant_is_shared(tid) else tid
 
 
@@ -1920,12 +2133,7 @@ async def tenant_admin_console_allowed(hub, sess, spoke_id: str) -> bool:
         # Bound host → only the OWNING tenant's admin (a different tenant is
         # denied; the own-tenant case is already allowed by
         # hypervisor_owned_by_caller, so this opt-in mainly covers unbound hosts).
-        user = (sess or {}).get("user", {}) or {}
-        allowed = [str(t).strip() for t in (user.get("tenants") or []) if str(t).strip()]
-        if not allowed:
-            primary = str(user.get("tenant_id") or "").strip()
-            allowed = [primary] if primary else []
-        if spoke_tenant not in allowed:
+        if not tenant_among(spoke_tenant, _session_tenants(sess)):
             return False
     # Is tenant console (or host shell) enabled for this hypervisor?
     try:
@@ -2015,7 +2223,7 @@ def can_bind_spoke(hub, sess, spoke_id: str) -> bool:
     except Exception:  # noqa: BLE001
         spoke_tenant = ""
     allowed = (sess or {}).get("user", {}).get("tenants") or []
-    return bool(spoke_tenant) and spoke_tenant in allowed
+    return tenant_among(spoke_tenant, allowed)
 
 
 
@@ -2037,6 +2245,10 @@ def check_tenant_access(sess, tenant_id: str) -> bool:
     if is_admin(sess):
         return True
     allowed = sess.get("user", {}).get("tenants") or []
+    # Exact on purpose, unlike tenant_among: this gates a CALLER-SUPPLIED
+    # ?tenant= for the whole hub, and the routes behind it then read data
+    # under the caller's spelling, much of it by exact key. A record's or
+    # spoke's stored tenant is compared with tenant_among instead.
     return bool(allowed) and tenant_id in allowed
 
 
@@ -2075,10 +2287,16 @@ def session_effective_tenant(sess, explicit: str = None) -> str | None:
     if is_admin(sess):
         return explicit
     # Non-admin: the explicit tenant only if they own it, else their own.
+    # A different capitalisation of an owned tenant resolves to the user's
+    # own spelling of it, never the caller's, so exact-key lookups that
+    # follow still hit.
     if explicit:
         allowed = sess.get("user", {}).get("tenants") or []
-        if allowed and explicit in allowed:
+        if explicit in allowed:
             return explicit
+        own = next((t for t in allowed if same_tenant(t, explicit)), None)
+        if own:
+            return own
     return sess.get("user", {}).get("tenant_id") or None
 
 
@@ -2545,7 +2763,9 @@ async def attribute_by_prefix(hub, records: List[Dict[str, Any]]
     discovered it) when that tenant owns a containing prefix, else the most
     specific containing prefix. A record with ``owner_tenant_id`` (discovered
     by a tenant-dedicated spoke, see ``spoke_owner_tenant``) goes to that
-    tenant without any prefix check. Records with no IP, an unparseable IP, or an
+    tenant without any prefix check (an owner that names several stored
+    legacy twins, and so neither, or a twin and a deleted twin, is dropped).
+    Records with no IP, an unparseable IP, or an
     IP no tenant owns are ``dropped`` (counted) — keeps NetBox
     tenant-authoritative, no orphans. Returns ``({tenant_id: [records]},
     dropped_count)``.
@@ -2571,9 +2791,22 @@ async def attribute_by_prefix(hub, records: List[Dict[str, Any]]
             dropped += 1
             continue
         # A dedicated-spoke owner wins; otherwise attribute by prefix.
-        owner = str(rec.get("owner_tenant_id") or "").strip()
+        owner = raw_tenant_id(rec.get("owner_tenant_id"))
         if owner:
-            matched = next((t for t in nets_by_tid if same_tenant(t, owner)), owner)
+            matched = next((t for t in nets_by_tid if same_tenant(t, owner)), None)
+            if matched is None:
+                # No prefixes were fetched for it: the stored id it names, else
+                # its own spelling (an unknown tenant). One that names several
+                # stored twins names neither and is dropped: bucketed under its
+                # own spelling, get_tenant's strip fallback would find a twin
+                # (" ACME" finds "ACME") and its replace=True push would delete
+                # that twin's devices. A deleted twin's id (retired_twin_ids) is
+                # dropped too; it would otherwise land in the survivor's bucket.
+                try:
+                    matched = match_tenant_id(owner, _scope_tenant_ids(hub), retired_twin_ids(
+                        getattr(hub.state, "tenant_state", None))) or owner
+                except ValueError:
+                    matched = None
         else:
             matched = _prefix_owner(addr, nets_by_tid, str(rec.get("source_tenant_id") or ""))
         if matched:
@@ -3040,14 +3273,9 @@ async def vm_in_tenant_scope(hub, sess, vm_record, spoke_id=None) -> bool:
     owned = _owned_spoke_writable(hub, sess, spoke_id)
     if owned is not None:
         return owned
-    # Caller's tenants (falling back to the primary tenant).
-    user = (sess or {}).get("user", {}) or {}
-    tenant_ids = [str(t).strip() for t in (user.get("tenants") or []) if str(t).strip()]
-    if not tenant_ids:
-        # Fall back to the session's primary tenant for a user whose session
-        # predates the ``tenants`` list (login derives tenant_id from tenants[0]).
-        primary = str(user.get("tenant_id") or "").strip()
-        tenant_ids = [primary] if primary else []
+    # Caller's tenants, falling back to the primary tenant for a user whose
+    # session predates the ``tenants`` list (login derives tenant_id from tenants[0]).
+    tenant_ids = _session_tenants(sess)
     if not tenant_ids:
         return False
     # Match by tenant tag, then by subnet, for each tenant.

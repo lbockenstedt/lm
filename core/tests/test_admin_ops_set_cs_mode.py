@@ -84,9 +84,12 @@ def test_setting_a_tenant_also_pins_it():
     assert out["client_simulation"]["tenant_pinned"] is True
 
 
-def test_tenant_is_stripped():
-    out = apply_cs_mode_entry({}, True, "  lrb  ")
-    assert out["client_simulation"]["tenant_id"] == "lrb"
+def test_tenant_is_kept_as_given():
+    """Not stripped, as the pxmx UI route stores it: a legacy " ACME " is a
+    tenant of its own beside "ACME", and stripping would pin its twin."""
+    out = apply_cs_mode_entry({}, True, " ACME ")
+    assert out["client_simulation"]["tenant_id"] == " ACME "
+    assert out["client_simulation"]["tenant_pinned"] is True
 
 
 @pytest.mark.parametrize("blank", [None, "", "   "])

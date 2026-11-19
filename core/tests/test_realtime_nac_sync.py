@@ -410,3 +410,38 @@ async def test_loop_disabled_does_not_sync(monkeypatch):
     monkeypatch.setattr(rt.asyncio, "sleep", fake_sleep)
     with pytest.raises(asyncio.CancelledError):
         await h.run_realtime_nac_sync_loop()
+
+# ── 'Sync now' looks the tenant up under its stored id ────────────────────────
+
+def _acme_rt_hub(**twins):
+    """A canned-response hub whose stored tenant is "ACME" (plus ``twins``),
+    looked up as StateManager looks tenants up."""
+    from _fakes import bind_state_tenant_lookups
+    h = _hub()
+    h.state = bind_state_tenant_lookups(FakeState(
+        system_state={"global_config": {}},
+        tenants={"ACME": {"name": "Acme", "netbox_tenant_slug": "acme"}, **twins}))
+    return h
+
+
+@pytest.mark.asyncio
+async def test_sync_now_in_another_spelling_pushes_the_tenants_sessions():
+    """'Sync now' for "acme" pushes the stored "ACME"'s sessions. Before, the
+    bucket was looked up under "acme" (buckets are keyed by stored ids), so
+    nothing was pushed."""
+    h = _acme_rt_hub()
+    status = await h.sync_tenant_realtime("acme")
+    assert status["tenant_id"] == "ACME"
+    push = next(p for _, cmd, p in h.request_log if cmd == "NETBOX_SYNC_ACCESS_TRACKER")
+    assert [s["mac"] for s in push["sessions"]] == ["aa:bb:cc:dd:ee:05"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", [" ACME", "   "])
+async def test_sync_now_for_an_id_naming_no_single_tenant_pushes_nothing(target):
+    """A target that names both stored twins, or is blank, pulls and pushes
+    nothing (before, " ACME" pushed to "ACME"'s slug)."""
+    h = _acme_rt_hub(**{" ACME ": {"name": "Acme legacy", "netbox_tenant_slug": "acme-old"}})
+    status = await h.sync_tenant_realtime(target)
+    assert status["status"] == "skipped"
+    assert h.request_log == []

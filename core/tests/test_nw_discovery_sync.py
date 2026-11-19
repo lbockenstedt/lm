@@ -990,3 +990,39 @@ async def test_fleet_of_device_pushes_holds_only_a_few_netbox_slots():
     await asyncio.gather(*(h.push_nw_device_inventory(
         {"id": f"d{i}", "name": f"sw{i}", "address": f"10.0.0.{i}"}, {}, []) for i in range(12)))
     assert peak[0] == nw_discovery_sync.NW_NETBOX_PUSHES_AT_ONCE
+
+
+# ── per-tenant pushes go under the stored tenant id ───────────────────────────
+
+def _acme_hub(**twins):
+    """A canned-response hub whose stored tenant is "ACME" (plus ``twins``),
+    looked up as StateManager looks tenants up."""
+    from _fakes import bind_state_tenant_lookups
+    h = _hub_with_responses()
+    h.state = bind_state_tenant_lookups(FakeState(
+        system_state={"global_config": _global_config()},
+        tenants={"ACME": {"name": "Acme", "netbox_tenant_slug": "acme"}, **twins}))
+    return h
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["ACME", "acme", " ACME "])
+async def test_sync_now_in_another_spelling_pushes_the_tenants_own_devices(target):
+    """'Sync now' for any spelling of the stored "ACME" pushes ACME's devices
+    under "ACME". Before, " ACME " pushed its own empty bucket into ACME's
+    slug (get_tenant ignores surrounding spaces), deleting ACME's devices."""
+    h = _acme_hub()
+    await h.sync_tenant_nw_devices(target)
+    assert [(p["tenant_id"], p["tenant_slug"], len(p["devices"]))
+            for p in h.sync_payloads] == [("ACME", "acme", 1)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", [" ACME", "Acme", "   "])
+async def test_sync_now_for_an_id_naming_no_single_tenant_pushes_nothing(target):
+    """A target that names both stored twins, or is blank, is pushed nowhere
+    (before, " ACME" replaced "ACME"'s devices with an empty set)."""
+    h = _acme_hub(**{" ACME ": {"name": "Acme legacy", "netbox_tenant_slug": "acme-old"}})
+    status = await h.sync_tenant_nw_devices(target)
+    assert status["status"] == "skipped"
+    assert h.sync_payloads == []

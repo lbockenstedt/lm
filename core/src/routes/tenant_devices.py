@@ -88,8 +88,7 @@ def register(app, hub, ctx):
         it is treated as not-found so existence never leaks across tenants."""
         if access.is_admin(sess):
             return True
-        tid = (record or {}).get("tenant_id") or ""
-        return bool(tid) and tid in _acting_tenants(sess)
+        return access.tenant_among((record or {}).get("tenant_id"), _acting_tenants(sess))
 
     def _store(prod):
         """Return the stored record list for a product (``[]`` when none exist yet)."""
@@ -186,7 +185,7 @@ def register(app, hub, ctx):
         """Approved spokes the caller may bind a device to — a tenant-admin's OWN
         tenant spokes only (access.can_bind_spoke), a Global Admin's every
         approved spoke. Shaped like /setup/pending_spokes (spoke_id/display_name/
-        approved/module_type/tenant_id) so the WebUI spoke dropdown
+        approved/module_type/tenant_id/tenant_key) so the WebUI spoke dropdown
         (loadApprovedSpokes) consumes it unchanged."""
         # Read the session and the hub's known spokes, display names and metadata.
         sess = _session_user(request)
@@ -204,13 +203,15 @@ def register(app, hub, ctx):
                 continue
             # Metadata holds the install guid and role/parent info for sub-spokes.
             m = meta.get(sid, {}) or {}
+            tenant = hub.state.get_spoke_tenant(sid) or ""
             # Row shape matches /setup/pending_spokes so the WebUI dropdown can reuse it.
             out.append({
                 "spoke_id": sid,
                 "display_name": names.get(sid, sid),
                 "approved": True,
                 "module_type": _module_type_for(hub, sid),
-                "tenant_id": hub.state.get_spoke_tenant(sid) or "",
+                "tenant_id": tenant,
+                "tenant_key": access._norm_tenant_id(tenant),
                 # B4: mirror /setup/pending_spokes so the WebUI spoke dropdown +
                 # Spokes & Agents page share one guid-keyed shape (``spoke_id``
                 # is the guid once armed; ``spoke_guid``/``install_uuid`` are the
@@ -281,10 +282,14 @@ def register(app, hub, ctx):
         # List the caller's records of this product.
         @app.get(base, operation_id=f"tdev_list_{op}")
         async def _list_route(request: Request, _prod=prod):
-            """List only the records the caller owns (their tenant(s))."""
+            """List only the records the caller owns (their tenant(s)), each
+            with ``tenant_key``: the form the hub compares tenant ids in
+            (access._norm_tenant_id), so the WebUI groups the caller's tenants
+            as the hub does. Copies, so the key is never stored."""
             # Filter the shared store down to records the caller owns.
             sess = _session_user(request)
-            items = [r for r in _store(_prod) if isinstance(r, dict) and _owns(sess, r)]
+            items = access.with_tenant_keys(
+                [r for r in _store(_prod) if isinstance(r, dict) and _owns(sess, r)])
             return {_prod["resp"]: items}
 
         # Create a new record of this product.

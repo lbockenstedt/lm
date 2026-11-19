@@ -11,6 +11,8 @@ fails is skipped (errors list), never raised.
 
 import asyncio
 
+import pytest
+
 from truenas_discovery_sync import TruenasDiscoverySyncMixin
 
 
@@ -45,7 +47,13 @@ class _State:
         self._tenants = {}
 
     def get_tenant(self, tid):
-        return self._tenants.get(tid)
+        """As StateManager.get_tenant: the exact id, else without surrounding spaces."""
+        return self._tenants.get(tid) or self._tenants.get(str(tid).strip())
+
+    def tenant_key(self, tid):
+        """As StateManager.tenant_key names a stored tenant."""
+        from access import match_tenant_id
+        return match_tenant_id(tid, set(self._tenants) | {"default"})
 
 
 class _Hub(TruenasDiscoverySyncMixin):
@@ -273,3 +281,76 @@ async def test_device_record_carries_serial_and_model_for_netbox_matching():
     assert dev["serial"] == "TN-SER-42"
     assert dev["model"] == "TrueNAS Mini X+"
     assert dev["manufacturer"] == "TrueNAS"
+
+
+def _nas(*tags):
+    """One appliance per tenant tag, ids nas0, nas1, ..."""
+    return [{"id": f"nas{i}", "name": f"nas-{i:02d}", "host": f"10.0.0.{50 + i}",
+             "tenant_id": tag} for i, tag in enumerate(tags)]
+
+
+def _pushes(hub):
+    """(NetBox slug, device count) of every push, sorted; a list, so two
+    pushes into one slug both show."""
+    return sorted((p["tenant_slug"], len(p["devices"])) for _sid, _cmd, p in hub.pushed)
+
+
+async def test_spellings_of_one_tenant_share_its_one_push():
+    """Tags naming one stored tenant in another case or with spaces go into
+    that tenant's single replace=True push, not one push per spelling, which
+    would delete each other's devices (or a skipped "acme" bucket)."""
+    hub = _Hub(gc={"truenas_discovery_sync": {"enabled": True}},
+               appliances_by_spoke={"truenas-1": _nas("acme", "ACME", " ACME ")},
+               pools_by_appliance={})
+    hub.state._tenants = {"ACME": {"name": "Acme", "netbox_tenant_slug": "acme"}}
+    agg = await hub.run_truenas_discovery_sync_all()
+    assert _pushes(hub) == [("acme", 3)]
+    assert set(agg["per_tenant"]) == {"ACME"}
+
+
+def _twins_hub(monkeypatch, *tags):
+    """A hub storing the legacy twins "ACME" and " ACME " (each its own
+    NetBox tenant), with one appliance per tag."""
+    import access
+    monkeypatch.setattr(access, "_AMBIGUOUS_TENANT_IDS", frozenset({"acme"}))
+    hub = _Hub(gc={"truenas_discovery_sync": {"enabled": True}},
+               appliances_by_spoke={"truenas-1": _nas(*tags)}, pools_by_appliance={})
+    hub.state._tenants = {"ACME": {"name": "Acme", "netbox_tenant_slug": "acme"},
+                          " ACME ": {"name": "Acme legacy", "netbox_tenant_slug": "acme-old"}}
+    return hub
+
+
+async def test_padded_twin_appliance_is_pushed_to_its_own_tenant(monkeypatch):
+    """A legacy " ACME " beside "ACME" is another tenant: its appliance must
+    not be stripped into "ACME" and pushed into that tenant's NetBox. A tag
+    naming neither twin ("Acme", " ACME") is synced nowhere: pushed under its
+    own spelling, get_tenant would find "ACME" for " ACME", and the two
+    replace=True pushes into one slug would delete each other's devices."""
+    hub = _twins_hub(monkeypatch, "ACME", " ACME ", "Acme", " ACME")
+    agg = await hub.run_truenas_discovery_sync_all()
+    assert _pushes(hub) == [("acme", 1), ("acme-old", 1)]
+    assert set(agg["per_tenant"]) == {"ACME", " ACME "}
+
+
+@pytest.mark.parametrize("target", [" ACME", "Acme", "   "])
+async def test_sync_now_for_a_tag_naming_no_single_tenant_pushes_nothing(monkeypatch, target):
+    """"Sync now" for an id that names several twins (or is blank) pushes
+    nothing: a replace=True push of no devices under " ACME" would land on
+    "ACME" and delete all of that tenant's TrueNAS devices."""
+    hub = _twins_hub(monkeypatch, "ACME", " ACME ")
+    res = await hub.sync_tenant_truenas_devices(target)
+    assert hub.pushed == []
+    assert res["status"] == "skipped" and res["pushed"] == 0
+
+
+async def test_sync_one_tenant_pushes_what_the_full_cycle_pushes():
+    """"Sync now" for one tenant pushes the same set as the full cycle, so
+    its replace=True push doesn't delete the tenant's other spellings."""
+    hub = _Hub(gc={"truenas_discovery_sync": {"enabled": True}},
+               appliances_by_spoke={"truenas-1": _nas("ACME", "acme", " ACME ", "globex")},
+               pools_by_appliance={})
+    hub.state._tenants = {"ACME": {"name": "Acme", "netbox_tenant_slug": "acme"},
+                          "globex": {"name": "Globex", "netbox_tenant_slug": "globex"}}
+    res = await hub.sync_tenant_truenas_devices("acme")
+    assert res["tenant_id"] == "ACME"
+    assert _pushes(hub) == [("acme", 3)]

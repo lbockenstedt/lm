@@ -160,3 +160,37 @@ def test_pinned_agent_request_prefers_telemetry_cache():
     hub.request_response = _record
     _run(_merge_pinned_agent_vms(hub, {"vms": []}, "central", {"cs-spoke"}))
     assert sent == [{"agent_id": "ag1", "prefer_cache": True}]
+
+
+def test_a_blank_scope_merges_no_unpinned_host():
+    """A scope of only spaces names no tenant. It must not match every agent
+    with no pin (whose tenant also reads as blank) and pull in its VMs."""
+    hub = _FakeHub(
+        agent_config={"loose": {"client_simulation": {}}, "loose2": {}},
+        agent_spokes={"loose": "shared-pxmx", "loose2": "shared-pxmx"},
+        responses={("shared-pxmx", "PXMX_LIST_VMS", "loose"): {"vms": [_vm(7)]},
+                   ("shared-pxmx", "PXMX_LIST_VMS", "loose2"): {"vms": [_vm(8)]}},
+    )
+    assert _run(_merge_pinned_agent_vms(hub, {"vms": []}, " ", None))["vms"] == []
+
+
+def test_hosts_pinned_to_legacy_twin_tenants_stay_apart(monkeypatch):
+    """With "ACME" and "acme" both stored, access compares them by exact
+    spelling, so a host pinned to one is not merged into the other's list,
+    while a pin in another case still matches a tenant with no twin."""
+    import access
+    monkeypatch.setattr(access, "_AMBIGUOUS_TENANT_IDS", frozenset({"acme"}))
+    hub = _FakeHub(
+        agent_config={"a1": {"client_simulation": {"tenant_id": "ACME"}},
+                      "b1": {"client_simulation": {"tenant_id": "BETA"}}},
+        agent_spokes={"a1": "shared-pxmx", "b1": "shared-pxmx"},
+        responses={("shared-pxmx", "PXMX_LIST_VMS", "a1"): {"vms": [_vm(1)]},
+                   ("shared-pxmx", "PXMX_LIST_VMS", "b1"): {"vms": [_vm(2)]}},
+    )
+
+    def _ids(tid):
+        """VM ids merged for scope ``tid``."""
+        return [v["vmid"] for v in _run(_merge_pinned_agent_vms(hub, {"vms": []}, tid, None))["vms"]]
+    assert _ids("acme") == []
+    assert _ids("ACME") == [1]
+    assert _ids("beta") == [2]

@@ -54,6 +54,11 @@ class FakeState:
     def get_tenant(self, tid: str) -> Optional[dict]:
         return self._tenants.get(tid)
 
+    def tenant_key(self, tid) -> Optional[str]:
+        """The stored tenant id ``tid`` names, as StateManager.tenant_key finds it."""
+        from access import match_tenant_id
+        return match_tenant_id(tid, set(map(str, self._tenants)) | {"default"})
+
     def get_spoke_tenant(self, module_id: str) -> Optional[str]:
         """Tenant a spoke/hypervisor is BOUND to (parity with StateManager)."""
         return self._spoke_tenants.get(module_id)
@@ -68,3 +73,13 @@ class FakeHub:
 
     def get_spoke_by_type(self, module_type: str) -> Optional[str]:
         return None
+
+def bind_state_tenant_lookups(state):
+    """Give a fake state StateManager's own get_tenant (exact, then ignoring
+    surrounding spaces) and tenant_key, for tests whose outcome turns on how
+    a spelling that is not stored resolves."""
+    import types
+    from state.manager import StateManager
+    state.get_tenant = types.MethodType(StateManager.get_tenant, state)
+    state.tenant_key = types.MethodType(StateManager.tenant_key, state)
+    return state

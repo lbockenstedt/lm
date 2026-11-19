@@ -46,9 +46,11 @@ try:
     from access import attribute_by_prefix  # sibling leaf (no main/api back-import)
 except Exception:  # pragma: no cover - access always importable in-app
     attribute_by_prefix = None  # type: ignore
-# MAC normalizer, spoke tenant lookups, and spoke response unwrapper.
+# MAC normalizer, spoke tenant lookups, the tenant id a push goes under, and
+# spoke response unwrapper.
 from access import (  # sibling leaf (no main/api back-import)
-    ADMIN_ONLY_OWNER, norm_mac, nw_spoke_tenant, spoke_data_owner, tenant_is_unbound, unwrap_spoke,
+    ADMIN_ONLY_OWNER, norm_mac, nw_spoke_tenant, push_tenant_key, raw_tenant_id,
+    spoke_data_owner, tenant_is_unbound, unwrap_spoke,
 )
 # Shared periodic-loop runner.
 from sync_loop import run_sync_loop  # sibling leaf
@@ -368,6 +370,16 @@ class RealtimeIpamNacSyncMixin:
         with the cycle's global ``sessions_total_global`` and
         ``dropped_unattributed`` for the UI summary.
         """
+        # Push under the stored tenant id the target names, as the buckets are
+        # keyed (access.push_tenant_key); one that names no single tenant is
+        # pushed nowhere.
+        key = push_tenant_key(self, tenant_id)
+        if not key:
+            return {"tenant_id": raw_tenant_id(tenant_id), "status": "skipped", "pushed": 0,
+                    "errors": 0, "skipped": 0, "deleted": 0, "sessions_total": 0,
+                    "message": "tenant id names no single tenant",
+                    "sessions_total_global": 0, "dropped_unattributed": 0, "pull_errors": []}
+        tenant_id = key
         # Pull everything, attribute, then push only this tenant.
         sessions, pull = await self._rt_pull_sessions()
         buckets, dropped = await self._rt_attribute(sessions)

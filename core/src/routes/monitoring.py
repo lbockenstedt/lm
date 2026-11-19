@@ -90,7 +90,9 @@ async def inventory_devices(hub):
         return [str(a or "").split("/")[0].strip()
                 for a in [d.get("address")] + list(d.get("alt_addresses") or [])]
     watch = gc.get("monitoring_watch") or {}
-    watched = {(str(t).casefold(), ip) for t, ips in watch.items() if isinstance(ips, dict)
+    # Keyed as access compares tenant ids, so a legacy twin spelt only by case
+    # ("acme" beside "ACME") never pins the other's device.
+    watched = {(_acc._norm_tenant_id(t), ip) for t, ips in watch.items() if isinstance(ips, dict)
                for ip in ips}
     covered = {ip for d in list(inv) + extra for ip in ips_of(d)}
     taken = names | {str(n["name"]).casefold() for n in extra}
@@ -109,7 +111,7 @@ async def inventory_devices(hub):
     for d in list(inv) + extra:
         # The device's tenant, and whether a user pinned one of its IPs in IPAM.
         tenant = d.get("tenant") or d.get("tenant_id") or "default"
-        pinned = any((str(tenant).casefold(), ip) in watched for ip in ips_of(d))
+        pinned = any((access._norm_tenant_id(tenant), ip) in watched for ip in ips_of(d))
         # Scanned devices are monitored only when proven to answer SNMP: verified
         # on the device itself, or by a scan that reached one of its addresses.
         ref = d.get("snmp_secret") or ""
@@ -316,6 +318,7 @@ def monitoring_server_address(hub):
 def scope_monitoring_hosts(hosts, tenant, sess, is_admin):
     """Hosts the session may see. Non-admins are bound to their own tenants;
     ``tenant`` (the picker) can only narrow that set further."""
+    import access
     # None means "no restriction" (admin); otherwise the set of tenants on the session.
     allowed = None if is_admin else set((sess or {}).get("user", {}).get("tenants") or [])
     want = tenant or None
@@ -323,9 +326,9 @@ def scope_monitoring_hosts(hosts, tenant, sess, is_admin):
     # Keep a host only if it is in an allowed tenant and matches the picked tenant (if any).
     for h in hosts:
         t = h.get("tenant") or "default"
-        if allowed is not None and t not in allowed:
+        if allowed is not None and not access.tenant_among(t, allowed):
             continue
-        if want and t != want:
+        if want and not access.same_tenant(t, want):
             continue
         out.append(h)
     return out

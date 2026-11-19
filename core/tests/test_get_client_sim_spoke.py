@@ -135,3 +135,12 @@ def test_plural_singular_consistent_for_single_bound():
                {"cs-spoke-1": {"tenant_id": "tenantA"}})
     assert main.LabManagerHub.get_client_sim_spoke(hub, "tenantA") == "cs-spoke-1"
     assert main.LabManagerHub.get_client_sim_spokes(hub, "tenantA") == ["cs-spoke-1"]
+
+def test_bound_spoke_matches_its_tenant_in_any_case():
+    """A spoke tagged "TenantA" is tenant "tenanta"'s own (fleet rule 6.1);
+    an unassigned spoke is not claimed in its place."""
+    hub = _Hub({"Client-Sim": ["cs-free", "cs-spoke-1"]},
+               {"cs-free": True, "cs-spoke-1": True},
+               {"cs-free": {}, "cs-spoke-1": {"tenant_id": "TenantA"}})
+    assert main.LabManagerHub.get_client_sim_spokes(hub, "tenanta") == ["cs-spoke-1"]
+    assert main.LabManagerHub.get_client_sim_spoke(hub, "tenanta") == "cs-spoke-1"

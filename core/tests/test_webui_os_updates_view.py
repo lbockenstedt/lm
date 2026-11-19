@@ -1,7 +1,8 @@
 """OS Updates page in headless Chromium against the real app, with
 /api/os-updates mocked: the node list survives its 5-second poll (open package
-list stays open, picked package stays picked) and the CVE lookup renders
-hostile data as text. Guards the React-lite migration of this pilot view
+list stays open, picked package stays picked), the CVE lookup renders hostile
+data as text, and the list is a drill-down: nothing is listed until a tenant or
+a state is picked. Guards the React-lite migration of this pilot view
 (docs/webui-react-lite-plan.md)."""
 import json
 import os
@@ -129,13 +130,31 @@ def _node(label, tenant, count=0, **extra):
             **extra}
 
 
+def _pick(page, row, value):
+    """Click a drill-down chip: ``row`` is "Tenant" or "State", ``value`` the
+    chip's tenant group key or state id. Clicking a picked chip clears it."""
+    page.click(f'#osu-body [data-action="pick{row}"][data-pick="{value}"]')
+
+
+def _chips(page, row):
+    """``(label, count)`` of each chip in the Tenant or State row."""
+    return [tuple(c) for c in page.locator(f'#osu-body [data-action="pick{row}"]').evaluate_all(
+        "els => els.map(e => [e.firstChild.textContent, e.lastChild.textContent])")]
+
+
+def _failures(page):
+    """``(headline, node labels)`` of each failure summary above the list."""
+    return [tuple(f) for f in page.locator("#osu-body div.bg-red-50").evaluate_all(
+        "els => els.map(e => [e.children[0].textContent, e.children[1].textContent])")]
+
+
 # Two different tenants are both named "Zulu": they must stay separate groups.
 GROUPED = {
     "totals": {"with_updates": 3, "packages": 6},
     "checked_at": 1700000000,
     "nodes": [_node("app-01", "Acme", 1, reboot_required=True), _node("fw-01", "Acme", unreachable=True),
-              _node("web-01", "Zulu", 3), _node("db-01", "Zulu"),
-              _node("web-02", "Zulu", 2, tenant_key="zulu-2")],
+              _node("db-02", "Acme"), _node("web-01", "Zulu", 3), _node("db-01", "Zulu"),
+              _node("web-02", "Zulu", 2, tenant_key="zulu-2"), _node("db-03", "Zulu", tenant_key="zulu-2")],
 }
 
 
@@ -156,21 +175,32 @@ def test_os_updates_groups_nodes_by_tenant_then_state(hub_url_and_session):  # n
             page.goto(base + "/")
             page.wait_for_function("window._lmClickFeedbackInstalled === true")
             page.evaluate("setView('osupdates')")
-            tenants = page.locator("#osu-body > details > summary > span:first-child")
-            tenants.first.wait_for()
 
-            # Worst first: Acme has an unreachable node, the Zulus only pending updates.
-            assert tenants.all_inner_texts() == ["Acme", "Zulu", "Zulu"]
-            # Needs-attention and pending groups are open; Zulu's up-to-date group is
-            # collapsed because the tenant has other states to look at.
+            # Needs-attention groups are open. app-01 has pending updates AND a reboot
+            # nobody scheduled, so it needs attention (not "Updates pending") alongside
+            # the unreachable fw-01.
+            _pick(page, "Tenant", "tenant-acme")
             assert page.locator("#osu-s-tenant-acme-attention").evaluate("d => d.open")
-            # app-01 has pending updates AND a reboot nobody scheduled, so it needs attention
-            # (not "Updates pending") alongside the unreachable fw-01.
             assert "app-01" in page.locator("#osu-s-tenant-acme-attention").inner_text()
             assert page.locator("#osu-s-tenant-acme-pending").count() == 0
+            # Picking another tenant replaces the pick. Zulu's pending group is open, its
+            # up-to-date group collapsed because the tenant has other states to look at.
+            _pick(page, "Tenant", "tenant-zulu")
+            assert page.locator("#osu-t-tenant-acme").count() == 0
             assert page.locator("#osu-s-tenant-zulu-pending").evaluate("d => d.open")
             assert not page.locator("#osu-s-tenant-zulu-current").evaluate("d => d.open")
 
+            # A group's select-all ticks only the deployable nodes of that group, and
+            # not those of another tenant that has the same name.
+            page.locator('input[data-action="toggleGroup"][data-tenant="tenant-zulu"][data-state="pending"]').check()
+            assert page.locator("#osu-apply-selected").inner_text() == "Deploy selected (1)"
+            _pick(page, "Tenant", "tenant-zulu")
+
+            # Every tenant has an up-to-date node. Worst first: Acme has an unreachable
+            # node, the Zulus only pending updates.
+            _pick(page, "State", "current")
+            tenants = page.locator("#osu-body > details > summary > span:first-child")
+            assert tenants.all_inner_texts() == ["Acme", "Zulu", "Zulu"]
             # Most updates first puts the Zulus (3 and 2 packages) ahead of Acme (1).
             page.select_option("#osu-sort", "updates")
             assert tenants.all_inner_texts() == ["Zulu", "Zulu", "Acme"]
@@ -183,12 +213,229 @@ def test_os_updates_groups_nodes_by_tenant_then_state(hub_url_and_session):  # n
             assert tenants.all_inner_texts() == ["Zulu", "Zulu", "Acme"]
             assert not page.locator("#osu-t-tenant-zulu").evaluate("d => d.open")
             assert page.locator("#osu-t-tenant-zulu-2").evaluate("d => d.open")
-            page.locator("#osu-t-tenant-zulu > summary").click()
+            assert not errors, errors
+        finally:
+            browser.close()
 
-            # A group's select-all ticks only the deployable nodes of that group, and
-            # not those of another tenant that has the same name.
-            page.locator('input[data-action="toggleGroup"][data-tenant="tenant-zulu"][data-state="pending"]').check()
+
+def test_os_updates_lists_nothing_until_a_tenant_or_state_is_picked(hub_url_and_session):  # noqa: F811
+    base, token = hub_url_and_session
+    data = json.loads(json.dumps(GROUPED))
+    with sync_api.sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            context = browser.new_context()
+            context.add_cookies([{"name": "lm_session", "value": token, "url": base}])
+            page = context.new_page()
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            nodes = lambda r: r.fulfill(content_type="application/json", body=json.dumps(data))  # noqa: E731
+            page.route("**/api/os-updates", nodes)
+            page.route("**/api/os-updates/check", nodes)
+            page.route("**/api/os-updates/cves/fleet", lambda r: r.fulfill(
+                content_type="application/json", body="[]"))
+            page.goto(base + "/")
+            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.evaluate("setView('osupdates')")
+            body = page.locator("#osu-body")
+            page.locator('#osu-body [data-action="pickTenant"]').first.wait_for()
+
+            # Nothing is listed: the bar asks for a pick. Same-name tenants are two chips.
+            assert "7 nodes. Pick a tenant or a state above to list them." in body.inner_text()
+            assert body.locator("details").count() == 0
+            assert _chips(page, "Tenant") == [("Acme", "3"), ("Zulu", "2"), ("Zulu", "2")]
+            assert _chips(page, "State") == [("Needs attention", "2"), ("Updates pending", "2"), ("Up to date", "3")]
+
+            # Each row counts under the other row's pick; Acme has no pending node.
+            _pick(page, "State", "pending")
+            assert _chips(page, "Tenant") == [("Zulu", "1"), ("Zulu", "1")]
+            _pick(page, "Tenant", "tenant-zulu")
+            assert _chips(page, "State") == [("Updates pending", "1"), ("Up to date", "1")]
+            assert body.locator("details").first.get_attribute("id") == "osu-t-tenant-zulu"
+            assert page.locator("#osu-body > details").count() == 1
+            assert "1 of 2 node(s)" in page.locator("#osu-t-tenant-zulu > summary").inner_text()
+
+            # Changing the pick unticks every node, so none is left on a node it hides.
+            page.locator('#osu-body input[data-action="toggleNode"][data-node="agent:web-01"]').check()
             assert page.locator("#osu-apply-selected").inner_text() == "Deploy selected (1)"
+            _pick(page, "State", "pending")
+            assert page.locator("#osu-apply-selected").inner_text() == "Deploy selected (0)"
+
+            # A new pick is drawn afresh: the up-to-date group collapsed under the tenant
+            # pick opens when up to date is picked.
+            assert not page.locator("#osu-s-tenant-zulu-current").evaluate("d => d.open")
+            _pick(page, "State", "current")
+            assert page.locator("#osu-s-tenant-zulu-current").evaluate("d => d.open")
+
+            # Clicking the picked chips again brings the prompt back.
+            _pick(page, "State", "current")
+            _pick(page, "Tenant", "tenant-zulu")
+            assert body.locator("details").count() == 0
+
+            # A new visit starts with nothing picked.
+            _pick(page, "State", "pending")
+            assert page.locator("#osu-body > details").count() == 2
+            page.evaluate("setView('dashboard'); setView('osupdates')")
+            page.wait_for_function("document.getElementById('osu-body')?.innerText.includes('7 nodes. Pick')")
+            assert body.locator("details").count() == 0
+
+            # A picked tenant whose nodes went away falls back to the prompt.
+            _pick(page, "Tenant", "tenant-acme")
+            data["nodes"] = [n for n in data["nodes"] if n["tenant"] != "Acme"]
+            page.click('button:has-text("Check for updates")')
+            page.wait_for_function("document.getElementById('osu-body').innerText.includes('4 nodes. Pick')")
+            assert _chips(page, "Tenant") == [("Zulu", "2"), ("Zulu", "2")]
+
+            # A picked state is kept when its nodes move on: its chip stays (count 0) to
+            # clear it, and the Tenant row goes, as no tenant has a node to list.
+            _pick(page, "State", "pending")
+            for n in data["nodes"]:
+                n.update(count=0, packages=[])
+            page.click('button:has-text("Check for updates")')
+            page.wait_for_function("document.getElementById('osu-body').innerText.includes('No nodes are in this state right now.')")
+            assert _chips(page, "State") == [("Updates pending", "0"), ("Up to date", "4")]
+            assert page.locator('#osu-body [data-action="pickTenant"]').count() == 0
+            assert "Tenant" not in body.inner_text()
+
+            # With no node reported there is no bar to clear a pick from, so the
+            # state pick goes too: nodes that report again ask for a pick.
+            reporting = data["nodes"]
+            data["nodes"] = []
+            page.click('button:has-text("Check for updates")')
+            page.wait_for_function("document.getElementById('osu-body').innerText.includes('No nodes reporting.')")
+            data["nodes"] = reporting
+            page.click('button:has-text("Check for updates")')
+            page.wait_for_function("document.getElementById('osu-body').innerText.includes('4 nodes. Pick')")
+            assert body.locator("details").count() == 0
+            assert not errors, errors
+        finally:
+            browser.close()
+
+
+def test_os_updates_failure_summary_names_only_nodes_the_pick_covers(hub_url_and_session):  # noqa: F811
+    base, token = hub_url_and_session
+    data = {
+        "totals": {"with_updates": 1, "packages": 5}, "checked_at": 1700000000,
+        "nodes": [_node("a-01", "Acme", 1), _node("a-02", "Acme", 1), _node("z-01", "Zulu", 1), _node("z-02", "Zulu", 2)],
+        "run": {"status": "finished", "done": 5, "total": 5, "items": [
+            {"key": "agent:a-01", "label": "a-01", "status": "failed", "message": "boom", "cause": "boom"},
+            {"key": "agent:a-02", "label": "a-02", "status": "failed", "message": "boom", "cause": "boom"},
+            {"key": "agent:z-01", "label": "z-01", "status": "failed", "message": "boom", "cause": "boom"},
+            # Spoke s-01 went offline: the hub no longer lists it or its agent, so
+            # this summary is the only place their failure shows.
+            {"key": "spoke:s-01", "label": "s-01", "status": "failed", "cause": "spoke s-01 is offline"},
+            {"key": "agent:s-02", "label": "s-02", "status": "failed", "cause": "spoke s-01 is offline"},
+            # One node alone behind another offline spoke: no row shows it either.
+            {"key": "agent:t-01", "label": "t-01", "status": "failed", "cause": "spoke s-03 is offline"}]},
+    }
+    offline = ("2 nodes not patched — spoke s-01 is offline", "s-01, s-02")
+    lone = ("1 node not patched — spoke s-03 is offline", "t-01")
+    with sync_api.sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            context = browser.new_context()
+            context.add_cookies([{"name": "lm_session", "value": token, "url": base}])
+            page = context.new_page()
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            nodes = lambda r: r.fulfill(content_type="application/json", body=json.dumps(data))  # noqa: E731
+            page.route("**/api/os-updates", nodes)
+            page.route("**/api/os-updates/check", nodes)
+            page.route("**/api/os-updates/cves/fleet", lambda r: r.fulfill(
+                content_type="application/json", body="[]"))
+            page.goto(base + "/")
+            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.evaluate("setView('osupdates')")
+            page.locator('#osu-body [data-action="pickTenant"]').first.wait_for()
+
+            # Before a pick no listed node is named, only the nodes no pick can list,
+            # even a cause that took down a single one of them.
+            assert _failures(page) == [offline, lone]
+            # A tenant pick names only its own nodes; the unlisted ones have no tenant.
+            _pick(page, "Tenant", "tenant-acme")
+            assert _failures(page) == [("2 nodes not patched — boom", "a-01, a-02")]
+            # A cause only one listed node has shows in that node's row instead.
+            _pick(page, "Tenant", "tenant-zulu")
+            assert _failures(page) == []
+            _pick(page, "Tenant", "tenant-zulu")
+            # Failed nodes need attention, in every tenant.
+            _pick(page, "State", "attention")
+            assert _failures(page) == [("3 nodes not patched — boom", "a-01, a-02, z-01"), offline, lone]
+            _pick(page, "State", "pending")
+            assert _failures(page) == []
+
+            # No node reports at all: there is no bar to clear the pick, so every failure shows.
+            data["nodes"] = []
+            page.click('button:has-text("Check for updates")')
+            page.wait_for_function("document.getElementById('osu-body').innerText.includes('No nodes reporting.')")
+            assert _failures(page) == [("3 nodes not patched — boom", "a-01, a-02, z-01"), offline, lone]
+            assert not errors, errors
+        finally:
+            browser.close()
+
+
+def test_os_updates_ticks_and_cve_fixes_stay_on_listed_nodes(hub_url_and_session):  # noqa: F811
+    base, token = hub_url_and_session
+    php = [{"package": "php8.2", "current": "1", "candidate": "2", "security": True}]
+    data = {
+        "totals": {"with_updates": 4, "packages": 4}, "checked_at": 1700000000,
+        # z-03 runs an LM that cannot pick packages: no package box, so no fix is ticked on it.
+        "nodes": [_node("a-01", "Acme", 1, packages=php), _node("z-01", "Zulu", 1, packages=php),
+                  _node("z-02", "Zulu", 1), _node("z-03", "Zulu", 1, packages=php, features=[])],
+    }
+    # Two CVEs in the same package: each node's fix is one package update, not two.
+    cves = {
+        "feeds": {"bookworm": {"fetched_at": 1700000000}}, "query": "php", "kind": "package",
+        "affected_nodes": 3, "checked_nodes": 4,
+        "results": [{"cve": cve, "affected": [
+            {"node": f"agent:{n}", "label": n, "release": "bookworm", "package": "php8.2",
+             "version": "1", "binaries": ["php8.2"], "update_pending": True} for n in ("a-01", "z-01", "z-03")]}
+            for cve in ("CVE-2026-1", "CVE-2026-2")],
+    }
+    with sync_api.sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            context = browser.new_context()
+            context.add_cookies([{"name": "lm_session", "value": token, "url": base}])
+            page = context.new_page()
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            nodes = lambda r: r.fulfill(content_type="application/json", body=json.dumps(data))  # noqa: E731
+            page.route("**/api/os-updates", nodes)
+            page.route("**/api/os-updates/check", nodes)
+            page.route("**/api/os-updates/cves?*", lambda r: r.fulfill(
+                content_type="application/json", body=json.dumps(cves)))
+            page.route("**/api/os-updates/cves/fleet", lambda r: r.fulfill(
+                content_type="application/json", body="[]"))
+            page.goto(base + "/")
+            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.evaluate("setView('osupdates')")
+            page.locator('#osu-body [data-action="pickTenant"]').first.wait_for()
+            cve = page.locator("#osu-cve-body")
+            selected = page.locator("#osu-apply-selected")
+
+            # Nothing is listed yet, so no fix can be ticked: the card says where they are.
+            page.fill("#osu-cve-q", "php")
+            page.click("text=Look up")
+            page.wait_for_selector("#osu-cve-body >> text=3 of 4 checked node(s) affected")
+            assert cve.locator("button").count() == 0
+            assert "2 fix(es) on nodes not listed above" in cve.inner_text()
+
+            # The count follows the pick without a new lookup, and only listed nodes are ticked.
+            _pick(page, "Tenant", "tenant-zulu")
+            assert cve.locator("button").inner_text() == "Select fixes (1)"
+            assert "1 fix(es) on nodes not listed above" in cve.inner_text()
+            cve.locator("button").click()
+            assert page.locator('#osu-body input[data-action="togglePkg"][data-node="agent:z-01"][data-pkg="php8.2"]').is_checked()
+            assert selected.inner_text() == "Deploy selected (1)"
+
+            # A re-check that moves a ticked node to another tenant drops its tick.
+            page.locator('#osu-body input[data-action="toggleNode"][data-node="agent:z-02"]').check()
+            assert selected.inner_text() == "Deploy selected (2)"
+            data["nodes"][2].update(tenant="Acme", tenant_key="acme")
+            page.click('button:has-text("Check for updates")')
+            page.wait_for_function("!document.getElementById('osu-node-agent:z-02')")
+            assert selected.inner_text() == "Deploy selected (1)"
             assert not errors, errors
         finally:
             browser.close()
@@ -229,7 +476,7 @@ def test_os_updates_run_results_are_not_mistaken_for_up_to_date(hub_url_and_sess
             page.goto(base + "/")
             page.wait_for_function("window._lmClickFeedbackInstalled === true")
             page.evaluate("setView('osupdates')")
-            page.locator("#osu-s-tenant-acme-current").wait_for()
+            _pick(page, "Tenant", "tenant-acme")
 
             # Fully updated is up to date; a deploy that left packages pending is not; a skipped node was never patched.
             assert "a-01" in page.locator("#osu-s-tenant-acme-current").text_content()
@@ -248,8 +495,11 @@ def test_os_updates_run_results_are_not_mistaken_for_up_to_date(hub_url_and_sess
             assert "package(s)" not in page.locator("#osu-s-tenant-acme-current").text_content()
             assert "3 package(s)" not in pending
             assert "4 package(s) pending" in page.locator("#osu-t-tenant-acme > summary").text_content()
+            # Both tenants have nodes that need attention. The header counts the whole tenant,
+            # so the tie on attention goes to the tenant with more packages left.
+            _pick(page, "Tenant", "tenant-acme")
+            _pick(page, "State", "attention")
             tenants = page.locator("#osu-body > details > summary > span:first-child")
-            # Tied on attention, so the tenant with more packages left comes first.
             assert tenants.all_inner_texts() == ["Beta", "Acme"]
             page.select_option("#osu-sort", "name")
             assert tenants.all_inner_texts() == ["Acme", "Beta"]
@@ -258,6 +508,8 @@ def test_os_updates_run_results_are_not_mistaken_for_up_to_date(hub_url_and_sess
 
             # A failed apply that re-listed shows what is left and its reboot need; one that never
             # reached apt keeps its cached count. Both stay failed, under Needs attention.
+            _pick(page, "State", "attention")
+            _pick(page, "Tenant", "tenant-beta")
             beta = page.locator("#osu-t-tenant-beta > summary").text_content()
             assert "9 package(s) pending" in beta and "1 need reboot" in beta
             failed = page.locator("#osu-s-tenant-beta-attention").text_content()
@@ -348,7 +600,7 @@ def test_os_updates_a_node_whose_reboot_did_not_finish_cleanly_needs_attention(h
             page.goto(base + "/")
             page.wait_for_function("window._lmClickFeedbackInstalled === true")
             page.evaluate("setView('osupdates')")
-            page.locator("#osu-s-tenant-acme-attention").wait_for()
+            _pick(page, "State", "attention")
 
             attention = page.locator("#osu-s-tenant-acme-attention").text_content()
             assert "o-01" not in attention
@@ -362,6 +614,7 @@ def test_os_updates_a_node_whose_reboot_did_not_finish_cleanly_needs_attention(h
             assert attention.count("reboot not confirmed") == 1
             assert "maintenance mode NOT cleared: pmxcfs busy" in attention
             # The clean node is still simply up to date.
+            _pick(page, "State", "current")
             assert "o-01" in page.locator("#osu-s-tenant-acme-current").text_content()
             assert not errors, errors
         finally:
@@ -394,13 +647,15 @@ def test_os_updates_a_node_rebooted_by_hand_stops_counting_as_needing_a_reboot(h
             page.goto(base + "/")
             page.wait_for_function("window._lmClickFeedbackInstalled === true")
             page.evaluate("setView('osupdates')")
-            page.locator("#osu-s-tenant-acme-patching").wait_for()
+            _pick(page, "State", "patching")
 
             patching = page.locator("#osu-s-tenant-acme-patching").text_content()
             assert "r-01" in patching and "rebooting…" in patching
             assert "reboot required" not in patching
-            assert "s-01" in page.locator("#osu-s-tenant-acme-attention").text_content()
+            # The header counts the whole tenant, not only the nodes listed.
             assert "1 need reboot" in page.locator("#osu-t-tenant-acme > summary").text_content()
+            _pick(page, "State", "attention")
+            assert "s-01" in page.locator("#osu-s-tenant-acme-attention").text_content()
             assert not errors, errors
         finally:
             browser.close()
@@ -434,22 +689,41 @@ def test_os_updates_tenant_ids_never_merge_into_hub_unassigned_or_each_other(hub
             page.goto(base + "/")
             page.wait_for_function("window._lmClickFeedbackInstalled === true")
             page.evaluate("setView('osupdates')")
+            page.locator('#osu-body [data-action="pickTenant"]').first.wait_for()
+            chips = page.locator('#osu-body [data-action="pickTenant"]')
+            # Real tenants A–Z, then the hub, then nodes with no tenant: six chips, six keys.
+            assert [c[0] for c in _chips(page, "Tenant")] == [
+                "Alpha", "Alpha Pending", "Hubco", "Nonesuch", "Hub", "Unassigned"]
+            assert chips.evaluate_all("els => els.map(e => e.dataset.pick)") == [
+                "tenant-alpha", "tenant-alpha-pending", "tenant-__hub", "tenant-__none", "hub", "none"]
             tenants = page.locator("#osu-body > details > summary > span:first-child")
-            tenants.first.wait_for()
-
-            assert sorted(tenants.all_inner_texts()) == [
-                "Alpha", "Alpha Pending", "Hub", "Hubco", "Nonesuch", "Unassigned"]
             text = lambda sel: page.locator(sel).inner_text()  # noqa: E731
-            assert "hub-01" in text("#osu-t-tenant-__hub") and "hub-01" not in text("#osu-t-hub")
-            assert "none-01" in text("#osu-t-tenant-__none") and "none-01" not in text("#osu-t-none")
-            assert "loose-01" in text("#osu-t-none")
+            unique_ids = """() => {
+                const ids = [...document.querySelectorAll('[id]')].map(e => e.id);
+                return ids.length === new Set(ids).size;
+            }"""
+
+            _pick(page, "State", "pending")
+            assert sorted(tenants.all_inner_texts()) == ["Alpha", "Alpha Pending", "Hubco", "Nonesuch"]
+            assert "hub-01" in text("#osu-t-tenant-__hub") and "none-01" in text("#osu-t-tenant-__none")
             # Tenant "alpha-pending" must not take the id of tenant "alpha"'s pending group.
             assert "alpha-01" in text("#osu-s-tenant-alpha-pending")
             assert "alpha-02" in text("#osu-s-tenant-alpha-pending-pending")
-            assert page.evaluate("""() => {
-                const ids = [...document.querySelectorAll('[id]')].map(e => e.id);
-                return ids.length === new Set(ids).size;
-            }""")
+            assert page.evaluate(unique_ids)
+
+            _pick(page, "State", "current")
+            assert sorted(tenants.all_inner_texts()) == ["Hub", "Unassigned"]
+            assert "hub-01" not in text("#osu-t-hub")
+            assert "none-01" not in text("#osu-t-none") and "loose-01" in text("#osu-t-none")
+            assert page.evaluate(unique_ids)
+
+            # The Hub chip and tenant "__hub"'s chip each list only their own nodes.
+            _pick(page, "State", "current")
+            _pick(page, "Tenant", "hub")
+            assert tenants.all_inner_texts() == ["Hub"]
+            _pick(page, "Tenant", "tenant-__hub")
+            assert tenants.all_inner_texts() == ["Hubco"]
+            assert "hub-01" in text("#osu-t-tenant-__hub")
             assert not errors, errors
         finally:
             browser.close()

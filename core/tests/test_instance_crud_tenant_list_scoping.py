@@ -157,3 +157,19 @@ def test_no_shared_tenant_configured_does_not_admit_unassigned(monkeypatch):
     c, hub = _build()
     _seed(hub)
     assert _ids(c.get("/setup/nw-scan-credentials?tenant=tenant-admin")) == ["c-admin"]
+
+
+def test_vault_sets_come_from_the_tenants_own_bucket_never_a_case_twins(monkeypatch):
+    """The viewed tenant's vault bucket matches in any case, but with legacy
+    tenants "acme" and "ACME" both stored, tenant ids compare by exact spelling
+    (access._AMBIGUOUS_TENANT_IDS), so each lists only its own bucket's logins."""
+    c, hub = _build()
+    login = {"mode": "hub", "type": "login"}
+    secrets = {"ACME": {"upper": login}}
+    hub.state.system_state["global_config"]["cred_vault"] = {"secrets": secrets}
+    assert _ids(c.get("/setup/nw-scan-credentials?tenant=acme")) == ["vault:ACME:upper"]
+    secrets["acme"] = {"lower": login}
+    monkeypatch.setattr(nw.access, "_AMBIGUOUS_TENANT_IDS",
+                        nw.access._case_collisions({"acme": {}, "ACME": {}}))
+    assert _ids(c.get("/setup/nw-scan-credentials?tenant=acme")) == ["vault:acme:lower"]
+    assert _ids(c.get("/setup/nw-scan-credentials?tenant=ACME")) == ["vault:ACME:upper"]

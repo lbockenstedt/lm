@@ -29,6 +29,7 @@ import api as api_mod
 import access as access_mod
 from access import session_user  # noqa: E402
 from warm_cache import WarmCacheMixin  # noqa: E402
+from state.manager import StateManager  # noqa: E402
 
 
 # ── Fakes ────────────────────────────────────────────────────────────────────
@@ -52,6 +53,9 @@ class _FakeState:
 
     def get_tenant(self, tid):
         return None
+
+    # The real lookup, over the tenant_state a test sets.
+    tenant_key = StateManager.tenant_key
 
 
 class _FakeHub(WarmCacheMixin):

@@ -255,3 +255,32 @@ def test_set_record_tenant_requires_name():
     holder.current = _global_admin()
     r = c.post("/api/henet/record/tenant", json={"name": "", "type": "A", "tenant": "lrb"})
     assert r.status_code == 400
+
+
+def test_record_write_gate_matches_the_list_in_any_case():
+    # Tenant ids are not case-sensitive: a record tagged "DXP" is listed for a
+    # "dxp" user, so that user may also delete it. Another tenant still gets
+    # the 404 that hides the record, and nothing reaches the spoke.
+    c, hub, holder = _build()
+    sent = []
+
+    async def _reply(spoke_id, command, payload, **kw):
+        sent.append(command)
+        if command == "HENET_LIST":
+            return {"status": "SUCCESS", "records": [
+                {"name": "h.example.com", "type": "A", "tenant_id": "DXP"}]}
+        return {"status": "SUCCESS"}
+
+    hub.get_spoke_by_type = lambda module_type: "he-1"
+    hub.request_response = _reply
+    holder.current = _tenant_user("dxp")
+    listed = c.get("/api/henet/records").json()["records"]
+    assert [r["name"] for r in listed] == ["h.example.com"]
+    r = c.request("DELETE", "/api/henet/record", json={"name": "h.example.com", "type": "A"})
+    assert r.status_code == 200 and "HENET_DELETE" in sent
+
+    sent.clear()
+    holder.current = _tenant_user("other")
+    assert c.get("/api/henet/records").json()["records"] == []
+    r = c.request("DELETE", "/api/henet/record", json={"name": "h.example.com", "type": "A"})
+    assert r.status_code == 404 and "HENET_DELETE" not in sent

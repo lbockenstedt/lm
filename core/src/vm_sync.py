@@ -39,7 +39,7 @@ from typing import Any, Dict, List, Optional
 from sync_loop import next_schedule_delay, run_sync_loop  # sibling leaf
 
 # Unwrap spoke replies.
-from access import unwrap_spoke  # sibling leaf (no main/api back-import)
+from access import same_tenant, unwrap_spoke  # sibling leaf (no main/api back-import)
 
 # Log to the hub's logger.
 logger = logging.getLogger("Hub")
@@ -519,7 +519,7 @@ class VmSyncMixin:
         agg = await self.sync_all_vms()
         tid = tenant_id or self._VM_SYNC_UNASSIGNED_KEY
         for st in agg.get("results", []):
-            if st.get("tenant_id") == tid:
+            if same_tenant(st.get("tenant_id"), tid):
                 return st
         # Tenant not in the results (not bound / no matched VMs) — synthesize a
         # row so the caller gets a well-formed status dict either way.

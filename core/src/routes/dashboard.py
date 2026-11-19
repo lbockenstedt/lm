@@ -228,11 +228,11 @@ def register(app, hub, ctx):
         if _tid:
             _acfg = hub.state.system_state.get("agent_config", {}) or {}
             _hv_set = set(hv_spokes)
-            _norm_tid = _tid.strip().casefold()
             for _apk, _cfg in _acfg.items():
-                _pin = str(((_cfg or {}).get("client_simulation") or {})
-                           .get("tenant_id") or "").strip()
-                if _pin.casefold() != _norm_tid:
+                # Pinned to this tenant, compared as the access checks compare
+                # ids (a blank pin matches nothing; see _merge_pinned_agent_vms).
+                _pin = ((_cfg or {}).get("client_simulation") or {}).get("tenant_id")
+                if not access.tenant_among(_pin, [_tid]):
                     continue
                 _sp = hub.get_spoke_for_agent(_apk, fallback_hypervisor=False)
                 if _sp and _sp in _hv_set:
@@ -488,7 +488,7 @@ def register(app, hub, ctx):
         for sid, meta in md.items():
             meta = meta or {}
             stid = meta.get("tenant_id")
-            if not want_all and tid and stid and stid != tid:
+            if not want_all and tid and stid and not access.same_tenant(stid, tid):
                 continue  # bound to another tenant (untagged = shared infra → shown)
             tier = alerts.get(sid, "none")
             online, status = infra_item_status(hub, sid, tier, connected,

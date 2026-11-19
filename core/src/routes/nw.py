@@ -282,19 +282,19 @@ def nw_scan_spoke_choices(hub, tenant_id, shared_tenant_id):
     names = hub.state.system_state.get("module_names", {}) or {}
     out = []
     # Ids reach here with differing spelling ("Default" from the picker vs the
-    # "default" a spoke is bound to), so compare canonicalised (strip+casefold).
-    def _n(x):
-        """Canonical form of an id for comparison."""
-        return str(x or "").strip().casefold()
-    want, shared_n = _n(tenant_id), _n(shared_tenant_id)
+    # "default" a spoke is bound to), so compare them as access.same_tenant
+    # does: case and spaces aside, except that legacy tenants spelt only by
+    # case ("acme" beside "ACME") never match each other's spokes.
+    want = str(tenant_id or "").strip()
+    shared = str(shared_tenant_id or "").strip()
     # Check every approved nw spoke and classify it as the tenant's own, shared, or neither.
     for sid in (hub.get_all_spokes_by_type("nw") or []):
         if not hub.approved_modules.get(hub._primary_key(sid), False):
             continue
         owner = (md.get(sid, {}) or {}).get("tenant_id") or ""
-        if want and _n(owner) == want:
+        if want and access.same_tenant(owner, tenant_id):
             scope = "own"
-        elif shared_n and _n(owner) == shared_n:
+        elif shared and access.same_tenant(owner, shared_tenant_id):
             scope = "shared"
         else:
             continue
@@ -1047,12 +1047,12 @@ def register(app, hub, ctx):
             if hide_shared and access.tenant_is_shared(tid):
                 return False
             # Acting as a tenant: that tenant's devices, shared devices, and (for default)
-            # unassigned ones.
+            # unassigned ones. tenant_among is strict, so an acting tenant of only
+            # spaces (an admin's ?tenant=%20) matches no unassigned device.
             if acting_tenant is not None:
                 if acting_tenant == "default" and not str(tid or "").strip():
                     return True
-                return (str(tid or "").casefold() == str(acting_tenant).casefold()
-                        or access.tenant_is_shared(tid))
+                return access.tenant_among(tid, [acting_tenant]) or access.tenant_is_shared(tid)
             # Otherwise admins see everything, others their own tenants plus shared.
             return is_admin or access.spoke_visible_to_session(sess, tid)
 
@@ -1347,8 +1347,7 @@ def register(app, hub, ctx):
             if acting_tenant is not None:
                 if acting_tenant == "default" and not str(tid or "").strip():
                     return True
-                return (str(tid or "").casefold() == str(acting_tenant).casefold()
-                        or access.tenant_is_shared(tid))
+                return access.tenant_among(tid, [acting_tenant]) or access.tenant_is_shared(tid)
             return is_admin or access.spoke_visible_to_session(sess, tid)
 
         # Visible devices from the hub config.
@@ -1811,7 +1810,8 @@ def register(app, hub, ctx):
         if not _is_admin(sess):
             devices = [d for d in devices
                        if access.spoke_visible_to_session(sess, (d or {}).get("tenant_id", ""))]
-        return {"nw_devices": devices}
+        # Each row also carries ``tenant_key`` (Managed Devices groups by it).
+        return {"nw_devices": access.with_tenant_keys(devices)}
 
     @app.get("/setup/nw-poll-config")
     async def get_nw_poll_config(request: Request):
@@ -2583,16 +2583,15 @@ def register(app, hub, ctx):
         # ADMIN (``default``) scope the admin's OWN sets are the unassigned /
         # ``default``-tagged ones, matching what the scan tab lists for default,
         # so a set the admin can see is a set the admin can actually scan with.
-        owned = access.tenant_scope_ids(tenant_id)
-        if owned is None:
-            # A blank/None tenant_id (reachable here — the scheduler can pass
-            # one, and admins resolve to "" when no shared tenant is set) must
-            # still be scoped. tenant_scope_ids(None-ish) returns None, and
-            # in_tenant_scope treats a None scope as UNRESTRICTED — that would
-            # let a blank-tenant scan pick up every tenant's vault credentials,
-            # exactly the leak this scoping exists to prevent. Fall back to the
-            # ADMIN scope (unassigned + default-tagged + shared) instead.
-            owned = access.tenant_scope_ids(access.ADMIN_TENANT_ID)
+        # A blank tenant_id (None, "" or only spaces; reachable here — the
+        # scheduler can pass one, and admins resolve to "" when no shared
+        # tenant is set) must still be scoped, so it gets the ADMIN scope
+        # (unassigned + default-tagged + shared). tenant_scope_ids reads None
+        # and "" as no selection at all (None, which in_tenant_scope treats as
+        # UNRESTRICTED: every tenant's vault credentials, exactly the leak this
+        # scoping exists to prevent), and only spaces as the shared scope alone.
+        owned = access.tenant_scope_ids(
+            tenant_id if str(tenant_id or "").strip() else access.ADMIN_TENANT_ID)
         # Keep only sets in that scope; tenant admins are also limited to sets they can see.
         chosen = [c for c in chosen if access.in_tenant_scope(c.get("tenant_id"), owned)]
         if not system and not _is_admin(sess):
@@ -3736,19 +3735,17 @@ def register(app, hub, ctx):
         bucket (login/console secrets, automation-readable), so a vault login is
         selectable on the scan tab without hand-creating a set. Ids are
         ``vault:<bucket>:<name>`` and resolve at scan time via the normal overlay."""
-        # No tenant: no vault sets.
-        tid = str(tenant_id or "").strip()
-        if not tid:
-            return []
-        # The tenant's vault bucket (case-insensitive match); none means no sets.
-        bucket = next((b for b in (
-            (((hub.state.system_state.get("global_config", {}) or {})
-              .get("cred_vault", {}) or {}).get("secrets", {}) or {}))
-            if str(b).casefold() == tid.casefold()), None)
+        # The tenant's vault bucket: its exact spelling, else one access.same_tenant
+        # matches (in any case, but never a legacy twin's); none (or no tenant)
+        # means no sets.
+        tid = access.raw_tenant_id(tenant_id)
+        buckets = (((hub.state.system_state.get("global_config", {}) or {})
+                    .get("cred_vault", {}) or {}).get("secrets", {}) or {})
+        bucket = access.tenant_key_in(buckets, tid)
         if bucket is None:
             return []
         # One set per hub-mode login or console secret in the bucket.
-        secrets = (hub.state.system_state["global_config"]["cred_vault"]["secrets"].get(bucket) or {})
+        secrets = buckets.get(bucket) or {}
         return [{
             "id": f"vault:{bucket}:{name}", "name": f"{name} (vault)", "username": "",
             "tenant_id": tid, "vault_credential": {"bucket": bucket, "name": name},
@@ -3869,6 +3866,8 @@ def register(app, hub, ctx):
                              if isinstance(i, dict) and access.in_tenant_scope(i.get("tenant_id"), scope)]
                 if storage_key == "nw_scan_credentials":
                     instances = instances + _vault_scan_sets(hub, req_tenant)
+            # Each row also carries ``tenant_key`` (Managed Devices groups by it).
+            instances = access.with_tenant_keys(instances)
             if present:
                 instances = [present(i) for i in instances if isinstance(i, dict)]
             return {"instances": instances}

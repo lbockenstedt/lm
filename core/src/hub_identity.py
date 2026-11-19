@@ -223,9 +223,13 @@ class HubIdentityMixin:
                 return True
             # (3) Both ids are already bound to DIFFERENT tenants → a real rename
             #     never changes tenant; this is a cross-tenant clone claim.
+            #     Compared exactly as stored, not as same_tenant compares: any
+            #     other spelling (a legacy " ACME " twin, or "acme") counts as
+            #     another tenant, so the claim fails closed.
+            from access import raw_tenant_id
             try:
-                old_tenant = (self.state.get_spoke_tenant(old_pk) or "").strip()
-                new_tenant = (self.state.get_spoke_tenant(new_pk) or "").strip()
+                old_tenant = raw_tenant_id(self.state.get_spoke_tenant(old_pk))
+                new_tenant = raw_tenant_id(self.state.get_spoke_tenant(new_pk))
             except Exception:  # noqa: BLE001
                 old_tenant = new_tenant = ""
             if old_tenant and new_tenant and old_tenant != new_tenant:

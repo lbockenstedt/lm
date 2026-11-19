@@ -288,8 +288,11 @@ async def _eval_tenant(engine: "AlertEngine", service, tenant: str, needed: set)
         for sid, meta in md.items():
             # Guard against a stored None.
             meta = meta or {}
-            if (meta.get("tenant_id") or "") not in ("", tenant):
-                continue  # bound to a different tenant
+            # Skip one bound to a different tenant (ids match in any case, as the
+            # access checks compare them); an unbound one counts for every tenant.
+            tag = meta.get("tenant_id") or ""
+            if tag and not access.same_tenant(tag, tenant):
+                continue
             # Work out its module type (live registry first, then stored metadata).
             mtype = (hub.spoke_module_types.get(hub._primary_key(sid)) or meta.get("module_type") or "").lower()
             # Hypervisor/simulation outages are reported as vm_offline; everything else as

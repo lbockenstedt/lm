@@ -302,6 +302,38 @@ def test_list_admin_acting_as_tenant_scopes_to_that_tenant(monkeypatch, tmp_path
     assert {d["id"] for d in r.json()["data"]} == {"shared-sw"}
 
 
+def test_list_admin_acting_as_a_legacy_case_twin_sees_only_its_own(monkeypatch, tmp_path):
+    """With legacy tenants "acme" and "ACME" both stored, tenant ids compare by
+    exact spelling (access._AMBIGUOUS_TENANT_IDS), so selecting one never lists
+    the other's device; a lone tenant still matches in any case."""
+    c, hub = _build(monkeypatch, tmp_path,
+                    gc_extra={"nw_devices": [_ACME_SW, {**_OTHER_SW, "tenant_id": "ACME"}]})
+    tok = _mint(hub, "admin", tenants=[], admin=True)
+    hub.state.tenant_state["tenants"]["ACME"] = {"netbox_tenant_slug": "acme-upper"}
+    monkeypatch.setattr(access_mod, "_AMBIGUOUS_TENANT_IDS",
+                        access_mod._case_collisions(hub.state.tenant_state["tenants"]))
+
+    def ids(tenant):
+        """Device ids listed with ?tenant=<tenant>."""
+        r = c.get(f"/api/nw/devices?tenant={tenant}", cookies={"lm_session": tok})
+        assert r.status_code == 200, r.text
+        return {d["id"] for d in r.json()["data"]}
+
+    assert ids("acme") == {"acme-sw"}
+    assert ids("ACME") == {"other-sw"}
+
+
+def test_list_admin_acting_as_only_spaces_sees_no_unassigned_device(monkeypatch, tmp_path):
+    """An acting tenant of only spaces names no tenant: it matches no
+    unassigned device (those belong to the ADMIN scope, ?tenant=default)."""
+    c, hub = _build(monkeypatch, tmp_path,
+                    gc_extra={"nw_devices": [_ACME_SW, {**_OTHER_SW, "tenant_id": ""}]})
+    tok = _mint(hub, "admin", tenants=[], admin=True)
+    r = c.get("/api/nw/devices?tenant=%20%20", cookies={"lm_session": tok})
+    assert r.status_code == 200, r.text
+    assert r.json()["data"] == []
+
+
 def test_list_admin_default_tenant_is_scoped_not_global(monkeypatch, tmp_path):
     """``default`` is the built-in ADMIN tenant with its own scanner/devices. A
     Global Admin who selects it (``?tenant=default``) sees the default tenant's

@@ -425,7 +425,8 @@ class HubOsUpdatesMixin:
         if t["kind"] == "agent":
             agent_cfg = (self.state.system_state.get("agent_config", {}) or {})
             ac = agent_cfg.get(apk(t["id"])) or agent_cfg.get(t["id"]) or {}
-            owner = str((ac.get("client_simulation") or {}).get("tenant_id") or "").strip()
+            from access import raw_tenant_id
+            owner = raw_tenant_id((ac.get("client_simulation") or {}).get("tenant_id"))
             if owner:
                 return owner
         sid = t["spoke_id"]
