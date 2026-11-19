@@ -8,6 +8,8 @@ import asyncio
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import cert_distribution as cd  # noqa: E402
@@ -27,8 +29,11 @@ _PEM = "-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----\n"
 def _fake_rr(responses):
     """``responses`` maps (spoke_id, command) → returned dict (the raw
     request_response result shape: {payload:{data: <spoke return>}}). Records
-    every call so tests can assert on the INSTALL_CERT payload."""
+    every call so tests can assert on the INSTALL_CERT payload. LE_LIST_CERTS
+    answers with no certs unless a test stubs it, so by default no spoke holds
+    its own cert (the wildcard fan-outs look the claims up there)."""
     calls = []
+    responses = {(_LE, "LE_LIST_CERTS"): _le_list_certs([]), **responses}
 
     async def rr(spoke_id, command, data=None, timeout=None):
         calls.append({"spoke": spoke_id, "cmd": command, "data": data,
@@ -53,7 +58,7 @@ def _install_ok():
 def _le_list_certs(certs):
     """LE_LIST_CERTS spoke return — certs nested under the spoke's ``data``
     wrapper, mirroring the real le spoke (``{"status":"SUCCESS","data":{
-    "certs":[...]}}``). ``_unwrap`` only strips the request_response payload
+    "certs":[...]}}``). ``unwrap_spoke`` only strips the request_response payload
     envelope, NOT the spoke's own ``data`` wrapper, so this is the shape that
     exercises the distributor's data-unwrap. (Tests previously used a flat
     ``{"status","certs"}`` → passed while production saw ``ret.get("certs")``
@@ -574,12 +579,79 @@ def test_wildcard_skips_spokes_with_unique_cert():
     assert all(s.get("wildcard") for s in summary)
 
 
+def test_wildcard_without_claim_set_looks_up_unique_certs():
+    """A caller that passes no claim set (the hub's issue path,
+    _distribute_one_cert) still skips a spoke holding its own cert: the
+    fan-out reads the claims from LE_LIST_CERTS. The lookup used to call an
+    undefined ``_unwrap``, so the claims were always empty and the wildcard
+    overwrote that spoke's own cert."""
+    rr, calls = _fake_rr({
+        (_LE, "LE_LIST_CERTS"): _le_list_certs([
+            {"domain": "*.lab.example.com", "targets": []},
+            {"domain": "opn2.lab.example.com",
+             "targets": [{"module_type": "firewall", "identifier": "opn-2"}]}]),
+        (_LE, "LE_GET_CERT"): _le_get_cert_ok(),
+        ("opn-1", "INSTALL_CERT"): _install_ok(),
+        ("opn-2", "INSTALL_CERT"): _install_ok(),
+    })
+    get_all = _wc_all_by_type({"firewall": ["opn-1", "opn-2"]})
+    push_state = {}
+    _run(cd.distribute_wildcard_to_all_spokes(
+        rr, get_all, cd.CERT_CAPABLE_MODULES, _LE, "*.lab.example.com",
+        None, push_state, install_on_hub=None))
+    assert [c["spoke"] for c in calls if c["cmd"] == "INSTALL_CERT"] == ["opn-1"]
+    assert "*.lab.example.com|opn-2" not in push_state
+
+
+@pytest.mark.parametrize("listed", [
+    {"status": "ERROR", "message": "busy"},
+    {"status": "SUCCESS", "data": {"count": 1}},
+    {"status": "SUCCESS", "data": {"certs": None}},
+    {"status": "SUCCESS", "data": {"certs": ["opn2.lab.example.com"]}},
+], ids=["error", "no-list", "null-list", "bad-entry"])
+def test_wildcard_failed_claim_lookup_fans_out_nothing(listed):
+    """When LE_LIST_CERTS fails or its cert list can't be read (missing, null,
+    or holding something that is not a cert record), no spoke's claim is
+    known, so a stale spoke is not written: the fan-out pushes nothing and
+    reports one ERROR (the hourly sweep retries), rather than pushing the
+    wildcard over a cert it can't see."""
+    rr, calls = _fake_rr({
+        (_LE, "LE_LIST_CERTS"): {"payload": {"data": listed}},
+        (_LE, "LE_GET_CERT"): _le_get_cert_ok(),
+        ("opn-1", "INSTALL_CERT"): _install_ok(),
+    })
+    get_all = _wc_all_by_type({"firewall": ["opn-1"]})
+    push_state = {}
+    summary = _run(cd.distribute_wildcard_to_all_spokes(
+        rr, get_all, cd.CERT_CAPABLE_MODULES, _LE, "*.lab.example.com",
+        None, push_state, install_on_hub=None))
+    assert not [c for c in calls if c["cmd"] in ("LE_GET_CERT", "INSTALL_CERT")]
+    assert len(summary) == 1 and summary[0]["status"] == "ERROR"
+    assert "1 stale spoke(s) not written" in summary[0]["message"]
+    assert summary[0].get("wildcard") and push_state == {}
+
+
+def test_wildcard_failed_claim_lookup_still_skips_when_all_current():
+    """Claims are needed only to write a stale spoke: with every spoke
+    current, a failed LE_LIST_CERTS still reports the all-current skip rather
+    than a failure (it used to return ERROR before checking)."""
+    get_all = _wc_all_by_type({"firewall": ["opn-1"]})
+    push_state = {"*.lab.example.com|opn-1": _H}
+    rr, calls = _fake_rr({
+        (_LE, "LE_LIST_CERTS"): {"payload": {"data": {"status": "ERROR", "message": "busy"}}}})
+    summary = _run(cd.distribute_wildcard_to_all_spokes(
+        rr, get_all, cd.CERT_CAPABLE_MODULES, _LE, "*.lab.example.com",
+        _H, push_state, install_on_hub=None))
+    assert [c["cmd"] for c in calls] == ["LE_LIST_CERTS"]
+    assert len(summary) == 1 and summary[0]["status"] == "SUCCESS" and summary[0]["skipped"]
+
+
 def test_wildcard_skips_all_current_no_pull(caplog):
     """When push_state shows every spoke at the current hash, no LE_GET_CERT
     pull + no INSTALL_CERT — the operator sees 'all N current' (not silence)."""
     get_all = _wc_all_by_type({"firewall": ["opn-1"]})
     push_state = {"*.lab.example.com|opn-1": _H}
-    rr, calls = _fake_rr({})  # no stubs needed — nothing should be called
+    rr, calls = _fake_rr({})  # only the default LE_LIST_CERTS answer is used
     with caplog.at_level("INFO", logger="le.distribution"):
         summary = _run(cd.distribute_wildcard_to_all_spokes(
             rr, get_all, cd.CERT_CAPABLE_MODULES, _LE, "*.lab.example.com",
