@@ -1247,10 +1247,13 @@ function _nwScanSchedulesHtml(d) {
         const mode = s.dry_run
             ? '<span class="px-1.5 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-600" title="Reports discoveries without adding them">preview</span>'
             : '<span class="px-1.5 py-0.5 rounded text-xs font-bold bg-amber-100 text-amber-700" title="Adds identified devices to the fleet automatically">auto-add</span>';
-        // A run that needs the tenant's vault logins is refused while several
-        // vault buckets name it, so it is neither discovery-only nor using its sets.
+        // Several vault buckets naming the tenant is a configuration error of a
+        // scan that needs its vault logins (a run that reaches them is refused),
+        // so it is neither discovery-only nor using its sets. The cell names the
+        // conflict, not a run's outcome: the Agent and Last run columns say
+        // whether a run happens (skipped while the agent is offline).
         const creds = s.vault_error
-            ? '<span class="text-red-600" title="Several Credential Vault buckets name this tenant, so this run is refused until a Global Admin keeps one">refused</span>'
+            ? '<span class="text-red-600" title="Several Credential Vault buckets name this tenant. Until a Global Admin keeps one, a run that needs its vault logins is refused">vault conflict</span>'
             : s.discovery_only
             ? '<span class="text-amber-600" title="No credential sets selected — this run probes reachability and open ports only, and can never add a device">discovery only</span>'
             : escapeHtml(s.credential_names.join(', '));

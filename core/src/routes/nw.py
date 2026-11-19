@@ -2387,9 +2387,14 @@ def register(app, hub, ctx):
             cred_ids = [str(x) for x in (cfg.get("credential_ids") or [])]
             spoke_id = str(cfg.get("spoke_id") or "").strip()
             rt = runtime.get(tid) or {}
-            # A run that needs the tenant's vault logins while several vault
-            # buckets name the tenant is refused (see _execute_nw_scan), so it
-            # is not a discovery-only pass either.
+            # Several vault buckets naming the tenant is a configuration error
+            # of a schedule whose scan needs the tenant's vault logins: a run
+            # that reaches them is refused (see _execute_nw_scan), so it is not
+            # a discovery-only pass either. It is reported whether or not the
+            # schedule can run now (it is disabled, or no agent is connected),
+            # as a warning to fix before it runs; what a run did stays in
+            # last_status ("skipped" with no agent). discovery_only below reads
+            # the vault sets only when this read did not fail, so it can't raise.
             vault_error = ""
             if _scan_uses_vault_sets(cred_ids):
                 try:
