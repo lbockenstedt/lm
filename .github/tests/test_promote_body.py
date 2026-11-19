@@ -179,6 +179,22 @@ class PromotionBodyQuotesEveryUnit(unittest.TestCase):
         self.git(self.work, "checkout", "-q", "-B", "promote/dev-to-qa", "origin/qa")
         self.git(self.work, "merge", "-q", "--no-ff", "--no-edit", "origin/dev")
 
+    def backmerge(self):
+        """Add a back-merge (#13) whose files already match qa, then a unit
+        with a file of the same awkward name that qa lacks; rebuild the
+        promotion and return the back-merge's sha."""
+        self.git(self.work, "checkout", "-q", "qa")
+        self.write('hot "fix" 1.txt', "hot\n")
+        self.commit("hotfix on qa")
+        self.git(self.work, "checkout", "-q", "dev")
+        self.git(self.work, "merge", "-q", "--no-ff", "--no-commit", "qa")
+        self.commit("Merge pull request #13 from x/backmerge/qa-to-dev", "backmerge: qa -> dev")
+        merge = self.head()
+        self.write('hot "fix" 2.txt', "new\n")
+        self.commit("Add the second fix", "The target has no such file yet.")
+        self.promote()
+        return merge
+
     def install(self, path, text):
         """Write an executable script."""
         path.write_text(text)
@@ -296,15 +312,7 @@ class PromotionBodyQuotesEveryUnit(unittest.TestCase):
         """A back-merge whose files already match the target is labelled as
         adding nothing and is not fetched, while a unit with a file of the
         same awkward name that the target lacks is still quoted."""
-        self.git(self.work, "checkout", "-q", "qa")
-        self.write('hot "fix" 1.txt', "hot\n")
-        self.commit("hotfix on qa")
-        self.git(self.work, "checkout", "-q", "dev")
-        self.git(self.work, "merge", "-q", "--no-ff", "--no-commit", "qa")
-        self.commit("Merge pull request #13 from x/backmerge/qa-to-dev", "backmerge: qa -> dev")
-        self.write('hot "fix" 2.txt', "new\n")
-        self.commit("Add the second fix", "The target has no such file yet.")
-        self.promote()
+        self.backmerge()
         proc, body = self.run_step()
         intent = intent_section(body)
         self.assertIn("**6 unit(s) of work**", intent)
@@ -317,6 +325,36 @@ class PromotionBodyQuotesEveryUnit(unittest.TestCase):
         self.assertEqual(intent.count("adds nothing"), 1)
         self.assertNotIn("hotfix on qa", intent)
         self.assertNotIn("::warning::", proc.stdout)
+
+    def test_a_failed_add_nothing_check_warns_and_quotes(self):
+        """A unit whose add-nothing check cannot run is quoted as usual, never
+        labelled as adding nothing, and the run log says which check failed."""
+        merge = self.backmerge()
+        gitbin = self.root / "gitbin"
+        gitbin.mkdir()
+        real_git = shutil.which("git", path=self.env["PATH"])
+        # Fails only the git call whose first argument is FAIL_DIFF_CMD and
+        # whose arguments include FAIL_DIFF_ARG.
+        self.install(gitbin / "git",
+                     '#!/bin/sh\n'
+                     'if [ "$1" = "$FAIL_DIFF_CMD" ]; then\n'
+                     '  for a in "$@"; do\n'
+                     '    [ "$a" = "$FAIL_DIFF_ARG" ] && { echo "fatal: broken" >&2; exit 128; }\n'
+                     '  done\n'
+                     'fi\n'
+                     'exec "%s" "$@"\n' % real_git)
+        for cmd, arg, check in (("diff", merge + "^1", "list the files unit"),
+                                ("--literal-pathspecs", merge, "compare the files unit")):
+            with self.subTest(check=check):
+                proc, body = self.run_step(PATH=str(gitbin) + os.pathsep + self.env["PATH"],
+                                           FAIL_DIFF_CMD=cmd, FAIL_DIFF_ARG=arg)
+                intent = intent_section(body)
+                self.assertRegex(intent, r"\*\*Unit 5 of 6: Merge pull request #13 from "
+                                         r"x/backmerge/qa-to-dev\*\* \(`[0-9a-f]+`, direct push\)"
+                                         r"\n\n> backmerge: qa -> dev\n")
+                self.assertNotIn("adds nothing", intent)
+                self.assertRegex(proc.stdout, r"::warning::Could not %s [0-9a-f]+ " % check)
+                self.assertIn("fatal: broken", proc.stderr)
 
     def test_an_unreadable_commit_is_unknown(self):
         """A commit git cannot read is UNKNOWN, and the other units render."""
@@ -341,15 +379,20 @@ class PromotionBodyQuotesEveryUnit(unittest.TestCase):
         self.assertIn("**Unit 4 of 4: #12 fix: thing (#12)**", intent)
 
     def test_units_that_cannot_be_listed_are_unknown(self):
-        """An empty or unknown unit_sha says UNKNOWN and warns."""
-        for sha in ("", "0" * 40):
+        """Each reason the units cannot be listed says UNKNOWN, is named in
+        the body and the warning, and lists no unit."""
+        qa_tip = self.git(self.work, "rev-parse", "origin/qa").strip()
+        for sha, why in (("", "promote.sh reported no `unit_sha`"),
+                         ("0" * 40, "`git rev-list` failed"),
+                         (qa_tip, "`git rev-list` found no commit between `qa` and `unit_sha`")):
             with self.subTest(unit_sha=sha):
                 proc, body = self.run_step(UNIT_SHA=sha)
                 intent = intent_section(body)
-                self.assertIn("could not be listed", intent)
-                self.assertIn("UNKNOWN --\nnot absent", intent)
+                self.assertIn("could not be listed (%s),\nso their intent is UNKNOWN -- not absent."
+                              % why, intent)
                 self.assertNotIn("**Unit", intent)
-                self.assertIn("::warning::Could not list the units", proc.stdout)
+                self.assertIn("::warning::Could not list the units of work in this promotion: %s ("
+                              % why, proc.stdout)
 
     def test_long_intents_share_the_budget(self):
         """Two long intents are cut to equal shares, each with a note."""

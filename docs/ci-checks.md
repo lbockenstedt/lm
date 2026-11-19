@@ -159,7 +159,10 @@ with no description or an unfilled Intent section; a commit git could not read
 is UNKNOWN too. A unit that adds nothing is labelled and nothing is fetched for
 it: one that changes only `VERSION` files carries no code, and one whose files
 (`VERSION` aside) already match the target, such as a back-merge, adds nothing
-to the diff.
+to the diff. When that check cannot run, the unit is quoted as usual and the
+run log warns. When the units cannot be listed at all, the body says their
+intent is UNKNOWN and names the cause: `promote.sh` reported no `unit_sha`,
+`git rev-list` failed, or it found no commit between the target and the unit.
 
 ## Promoting several repos
 

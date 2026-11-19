@@ -64,10 +64,13 @@ name: promote (reusable)
 # push. A PR named in a commit subject is quoted only when GitHub records it as
 # merged as that very commit. A unit that adds nothing -- it changes only
 # VERSION files, or only files that already match the target, as a back-merge
-# does -- is listed and labelled, and nothing is fetched for it. The units are
-# listed from git (`origin/<tgt>..unit_sha`, first parents), not from
+# does -- is listed and labelled, and nothing is fetched for it; when that
+# check cannot run, the unit is quoted as usual and the run log warns. The
+# units are listed from git (`origin/<tgt>..unit_sha`, first parents), not from
 # promote.sh's outputs, because this workflow runs the CALLER's promote.sh and
-# older copies name only one unit. The quotes share a budget of about 16,000
+# older copies name only one unit. When they cannot be listed, the body says
+# their intent is UNKNOWN and why: no unit_sha, a failed rev-list, or an empty
+# range. The quotes share a budget of about 16,000
 # characters fairly, a cut quote says so and points to its PR or commit, and at
 # most 40 units are quoted. Quoting one PR's intent for a multi-unit diff is
 # what got ab#586 denied.
@@ -487,14 +490,25 @@ jobs:
             awk '/^[[:space:]]*$/ { if (seen) held++; next }
                  { for (; held > 0; held--) print ""; seen = 1; print }'
           }
+          # Units that cannot be listed have three causes, and the body and
+          # the warning name the one that happened. An empty range should not
+          # happen -- promote.sh picks unit_sha from `origin/$TGT..origin/$SRC`
+          # in this same job -- so it is reported too, never read as a
+          # promotion with no units.
           units_ok="no"
-          if [ -n "$UNIT_SHA" ] \
-             && unit_shas="$(git rev-list --reverse --first-parent "$base..$UNIT_SHA" 2>/dev/null)" \
-             && [ -n "$unit_shas" ]; then
-            units_ok="yes"
+          if [ -z "$UNIT_SHA" ]; then
+            units_why='promote.sh reported no `unit_sha`'
+          elif ! unit_shas="$(git rev-list --reverse --first-parent "$base..$UNIT_SHA" 2> "$udir/err")"; then
+            units_why='`git rev-list` failed'
+            cat "$udir/err" >&2
+          elif [ -z "$unit_shas" ]; then
+            units_why="\`git rev-list\` found no commit between \`$TGT\` and \`unit_sha\`"
           else
+            units_ok="yes"
+          fi
+          if [ "$units_ok" != "yes" ]; then
             unit_shas=""
-            echo "::warning::Could not list the units of work in this promotion (unit_sha='$UNIT_SHA'), so the PR body says their intent is UNKNOWN. Re-run this workflow; if it repeats, check promote.sh's unit_sha output."
+            echo "::warning::Could not list the units of work in this promotion: $units_why (unit_sha='$UNIT_SHA'), so the PR body says their intent is UNKNOWN. Re-run this workflow; if it repeats, compare promote.sh's unit_sha output with \`git rev-list origin/$TGT..origin/$SRC\`."
           fi
           # A stuck queue can batch dozens of units into one promotion, and
           # GitHub refuses a PR body over 65,536 characters, so only the oldest
@@ -559,23 +573,34 @@ jobs:
             # files never count: promotion pins them to the target. A unit
             # that changes no file at all stays on the normal path, where its
             # message is its intent.
-            if [ -z "$state" ] \
-               && git diff --name-only -z --no-renames "$u^1" "$u" > "$udir/files" 2>/dev/null \
-               && [ -s "$udir/files" ]; then
-              paths=()
-              while IFS= read -r -d '' p; do
-                case "$p" in
-                  VERSION|*/VERSION) ;;
-                  *) paths+=("$p") ;;
-                esac
-              done < "$udir/files"
-              if [ "${#paths[@]}" -eq 0 ]; then
-                state="version-only"
-              elif git --literal-pathspecs diff --quiet "$base" "$u" -- "${paths[@]}" 2>/dev/null; then
-                # Only exit 0 means "the same". 1 (they differ) and a failed
-                # diff both leave the unit on the normal path, which quotes its
-                # intent and claims nothing about the target.
-                state="in-target"
+            #
+            # A check that cannot run warns, and the unit stays on the normal
+            # path too: that path quotes its intent and claims nothing about
+            # the target, so a broken check can cost an "adds nothing" label
+            # but never hide an intent. Both diffs write to a file, so failed,
+            # empty and non-empty are three outcomes without reading `$?`.
+            nothing_warn="so its intent is quoted without checking whether $TGT already has them"
+            if [ -z "$state" ]; then
+              if ! git diff --name-only -z --no-renames "$u^1" "$u" > "$udir/files" 2> "$udir/err"; then
+                cat "$udir/err" >&2
+                echo "::warning::Could not list the files unit $sha changes, $nothing_warn."
+              elif [ -s "$udir/files" ]; then
+                paths=()
+                while IFS= read -r -d '' p; do
+                  case "$p" in
+                    VERSION|*/VERSION) ;;
+                    *) paths+=("$p") ;;
+                  esac
+                done < "$udir/files"
+                if [ "${#paths[@]}" -eq 0 ]; then
+                  state="version-only"
+                elif ! git --literal-pathspecs diff --name-only -z --no-renames "$base" "$u" -- "${paths[@]}" \
+                       > "$udir/differ" 2> "$udir/err"; then
+                  cat "$udir/err" >&2
+                  echo "::warning::Could not compare the files unit $sha changes with $TGT, $nothing_warn."
+                elif [ ! -s "$udir/differ" ]; then
+                  state="in-target"
+                fi
               fi
             fi
             # Step 4: GitHub records the commit each PR was merged as, and only
@@ -796,9 +821,9 @@ jobs:
                 printf 'GitHub'"'"'s size limit._\n\n'
               fi
             else
-              printf '_The units of work in this promotion could not be listed (`unit_sha`\n'
-              printf 'was empty or `git rev-list` failed), so their intent is UNKNOWN --\n'
-              printf 'not absent. Review the enumerated changes directly._\n\n'
+              printf '_The units of work in this promotion could not be listed (%s),\n' "$units_why"
+              printf 'so their intent is UNKNOWN -- not absent. Review the enumerated\n'
+              printf 'changes directly._\n\n'
             fi
             if [ "${REMAINING:-0}" -gt 0 ] 2>/dev/null; then
               printf 'Up to **%s** further unit(s) are queued behind this one and will\n' "$REMAINING"
