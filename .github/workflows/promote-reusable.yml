@@ -637,7 +637,7 @@ jobs:
                   awk '!done && /^#+[[:space:]]/ && /Intent & Problem Statement/ { f = 1; next }
                        f && /^#+[[:space:]]/ { f = 0; done = 1 }
                        f { print }' "$udir/body" \
-                    | perl -0777 -pe 's/<!--.*?-->//gs' | trim_blank > "$udir/$n.txt"
+                    | perl -0777 -pe 's/<!--.*?(?:-->|\z)//gs' | trim_blank > "$udir/$n.txt"
                   if [ -s "$udir/$n.txt" ]; then
                     state="ok"
                   else
@@ -646,7 +646,7 @@ jobs:
                 else
                   # Written without the template, as an automated back-merge
                   # is: the description is still what the PR said it does.
-                  perl -0777 -pe 's/<!--.*?-->//gs' "$udir/body" | trim_blank > "$udir/$n.txt"
+                  perl -0777 -pe 's/<!--.*?(?:-->|\z)//gs' "$udir/body" | trim_blank > "$udir/$n.txt"
                   if [ -s "$udir/$n.txt" ]; then
                     state="no-section"
                   else
