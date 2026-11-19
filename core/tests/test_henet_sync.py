@@ -7,6 +7,8 @@ Contract under test:
 * accepted records are relayed to the spoke as ``HENET_WEB_RECORD`` (local-state
   refresh, no dyndns push);
 * a scope with no assignable credential is skipped, not errored;
+* a tenant that several credential slots name is an error, not a skip, and
+  nothing is written for it;
 * the loop skips quietly when the henet spoke is offline.
 """
 import asyncio
@@ -123,6 +125,37 @@ def test_scope_without_credential_is_skipped(patch_write, monkeypatch):
     assert res["applied"] == 0
     assert res["skipped"] == 1
     assert calls == []
+
+
+@pytest.mark.parametrize("spellings", [["beta"], ["BETA"], ["BETA", "beta"], ["beta", "BETA"]])
+def test_scope_with_several_slots_is_an_error(patch_write, monkeypatch, spellings):
+    # "Beta" and "BETA" slots (saved before slots matched in any case) both
+    # name tenant "beta": its records are written with neither, nor with the
+    # global login, and the run reports an error rather than "ok". The same
+    # when the records are tagged with the exact "BETA", and in either order
+    # (the first record's spelling names the scope).
+    gc = {"henet": {
+        "vault_credential": {"bucket": "__admin__", "name": "he-global"},
+        "tenant_credentials": {"Beta": {"bucket": "b", "name": "old"},
+                               "BETA": {"bucket": "b", "name": "new"}},
+    }}
+    records = [{"name": f"b{i}.beta.com", "type": "A", "value": "2.2.2.2",
+                "ttl": 300, "tenant_id": t} for i, t in enumerate(spellings)]
+    calls = patch_write()
+    # Recorded, not raised: the vault branch counts any exception as an error.
+    reads = []
+
+    async def _fake_get(hub, bucket, name):
+        reads.append((bucket, name))
+        return {"he_username": f"{bucket}-user", "he_password": f"{bucket}-pass"}
+    monkeypatch.setattr(cred_vault, "automation_get", _fake_get)
+
+    hub = _FakeHub(gc, records)
+    res = _run(hub.sync_henet_scheduled())
+    assert res["status"] == "error"
+    assert (res["applied"], res["errors"], res["skipped"]) == (0, len(spellings), 0)
+    assert reads == [] and calls == []
+    assert not [p for (cmd, p) in hub.relayed if cmd == "HENET_WEB_RECORD"]
 
 
 def test_no_managed_records(patch_write):

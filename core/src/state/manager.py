@@ -341,6 +341,11 @@ class StateManager:
             logger.info(f"Tenant state loaded successfully from {self.tenants_path}")
         else:
             logger.info("No valid tenant state found, using defaults.")
+        # Rebuild access's tenant caches (shared tenant, groups, twins) from the
+        # records just loaded. Lazy import: access is a leaf module, state stays
+        # importable alone.
+        from access import refresh_tenant_caches
+        refresh_tenant_caches(self.tenant_state)
 
         # A state file decrypted via a fallback (previous/legacy) key — re-save
         # NOW to re-encrypt everything under the current key so the old key can
@@ -775,7 +780,11 @@ class StateManager:
         ValueError when tenant_key cannot name one tenant, and for a new
         blank id, which names no tenant (as a scope it would read as no
         selection). A blank-id record saved before that stays editable by its
-        exact id, so a single-shared sweep can still clear its flag."""
+        exact id, so a single-shared sweep can still clear its flag.
+
+        Every write refreshes access's tenant caches (refresh_tenant_caches),
+        so a new twin is told apart from its sibling at once, whichever route
+        or loop wrote it."""
         tenants = self.tenant_state.setdefault("tenants", {})
         if tenant_id not in tenants and (tenant_id is None or not str(tenant_id).strip()):
             raise ValueError("tenant id is blank")
@@ -783,6 +792,9 @@ class StateManager:
         key = self.tenant_key(tenant_id)
         tenants.setdefault(tenant_id if key is None else key, {}).update(data)
         self._mark_dirty()
+        # Lazy import: access is a leaf module, state stays importable alone.
+        from access import refresh_tenant_caches
+        refresh_tenant_caches(self.tenant_state)
 
     def delete_tenant(self, tenant_id: str) -> Optional[List[str]]:
         """Remove a tenant's registry record and detach it from every user and
@@ -828,7 +840,7 @@ class StateManager:
             return None
         tenants.pop(match, None)
         # Lazy import: access is a leaf module, state stays importable alone.
-        from access import goes_with_deleted_tenant, retired_twin_ids
+        from access import goes_with_deleted_tenant, refresh_tenant_caches, retired_twin_ids
         remaining = set(map(str, tenants)) | {"default"}
         # Keep the id as retired while a twin of it survives; see the docstring.
         folded = str(match).strip().casefold()
@@ -865,6 +877,9 @@ class StateManager:
         if _goes(self.system_state.get("active_tenant")):
             self.system_state["active_tenant"] = "default"
         self._mark_dirty()
+        # Refresh access's tenant caches: a deleted shared tenant stops being
+        # shared, and a retired twin is told apart from the survivor, at once.
+        refresh_tenant_caches(self.tenant_state)
         logger.info(f"Tenant '{match}' deleted (users detached).")
         return detached
 

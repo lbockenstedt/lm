@@ -41,6 +41,12 @@ secret out…** (rescue the credential into a bucket something can actually
 reference) and **Delete this bucket**. See *Rescuing and removing an orphaned
 bucket* below.
 
+An orphan whose id differs from a tenant's only by case or surrounding spaces
+(`ACME` next to `acme`) also blocks that tenant's vault logins for `nw` scans:
+the hub can't tell which bucket is the tenant's, so it offers neither and
+refuses a scan that needs them (see [nw.md](nw.md), Troubleshooting). Moving
+the secrets into the tenant's bucket and deleting the orphan fixes it.
+
 Two independent gates protect a secret:
 - **Reach** (role) — which buckets you can see at all.
 - **Pass-phrase / PSK** (knowledge) — whether you can *decrypt* an interactive

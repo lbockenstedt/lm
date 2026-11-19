@@ -814,6 +814,99 @@ def test_scan_schedules_narrow_to_selected_tenant(monkeypatch, tmp_path):
     assert [s["tenant_id"] for s in r.json()["schedules"]] == ["acme"]
 
 
+# ── several vault buckets naming one tenant ─────────────────────────────────
+
+def _two_acme_buckets(**extra):
+    """global_config with vault buckets "ACME" and "acme" (saved before buckets
+    matched in any case): both name tenant acme, so which holds its logins is
+    unknown."""
+    login = {"mode": "hub", "type": "login"}
+    return {"cred_vault": {"secrets": {"ACME": {"upper": dict(login)},
+                                       "acme": {"lower": dict(login)}}}, **extra}
+
+
+def _scan_stubs(monkeypatch, hub):
+    """Answer the scan's NetBox, ping and NW_SCAN calls (every pinged host is up)."""
+    async def prefixes(_hub, _tid):
+        return ["10.0.0.0/29"]
+    monkeypatch.setattr(access_mod, "fetch_tenant_prefixes", prefixes)
+
+    async def rr(spoke_id, cmd, data, timeout=30.0):
+        hub.calls.append((spoke_id, cmd, data))
+        if cmd == "NW_PING_SWEEP":
+            return {"payload": {"data": {"status": "SUCCESS", "alive": list(data["targets"])}}}
+        return {"payload": {"data": {"status": "SUCCESS", "reachable": []}}}
+    hub.request_response = rr
+    for name in ("get_dns_spoke_for_tenant", "get_dhcp_spoke_for_tenant",
+                 "get_cppm_spoke_for_tenant"):
+        setattr(hub, name, lambda *_a, **_k: None)
+
+
+def test_scan_needing_vault_logins_is_refused_while_two_buckets_name_the_tenant(monkeypatch, tmp_path):
+    """With no set picked, or a vault login picked, the scan needs acme's vault
+    logins: it is refused with the remedy instead of silently running as a
+    discovery-only pass, and nothing reaches the spoke."""
+    c, hub = _build(monkeypatch, tmp_path, gc_extra=_two_acme_buckets())
+    _scan_stubs(monkeypatch, hub)
+    tok = _mint(hub, "admin", tenants=[], admin=True)
+    for picked in ([], ["vault:acme:lower"]):
+        r = c.post("/setup/nw-scan/run", cookies={"lm_session": tok}, json={
+            "tenant": "acme", "dry_run": True, "credential_ids": picked})
+        assert r.status_code == 409, r.text
+        assert "Move a secret out" in r.json()["detail"]
+    res = asyncio.run(hub.run_nw_scheduled_scan("acme"))
+    assert res["status"] == "error" and "Move a secret out" in res["reason"]
+    assert hub.calls == []
+
+
+def test_scan_with_only_stored_sets_picked_ignores_the_bucket_conflict(monkeypatch, tmp_path):
+    """A scan that picks only stored sets needs no vault login, so it runs."""
+    c, hub = _build(monkeypatch, tmp_path, gc_extra=_two_acme_buckets(nw_scan_credentials=[
+        {"id": "c-acme", "name": "acme login", "tenant_id": "acme", "username": "u"}]))
+    _scan_stubs(monkeypatch, hub)
+    tok = _mint(hub, "admin", tenants=[], admin=True)
+    r = c.post("/setup/nw-scan/run", cookies={"lm_session": tok}, json={
+        "tenant": "acme", "dry_run": True, "credential_ids": ["c-acme"],
+        "targets": ["10.0.0.2"], "ip_sources": ["explicit"]})
+    assert r.status_code == 200, r.text
+    scan = next(d for _s, cmd, d in hub.calls if cmd == "NW_SCAN")
+    assert [x["id"] for x in scan["credentials"]] == ["c-acme"]
+
+
+def test_scan_schedules_flag_a_run_the_bucket_conflict_refuses(monkeypatch, tmp_path):
+    """The schedule row carries the bucket conflict (and why), not
+    discovery-only; a schedule that picks only stored sets is not flagged."""
+    c, hub = _build(monkeypatch, tmp_path, gc_extra=_two_acme_buckets(
+        nw_tenant_cfg={"othercorp": {"scan": {"credential_ids": ["c-other"]}}}))
+    hub.state.system_state["global_config"]["cred_vault"]["secrets"].update(
+        {"OtherCorp": {}, "othercorp": {}})
+    tok = _mint(hub, "admin", tenants=[], admin=True)
+    rows = {s["tenant_id"]: s for s in c.get(
+        "/api/nw/scan-schedules", cookies={"lm_session": tok}).json()["schedules"]}
+    assert "Move a secret out" in rows["acme"]["vault_error"]
+    assert rows["acme"]["discovery_only"] is False
+    assert rows["othercorp"]["vault_error"] == ""
+
+
+def test_scan_schedules_report_the_bucket_conflict_of_a_schedule_that_cannot_run(monkeypatch, tmp_path):
+    """The conflict is a configuration error, not a run's outcome: a disabled
+    schedule (acme) and an enabled one with no nw agent (beta) carry it too,
+    are not called discovery-only, and the list still answers."""
+    c, hub = _build(monkeypatch, tmp_path, gc_extra=_two_acme_buckets(nw_tenant_cfg={
+        "acme": {"scan_schedule": {"enabled": False}},
+        "beta": {"scan_schedule": {"enabled": True}}}))
+    hub.state.system_state["global_config"]["cred_vault"]["secrets"].update(
+        {"BETA": {}, "beta": {}})
+    tok = _mint(hub, "admin", tenants=[], admin=True)
+    r = c.get("/api/nw/scan-schedules", cookies={"lm_session": tok})
+    assert r.status_code == 200, r.text
+    rows = {s["tenant_id"]: s for s in r.json()["schedules"]}
+    assert rows["acme"]["enabled"] is False and rows["beta"]["enabled"] is True
+    for tid in ("acme", "beta"):
+        assert "Move a secret out" in rows[tid]["vault_error"]
+        assert rows[tid]["discovery_only"] is False
+
+
 # ── background sweep: gateway pass, then ping-first host sweep ─────────────
 
 def test_sweep_adds_answering_gateway_24s_then_pings_before_probing(monkeypatch, tmp_path):
