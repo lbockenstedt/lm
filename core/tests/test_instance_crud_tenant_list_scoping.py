@@ -44,11 +44,11 @@ class _Hub:
         return sid
 
 
-def _build(is_admin=True, own_tenants=()):
+def _build(is_admin=True, own_tenants=(), primary=""):
     hub = _Hub()
     app = FastAPI()
     app.state.hub = hub
-    sess = {"user": {"user_id": "u", "tenants": list(own_tenants),
+    sess = {"user": {"user_id": "u", "tenants": list(own_tenants), "tenant_id": primary,
                      "permissions": {"admin": is_admin}}}
     ctx = SimpleNamespace(
         _session_user=lambda req: sess,
@@ -191,3 +191,43 @@ def test_no_vault_sets_when_several_buckets_name_the_tenant(spelling):
     assert r.status_code == 200, r.text
     assert _ids(r) == ["c-shared"]
     assert "Move a secret out" in r.json()["vault_error"]
+
+
+def _vault(hub, secrets):
+    """Store Credential Vault buckets of hub-mode logins: {bucket: [names]}."""
+    login = {"mode": "hub", "type": "login"}
+    hub.state.system_state["global_config"]["cred_vault"] = {"secrets": {
+        b: {n: login for n in names} for b, names in secrets.items()}}
+
+
+@pytest.mark.parametrize("other", ["tenant-lrb", SHARED])
+def test_non_admin_gets_no_vault_logins_of_a_tenant_not_their_own(other):
+    """Naming another tenant (or the shared one, without being a member) lists
+    none of its vault logins: their names are that tenant's labels, and the
+    caller may not scan it (_nw_caller_tenant). Their own still list."""
+    c, hub = _build(is_admin=False, own_tenants=["tenant-admin"])
+    _seed(hub)
+    _vault(hub, {"tenant-admin": ["mine"], other: ["theirs"]})
+    assert _ids(c.get(f"/setup/nw-scan-credentials?tenant={other}")) == ["c-shared"]
+    assert _ids(c.get("/setup/nw-scan-credentials?tenant=tenant-admin")) == [
+        "c-admin", "c-shared", "vault:tenant-admin:mine"]
+
+
+def test_non_admin_gets_no_vault_error_of_another_tenant():
+    """Another tenant's bucket conflict (which names its buckets) stays hidden."""
+    c, hub = _build(is_admin=False, own_tenants=["tenant-admin"])
+    _seed(hub)
+    _vault(hub, {"TENANT-LRB": ["upper"], "tenant-lrb": ["lower"]})
+    r = c.get("/setup/nw-scan-credentials?tenant=tenant-lrb")
+    assert r.status_code == 200, r.text
+    assert "vault_error" not in r.json()
+
+
+def test_non_admin_with_only_a_primary_tenant_gets_its_vault_logins():
+    """A session with no tenants list falls back to its primary tenant_id, as
+    the scan and scan-config routes do."""
+    c, hub = _build(is_admin=False, primary="tenant-admin")
+    _vault(hub, {"tenant-admin": ["mine"], "tenant-lrb": ["theirs"]})
+    assert _ids(c.get("/setup/nw-scan-credentials?tenant=tenant-admin")) == [
+        "vault:tenant-admin:mine"]
+    assert _ids(c.get("/setup/nw-scan-credentials?tenant=tenant-lrb")) == []
