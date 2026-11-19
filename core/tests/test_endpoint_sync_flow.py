@@ -29,7 +29,7 @@ class _SyncHub(EndpointSyncMixin):
     """Minimal hub stand-in: canned request_response + spoke routing."""
 
     def __init__(self, ipam_spoke="netbox-spoke-1", nac_spoke="cppm-spoke-1",
-                 tenants=None, responses=None):
+                 tenants=None, responses=None, shared_nac_spoke=None):
         self.state = FakeState(
             global_config={},
             tenants=tenants or {"acme": {"name": "Acme", "netbox_tenant_slug": "acme"}},
@@ -37,6 +37,7 @@ class _SyncHub(EndpointSyncMixin):
         self.simulations_store = _FakeSimulationsStore()
         self._ipam_spoke = ipam_spoke
         self._nac_spoke = nac_spoke
+        self._shared_nac_spoke = shared_nac_spoke or nac_spoke
         self._responses = responses or {}
         self.request_log = []
         self._nac_unconfigured_spokes = set()
@@ -52,7 +53,7 @@ class _SyncHub(EndpointSyncMixin):
         return self._nac_spoke
 
     def get_cppm_spoke_for_shared(self):
-        return self._nac_spoke
+        return self._shared_nac_spoke
 
     async def request_response(self, spoke_id, command, payload, timeout=30.0):
         self.request_log.append((spoke_id, command, payload))
@@ -261,3 +262,64 @@ async def test_nad_sync_skips_without_secret(monkeypatch):
     res = await hub.sync_tenant_nads("acme")
     assert res["status"] == "skipped"
     assert hub.request_log == []
+
+
+@pytest.mark.asyncio
+async def test_tenant_with_its_own_clearpass_is_never_synced_into_the_shared_one(monkeypatch):
+    """A tenant with a NAC record of its own has left the shared ClearPass
+    (shared access ``auto``). While its own spoke is offline, or also serves
+    another tenant, its endpoints and NADs are skipped, not written to the
+    shared ClearPass. A tenant still on shared NAC syncs there."""
+    import access
+    import cred_vault
+
+    async def _list(hub, stype, buckets):
+        return [{"bucket": "acme", "value": {"radius_secret": "r1"}}]
+
+    async def _prefixes(hub, tid):
+        return ["10.1.0.0/16"]
+
+    monkeypatch.setattr(cred_vault, "automation_list_by_type", _list)
+    monkeypatch.setattr(access, "fetch_tenant_prefixes", _prefixes)
+    hub = _SyncHub(nac_spoke=None, shared_nac_spoke="cppm-shared", responses={
+        ("netbox-spoke-1", "NETBOX_GET_IPS"): _netbox_ips_payload(),
+        ("cppm-shared", "CPPM_SYNC_ENDPOINTS"): _cppm_ok_payload(),
+        ("cppm-shared", "CPPM_SYNC_NADS"): {"status": "SUCCESS"}})
+    hub.state.update_global_config({"nac_instances": [{"tenant_id": "acme", "spoke_id": "cppm-acme"}]})
+    status = await hub.sync_tenant_endpoints("acme")
+    nads = await hub.sync_tenant_nads("acme")
+    assert status["status"] == "error" and nads["status"] == "skipped"
+    assert hub.request_log == []
+    # Without a record of its own, the tenant still uses the shared ClearPass.
+    hub.state.update_global_config({"nac_instances": []})
+    await hub.sync_tenant_endpoints("acme")
+    await hub.sync_tenant_nads("acme")
+    assert [(s, c) for s, c, _ in hub.request_log if c.startswith("CPPM_")] == [
+        ("cppm-shared", "CPPM_SYNC_ENDPOINTS"), ("cppm-shared", "CPPM_SYNC_NADS")]
+
+
+@pytest.mark.asyncio
+async def test_ipam_edit_syncs_through_the_tenants_own_usable_clearpass():
+    """trigger_endpoint_sync checks the tenant's own (or still shared)
+    ClearPass spoke, not the hub's first NAC spoke: another tenant's
+    unconfigured spoke does not block it, and an unconfigured spoke of its
+    own does."""
+    import asyncio
+    hub = _SyncHub(nac_spoke="cppm-acme")
+    hub.state.system_state["global_config"] = {hub._ENDPOINT_SYNC_CFG_KEY: {"enabled": True}}
+    hub.get_spoke_by_type = lambda module_type: "cppm-other" if module_type == "nac" else None
+    started = []
+
+    async def _sync(tenant_id, allow_mass_remove=False):
+        """Record the tenant whose sync started."""
+        started.append(tenant_id)
+
+    hub.sync_tenant_endpoints = _sync
+    hub._nac_unconfigured_spokes = {"cppm-other"}
+    hub.trigger_endpoint_sync("acme")
+    await asyncio.sleep(0)
+    assert started == ["acme"]
+    hub._nac_unconfigured_spokes = {"cppm-acme"}
+    hub.trigger_endpoint_sync("acme")
+    await asyncio.sleep(0)
+    assert started == ["acme"]

@@ -167,6 +167,9 @@ class _AutoApproveHub:
     def approve_and_bind_spoke(self, spoke_id, tenant_id):
         return main.LabManagerHub.approve_and_bind_spoke(self, spoke_id, tenant_id)
 
+    def bind_spoke_tenant(self, spoke_id, tenant_id):
+        return main.LabManagerHub.bind_spoke_tenant(self, spoke_id, tenant_id)
+
     def spoke_can_accept_commands(self, spoke_id):
         return main.LabManagerHub.spoke_can_accept_commands(self, spoke_id)
 

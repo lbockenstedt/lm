@@ -21,6 +21,7 @@ These lock in:
 import asyncio
 import types
 
+from hub_spoke_registry import SpokeRegistryMixin, nac_push_key
 from routes.dashboard import register
 
 
@@ -43,9 +44,21 @@ class _Hub:
         self._global = global_spoke
         self._responses = responses
         self._agent_spokes = agent_spokes or {}
+        self.calls = []
 
     def get_spoke_by_type(self, t):
         return {"ipam": "ipam-1", "nac": "nac-1"}.get(t)
+
+    def get_cppm_spoke_for_global(self):
+        """Return the fixture's safe global NAC source."""
+        return "nac-global"
+
+    def get_cppm_spokes_for_tenant(self, tenant_id):
+        """Return the fixture's tenant-visible NAC source."""
+        return ["nac-shared"]
+
+    # The real scope pick, over the two fixture sources above.
+    get_cppm_spoke_for_scope = SpokeRegistryMixin.get_cppm_spoke_for_scope
 
     def _agent_relay_name(self, agent_id):
         return agent_id
@@ -61,6 +74,7 @@ class _Hub:
 
     async def request_response(self, spoke, cmd, payload=None, timeout=None):
         payload = payload or {}
+        self.calls.append((spoke, cmd, dict(payload)))
         # A pinned-agent (whole-host) query is keyed by (spoke, cmd, agent_id).
         if payload.get("agent_id"):
             return self._responses.get(
@@ -230,6 +244,115 @@ def test_pinned_agent_stopped_vm_not_counted():
     )
     out = _summary(hub, _ctx(_LRB_PREFIXES))
     assert out["vms"] == 1  # only the running one
+
+
+def test_dashboard_tenant_summary_uses_tenant_visible_nac_source():
+    """Tenant counts use the selected tenant's NAC source, not a global pick."""
+    hub = _Hub(
+        tenants=_TENANTS,
+        module_metadata={},
+        plural={"lrb": []},
+        global_spoke=None,
+        responses={
+            ("nac-shared", "CPPM_GET_ACCESS_TRACKER"): {
+                "sessions": [{"ip": "10.10.0.15"}],
+            },
+        },
+    )
+    out = _summary(hub, _ctx(_LRB_PREFIXES))
+    assert out["sessions"] == 1
+    assert ("nac-shared", "CPPM_GET_ACCESS_TRACKER", {}) in hub.calls
+
+
+def test_dashboard_session_count_skips_rows_a_nested_tenant_owns(monkeypatch):
+    """On the shared ClearPass a tenant on 10.0.0.0/8 does not count the
+    sessions of a tenant on 10.10.0.0/16 inside it, as in the Access Tracker."""
+    import access
+    prefixes = {"lrb": ["10.0.0.0/8"], "inner": ["10.10.0.0/16"]}
+
+    async def _fetch(hub, tid):
+        """Each tenant's NetBox prefixes."""
+        return prefixes.get(tid, [])
+
+    monkeypatch.setattr(access, "fetch_tenant_prefixes", _fetch)
+    tenants = dict(_TENANTS, inner={"netbox_tenant_slug": "inner", "proxmox_tag": ""})
+    hub = _Hub(
+        tenants=tenants,
+        module_metadata={},
+        plural={"lrb": [], "inner": []},
+        global_spoke=None,
+        responses={("nac-shared", "CPPM_GET_ACCESS_TRACKER"): {
+            "sessions": [{"ip": "10.10.0.15"}, {"ip": "10.20.0.5"}]}},
+    )
+    hub.state.tenant_state = {"tenants": tenants}
+    assert _summary(hub, _ctx(prefixes))["sessions"] == 1
+    assert _summary(hub, _ctx(prefixes), tenant="inner")["sessions"] == 1
+
+
+class _NacOwnerHub(_Hub):
+    """The dashboard hub whose tenant NAC source is ``spoke``, owned as the
+    real record-based ``get_nac_spoke_owner`` decides from ``records``."""
+
+    get_nac_spoke_owner = SpokeRegistryMixin.get_nac_spoke_owner
+
+    def __init__(self, spoke, records, sessions):
+        super().__init__(
+            tenants=_TENANTS,
+            module_metadata={spoke: {"module_type": "nac", "tenant_id": ""}},
+            plural={"lrb": []},
+            global_spoke=None,
+            responses={(spoke, "CPPM_GET_ACCESS_TRACKER"): {"sessions": sessions}},
+        )
+        self._nac = spoke
+        gc = {"nac_instances": records}
+        self.state.get_global_config = lambda: gc
+        # Each record has a host and the spoke was sent the first one, so
+        # it is not stale (hub_spoke_registry.nac_spoke_stale).
+        for rec in records:
+            rec.setdefault("host", "cp.example")
+        self.state.system_state["nac_config_pushed"] = {spoke: nac_push_key(records[0])}
+        self.state.get_spoke_tenant = lambda sid: ""
+
+    def _primary_key(self, sid):
+        return sid
+
+    def get_cppm_spokes_for_tenant(self, tenant_id):
+        """The tenant's NAC source is the fixture's spoke."""
+        return [self._nac]
+
+
+def test_dashboard_counts_an_own_clearpass_in_full_and_a_mixed_one_not_at_all():
+    """A spoke serving only the tenant's own ClearPass record counts every
+    session, including ones off the tenant's subnets, even when the spoke
+    itself is unassigned. A spoke serving two tenants' records counts none
+    for either tenant."""
+    sessions = [{"ip": "10.10.0.15"}, {"ip": "192.168.5.9"}]
+    own = _NacOwnerHub("nac-own", [{"id": "a", "spoke_id": "nac-own", "tenant_id": "lrb"}], sessions)
+    assert _summary(own, _ctx(_LRB_PREFIXES))["sessions"] == 2
+    mixed = _NacOwnerHub("nac-mixed", [
+        {"id": "a", "spoke_id": "nac-mixed", "tenant_id": "lrb"},
+        {"id": "b", "spoke_id": "nac-mixed", "tenant_id": "other"}], sessions)
+    assert _summary(mixed, _ctx(_LRB_PREFIXES))["sessions"] == 0
+
+
+def test_dashboard_default_summary_uses_safe_global_nac_source():
+    """The admin/default dashboard uses only the explicit global NAC source."""
+    tenants = dict(_TENANTS, default={"netbox_tenant_slug": "default", "proxmox_tag": ""})
+    prefixes = dict(_LRB_PREFIXES, default=["10.10.0.0/24"])
+    hub = _Hub(
+        tenants=tenants,
+        module_metadata={},
+        plural={"default": []},
+        global_spoke=None,
+        responses={
+            ("nac-global", "CPPM_GET_ACCESS_TRACKER"): {
+                "sessions": [{"ip": "10.10.0.16"}],
+            },
+        },
+    )
+    out = _summary(hub, _ctx(prefixes), tenant="default")
+    assert out["sessions"] == 1
+    assert ("nac-global", "CPPM_GET_ACCESS_TRACKER", {}) in hub.calls
 
 
 def test_pinned_agent_whole_host_vms_counted_for_default_tenant():

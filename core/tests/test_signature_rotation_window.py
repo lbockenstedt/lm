@@ -297,6 +297,45 @@ async def test_install_evicts_zombie_when_existing_unresponsive():
     assert zombie.close_code == 1008
 
 
+
+def _nac_ledger(hub, entry):
+    """Give ``hub`` a NAC ledger in which spoke s1 confirmed ``entry``."""
+    hub.state = type("S", (), {"system_state": {"nac_config_pushed": {"s1": entry}},
+                               "_mark_dirty": lambda self: None})()
+    return hub.state.system_state["nac_config_pushed"]
+
+
+async def test_install_marks_the_nac_config_unknown_for_a_new_process():
+    """A new spoke process no longer holds the NAC config the hub sent the
+    last one, so installing it, in a free slot or over a zombie, marks that
+    config unknown ("") until the reconnect push is confirmed."""
+    km = _make_km()
+    km.keys["s1"] = _key("cur", "current-secret")
+    hub = _ConnHub(km)
+    ledger = _nac_ledger(hub, "rec@h")
+    assert await _install(hub, "s1", _FakeWS(), "cur") is True
+    assert ledger == {"s1": ""}
+
+    hub = _ConnHub(km)
+    ledger = _nac_ledger(hub, "rec@h")
+    hub.active_connections["s1"] = _FakeWS(alive=False)
+    hub.active_connection_key_ids["s1"] = "cur"
+    assert await _install(hub, "s1", _FakeWS(), "cur") is True
+    assert ledger == {"s1": ""}
+
+
+async def test_rejected_duplicate_keeps_the_nac_config_known():
+    """A duplicate rejected while the live connection keeps the slot changes
+    nothing: the live process still holds the config it confirmed."""
+    km = _make_km()
+    km.keys["s1"] = _key("cur", "current-secret")
+    hub = _ConnHub(km)
+    ledger = _nac_ledger(hub, "rec@h")
+    hub.active_connections["s1"] = _FakeWS(alive=True)
+    hub.active_connection_key_ids["s1"] = "cur"
+    assert await _install(hub, "s1", _FakeWS(), "cur") is False
+    assert ledger == {"s1": "rec@h"}
+
 async def test_install_keeps_existing_when_last_seen_fresh_no_probe():
     """A reconnect while the existing connection has a FRESH last_seen (it's
     actively sending frames — a live duplicate) is REJECTED without even

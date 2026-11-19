@@ -1094,3 +1094,96 @@ def test_prefix_reads_ignore_the_pre_unified_hub_cache_copies():
     _feed(warm, "lab1", _COMMON_VRF_ROWS["lab1"])
     assert _reread(hub, "lab1", {"status": "ERROR", "message": "NetBox timed out"}) == [
         "172.16.0.0/23", "172.31.200.0/22"]
+
+
+# ── Shared-source ownership: nested common prefixes ─────────────────────────
+# The shared ClearPass and the shared Kea serve every tenant's common
+# prefixes, and those can nest. A shared row belongs to the tenant with the
+# most specific served prefix holding it, so a tenant with a broad container
+# does not see a nested tenant's rows. A prefix in a tenant's own VRF is not
+# served by shared infrastructure and claims nothing; the shared tenant sees
+# shared infrastructure whole and claims nothing either (rule 6.2).
+
+from simulations.tenant_filter import OWN_SOURCE_MARKER
+
+
+class _NestedHub(_PrefixHub):
+    """a's 10.0.0.0/8 holds b's 10.1.0.0/16 (global table); b2 is a second hub
+    tenant on NetBox tenant b; c's 10.1.5.0/24 is in c's own VRF 7; group g1
+    is a; the shared tenant has 10.1.0.0/24 and 172.16.0.0/12, which holds
+    d's 172.16.1.0/24."""
+    _ROWS = {"a": [("10.0.0.0/8", None)], "g1": [("10.0.0.0/8", None)],
+             "b": [("10.1.0.0/16", None)], "c": [("10.1.5.0/24", 7)],
+             "d": [("172.16.1.0/24", None)],
+             "shared": [("10.1.0.0/24", None), ("172.16.0.0/12", None)]}
+
+    async def request_response(self, spoke_id, command, payload, **kwargs):
+        rows = self._ROWS.get(payload.get("tenant") or payload.get("tenant_group"), [])
+        return {"payload": {"data": {"status": "SUCCESS", "prefixes": [
+            {"prefix": p, "vrf_id": v} for p, v in rows]}}}
+
+
+def _nested_hub():
+    tenants = {t: {"netbox_tenant_slug": t} for t in ("a", "b", "c", "d", "shared")}
+    tenants["b2"] = {"netbox_tenant_slug": "b"}
+    tenants["group:g1"] = {"is_tenant_group": True, "netbox_tenant_group_slug": "g1",
+                           "member_tenant_slugs": ["a"]}
+    return _NestedHub(FakeState(system_state={}, tenants=tenants))
+
+
+_NESTED_ROWS = [{"ip": "10.1.0.5", "n": "b"},        # b's /16 is the most specific
+                {"ip": "10.2.0.5", "n": "a"},        # only a's /8 holds it
+                {"ip": "10.1.5.9", "n": "b-in-c"},   # c's own-VRF /24 claims nothing
+                {"ip": "172.16.1.5", "n": "d"},      # d's /24, inside the shared tenant's /12
+                {"ip": "10.1.0.7", "n": "own", OWN_SOURCE_MARKER: True}]
+
+
+def _nested(tenant):
+    out = asyncio.run(filter_tenant(_nested_hub(), {"x": _admin_session()}, _FakeRequest("x"),
+                                    {"sessions": list(_NESTED_ROWS)}, "nac", ["ip"],
+                                    explicit_tenant=tenant))
+    return [r["n"] for r in out["sessions"]]
+
+
+def test_shared_clearpass_rows_go_to_the_most_specific_tenant():
+    assert _nested("a") == ["a", "own"]
+    assert _nested("b") == ["b", "b-in-c", "own"]
+    assert _nested("b2") == ["b", "b-in-c", "own"]  # a tie keeps the row for both
+
+
+def test_tenant_group_is_narrowed_like_its_members():
+    assert _nested("group:g1") == ["a", "own"]
+
+
+def test_shared_tenant_sees_shared_infrastructure_whole():
+    # d's /24 is more specific than the shared tenant's /12, yet the shared
+    # tenant keeps d's row; d keeps it too.
+    assert _nested("shared") == ["b", "d", "own"]
+    assert _nested("d") == ["d", "own"]
+
+
+def test_non_admin_without_selection_is_narrowed_too():
+    # No ?tenant=: filter_tenant falls back to filter_session, which narrows
+    # NAC rows, and the shared Kea's scopes (shared_source) but not a tenant's
+    # own DHCP server's.
+    hub, sessions = _nested_hub(), {"u": _user_session("a")}
+    nac = asyncio.run(filter_session(hub, sessions, _QSRequest("u"),
+                                     {"sessions": list(_NESTED_ROWS)}, "nac", ["ip"]))
+    assert [r["n"] for r in nac["sessions"]] == ["a", "own"]
+    scopes = {"subnets": [{"subnet": "10.1.0.0/24"}, {"subnet": "10.2.0.0/24"}]}
+    for shared_source, want in ((True, ["10.2.0.0/24"]),
+                                (False, ["10.1.0.0/24", "10.2.0.0/24"])):
+        out = asyncio.run(filter_tenant(hub, sessions, _QSRequest("u"), scopes, "dhcp",
+                                        ["subnet"], shared_source=shared_source))
+        assert [s["subnet"] for s in out["subnets"]] == want
+
+
+def test_single_record_gates_apply_ownership():
+    hub = _nested_hub()
+    b_row, a_row = _NESTED_ROWS[0], _NESTED_ROWS[1]
+    for rec, want in ((b_row, None), (a_row, a_row)):
+        assert asyncio.run(_access.gate_record_tenant(
+            hub, {"x": _admin_session()}, _FakeRequest("x"), rec, "nac", ["ip"],
+            explicit_tenant="a")) == want
+        assert asyncio.run(_access.gate_record(
+            hub, {"u": _user_session("a")}, _FakeRequest("u"), rec, "nac", ["ip"])) == want

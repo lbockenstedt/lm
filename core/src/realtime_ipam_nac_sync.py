@@ -47,7 +47,9 @@ try:
 except Exception:  # pragma: no cover - access always importable in-app
     attribute_by_prefix = None  # type: ignore
 # MAC normalizer, spoke tenant lookups, and spoke response unwrapper.
-from access import norm_mac, nw_spoke_tenant, spoke_owner_tenant, unwrap_spoke  # sibling leaf (no main/api back-import)
+from access import (  # sibling leaf (no main/api back-import)
+    ADMIN_ONLY_OWNER, norm_mac, nw_spoke_tenant, spoke_data_owner, tenant_is_unbound, unwrap_spoke,
+)
 # Shared periodic-loop runner.
 from sync_loop import run_sync_loop  # sibling leaf
 
@@ -94,13 +96,13 @@ class RealtimeIpamNacSyncMixin:
                 .get(self._REALTIME_NAC_CFG_KEY, {})) or {}
 
     def _rt_nac_spokes(self) -> List[str]:
-        """Every connected, configured NAC (CPPM) spoke to pull from. A tenant
-        whose addresses overlap another tenant's has its own ClearPass, so all
-        of them are pulled, not just the first."""
-        # NAC spokes known to be unconfigured are excluded.
-        unconfigured = getattr(self, "_nac_unconfigured_spokes", set())
-        return [sid for sid in self.get_all_spokes_by_type(self._RT_NAC_SOURCE_MODULE)
-                if sid not in unconfigured]
+        """Every usable NAC (CPPM) spoke to pull from
+        (``get_nac_usable_spokes``: live and configured). A tenant whose
+        addresses overlap another tenant's has its own ClearPass, so all of
+        them are pulled, not just the first. A stale spoke (one that may hold
+        a ClearPass other than the one the hub gives it now) is not live, so
+        its sessions are never written."""
+        return self.get_nac_usable_spokes()
 
     def _rt_ipam_spoke(self) -> Optional[str]:
         """Connected IPAM (netbox) spoke id to push to (first of type). None if down."""
@@ -165,13 +167,46 @@ class RealtimeIpamNacSyncMixin:
             info["window_end"] = info["window_end"] or one.get("window_end", "")
         return sessions, info
 
+    def _rt_nac_owner(self, nac: str) -> Optional[Tuple[str, str]]:
+        """``(owner, hint)`` to stamp on ``nac``'s sessions as
+        ``owner_tenant_id`` and ``source_tenant_id`` (see
+        ``access.attribute_by_prefix``), or None when they must not be written
+        to any tenant.
+
+        A NAC spoke serves the ClearPass the hub pushed it, whatever its own
+        binding says, so its NAC records decide (``access.spoke_data_owner``):
+        the one tenant it serves alone owns every session. The shared
+        ClearPass has no owner, so each session goes to the tenant whose
+        prefix contains it; the spoke's binding only breaks prefix ties, and
+        only when it names no real tenant, so a tenant-bound spoke holding a
+        shared record never pulls other tenants' overlapping addresses into
+        that tenant. A spoke that serves no one tenant alone (admin-only) gets
+        None: tenants may not read it even through their subnet filter, so its
+        sessions are not written into their NetBox by prefix either."""
+        owner = spoke_data_owner(self, nac)
+        if owner == ADMIN_ONLY_OWNER:
+            return None
+        if owner:
+            return owner, owner
+        binding = nw_spoke_tenant(self, nac)
+        return "", (binding if tenant_is_unbound(binding) else "")
+
     async def _rt_pull_one(self, nac: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        """Pull + normalize one CPPM spoke's recent sessions (see _rt_pull_sessions)."""
+        """Pull + normalize one CPPM spoke's recent sessions (see
+        _rt_pull_sessions). An admin-only spoke (``_rt_nac_owner``) is not
+        pulled."""
         # Lookback window and per-spoke errors.
         lookback = self._rt_nac_lookback()
         errors: List[str] = []
         # Ask the spoke for recent sessions; any failure is recorded as an error.
         try:
+            # Whose sessions these are, decided before the pull.
+            stamps = self._rt_nac_owner(nac)
+            if stamps is None:
+                logger.info("Realtime NAC: not pulling %s, it serves no one "
+                            "tenant's ClearPass alone (Setup → NAC)", nac)
+                return [], {"errors": errors, "total": 0}
+            owner, hint = stamps
             r = await self.request_response(nac, self._RT_NAC_PULL_COMMAND,
                                             {"lookback_minutes": lookback},
                                             timeout=30.0)
@@ -182,10 +217,6 @@ class RealtimeIpamNacSyncMixin:
                 return [], {"errors": errors, "total": 0}
             # Session rows from the response.
             rows = (d.get("sessions") if isinstance(d, dict) else None) or []
-            # The CPPM spoke's tenant: framed IPs overlap across tenants'
-            # VRFs, so attribution prefers this tenant's prefixes.
-            nac_tid = nw_spoke_tenant(self, nac)
-            nac_owner = spoke_owner_tenant(self, nac)
             # Normalize each row; skip non-dict rows.
             out: List[Dict[str, Any]] = []
             for row in rows or []:
@@ -219,10 +250,10 @@ class RealtimeIpamNacSyncMixin:
                     sess_rec["model"] = model
                 if manufacturer:
                     sess_rec["manufacturer"] = manufacturer
-                if nac_tid:
-                    sess_rec["source_tenant_id"] = nac_tid
-                if nac_owner:
-                    sess_rec["owner_tenant_id"] = nac_owner
+                if hint:
+                    sess_rec["source_tenant_id"] = hint
+                if owner:
+                    sess_rec["owner_tenant_id"] = owner
                 out.append(sess_rec)
             # Pull info: errors, reported total, and the session window.
             info = {"errors": errors, "total": int(d.get("total", len(out)) or 0) if isinstance(d, dict) else len(out),

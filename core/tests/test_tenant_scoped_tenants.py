@@ -398,3 +398,80 @@ def test_delete_tenant_with_bound_spoke_rejected_409():
     assert "acme-fw" in r.json()["detail"]
     # Tenant NOT removed while a spoke is still bound.
     assert "acme" in hub.state.tenant_state["tenants"]
+
+
+# ── tenant sharing changes drop the NAC caches ──────────────────────────────
+# A cached NAC entry is served without re-resolving its ClearPass, so a write
+# that changes which tenant is shared, or a tenant's shared access, must drop
+# the NAC caches; a write that changes neither keeps them.
+@pytest.fixture
+def nac_drops(monkeypatch):
+    """Record drop_nac_caches calls and restore the shared-tenant cache after."""
+    drops = []
+    monkeypatch.setattr(tenants_users, "drop_nac_caches", drops.append)
+    monkeypatch.setattr(access, "_SHARED_TENANT_ID", access._SHARED_TENANT_ID)
+    monkeypatch.setattr(access, "_GROUP_MEMBERS", access._GROUP_MEMBERS)
+    return drops
+
+
+def test_setup_tenant_drops_nac_caches_only_when_sharing_changes(nac_drops):
+    c, hub, holder = _build({**_acme_record(), "beta": {"name": "Beta"}})
+    holder.current = _global_admin()
+    assert c.post("/setup/tenant", json={"tenant_id": "acme",
+                                         "config": {"description": "x"}}).status_code == 200
+    assert nac_drops == []
+    assert c.post("/setup/tenant", json={"tenant_id": "acme",
+                                         "config": {"shared_access": "deny"}}).status_code == 200
+    assert nac_drops == [hub]
+    assert c.post("/setup/tenant", json={"tenant_id": "beta",
+                                         "config": {"shared": True}}).status_code == 200
+    assert nac_drops == [hub, hub]
+
+
+def test_tenant_edit_route_drops_nac_caches_for_a_global_sharing_change(nac_drops):
+    c, hub, holder = _build({"beta": {"name": "Beta", "shared": True}, **_acme_record()})
+    access.refresh_shared_tenant(hub)
+    holder.current = _tenant_admin("acme")
+    assert c.post("/api/tenant/acme", json={"config": {"name": "Acme 2"}}).status_code == 200
+    assert nac_drops == []
+    holder.current = _global_admin()
+    assert c.post("/api/tenant/acme", json={"config": {"shared": True}}).status_code == 200
+    assert nac_drops == [hub]
+    # One shared tenant, as /setup/tenant keeps it: beta's flag is cleared.
+    assert hub.state.get_tenant("beta")["shared"] is False
+    assert access.shared_tenant_id() == "acme"
+
+
+def test_delete_tenant_drops_nac_caches(nac_drops):
+    c, hub, holder = _build({**_acme_record(), "beta": {"name": "Beta", "shared": True}})
+    access.refresh_shared_tenant(hub)
+    holder.current = _global_admin()
+    assert c.delete("/setup/tenants/beta").status_code == 200
+    assert nac_drops == [hub]
+    assert access.shared_tenant_id() is None
+
+
+def test_tenant_group_prune_drops_nac_caches(monkeypatch, nac_drops):
+    """The NetBox group sync deletes a group that left NetBox, which may be
+    the shared tenant, so it drops the NAC caches; a sync that prunes nothing
+    keeps them."""
+    import asyncio
+    import main
+    import routes.cppm as cppm
+    monkeypatch.setattr(cppm, "drop_nac_caches", nac_drops.append)
+    hub = _Hub({**_acme_record(),
+                "group:emea": {"name": "EMEA", "is_tenant_group": True, "shared": True}})
+    access.refresh_shared_tenant(hub)
+    groups = [{"slug": "emea", "name": "EMEA", "tenant_slugs": ["acme"]}]
+
+    async def _rr(spoke_id, cmd, payload, timeout=None):
+        """The NetBox spoke's NETBOX_GET_TENANT_GROUPS reply."""
+        return {"payload": {"data": {"status": "SUCCESS", "groups": list(groups)}}}
+    hub.request_response = _rr
+
+    asyncio.run(main.LabManagerHub._sync_tenant_groups(hub, "nb-1"))
+    assert nac_drops == [] and access.shared_tenant_id() == "group:emea"
+    groups.clear()
+    asyncio.run(main.LabManagerHub._sync_tenant_groups(hub, "nb-1"))
+    assert nac_drops == [hub] and access.shared_tenant_id() is None
+    assert "group:emea" not in hub.state.tenant_state["tenants"]
