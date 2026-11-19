@@ -56,7 +56,7 @@ function renderOsUpdatesView(content) {
         <div class="${card}">
             <div class="flex items-center justify-between">
                 <h3 class="${h3}">OS Updates ${rawHtml(helpIcon('lm-hub', null, 'Hub help'))} <span class="cursor-help normal-case font-normal text-slate-500" title="Operating-system package updates (apt dist-upgrade) for every spoke and agent. Global Admin only; every approval is audit-logged.
-• Deploy everything, only selected nodes/packages, or only security updates.
+• Deploy every listed node, only selected nodes/packages, or only security updates.
 • A manual deploy never reboots; a host that needs one gets a Reboot… button. Proxmox cluster nodes are the exception (below).
 • Auto-patch is approved per node and runs only in the maintenance window, minus packages under &quot;Never auto-install&quot;.
 • Auto-reboot (on by default for auto-patch nodes) reboots nodes that installed something once the run is done, hub last.
@@ -64,7 +64,7 @@ function renderOsUpdatesView(content) {
 • Nodes update one at a time; the hub goes last (this page restarts).
 • Nothing is listed until you pick a tenant or a state (needs attention, patching, updates pending, not checked yet, up to date) in the bar above the list; click a picked one again to clear it. Changing the pick unticks every node.
 • The picked nodes are grouped by tenant, then by state; each group has a Select all and the Sort box orders them.
-• Ticks and Select fixes (Who is affected?) cover only the listed nodes. The summary of failed nodes names the listed ones, plus any whose spoke is offline (they drop out of the list, so even a lone one is named) while no tenant and no state other than needs attention is picked, and always when no node reports at all.
+• Ticks, Approve &amp; deploy listed and Select fixes (Who is affected?) cover only the listed nodes. The summary of failed nodes names the listed ones, plus any whose spoke is offline (they drop out of the list, so even a lone one is named) while no tenant and no state other than needs attention is picked, and always when no node reports at all.
 • Separate from LM code updates.">ⓘ</span></h3>
                 <span class="flex items-center gap-3"><span id="osu-status" class="text-xs text-slate-500"></span><span id="osu-checked" class="text-xs text-slate-500"></span></span>
             </div>
@@ -72,7 +72,7 @@ function renderOsUpdatesView(content) {
             <div class="flex flex-wrap items-center gap-2">
                 <button data-action="check" class="${btnSecCls}">↻ Check for updates</button>
                 <button id="osu-apply-selected" data-action="applySelected" class="${btnCls}" disabled>Deploy selected (0)</button>
-                <button id="osu-apply" data-action="apply" class="${btnSecCls}" title="Every node you manage that has pending updates, not only the nodes listed below">Approve &amp; deploy all</button>
+                <button id="osu-apply" data-action="apply" class="${btnSecCls}" disabled title="Every listed node that has pending updates, never a node the list hides. Pick a tenant or a state to list nodes.">Approve &amp; deploy listed (0)</button>
                 <label class="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer ml-1" title="Nodes without picked packages get only their pending security updates"><input type="checkbox" id="osu-security-only" class="w-4 h-4 rounded">Security updates only</label>
                 <button id="osu-cancel" data-action="cancel" class="${btnSecCls} hidden">Cancel run</button>
                 <span id="osu-run" class="text-xs text-slate-500 ml-auto"></span>
@@ -582,10 +582,20 @@ async function _osuDeploy(body, summary) {
     } catch (e) { showToast('Apply failed: ' + (e.message || e), 'error'); }
 }
 
+// What "Approve & deploy listed" deploys and counts: the nodes the list shows
+// under the current picks (_osuListed) that a group's Select all would tick.
+// None while the list asks for a pick, so it never deploys a node the list
+// hides (fleet rule 7.5: select-all covers only the current view).
+function _osuDeployable(d, busy) {
+    return (_osuListed((d.nodes || []).map(n => _osuClassify(n, d.run, busy))) || []).filter(c => _osuSelectable(c.n, busy));
+}
+
+// "Approve & deploy listed": send the listed deployable nodes by key, so the
+// hub patches only those (an empty body would mean every node in scope).
 async function osuApply() {
-    const n = (_osuView.state.data.totals || {}).with_updates || 0;
-    if (!n) { showToast('No nodes have pending updates.', 'info'); return; }
-    _osuDeploy({}, `All ${n} node(s) with pending updates.`);
+    const rows = _osuDeployable(_osuView.state.data, _osuBusy());
+    if (!rows.length) { showToast('No listed node has pending updates.', 'info'); return; }
+    _osuDeploy({ nodes: rows.map(c => c.key) }, `All ${rows.length} listed node(s) with pending updates.`);
 }
 
 async function osuApplySelected() {
@@ -680,8 +690,9 @@ function _osuRender(d) {
             : (run && label[run.status] ? `last run${run.actor === 'auto-patch' ? ' (auto-patch)' : ''}: ${run.done}/${run.total} ${label[run.status]}` : '');
     }
     const nSel = _osuSelectedKeys().length;
+    const nAll = _osuDeployable(d, busy).length;
     const btn = document.getElementById('osu-apply');
-    if (btn) btn.disabled = busy;
+    if (btn) { btn.disabled = !nAll; btn.textContent = `Approve & deploy listed (${nAll})`; }
     const selBtn = document.getElementById('osu-apply-selected');
     if (selBtn) { selBtn.disabled = busy || !nSel; selBtn.textContent = `Deploy selected (${nSel})`; }
     const cancelBtn = document.getElementById('osu-cancel');
