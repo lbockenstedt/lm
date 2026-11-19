@@ -56,6 +56,25 @@ name: promote (reusable)
 # per direct push) and promotes the OLDEST un-promoted one, by merging an
 # ancestor of dev rather than by cherry-picking. See promote.sh.
 #
+# EVERY CARRIED UNIT STATES ITS OWN INTENT. promote.sh may extend that unit
+# over later units that change the same files, so one promotion PR can still
+# carry several. The PR body quotes each unit's own intent, oldest first: the
+# merged PR's `Intent & Problem Statement` section (or, for a PR written
+# without the template, its description), or the commit message of a direct
+# push. A PR named in a commit subject is quoted only when GitHub records it as
+# merged as that very commit. A unit that adds nothing -- it changes only
+# VERSION files, or only files that already match the target, as a back-merge
+# does -- is listed and labelled, and nothing is fetched for it; when that
+# check cannot run, the unit is quoted as usual and the run log warns. The
+# units are listed from git (`origin/<tgt>..unit_sha`, first parents), not from
+# promote.sh's outputs, because this workflow runs the CALLER's promote.sh and
+# older copies name only one unit. When they cannot be listed, the body says
+# their intent is UNKNOWN and why: no unit_sha, a failed rev-list, or an empty
+# range. The quotes share a budget of about 16,000
+# characters fairly, a cut quote says so and points to its PR or commit, and at
+# most 40 units are quoted. Quoting one PR's intent for a multi-unit diff is
+# what got ab#586 denied.
+#
 # Promotion is driven up to three ways (whichever the caller subscribes to),
 # and ALL of them only ever OPEN a PR:
 #   * BY HAND (`workflow_dispatch` on the caller): `source: dev` (dev -> qa) or
@@ -351,9 +370,9 @@ jobs:
           SRC: ${{ steps.route.outputs.src }}
           TGT: ${{ steps.route.outputs.tgt }}
           BR: ${{ steps.route.outputs.branch }}
+          UNIT_SHA: ${{ steps.build.outputs.unit_sha }}
           UNIT_PR: ${{ steps.build.outputs.unit_pr }}
           UNIT_SUBJECT: ${{ steps.build.outputs.unit_subject }}
-          UNITS_CARRIED: ${{ steps.build.outputs.units_carried }}
           REMAINING: ${{ steps.build.outputs.remaining }}
         run: |
           set -e
@@ -375,47 +394,318 @@ jobs:
               title="$title ($UNIT_SUBJECT)"
             fi
           fi
-          # The panel is told to lower confidence when a PR states no intent
-          # (AGENTS.md: Pull Request Intent & Specification Rule). A promotion
-          # PR inherits its intent from the original PR it carries, so fetch
-          # that and quote it. The old boilerplate ("carries code only") is
-          # what made every recent promotion reject with ZERO code findings --
-          # dns#65, le#22, opnsense#54, cppm#34, nw#128 all read "the
-          # description doesn't match the diff".
+          # GitHub's GraphQL API intermittently answers "Something went wrong
+          # while executing your query", and when it does the promotion branch
+          # has ALREADY been pushed -- so the step fails with no PR, and the
+          # promotion stalls silently until the next run. ab's own dev->qa
+          # promotion died exactly this way (run 36516057861). The per-unit
+          # `gh pr view` below goes through it too.
           #
-          # "intent is empty" is FOUR different states and they must not print the
-          # same sentence: no originating PR at all, a fetch that FAILED (so the
-          # section was never even looked at), a PR with no section, and a PR that
-          # left the template comment unfilled. Reporting a failed fetch as "stated
-          # no intent" is simply false, and it hides a broken token or a deleted PR.
-          intent=""
-          intent_state="no-unit"
-          if [ -n "$UNIT_PR" ]; then
-            # Pessimistic default: only a confirmed exit 0 clears it.
-            intent_state="fetch-failed"
-            if unit_body="$(gh pr view "$UNIT_PR" --json body -q .body 2>/dev/null)"; then
-              # A heading is `#`s FOLLOWED BY WHITESPACE: a body line that merely
-              # starts with an issue ref ("#123 fixed ...") must neither open nor
-              # close the section. HTML comments are stripped across lines --
-              # the PR template's placeholders can span several lines, and a
-              # line-local `sed 's/<!--.*-->//'` left them quoted as "intent".
-              if printf '%s\n' "$unit_body" \
-                   | grep -E '^#+[[:space:]].*Intent & Problem Statement' >/dev/null; then
-                intent="$(printf '%s\n' "$unit_body" | awk '
-                  /^#+[[:space:]]/ && /Intent & Problem Statement/ { f=1; next }
-                  f && /^#+[[:space:]]/ { exit }
-                  f { print }' | perl -0777 -pe 's/<!--.*?-->//gs' | sed '/^[[:space:]]*$/d')"
-                if [ -n "$intent" ]; then
-                  intent_state="ok"
-                else
-                  intent_state="unfilled"
-                fi
-              else
-                intent_state="no-section"
+          # NB "$@", never eval: $title is a commit subject, i.e. arbitrary text
+          # that can contain backticks, $(...) and semicolons. Building a command
+          # string from it and eval-ing would be a command-injection hole.
+          # stderr is deliberately NOT suppressed: it is kept only long enough
+          # to read, then passed on, so the real gh error still reaches the job
+          # log.
+          #
+          # GitHub's answer that the PR asked for does not exist is final, so
+          # it is not retried: a commit subject's "(#N)" can name an issue, or
+          # a number from before the repo moved (ab dev's ff6a2ff7 "...
+          # (#883)" resolves to neither), and retrying it only delays the run
+          # by 45 seconds. The per-unit read below tells it apart from a
+          # failed fetch by the same text.
+          no_such_pr='Could not resolve to a PullRequest'
+          gh_retry() {
+            local _attempt=1
+            local _delay=3
+            local _rc _err
+            _err="$(mktemp "${RUNNER_TEMP:-/tmp}/gh-err.XXXXXX")"
+            while : ; do
+              _rc=0
+              "$@" 2> "$_err" || _rc=1
+              cat "$_err" >&2
+              if [ "$_rc" -eq 0 ] || grep "$no_such_pr" "$_err" >/dev/null; then
+                break
+              fi
+              if [ "$_attempt" -ge 5 ]; then
+                break
+              fi
+              echo "gh call failed (attempt $_attempt/5); retrying in ${_delay}s..." >&2
+              sleep "$_delay"
+              _attempt=$((_attempt + 1))
+              _delay=$((_delay * 2))
+            done
+            rm -f "$_err"
+            return "$_rc"
+          }
+          # The review panel judges the diff against the PR's stated intent
+          # (fleet rule 2.4), and a promotion's diff is the sum of the units of
+          # work it carries. promote.sh extends the oldest unit over later
+          # units that change the same files, so one PR can carry several, and
+          # each is quoted here with its OWN intent, oldest first. Quoting only
+          # one PR's intent left the other units to be judged against nothing:
+          # ab#586 was denied for that. The older boilerplate ("carries code
+          # only") was worse -- dns#65, le#22, opnsense#54, cppm#34 and nw#128
+          # all rejected with ZERO code findings, for "the description doesn't
+          # match the diff".
+          #
+          # The units come from git, not from promote.sh's `units_carried`
+          # output: this step runs the CALLER's promote.sh, and on most fleet
+          # repos that copy predates `units_carried` and names only the newest
+          # unit. `origin/$TGT..$UNIT_SHA` along first parents is exactly what
+          # the promotion merge brings in, whichever promote.sh built it. That
+          # includes units that add nothing: a VERSION-only bump, or a
+          # back-merge whose files already match the target. They are in the
+          # merge, so each is listed and labelled as adding nothing, and no
+          # intent is fetched for it.
+          #
+          # A unit's PR is read off its subject, as promote.sh's describe_unit
+          # does, but that is only a candidate: a direct push whose subject
+          # ends "(#N)" may be citing an issue or another PR. The PR is quoted
+          # only when GitHub says it was merged as this very commit; otherwise
+          # the unit is a direct push and quotes its own message.
+          #
+          # "No intent" is several states and they must not print the same
+          # sentence: a fetch that FAILED (the section was never looked at, so
+          # the commit's own message is quoted for context), a PR with no
+          # section (its description is quoted instead -- an automated
+          # back-merge's says what it carries), a PR with no description at
+          # all, a PR that left the template comment unfilled, a direct push
+          # with no message body, and a commit git could not read. Reporting a
+          # failed fetch as "stated no intent" is simply false, and it hides a
+          # broken token or a deleted PR.
+          #
+          # The single-PR body this replaced also had a `no-unit` state, for a
+          # unit with no PR; such a direct push now quotes its own commit
+          # message. Keep that name in this comment until ab's
+          # tests/test_pr_intent_statement.py stops grepping this step for it:
+          # ab's CI reads this file from lm main, and every ab branch and
+          # queued unit still carries that test.
+          base="origin/$TGT"
+          body_file="${RUNNER_TEMP:-/tmp}/promote-body.md"
+          udir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/promote-units.XXXXXX")"
+          # Drop leading and trailing blank lines but keep the ones between
+          # paragraphs, which keep a quoted message readable.
+          trim_blank() {
+            awk '/^[[:space:]]*$/ { if (seen) held++; next }
+                 { for (; held > 0; held--) print ""; seen = 1; print }'
+          }
+          # Units that cannot be listed have three causes, and the body and
+          # the warning name the one that happened. An empty range should not
+          # happen -- promote.sh picks unit_sha from `origin/$TGT..origin/$SRC`
+          # in this same job -- so it is reported too, never read as a
+          # promotion with no units.
+          units_ok="no"
+          if [ -z "$UNIT_SHA" ]; then
+            units_why='promote.sh reported no `unit_sha`'
+          elif ! unit_shas="$(git rev-list --reverse --first-parent "$base..$UNIT_SHA" 2> "$udir/err")"; then
+            units_why='`git rev-list` failed'
+            cat "$udir/err" >&2
+          elif [ -z "$unit_shas" ]; then
+            units_why="\`git rev-list\` found no commit between \`$TGT\` and \`unit_sha\`"
+          else
+            units_ok="yes"
+          fi
+          if [ "$units_ok" != "yes" ]; then
+            unit_shas=""
+            echo "::warning::Could not list the units of work in this promotion: $units_why (unit_sha='$UNIT_SHA'), so the PR body says their intent is UNKNOWN. Re-run this workflow; if it repeats, compare promote.sh's unit_sha output with \`git rev-list origin/$TGT..origin/$SRC\`."
+          fi
+          # A stuck queue can batch dozens of units into one promotion, and
+          # GitHub refuses a PR body over 65,536 characters, so only the oldest
+          # max_units are quoted (and fetched).
+          max_units=40
+          n=0
+          shown=0
+          : > "$udir/sizes"
+          re_merge='^Merge pull request #([0-9]+) '
+          re_squash='\(#([0-9]+)\)[[:space:]]*$'
+          # The unit's commit message without its trailers, which say nothing
+          # about the change.
+          message_text() {
+            { grep -v -i -E '^[[:space:]]*(co-authored-by|signed-off-by):' "$udir/msg" || true; } \
+              | trim_blank
+          }
+          for u in $unit_shas; do
+            n=$((n + 1))
+            if [ "$n" -gt "$max_units" ]; then
+              continue
+            fi
+            shown="$n"
+            state=""
+            pr=""
+            kind="push"
+            # Step 1: read the commit once: short sha, subject, message. It was
+            # just listed by rev-list, so this fails only in a damaged
+            # checkout; that unit is then reported as UNKNOWN, where an
+            # unguarded read would abort the whole step under `bash -e`.
+            if git log -1 --format='%h%n%s%n%b' "$u" > "$udir/commit" 2>/dev/null; then
+              sha="$(sed -n 1p "$udir/commit")"
+              subj="$(sed -n 2p "$udir/commit")"
+              sed 1,2d "$udir/commit" | tr -d '\r' > "$udir/msg"
+            else
+              state="read-failed"
+              kind="unconfirmed"
+              sha="$(printf '%.7s' "$u")"
+              subj="(could not be read)"
+              : > "$udir/msg"
+            fi
+            # Step 2: the PR it may have come from, read off the subject the
+            # way promote.sh's describe_unit does (it cannot be called from
+            # here: the caller's promote.sh may predate it): "Merge pull
+            # request #N ..." with the PR title on the first body line, or a
+            # squash "subject (#N)". Only a candidate until step 4 confirms it.
+            merge_style=""
+            if [ -z "$state" ]; then
+              if [[ $subj =~ $re_merge ]]; then
+                pr="${BASH_REMATCH[1]}"
+                merge_style="yes"
+              elif [[ $subj =~ $re_squash ]]; then
+                pr="${BASH_REMATCH[1]}"
+              fi
+              if [ -n "$pr" ]; then
+                kind="unconfirmed"
               fi
             fi
+            # Step 3: a unit that adds nothing needs no intent. Its own files
+            # are listed NUL-separated and without rename pairing, so every
+            # path it touches (a renamed file's old name too, or a name git
+            # would quote) is compared literally against the target. VERSION
+            # files never count: promotion pins them to the target. A unit
+            # that changes no file at all stays on the normal path, where its
+            # message is its intent.
+            #
+            # A check that cannot run warns, and the unit stays on the normal
+            # path too: that path quotes its intent and claims nothing about
+            # the target, so a broken check can cost an "adds nothing" label
+            # but never hide an intent. Both diffs write to a file, so failed,
+            # empty and non-empty are three outcomes without reading `$?`.
+            nothing_warn="so its intent is quoted without checking whether $TGT already has them"
+            if [ -z "$state" ]; then
+              if ! git diff --name-only -z --no-renames "$u^1" "$u" > "$udir/files" 2> "$udir/err"; then
+                cat "$udir/err" >&2
+                echo "::warning::Could not list the files unit $sha changes, $nothing_warn."
+              elif [ -s "$udir/files" ]; then
+                paths=()
+                while IFS= read -r -d '' p; do
+                  case "$p" in
+                    VERSION|*/VERSION) ;;
+                    *) paths+=("$p") ;;
+                  esac
+                done < "$udir/files"
+                if [ "${#paths[@]}" -eq 0 ]; then
+                  state="version-only"
+                elif ! git --literal-pathspecs diff --name-only -z --no-renames "$base" "$u" -- "${paths[@]}" \
+                       > "$udir/differ" 2> "$udir/err"; then
+                  cat "$udir/err" >&2
+                  echo "::warning::Could not compare the files unit $sha changes with $TGT, $nothing_warn."
+                elif [ ! -s "$udir/differ" ]; then
+                  state="in-target"
+                fi
+              fi
+            fi
+            # Step 4: GitHub records the commit each PR was merged as, and only
+            # a PR merged as THIS commit is this unit's. A direct push whose
+            # subject merely ends "(#N)" would otherwise be judged by someone
+            # else's intent.
+            if [ -z "$state" ] && [ -n "$pr" ]; then
+              # Pessimistic default: only a confirmed read clears it.
+              state="fetch-failed"
+              got="failed"
+              if view="$(gh_retry gh pr view "$pr" --json body,mergeCommit \
+                           -q '.mergeCommit.oid // "", .body' </dev/null 2> "$udir/err")"; then
+                got="yes"
+              elif grep "$no_such_pr" "$udir/err" >/dev/null; then
+                got="no-such-pr"
+              fi
+              cat "$udir/err" >&2
+              if [ "$got" = "yes" ] && [ "$(printf '%s\n' "$view" | sed -n 1p)" = "$u" ]; then
+                kind="pr"
+                if [ -n "$merge_style" ]; then
+                  # Not `title`: that is this promotion PR's own title, which
+                  # the loop must leave as built above.
+                  pr_title="$(awk 'NF { print; exit }' "$udir/msg")"
+                  if [ -n "$pr_title" ]; then
+                    subj="$pr_title"
+                  fi
+                fi
+                printf '%s\n' "$view" | sed 1d | tr -d '\r' > "$udir/body"
+                # A heading is `#`s FOLLOWED BY WHITESPACE: a body line that
+                # merely starts with an issue ref ("#123 fixed ...") must
+                # neither open nor close the section. HTML comments are
+                # stripped across lines -- the PR template's placeholders can
+                # span several, and a line-local `sed 's/<!--.*-->//'` left
+                # them quoted as "intent".
+                if grep -E '^#+[[:space:]].*Intent & Problem Statement' "$udir/body" >/dev/null; then
+                  awk '!done && /^#+[[:space:]]/ && /Intent & Problem Statement/ { f = 1; next }
+                       f && /^#+[[:space:]]/ { f = 0; done = 1 }
+                       f { print }' "$udir/body" \
+                    | perl -0777 -pe 's/<!--.*?(?:-->|\z)//gs' | trim_blank > "$udir/$n.txt"
+                  if [ -s "$udir/$n.txt" ]; then
+                    state="ok"
+                  else
+                    state="unfilled"
+                  fi
+                else
+                  # Written without the template, as an automated back-merge
+                  # is: the description is still what the PR said it does.
+                  perl -0777 -pe 's/<!--.*?(?:-->|\z)//gs' "$udir/body" | trim_blank > "$udir/$n.txt"
+                  if [ -s "$udir/$n.txt" ]; then
+                    state="no-section"
+                  else
+                    state="no-description"
+                  fi
+                fi
+              elif [ "$got" != "failed" ]; then
+                # Merged as another commit (or never), or GitHub has no PR by
+                # that number: a direct push, judged by its own message under
+                # its own subject.
+                pr=""
+                kind="push"
+                state=""
+              else
+                echo "::warning::Could not read #$pr to quote its intent, so the PR body says it is UNKNOWN. Re-run this workflow once GitHub answers."
+                # The commit's own message is the only context left; the state
+                # still says the intent is UNKNOWN.
+                message_text > "$udir/$n.txt"
+              fi
+            fi
+            # Step 5: a direct push states its intent in its commit message.
+            if [ -z "$state" ]; then
+              message_text > "$udir/$n.txt"
+              if [ -s "$udir/$n.txt" ]; then
+                state="ok"
+              else
+                state="empty"
+              fi
+            fi
+            u_sha[$n]="$sha"
+            u_pr[$n]="$pr"
+            u_kind[$n]="$kind"
+            u_subj[$n]="$(printf '%s\n' "$subj" | sed 's/<!--/\&lt;!--/g')"
+            u_state[$n]="$state"
+            # Only a quoted unit writes non-empty text. Sized as rendered:
+            # each line gains a "> " quote prefix.
+            if [ -s "$udir/$n.txt" ]; then
+              awk '{ c += length($0) + 3 } END { print c + 0 }' "$udir/$n.txt" >> "$udir/sizes"
+            else
+              echo 0 >> "$udir/sizes"
+            fi
+          done
+          # Share a fixed budget fairly: a unit shorter than its share keeps
+          # all of its text and leaves the rest to the longer ones, so one long
+          # unit cannot crowd the others out of the part of the description
+          # the reviewer reads.
+          budget=16000
+          : > "$udir/caps"
+          if [ "$shown" -gt 0 ]; then
+            awk '{ print NR, $1 }' "$udir/sizes" | sort -k2,2n \
+              | awk -v left="$budget" -v n="$shown" '{
+                  share = int(left / (n - NR + 1))
+                  cap = ($2 < share) ? $2 : share
+                  left -= cap
+                  print $1, cap }' \
+              | sort -k1,1n | awk '{ print $2 }' > "$udir/caps"
           fi
-          base="origin/$TGT"
           # No `|| echo 0` here: that masks a rev-list FAILURE as a genuine count
           # of 0, so the body would claim "0 commit(s)" for a promotion that may
           # carry many. Capture the real status, then default only on failure.
@@ -448,43 +738,95 @@ jobs:
             files=""
             automation=""
           fi
+          # Quote unit $1's text within its share of the budget. Quoted, so no
+          # line of it can start with `#`; an unclosed `<!--` is escaped, or it
+          # would hide the rest of the body. `$where` names the full text.
+          quote_unit() {
+            local cap size
+            cap="$(sed -n "${1}p" "$udir/caps")"
+            size="$(sed -n "${1}p" "$udir/sizes")"
+            awk -v cap="$cap" '{ c += length($0) + 3
+                                 if (c > cap) { if (NR == 1) print substr($0, 1, cap); exit }
+                                 print }' "$udir/$1.txt" \
+              | sed -e 's/<!--/\&lt;!--/g' -e 's/^/> /' -e 's/^> $/>/'
+            if [ "$size" -gt "$cap" ]; then
+              printf '\n_[Cut to its share of the review budget (%s of %s characters); the full text is in %s.]_\n' "$cap" "$size" "$where"
+            fi
+          }
           {
             printf '## Intent & Problem Statement\n\n'
-            if [ -n "$UNITS_CARRIED" ]; then
-              # promote.sh extended the oldest unit over later units that change
-              # the same files, so the intent must name every one of them.
-              printf 'Promotes **several units of work** from `%s` into `%s`. The oldest\n' "$SRC" "$TGT"
-              printf 'unit is carried together with later units that change the same\n'
-              printf 'files, because promoting a version a later unit already replaced\n'
-              printf 'would be rejected:\n\n%s\n' "$UNITS_CARRIED"
-            elif [ -n "$UNIT_SUBJECT" ]; then
-              printf 'Promotes **one unit of work** from `%s` into `%s`' "$SRC" "$TGT"
-              if [ -n "$UNIT_PR" ]; then printf ' (originally #%s)' "$UNIT_PR"; fi
-              printf ':\n\n> %s\n\n' "$UNIT_SUBJECT"
+            # Said here as well as under Guardrails: a reviewer that reads only
+            # the head of a long description must still learn where this PR
+            # came from and why VERSION moves.
+            printf 'Opened by `promote.yml`, the only route from `%s` into `%s` (fleet\n' "$SRC" "$TGT"
+            printf 'rule 2.1); this is not a hand-made PR. Every tracked `VERSION` file is\n'
+            printf 'pinned to `%s`'"'"'s own sequence and advanced one step (rule 2.2).\n\n' "$TGT"
+            if [ "$units_ok" = "yes" ]; then
+              printf 'It merges **%s unit(s) of work** from `%s` into `%s`, each already\n' "$n" "$SRC" "$TGT"
+              printf 'on `%s` after its own review. Judge each unit against its own intent,\n' "$SRC"
+              printf 'quoted below, oldest first.\n\n'
+              k=0
+              while [ "$k" -lt "$shown" ]; do
+                k=$((k + 1))
+                # A bold line, never a heading: AB's intent extractor ends the
+                # section at the first line that starts with `#`. A unit is
+                # named as a PR only when GitHub confirmed it, as a direct push
+                # only when no PR is in question, and otherwise by its subject.
+                case "${u_kind[$k]}" in
+                  pr)
+                    printf '**Unit %s of %s: #%s %s** (`%s`)\n\n' "$k" "$n" "${u_pr[$k]}" "${u_subj[$k]}" "${u_sha[$k]}"
+                    where="#${u_pr[$k]}" ;;
+                  push)
+                    printf '**Unit %s of %s: %s** (`%s`, direct push)\n\n' "$k" "$n" "${u_subj[$k]}" "${u_sha[$k]}"
+                    where="commit \`${u_sha[$k]}\`" ;;
+                  *)
+                    printf '**Unit %s of %s: %s** (`%s`)\n\n' "$k" "$n" "${u_subj[$k]}" "${u_sha[$k]}"
+                    where="commit \`${u_sha[$k]}\`" ;;
+                esac
+                case "${u_state[$k]}" in
+                  ok)
+                    quote_unit "$k" ;;
+                  no-section)
+                    printf '_%s has no Intent & Problem Statement section, so its description\n' "$where"
+                    printf 'is quoted instead._\n\n'
+                    quote_unit "$k" ;;
+                  no-description)
+                    printf '_%s has no description, so there is no stated intent to carry;\n' "$where"
+                    printf 'judge it by its changes, enumerated below._\n' ;;
+                  unfilled)
+                    printf '_%s has an Intent section but left it unfilled, so there is no\n' "$where"
+                    printf 'stated intent to carry; judge it by its changes, enumerated below._\n' ;;
+                  fetch-failed)
+                    printf '_Could not read #%s (the GitHub fetch failed), so its intent is\n' "${u_pr[$k]}"
+                    printf 'UNKNOWN -- not absent, and so is whether this commit is that PR'"'"'s merge._\n'
+                    if [ -s "$udir/$k.txt" ]; then
+                      printf '\n_Its own commit message reads:_\n\n'
+                      quote_unit "$k"
+                    fi ;;
+                  empty)
+                    printf '_No commit message beyond its subject, so the subject above is its\n'
+                    printf 'whole stated intent._\n' ;;
+                  read-failed)
+                    printf '_Could not read this commit (`git log` failed), so its intent is\n'
+                    printf 'UNKNOWN -- not absent, and so is whether it came from a PR._\n' ;;
+                  version-only)
+                    printf '_Changes only `VERSION` files, which promotion pins to `%s`, so it\n' "$TGT"
+                    printf 'carries no code._\n' ;;
+                  in-target)
+                    printf '_Every file it changes, `VERSION` aside, already matches `%s`, so it\n' "$TGT"
+                    printf 'adds nothing to this diff and no intent is quoted for it._\n' ;;
+                esac
+                printf '\n'
+              done
+              if [ "$n" -gt "$shown" ]; then
+                printf '_Units %s to %s are not quoted, to keep this description within\n' "$((shown + 1))" "$n"
+                printf 'GitHub'"'"'s size limit._\n\n'
+              fi
             else
-              printf 'Automated promotion of `%s` into `%s`.\n\n' "$SRC" "$TGT"
+              printf '_The units of work in this promotion could not be listed (%s),\n' "$units_why"
+              printf 'so their intent is UNKNOWN -- not absent. Review the enumerated\n'
+              printf 'changes directly._\n\n'
             fi
-            case "$intent_state" in
-              ok)
-                printf 'Intent carried from #%s:\n\n' "$UNIT_PR"
-                printf '%s\n' "$intent" | sed 's/^/> /'
-                printf '\n' ;;
-              unfilled)
-                printf '_#%s has an Intent section but left it unfilled, so there is\n' "$UNIT_PR"
-                printf 'no stated intent to carry. What this PR actually carries is\n'
-                printf 'enumerated below._\n\n' ;;
-              no-section)
-                printf '_#%s stated no Intent section, so there is nothing to carry.\n' "$UNIT_PR"
-                printf 'What this PR actually carries is enumerated below._\n\n' ;;
-              fetch-failed)
-                printf '_Could not read #%s to inherit its intent (the GitHub fetch\n' "$UNIT_PR"
-                printf 'failed), so the intent below is UNKNOWN -- not absent. Review\n'
-                printf 'the enumerated changes directly._\n\n' ;;
-              *)
-                printf '_This promotion is not tied to a single originating PR, so there\n'
-                printf 'is no upstream intent to inherit. What it carries is enumerated\n'
-                printf 'below._\n\n' ;;
-            esac
             if [ "${REMAINING:-0}" -gt 0 ] 2>/dev/null; then
               printf 'Up to **%s** further unit(s) are queued behind this one and will\n' "$REMAINING"
               printf 'be promoted once this PR merges, oldest first.\n\n'
@@ -539,35 +881,8 @@ jobs:
             printf '## Verification & Parity\n\n'
             printf -- '- Each commit was reviewed by the skeptical panel before merging into `%s`.\n' "$SRC"
             printf -- '- Repository CI runs on this promotion PR.\n'
-          } > /tmp/promote-body.md
+          } > "$body_file"
 
-          # GitHub's GraphQL API intermittently answers "Something went wrong
-          # while executing your query", and when it does the promotion branch
-          # has ALREADY been pushed -- so the step fails with no PR, and the
-          # promotion stalls silently until the next run. ab's own dev->qa
-          # promotion died exactly this way (run 36516057861).
-          #
-          # NB "$@", never eval: $title is a commit subject, i.e. arbitrary text
-          # that can contain backticks, $(...) and semicolons. Building a command
-          # string from it and eval-ing would be a command-injection hole.
-          # stderr is deliberately NOT suppressed, so the real gh error still
-          # reaches the job log.
-          gh_retry() {
-            local _attempt=1
-            local _delay=3
-            while : ; do
-              if "$@"; then
-                return 0
-              fi
-              if [ "$_attempt" -ge 5 ]; then
-                return 1
-              fi
-              echo "gh call failed (attempt $_attempt/5); retrying in ${_delay}s..." >&2
-              sleep "$_delay"
-              _attempt=$((_attempt + 1))
-              _delay=$((_delay * 2))
-            done
-          }
           find_existing() {
             gh_retry gh pr list --head "$BR" --base "$TGT" --state open --json number -q '.[0].number'
           }
@@ -583,7 +898,7 @@ jobs:
             # mismatch and hold the PR. (kvm's copy had stopped refreshing; that
             # reintroduced exactly this, so it is not carried here.)
             echo "PR #$existing already open for $BR -- refreshing its title and body."
-            gh_retry gh pr edit "$existing" --title "$title" --body-file /tmp/promote-body.md
+            gh_retry gh pr edit "$existing" --title "$title" --body-file "$body_file"
             exit 0
           fi
           # Deliberately NOT under gh_retry, and deliberately tested with `if !`
@@ -592,7 +907,7 @@ jobs:
           # created TWICE by a blind retry. Re-check instead.
           if ! gh pr create --base "$TGT" --head "$BR" \
             --title "$title" \
-            --body-file /tmp/promote-body.md; then
+            --body-file "$body_file"; then
             sleep 5
             existing=$(find_existing || true)
             if [ -n "$existing" ]; then
