@@ -288,6 +288,19 @@ def test_spokes_for_tenant_no_shared_flag_stays_strict():
     assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "tenantLRB") == ["cs-06"]
 
 
+def test_spokes_for_tenant_a_blank_shared_id_shares_no_unassigned_host():
+    """A legacy record whose id is only spaces, flagged shared, names no
+    tenant. As the shared tenant it canonicalised to "" and made every
+    UNASSIGNED (admin-only) host visible to every tenant."""
+    hub = _MixedHub(
+        hypervisors=["pxmx-free"],
+        simulations=["cs-06"],
+        metadata={"pxmx-free": {"tenant_id": ""},
+                  "cs-06": {"tenant_id": "tenantLRB"}},
+        tenant_state={"tenants": {"  ": {"shared": True}, "tenantLRB": {}}})
+    assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "tenantLRB") == ["cs-06"]
+
+
 # ── per-AGENT tenant scope wins over the SPOKE binding (reported leak) ────────
 #
 # The host stayed on a SHARED spoke but the operator pinned its Proxmox agent to
@@ -370,3 +383,17 @@ def test_pin_survives_restart_via_durable_heartbeat_keys():
     hub.heartbeat = _HB({"pxmx-shared:ag-1": 123.0})  # persisted composite key
     assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "tenantLRB") == ["pxmx-shared"]
     assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "tenantRA") == []
+
+
+def test_spokes_for_tenant_tells_padded_twins_apart(monkeypatch):
+    """A legacy " ACME " beside "ACME" is another tenant: each sees only the
+    host bound to its own spelling, as the access checks compare them."""
+    import access
+    monkeypatch.setattr(access, "_AMBIGUOUS_TENANT_IDS", frozenset({"acme"}))
+    hub = _MixedHub(
+        hypervisors=["pxmx-1", "pxmx-2"],
+        simulations=[],
+        metadata={"pxmx-1": {"tenant_id": " ACME "},
+                  "pxmx-2": {"tenant_id": "ACME"}})
+    assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, " ACME ") == ["pxmx-1"]
+    assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "ACME") == ["pxmx-2"]

@@ -155,3 +155,35 @@ def test_admin_can_backup_any_tenant(tmp_path):
     assert r.json()["status"] == "SUCCESS"
     _, _, payload = hub.forwarded[-1]
     assert payload["target_agent_id"] == "agent-2"
+
+
+def test_tenant_backup_own_tenant_in_any_capitalisation(tmp_path):
+    """A user assigned "ACME" owns the host bound to "acme" (fleet rule 6.1)."""
+    c, hub = _build(tmp_path, tenants=("ACME",))
+    r = c.post("/tenant/templates/backup", json={
+        "agent_id": "agent-1", "vmid": 90025, "node": "pxmx-acme", "name": "t2-golden",
+    })
+    assert r.status_code == 200, r.text
+    _, _, payload = hub.forwarded[-1]
+    assert payload["target_agent_id"] == "agent-1"
+
+
+def test_list_and_default_seed_match_tenant_in_any_capitalisation(tmp_path):
+    """A user assigned "ACME" sees acme's completed backup in the list and gets
+    it as the default seed for a fleet refresh (fleet rule 6.1)."""
+    c, hub = _build(tmp_path, tenants=("ACME",))
+    hub.agent_info["agent-1"]["spoke_id"] = "cs-spoke-1"
+    hub.active_connections = {"cs-spoke-1": object()}
+    rec = hub.template_repo.create_pending(
+        name="golden", source_vmid=100, source_node="pxmx-acme", source_agent="agent-1",
+        source_spoke="cs-spoke-1", created_by="admin", tenant="Acme", tenant_id="acme")
+    hub.template_repo.finalize(rec["id"], size=10, sha256="abc")
+    listed = c.get("/tenant/templates").json()["templates"]
+    assert [t["id"] for t in listed] == [rec["id"]]
+    r = c.post("/tenant/templates/refresh-hosts", json={"host_ids": ["pxmx-acme"], "target_vmid": 200})
+    assert r.status_code == 200, r.text
+    assert any(p.get("command") == "REFRESH_TEMPLATE" and p["data"].get("template_id") == rec["id"]
+               for _, _, p in hub.forwarded), hub.forwarded
+    # Another tenant's user sees none of it.
+    other, _ = _build(tmp_path, tenants=("other",))
+    assert other.get("/tenant/templates").json()["templates"] == []

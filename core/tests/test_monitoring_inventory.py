@@ -185,6 +185,16 @@ def test_monitoring_hosts_are_tenant_scoped_and_problems_flattened():
     assert [p["name"] for p in m.monitoring_problem_list(hosts)] == ["p2", "p1"]
 
 
+def test_monitoring_hosts_scope_ignores_tenant_capitalisation():
+    """A host tagged "T1" belongs to a user assigned "t1" (fleet rule 6.1)."""
+    from routes import monitoring as m
+    hosts = [{"name": "a", "tenant": "T1"}, {"name": "b", "tenant": "t2"}]
+    user = {"user": {"tenants": ["t1"]}}
+    assert [h["name"] for h in m.scope_monitoring_hosts(hosts, None, user, False)] == ["a"]
+    assert [h["name"] for h in m.scope_monitoring_hosts(hosts, "t1", user, False)] == ["a"]
+    assert [h["name"] for h in m.scope_monitoring_hosts(hosts, "T2", {}, True)] == ["b"]
+
+
 def test_monitoring_sync_config_defaults_and_status_record():
     hub = SimpleNamespace(state=SimpleNamespace(
         system_state={"global_config": {}}, _mark_dirty=lambda: None))
@@ -237,3 +247,27 @@ def test_ipam_pinned_ips_are_monitored_by_snmp_or_ping(monkeypatch):
     assert sorted((r["name"], r["ip"], r["snmp"]) for r in rows) == [
         ("10.0.0.6", "10.0.0.6", False), ("pdu-a", "10.0.0.5", False),
         ("sw1", "10.0.0.1", False), ("sw2", "10.0.0.2", True)]
+
+
+def test_a_pin_by_a_legacy_case_twin_tenant_never_monitors_the_others_device(monkeypatch):
+    # A Monitor pin covers its tenant's device whatever the case, but with
+    # "acme" and "ACME" both stored, tenant ids compare by exact spelling
+    # (access._AMBIGUOUS_TENANT_IDS): ACME's pin never pins acme's switch.
+    import access
+
+    async def fake_overlay_many(hub, records, storage_key):
+        return records
+
+    async def no_snmp(hub, sec_type, buckets=None):
+        return []
+
+    monkeypatch.setattr(cred_vault, "automation_list_by_type", no_snmp)
+    monkeypatch.setattr(instance_vault, "overlay_many", fake_overlay_many)
+    hub = SimpleNamespace(state=SimpleNamespace(system_state={"global_config": {
+        "nw_devices": [{"name": "sw1", "address": "10.0.0.1", "tenant_id": "acme"}],
+        "monitoring_watch": {"ACME": {"10.0.0.1": {"name": ""}}},
+    }}))
+    assert [r["name"] for r in asyncio.run(monitoring.inventory_devices(hub))] == ["sw1"]
+    monkeypatch.setattr(access, "_AMBIGUOUS_TENANT_IDS",
+                        access._case_collisions({"acme": {}, "ACME": {}}))
+    assert asyncio.run(monitoring.inventory_devices(hub)) == []

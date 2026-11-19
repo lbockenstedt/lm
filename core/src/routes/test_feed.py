@@ -41,6 +41,8 @@ import sys
 import time
 
 from api import HTTPException, Request, logger
+# Matches a spoke's tenant tag to the source tenant it names; keeps a picked id unstripped.
+from access import first_shared_tenant, match_tenant_id, raw_tenant_id
 
 try:
     from test_feed_scrub import scrub_snapshot, shard_by_spoke
@@ -183,13 +185,11 @@ def register(app, hub, ctx):
             return None
 
     def _local_tenant_ids() -> set:
-        """Every tenant id this hub knows, for preserve-mode mapping.
+        """Every tenant id this hub knows, so preserve mode creates no shell
+        for a source tenant that already exists here (see _map_source_tenants).
 
-        A source tenant is replayed into the local tenant of the SAME id when
-        one exists (the two hubs share a tenant registry lineage — NetBox ids
-        are stable across them); anything else falls back to shared. Always
-        includes the built-in ``default`` (ADMIN) scope, which is real even
-        when the tenant_state map has no explicit row for it."""
+        Always includes the built-in ``default`` (ADMIN) scope, which is real
+        even when the tenant_state map has no explicit row for it."""
         try:
             ids = set((hub.state.tenant_state.get("tenants", {}) or {}).keys())
         except Exception:  # noqa: BLE001
@@ -299,9 +299,12 @@ def register(app, hub, ctx):
                   "receiver_preserve_tenants"):
             if k in data:
                 patch[k] = bool(data[k])
-        for k in ("receiver_source_url", "receiver_prefix", "receiver_tenant"):
+        for k in ("receiver_source_url", "receiver_prefix"):
             if k in data:
                 patch[k] = str(data[k] or "").strip()
+        # The tenant is kept as picked (unstripped): " ACME " is a legacy twin of "ACME".
+        if "receiver_tenant" in data:
+            patch["receiver_tenant"] = raw_tenant_id(data["receiver_tenant"])
         # Secrets: an empty string means "leave what is stored alone" so the UI
         # can save the rest of the form without the operator re-typing them.
         # Clearing is explicit, via the separate clear flags below.
@@ -425,11 +428,23 @@ def register(app, hub, ctx):
                 raise HTTPException(
                     status_code=502,
                     detail=f"could not read the source snapshot to map tenants: {e}")
+            # Refuse before anything is written: guessing which tenant an
+            # ambiguous id means could replay one tenant's spokes into another.
+            ambiguous = _ambiguous_source_tenants(hub, src_registry, src_tenants)
+            if ambiguous:
+                raise HTTPException(
+                    status_code=409,
+                    detail="These source tenants differ only by case or surrounding "
+                           "spaces from another tenant, so they cannot be matched "
+                           "to one tenant here: "
+                           + ", ".join(ambiguous) + ". Rename all but one of each "
+                           "(on the source, or in Setup → Tenants here), then start "
+                           "the feed again.")
             await _ensure_local_tenants(
                 hub, src_registry or {t: {} for t in src_tenants},
                 _local_tenant_ids())
 
-        fallback = (c.get("receiver_tenant") or "").strip() or _shared_tenant()
+        fallback = raw_tenant_id(c.get("receiver_tenant")) or _shared_tenant()
         if not fallback:
             raise HTTPException(
                 status_code=400,
@@ -438,14 +453,9 @@ def register(app, hub, ctx):
 
         # source tenant id -> local tenant id (preserve only); the PSK must be
         # registered on every local tenant a synthetic spoke will claim.
-        tenant_map = {}
-        psk_tenants = {fallback}
-        if preserve:
-            local_ids = _local_tenant_ids()
-            for st in src_tenants:
-                local = st if st in local_ids else fallback
-                tenant_map[st] = local
-                psk_tenants.add(local)
+        tenant_map = (_map_source_tenants(hub, src_registry, src_tenants, fallback)
+                      if preserve else {})
+        psk_tenants = {fallback, *tenant_map.values()}
 
         script = os.path.join(_repo_root(), "scripts", "hub_feed.py")
         if not os.path.isfile(script):
@@ -849,6 +859,61 @@ def _tenant_registry(hub) -> dict:
     return out
 
 
+def _source_known(registry, tags) -> set:
+    """The tenant ids the source hub has, which its spoke tags name.
+
+    Its registry's ids plus its built-in "default" (which exists there with
+    no record), or, from a source that publishes no registry, the tags
+    themselves. Blank ids name no tenant."""
+    ids = ({str(t) for t in registry} | {"default"}) if registry else {str(t) for t in tags}
+    return {t for t in ids if t.strip()}
+
+
+def _ambiguous_source_tenants(hub, registry, tags) -> list:
+    """Source tenant ids and spoke tags this hub cannot match to one tenant.
+
+    A spoke's tag names the source tenant it matches in any case, as the
+    source's own access checks match it (access.match_tenant_id), so the
+    registry's "ACME" and a spoke tagged "acme" are one tenant. Ambiguous:
+    source ids that differ only by case or surrounding spaces (the source
+    keeps them apart by exact spelling, but here they would merge into one
+    tenant), and any id or tag that names several local tenants
+    (StateManager.tenant_key). Without a registry the tags are the source's
+    ids, so two tags that differ only by case or spaces are refused rather than
+    guessed to be one tenant."""
+    known = _source_known(registry, tags)
+    out = set()
+    # Source ids that only case or surrounding spaces tell apart.
+    by_key = {}
+    for tid in known:
+        by_key.setdefault(tid.strip().casefold(), set()).add(tid)
+    for spellings in by_key.values():
+        if len(spellings) > 1:
+            out |= spellings
+    # Each tag must name one source tenant, and each source tenant one local one.
+    for tid in known | {str(t) for t in tags}:
+        try:
+            hub.state.tenant_key(match_tenant_id(tid, known) or tid)
+        except ValueError:
+            out.add(tid)
+    return sorted(out)
+
+
+def _map_source_tenants(hub, registry, tags, fallback) -> dict:
+    """Preserve mode: spoke tag -> the local tenant its spokes join.
+
+    The tag names a source tenant (as in _ambiguous_source_tenants), and that
+    tenant joins the local tenant its id names in any case
+    (StateManager.tenant_key), so the source's "ra" joins this hub's "RA",
+    which _ensure_local_tenants counted as existing instead of creating a
+    second spelling. The built-in "default" (ADMIN) scope always exists here;
+    a tag naming no tenant on either hub falls back. The caller refused
+    ambiguous ids first."""
+    known = _source_known(registry, tags)
+    return {st: hub.state.tenant_key(match_tenant_id(st, known) or st) or fallback
+            for st in tags}
+
+
 async def _ensure_local_tenants(hub, registry: dict, existing: set) -> list:
     """Mirror the source's tenant registry onto this hub.
 
@@ -871,9 +936,12 @@ async def _ensure_local_tenants(hub, registry: dict, existing: set) -> list:
     than failing the whole feed start; its spokes just fall back. Returns the
     ids created, for the audit line."""
     created = []
+    # update_tenant merges an id into a stored tenant spelt with another case,
+    # so a tenant counts as existing here in any case.
+    existing_keys = {str(t).strip().casefold() for t in (existing or ())}
     for tid, row in (registry or {}).items():
         clean = str(tid or "").strip()
-        if not clean or clean in existing:
+        if not clean or clean.casefold() in existing_keys:
             continue
         # 'shared' is applied below, under the single-shared invariant, rather
         # than seeded here — seeding it directly could leave two flagged.
@@ -918,17 +986,24 @@ def _mirror_shared_tenant(hub, registry: dict) -> bool:
     No-ops when the source publishes no shared tenant (an older source, an
     anonymised one, or a fleet that genuinely has none) so the operator's own
     choice is left alone. Returns True when something changed."""
-    src_shared = next((str(tid) for tid, row in (registry or {}).items()
-                       if isinstance(row, dict) and row.get("shared")), None)
-    if not src_shared:
+    # The source's shared tenant, never a blank id (first_shared_tenant).
+    src_shared = first_shared_tenant(registry)
+    if src_shared is None:
         return False
+    src_shared = str(src_shared)
     try:
         tenants = (getattr(hub.state, "tenant_state", None) or {}).get("tenants") or {}
+        # The local tenant the source's shared id names in any case, as
+        # _ensure_local_tenants matched it (the source's "ra" is this hub's
+        # "RA"). The caller refused ambiguous ids before calling this.
+        local_shared = hub.state.tenant_key(src_shared)
     except Exception:  # noqa: BLE001
         logger.debug("[test-feed] shared mirror: tenant state unreadable",
                      exc_info=True)
         return False
-    if src_shared not in tenants:
+    # No local record to flag (none matches, or it is the built-in default
+    # with no record stored): leave the operator's choice alone.
+    if local_shared not in tenants:
         return False
 
     changed = False
@@ -936,7 +1011,7 @@ def _mirror_shared_tenant(hub, registry: dict) -> bool:
     for tid, cfg in list(tenants.items()):
         if not isinstance(cfg, dict):
             continue
-        want = (str(tid) == src_shared)
+        want = (tid == local_shared)
         if bool(cfg.get("shared")) != want:
             try:
                 hub.state.update_tenant(str(tid), {"shared": want})

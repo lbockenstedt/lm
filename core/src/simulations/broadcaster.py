@@ -1,7 +1,9 @@
 """Simulations (cs) WebSocket fan-out — ``SimulationsBroadcaster``.
 
 Multiplexes cs telemetry from spokes to WebUI clients. Subscribers are tracked
-per tenant (plus a separate admin set that receives every tenant's stream).
+per tenant (plus a separate admin set that receives every tenant's stream),
+and a frame reaches the subscribers whose tenant id names its tenant as the
+access checks compare ids (access.same_tenant).
 The Hub owns one instance; the cs relay pushes spoke telemetry in and the
 WebUI /sim WS endpoints subscribe/unsubscribe on connect/disconnect.
 Audience: Hub developers.
@@ -11,6 +13,9 @@ Audience: Hub developers.
 import logging
 # Type hints only; they document the shape of the subscriber maps and telemetry payloads.
 from typing import Any, Dict, Set
+
+# Tenant ids compared as the access checks compare them (case, spaces, legacy twins).
+from access import raw_tenant_id, same_tenant
 
 # One named logger so all broadcaster messages can be filtered together.
 logger = logging.getLogger("SimulationsBroadcaster")
@@ -32,8 +37,16 @@ class SimulationsBroadcaster:
         ``tenant_id`` may be passed explicitly (the hub's CS_TELEMETRY handler
         does this — see ``main.py`` ``handle_connection`` / ``_handle_cs_telemetry``,
         which calls ``self.state.get_spoke_tenant(spoke_id)``) or carried inside
-        ``data["tenant_id"]``; the explicit arg wins. If neither is present the
-        frame is dropped — telemetry can't be routed without a tenant.
+        ``data["tenant_id"]``; the explicit arg wins. If neither names a tenant
+        (a blank id names none) the frame is dropped — telemetry can't be
+        routed without a tenant.
+
+        A socket subscribes under its session's tenant id and a frame arrives
+        under the spoke's tag, which may be spelt differently, so the tenant
+        subscribers are every set whose id same_tenant matches: in any case or
+        surrounding spaces, but only by exact id for a tenant with a legacy
+        twin. A raw key lookup sent a socket subscribed as "ACME" nothing
+        tagged "acme".
 
         Each subscriber send is isolated: a dead/closed socket raises, is logged
         and skipped, but does NOT abort the fan-out to the remaining subscribers.
@@ -41,10 +54,10 @@ class SimulationsBroadcaster:
         broadcast with no log — silently killing telemetry delivery to everyone.)
         """
         # Explicit arg wins; fall back to the tenant carried in the payload.
-        if not tenant_id:
+        if not raw_tenant_id(tenant_id):
             tenant_id = data.get("tenant_id")
         # Neither the caller nor the payload named a tenant, so there is nowhere safe to route it.
-        if not tenant_id:
+        if not raw_tenant_id(tenant_id):
             logger.debug("simulations broadcast: no tenant for spoke %s, dropping", spoke_id)
             return
 
@@ -57,7 +70,9 @@ class SimulationsBroadcaster:
 
         # Tenant subscribers — iterate a snapshot so a socket dropping mid-loop
         # (or a subscriber set mutating) can't break the fan-out.
-        for ws in list(self._subscribers.get(tenant_id, set())):
+        targets = [ws for key, socks in list(self._subscribers.items())
+                   if same_tenant(key, tenant_id) for ws in list(socks)]
+        for ws in targets:
             # Send to this subscriber; one failure must not stop delivery to the others.
             try:
                 await ws.send_json(message)

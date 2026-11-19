@@ -228,6 +228,30 @@ def test_pinned_agent_whole_host_vms_counted_off_subnet_untagged():
     assert out["vms"] == 3  # 501 (subnet) + 502/503 (whole-host pinned) — all counted
 
 
+def test_pinned_agent_on_a_legacy_twin_tenant_not_counted(monkeypatch):
+    """With "LRB" and "lrb" both stored, the access checks compare them by
+    exact spelling: a host pinned to "LRB" is that tenant's, not lrb's. With
+    one lrb tenant, a pin in another case is its own."""
+    import access
+    host_vms = [_vm(501, "10.10.0.51"), _vm(502, "192.168.7.2"), _vm(503, "192.168.7.3")]
+
+    def _hub():
+        """A shared spoke whose pinned host carries off-subnet VMs."""
+        return _Hub(
+            tenants=_TENANTS,
+            module_metadata={"shared-pxmx": {"tenant_id": "shared"}},
+            plural={"lrb": ["shared-pxmx"]},
+            global_spoke=None,
+            responses={("shared-pxmx", "PXMX_LIST_VMS"): {"vms": [_vm(501, "10.10.0.51")]},
+                       ("shared-pxmx", "PXMX_LIST_VMS", "agent-lrb-1"): {"vms": host_vms}},
+            agent_config={"agent-lrb-1": {"client_simulation": {"tenant_id": "LRB"}}},
+            agent_spokes={"agent-lrb-1": "shared-pxmx"},
+        )
+    assert _summary(_hub(), _ctx(_LRB_PREFIXES))["vms"] == 3
+    monkeypatch.setattr(access, "_AMBIGUOUS_TENANT_IDS", frozenset({"lrb"}))
+    assert _summary(_hub(), _ctx(_LRB_PREFIXES))["vms"] == 1
+
+
 def test_pinned_agent_stopped_vm_not_counted():
     """Whole-host ownership still only counts RUNNING VMs (Overview semantics).
     A stopped VM on the pinned host is owned but not counted as running."""

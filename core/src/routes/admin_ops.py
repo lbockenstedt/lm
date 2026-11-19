@@ -40,7 +40,7 @@ import secrets
 # Hub HTTP error type, request object and shared logger.
 from api import HTTPException, Request, logger
 # Helper that unwraps a spoke's relayed reply envelope.
-from access import unwrap_spoke
+from access import raw_tenant_id, same_tenant, unwrap_spoke
 
 # Argument-shape guard for the diagnostic bundle's unit / repo / log / lines
 # parameters. Deliberately strict: letters, digits, and the handful of path /
@@ -153,8 +153,9 @@ def apply_cs_mode_entry(entry, enabled, tenant_id=_UNSET):
     cs_cfg["enabled"] = bool(enabled)
     # Only touch the tenant when the caller explicitly passed one (None/"" means clear).
     if tenant_id is not _UNSET:
-        # Normalise the tenant to a stripped string, or None when blank/None.
-        tenant_in = (str(tenant_id).strip() or None) if tenant_id is not None else None
+        # The tenant as given (unstripped, as the UI route stores it), or None
+        # when blank/None: " ACME " is a legacy twin of "ACME".
+        tenant_in = raw_tenant_id(tenant_id) or None
         # Store the tenant and pin it when non-empty so tenant inheritance can't override it.
         cs_cfg["tenant_id"] = tenant_in
         cs_cfg["tenant_pinned"] = bool(tenant_in)
@@ -648,7 +649,7 @@ def register(app, hub, ctx):
         # Check every network device in the global config.
         for d in gc.get("nw_devices", []) or []:
             # Skip devices of other tenants or without an id / owning spoke.
-            if not isinstance(d, dict) or (d.get("tenant_id") or "default") != tenant \
+            if not isinstance(d, dict) or not same_tenant(d.get("tenant_id") or "default", tenant) \
                     or not d.get("id") or not d.get("spoke_id"):
                 continue
             # Ask the owning spoke for the device's LLDP neighbours, unwrap the reply, and keep
@@ -988,8 +989,9 @@ def register(app, hub, ctx):
             body = await request.json()
         except Exception:  # noqa: BLE001
             body = {}
-        # A tenant id is required.
-        tid = str((body or {}).get("tenant_id") or "").strip()
+        # A tenant id is required, kept as sent: stripped, a legacy " ACME "
+        # would name its twin "ACME" (the sync resolves the stored id itself).
+        tid = raw_tenant_id((body or {}).get("tenant_id"))
         if not tid:
             raise HTTPException(status_code=400, detail="tenant_id required")
         # Mass removal is only allowed when explicitly confirmed with a literal true.

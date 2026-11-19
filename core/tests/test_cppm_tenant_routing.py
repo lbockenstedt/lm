@@ -1301,3 +1301,19 @@ def test_access_tracker_hides_shared_rows_a_nested_tenant_owns():
         r = c.get(f"/api/cppm/sessions?tenant={tenant}")
         assert r.status_code == 200
         assert [s["mac"] for s in r.json()["sessions"]] == want
+def test_tenant_devices_tag_matches_in_any_case(monkeypatch):
+    # Tenant ids are not case-sensitive: a device tagged "TENANTA" is tenantA's,
+    # as the spoke binding is matched; another tenant's tag is still dropped.
+    import routes.cppm as cppm_routes
+    monkeypatch.setattr(cppm_routes, "get_tenant_scoping",
+                        lambda hub, tid: {"netbox_tenant_slug": "a-slug"})
+    devices = [
+        {"mac": "aa:aa:aa:aa:aa:aa", "attributes": {"NetBox_Tenant_ID": "TENANTA"}},
+        {"mac": "bb:bb:bb:bb:bb:bb", "attributes": {"NetBox_Tenant_ID": "tenantB"}},
+    ]
+    hub = FakeHub({"cppm-a"},
+                  replies={"cppm-a": {"LIST_ENDPOINTS": {"status": "SUCCESS", "devices": devices}}},
+                  module_metadata={"cppm-a": {"tenant_id": "tenantA"}})
+    c = _build(_tenant_user("tenantA"), hub)
+    r = c.get("/api/cppm/devices")
+    assert [d["mac"] for d in r.json()["devices"]] == ["aa:aa:aa:aa:aa:aa"]

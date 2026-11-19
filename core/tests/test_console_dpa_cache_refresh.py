@@ -8,6 +8,7 @@ didn't appear until the next background refresh — looking like DPA was broken.
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import access
 from routes import console
 from test_console_ports_warm_cache import _FakeAccess, _Hub, _ctx
 
@@ -77,19 +78,19 @@ class _TaAccess(_FakeAccess):
     def tenant_is_shared(t):
         return t == "shared"
 
-    @staticmethod
-    def check_tenant_access(sess, t):
-        return t in sess["user"]["tenants"]
+    tenant_among = staticmethod(access.tenant_among)
 
 
 def test_tenant_admin_gets_dpa_on_own_console_servers_only(monkeypatch):
     """A tenant admin manages DPA on console servers dedicated to its tenant,
-    never on a shared or another tenant's server (DPA is whole-server)."""
+    never on a shared or another tenant's server (DPA is whole-server). A
+    server bound to the same tenant spelled differently ("DXP") is still
+    theirs."""
     monkeypatch.setattr(console, "access", _TaAccess)
     hub = _DpaHub()
-    hub._connected = ["c1", "c2", "c3"]
+    hub._connected = ["c1", "c2", "c3", "c4"]
     hub._console_creds_seeded = set(hub._connected)
-    hub.state._tenants = {"c1": "dxp", "c2": "shared", "c3": "ra"}
+    hub.state._tenants = {"c1": "dxp", "c2": "shared", "c3": "ra", "c4": "DXP"}
     hub.state.system_state = {}
     ctx = _ctx()
     ctx._is_admin = lambda sess: False
@@ -101,9 +102,10 @@ def test_tenant_admin_gets_dpa_on_own_console_servers_only(monkeypatch):
     c = TestClient(app)
 
     body = c.get("/api/console/ports?tenant=dxp").json()
-    assert [d["spoke_id"] for d in body["dpa_consoles"]] == ["c1"]
-    assert c.get("/api/console/dpa?spoke_id=c1").status_code == 200
-    assert c.post("/api/console/dpa", json={"spoke_id": "c1", "enabled": True}).status_code == 200
+    assert [d["spoke_id"] for d in body["dpa_consoles"]] == ["c1", "c4"]
+    for sid in ("c1", "c4"):
+        assert c.get(f"/api/console/dpa?spoke_id={sid}").status_code == 200
+        assert c.post("/api/console/dpa", json={"spoke_id": sid, "enabled": True}).status_code == 200
     for sid in ("c2", "c3"):
         assert c.get(f"/api/console/dpa?spoke_id={sid}").status_code == 403
         assert c.post("/api/console/dpa", json={"spoke_id": sid, "enabled": True}).status_code == 403

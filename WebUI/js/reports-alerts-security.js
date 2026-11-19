@@ -1213,7 +1213,7 @@ function initView(viewId, subView) {
             _renderSetupSection(subView || 'Spokes & Agents');
             break;
         case 'mydevices':
-            loadAllDevices();
+            loadAllDevices({ fresh: true });
             loadMyDeviceSpokes();
             loadMyDeviceAgents();
             loadMyDevicePsks();

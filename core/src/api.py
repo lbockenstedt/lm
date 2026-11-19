@@ -588,10 +588,11 @@ def _record_session(hub, user_data: dict, bind_ip: str = "") -> str:
 
 def _end_impersonation(sess: dict) -> None:
     """Restore an impersonating session to the admin who started it."""
-    # Swap back to the impersonator's identity and clear cached prefixes.
+    # Swap back to the impersonator's identity (blank grants dropped, as when
+    # any session's user is built) and clear cached prefixes.
     imp = sess.pop("impersonator", None) or {}
     sess["user_id"] = imp.get("user_id")
-    sess["user"] = imp.get("user") or {}
+    sess["user"] = access.drop_blank_grants(imp.get("user") or {})
     sess.pop("prefixes", None)
     sess.pop("prefixes_at", None)
 
@@ -737,7 +738,8 @@ def _load_sessions(hub) -> None:
                 "created":  sess.get("created", now),
                 "last_seen": now,  # idle window resets on restart (absolute 8h still caps)
                 "sid":      sess.get("sid") or secrets.token_hex(8),
-                "user":     sess.get("user", {}),
+                # Saved before the routes refused blank grants? Drop them.
+                "user":     access.drop_blank_grants(sess.get("user", {})),
             }
             if isinstance(sess.get("impersonator"), dict):
                 _sessions[token]["impersonator"] = sess["impersonator"]

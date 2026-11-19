@@ -765,163 +765,293 @@ function _devEndpoint(t) {
     return '/tenant/devices' + t.endpoint.slice('/setup'.length);
 }
 
-async function loadAllDevices() {
+// Managed Devices drill-down picks. Nothing is listed until the user picks a
+// tenant or a device type (owner request: never open on every device and then
+// filter). null = not picked; a tenant pick is a tenant key (see
+// loadAllDevices), and '' means "Unassigned".
+// A page visit (loadAllDevices({ fresh: true })) clears the picks; a refresh
+// after an add, edit or delete keeps them, unless it leaves no device at all.
+// `keep` is set by _mdFollowTenant() for the one re-render a tenant switch
+// triggers.
+const _mdPick = { type: null, tenant: null, keep: false };
+
+// The lists the last loadAllDevices could not read (device type labels, and
+// 'Spokes'). What a failed list holds is unknown, not empty, so the page says
+// it could not load them and no pick is dropped for a device it may still hold.
+let _mdFailed = [];
+
+// Tenant names by tenant key, from the tenant records (admin only); refilled
+// on every load. A chip for a kept pick with no device listed is named from it.
+const _mdTenantNames = new Map();
+
+// Fetch every managed device, decorate each with its spoke name and tenant,
+// then draw the drill-down bar and the list. `fresh` marks a page visit.
+async function loadAllDevices({ fresh = false } = {}) {
     const listEl = document.getElementById('all-devices-list');
     if (!listEl) return;
+    if (fresh) {
+        if (!_mdPick.keep) { _mdPick.type = null; _mdPick.tenant = null; }
+        _mdPick.keep = false;
+    }
     listEl.innerHTML = '<p class="text-xs text-slate-500 italic animate-pulse">Loading…</p>';
-    const results = await Promise.all(_deviceTypeKeys().map(async typeKey => {
+    // Each type's list, or null when it could not be read: an HTTP error, a
+    // reply that is not JSON or has no list (every list route always sends
+    // one), or no network.
+    const keys = _deviceTypeKeys();
+    const results = await Promise.all(keys.map(async typeKey => {
         const t = DEVICE_TYPES[typeKey];
         try {
             const r = await setupFetch(_devEndpoint(t));
-            if (!r.ok) return [];
+            if (!r.ok) return null;
             const data = await r.json();
-            const items = data[t.responseKey] || [];
-            return (Array.isArray(items) ? items : []).map(d => ({ _typeKey: typeKey, _id: d.id, ...d }));
+            const items = data && data[t.responseKey];
+            if (!Array.isArray(items)) return null;
+            return items.map(d => ({ _typeKey: typeKey, _id: d.id, ...d }));
         } catch (e) {
             console.error(`loadAllDevices: ${typeKey} fetch failed:`, e);
-            return [];
+            return null;
         }
     }));
-    const all = results.flat();
+    _mdFailed = keys.filter((k, i) => results[i] === null)
+        .map(k => DEVICE_TYPES[k].badgeLabel || DEVICE_TYPES[k].title);
+    const all = results.filter(Boolean).flat();
     window._allDevices = all;
     if (all.length === 0) {
         const tabsEl = document.getElementById('all-devices-tabs');
         if (tabsEl) tabsEl.innerHTML = '';
+        // Nothing listed because a list failed: keep the picks for when it
+        // loads again, and say what failed rather than "no devices".
+        if (_mdFailed.length) { listEl.innerHTML = _mdFailNote(); return; }
+        // No device, no chips: the picks go too, so devices added later are
+        // not listed under picks the page no longer shows.
+        _mdPick.type = null;
+        _mdPick.tenant = null;
         listEl.innerHTML = '<p class="text-xs text-slate-500 italic">No managed devices yet. Click <strong>Add Device</strong> to attach one.</p>';
         return;
     }
-    // Map spoke_id -> friendly name AND -> tenant so each row shows the spoke
-    // NAME (not the GUID) and so devices can be grouped/filtered by tenant.
+    // The approved spokes by id, so each row shows the spoke NAME (not the
+    // GUID) and devices can be grouped by their spoke's tenant.
     // loadApprovedSpokes() is tenant-safe; ensureTenants() gives tenant display
-    // names (admin only — tenant-admins see just their own devices).
-    const _spokeNameById = {};
-    const _spokeTenantById = {};
+    // names (admin only: /setup/* is admin-gated, so a tenant-admin's tenant
+    // chips and badges show the tenant ids, as their header picker does).
+    // Maps, not plain objects, for anything keyed by an id: a tenant id is free
+    // text, and {}["constructor"] is not undefined.
+    const spokes = new Map();
     try {
-        (await loadApprovedSpokes()).forEach(s => {
-            _spokeNameById[s.spoke_id] = _spokeName(s);
-            _spokeTenantById[s.spoke_id] = _tenantOf(s) || '';
-        });
-    } catch (e) { /* best-effort — fall back to the id below */ }
+        (await loadApprovedSpokes({ strict: true })).forEach(s => spokes.set(s.spoke_id, s));
+    } catch (e) {
+        // Without the spokes a device that names no tenant cannot be given its
+        // spoke's, so it would show as Unassigned: say so, and keep the picks.
+        _mdFailed.push('Spokes');
+    }
     if (isAdmin()) { try { await ensureTenants(); } catch (_e) { /* names optional */ } }
-    const _tenantNames = window._allTenantsName || {};
+    // Tenant names by tenant key, so a binding written in another case than
+    // the tenant record ("ACME" for "acme") still shows the record's name.
+    _mdTenantNames.clear();
+    (window._allTenants || []).forEach(t => {
+        const key = _mdTenantKey(t.tenant_key, t.id);
+        if (!_mdTenantNames.has(key)) _mdTenantNames.set(key, t.name || t.id);
+    });
     // Decorate each device with its resolved spoke name + tenant so both the
     // tab bar and the row renderer can read them without re-deriving.
     all.forEach(d => {
-        d._spokeName = d.spoke_id ? (_spokeNameById[d.spoke_id] || d.spoke_id) : '';
-        // A spokeless record (e.g. an AD connection) carries its own tenant.
-        d._tenant = d.spoke_id ? (_spokeTenantById[d.spoke_id] || '')
-            : ((DEVICE_TYPES[d._typeKey] || {}).noSpoke ? (d.tenant_id || '') : '');
-        d._tenantLabel = d._tenant ? (_tenantNames[d._tenant] || d._tenant) : '';
+        const spoke = d.spoke_id ? spokes.get(d.spoke_id) : null;
+        d._spokeName = d.spoke_id ? (spoke ? _spokeName(spoke) : d.spoke_id) : '';
+        // Where the device's tenant is read from: the tenant its own record
+        // names, for every role. That is how the hub decides a device's owner
+        // (access.firewall_owner_tenant takes the record's tenant first, and
+        // /setup/nw-devices scopes by the record's tenant_id) and how a Tenant
+        // Admin's My Devices files it (their list holds only records whose own
+        // tenant_id is one of theirs, the server's _owns check). So a Global
+        // Admin who picks a tenant sees the devices that tenant sees (fleet
+        // rule 6.2), including one on a shared spoke or on a role sub-spoke
+        // with no tenant of its own. Only a record that names no tenant takes
+        // its spoke's, and with neither it is Unassigned. "Names no tenant" is
+        // judged by the hub's key, so it follows the hub's strip rules.
+        const src = _mdTenantKey(d.tenant_key, d.tenant_id) || !spoke ? d : spoke;
+        // _tenant is the key every pick, chip and count compares: the hub's
+        // tenant_key for that tenant id (access._norm_tenant_id), not one
+        // derived here, because JS and Python fold case differently ("Straße"
+        // and "STRASSE" are one tenant to the hub). Only an older hub that
+        // sends no tenant_key gets a derived one (_mdTenantKey). _tenantRaw is
+        // the id as stored; the label is the tenant's name, or that id.
+        d._tenantRaw = String(src.tenant_id ?? '');
+        d._tenant = _mdTenantKey(src.tenant_key, src.tenant_id);
+        d._tenantLabel = d._tenant ? (_mdTenantNames.get(d._tenant) || d._tenantRaw.trim()) : '';
     });
-    if (!window._mdFilter) window._mdFilter = { type: 'all', tenant: 'all' };
-    // Self-heal a stale filter after a delete/add: if the selected type or
-    // tenant no longer owns any device, fall back to 'all' so the user isn't
-    // stranded on an empty tab.
-    const f = window._mdFilter;
-    if (f.type !== 'all' && !all.some(d => d._typeKey === f.type)) f.type = 'all';
-    if (f.tenant !== 'all' && !all.some(d => (d._tenant || '') === f.tenant)) f.tenant = 'all';
+    // A pick whose tenant or type no longer owns a device (after a delete, or
+    // a tenant switch to a tenant with none) falls back to "not picked". Only
+    // a load in which every list answered can say that: a failed list may
+    // still hold the picked devices.
+    if (!_mdFailed.length) {
+        if (_mdPick.type !== null && !all.some(d => d._typeKey === _mdPick.type)) _mdPick.type = null;
+        if (_mdPick.tenant !== null && !all.some(d => (d._tenant || '') === _mdPick.tenant)) _mdPick.tenant = null;
+    }
     _renderManagedDeviceTabs();
     _renderManagedDeviceList();
 }
 
-// Filter state for the Managed Devices list. Two independent, AND-combined
-// dimensions: module TYPE (_typeKey) and TENANT (tenant id). 'all' = no filter.
-// Kept on window so the tab click handlers survive re-renders.
-function _mdFilteredDevices() {
-    const f = window._mdFilter || { type: 'all', tenant: 'all' };
-    return (window._allDevices || []).filter(d =>
-        (f.type === 'all' || d._typeKey === f.type) &&
-        (f.tenant === 'all' || (d._tenant || '') === f.tenant));
+// setTenant() calls this just before it re-renders the page for a tenant
+// switch. That re-render is not a new visit, so the picks are kept, and a
+// tenant pick moves to the tenant just switched to. The device fetch is not
+// scoped to the header tenant (a Global Admin gets every tenant's devices, a
+// tenant-admin every assigned tenant's), so a pick left on the old tenant kept
+// listing its devices under the new tenant's name (lm#486).
+// `keep` cannot outlive that re-render: setTenant calls setSubView/setView
+// right after this, and neither awaits before the page's loadAllDevices({
+// fresh: true }), which consumes `keep` before its own first await.
+function _mdFollowTenant(tenant) {
+    if (!document.getElementById('all-devices-list')) return;
+    _mdPick.keep = true;
+    if (_mdPick.tenant !== null) _mdPick.tenant = _mdKeyOf(tenant);
 }
 
-// Build the two-row sub-nav for Managed Devices: a device-TYPE row (always) and
-// a TENANT row (admin only, when >1 tenant owns devices). Counts are contextual
-// — a type tab shows how many match under the current tenant filter, and vice
-// versa — so the numbers always reflect what a click would reveal. Mirrors the
-// Setup → Simulations sub-tab idiom (.sub-nav-item.active = HPE-green underline).
+// The tenant key (see loadAllDevices) of a header tenant id, or null when
+// nothing listed has that tenant, which clears the pick rather than guess.
+// An admin's header tenant is a tenant record's id (/setup/tenants carries
+// its tenant_key). A tenant-admin's is one of their own tenant ids, exactly as
+// stored (canAccessTenant), and so is each of their devices' tenant_id (the
+// server's _owns check), so their devices' stored ids are matched exactly.
+function _mdKeyOf(raw) {
+    const id = String(raw ?? '');
+    const rec = (window._allTenants || []).find(t => t.id === id);
+    if (rec) return _mdTenantKey(rec.tenant_key, rec.id);
+    const dev = (window._allDevices || []).find(d => d._tenantRaw === id);
+    return dev ? dev._tenant : null;
+}
+
+// A record's tenant key: the tenant_key the hub sends, else its raw tenant id
+// folded as the hub folds it (access._norm_tenant_id: strip, then casefold).
+// The fallback is for an older hub process: WebUI files go live the moment a
+// pull lands, the hub process only at its next (gated) restart, so this page
+// can meet routes that send no tenant_key yet, and without it every device
+// fell under Unassigned. JS has no casefold; toLowerCase() differs from it
+// only for a few non-ASCII letters ("ß"), and only in that window.
+function _mdTenantKey(key, rawId) {
+    return key ?? String(rawId ?? '').trim().toLowerCase();
+}
+
+// The devices the current picks select. A row that is not picked does not filter.
+function _mdFilteredDevices() {
+    return (window._allDevices || []).filter(d =>
+        (_mdPick.type === null || d._typeKey === _mdPick.type) &&
+        (_mdPick.tenant === null || (d._tenant || '') === _mdPick.tenant));
+}
+
+// Which drill-down rows offer a real choice: Tenant when the devices span 2+
+// tenants (Unassigned counts as one), Type when they span 2+ device types.
+// The Tenant row is not admin-only: a tenant-admin assigned to several tenants
+// gets every one of them from /tenant/devices/*, so they pick one too (their
+// list only ever holds their own tenants).
+function _mdOffered() {
+    const all = window._allDevices || [];
+    return {
+        tenant: new Set(all.map(d => d._tenant || '')).size > 1,
+        type: new Set(all.map(d => d._typeKey)).size > 1,
+    };
+}
+
+// Draw the drill-down bar: a Tenant row and a Type row, each when it offers a
+// real choice or holds a pick. A row's chips are the tenants or types that own
+// a device under the other row's pick, plus its own active chip so a pick
+// never hides itself; counts say what a click would list. Clicking the active
+// chip again clears it. Mirrors the Setup → Simulations sub-tab idiom
+// (.sub-nav-item.active = HPE-green underline).
 function _renderManagedDeviceTabs() {
     const wrap = document.getElementById('all-devices-tabs');
     if (!wrap) return;
     const all = window._allDevices || [];
-    const f = window._mdFilter || (window._mdFilter = { type: 'all', tenant: 'all' });
-
-    // Type tabs: only types that actually have a device, ordered by DEVICE_TYPES.
-    const underTenant = all.filter(d => f.tenant === 'all' || (d._tenant || '') === f.tenant);
-    const typeCounts = {};
-    underTenant.forEach(d => { typeCounts[d._typeKey] = (typeCounts[d._typeKey] || 0) + 1; });
-    const typeKeys = Object.keys(DEVICE_TYPES).filter(k =>
-        all.some(d => d._typeKey === k));
+    const offered = _mdOffered();
     const chip = (active, onclick, label, count) =>
-        `<div onclick="${onclick}" class="sub-nav-item ${active ? 'active ' : ''}px-2 py-1 text-xs tracking-normal cursor-pointer select-none">${escapeHtml(label)}<span class="ml-1 text-xs text-slate-500 normal-case">${count}</span></div>`;
-    // A single device type makes the type row redundant (All == that one type).
-    let typeRow = '';
-    if (typeKeys.length > 1) {
-        let chips = chip(f.type === 'all', "_mdSelectType('all')", 'All', underTenant.length);
-        chips += typeKeys.map(k => chip(f.type === k, `_mdSelectType('${k}')`,
-            DEVICE_TYPES[k].badgeLabel || DEVICE_TYPES[k].title, typeCounts[k] || 0)).join('');
-        typeRow = `<div class="flex flex-wrap items-center gap-x-1 gap-y-1">
-            <span class="text-xs font-bold text-slate-500 mr-1">Type</span>${chips}</div>`;
-    } else if (f.type !== 'all') {
-        // Only one type exists but a stale filter still points at a removed one.
-        f.type = 'all';
+        `<div onclick="${onclick}" title="${active ? 'Click again to clear this pick' : 'List only these devices'}" class="sub-nav-item ${active ? 'active ' : ''}px-2 py-1 text-xs tracking-normal cursor-pointer select-none">${escapeHtml(label)}<span class="ml-1 text-xs text-slate-500 normal-case">${count}</span></div>`;
+    const row = (label, chips, cls) =>
+        `<div class="flex flex-wrap items-center gap-x-1 gap-y-1 ${cls}"><span class="text-xs font-bold text-slate-500 mr-1">${label}</span>${chips}</div>`;
+
+    let tenantRow = '';
+    if (offered.tenant || _mdPick.tenant !== null) {
+        // Devices per tenant key under the type pick; '' is Unassigned.
+        const counts = new Map();
+        all.filter(d => _mdPick.type === null || d._typeKey === _mdPick.type)
+            .forEach(d => counts.set(d._tenant || '', (counts.get(d._tenant || '') || 0) + 1));
+        if (_mdPick.tenant !== null) counts.set(_mdPick.tenant, counts.get(_mdPick.tenant) || 0);
+        // Each tenant's label (its name, or its id as stored), from its devices.
+        const labels = new Map();
+        all.forEach(d => { if (d._tenant && !labels.has(d._tenant)) labels.set(d._tenant, d._tenantLabel); });
+        const label = tid => tid ? (labels.get(tid) || _mdTenantNames.get(tid) || tid) : 'Unassigned';
+        // Tenants A–Z by name, Unassigned last.
+        const ids = [...counts.keys()].sort((a, b) =>
+            a === '' ? 1 : b === '' ? -1 : label(a).localeCompare(label(b)));
+        tenantRow = row('Tenant', ids.map(tid => chip(_mdPick.tenant === tid,
+            `_mdSelectTenant('${escJsAttr(tid)}')`, label(tid), counts.get(tid))).join(''),
+            'border-b border-slate-100 pb-1 mb-1');
     }
 
-    // Tenant tabs (admin only): tenants that own ≥1 device, under the current
-    // type filter. A single tenant (or none) makes the row pointless → hide it.
-    let tenantRow = '';
-    if (isAdmin()) {
-        const underType = all.filter(d => f.type === 'all' || d._typeKey === f.type);
-        const tenantCounts = {};
-        underType.forEach(d => {
-            const t = d._tenant || '';
-            if (t) tenantCounts[t] = (tenantCounts[t] || 0) + 1;
-        });
-        const tenantIds = Object.keys(tenantCounts).sort((a, b) =>
-            (a).localeCompare(b));
-        if (tenantIds.length > 1) {
-            const names = window._allTenantsName || {};
-            let row = chip(f.tenant === 'all', "_mdSelectTenant('all')", 'All Tenants', underType.length);
-            row += tenantIds.map(tid => chip(f.tenant === tid,
-                `_mdSelectTenant('${escJsAttr(tid)}')`, names[tid] || tid, tenantCounts[tid])).join('');
-            tenantRow = `<div class="flex flex-wrap items-center gap-x-1 gap-y-1 border-b border-slate-100 pb-1 mb-1">
-                <span class="text-xs font-bold text-slate-500 mr-1">Tenant</span>${row}</div>`;
-        }
+    let typeRow = '';
+    if (offered.type || _mdPick.type !== null) {
+        // Devices per type under the tenant pick, in DEVICE_TYPES order.
+        const counts = {};
+        all.filter(d => _mdPick.tenant === null || (d._tenant || '') === _mdPick.tenant)
+            .forEach(d => { counts[d._typeKey] = (counts[d._typeKey] || 0) + 1; });
+        if (_mdPick.type !== null) counts[_mdPick.type] = counts[_mdPick.type] || 0;
+        typeRow = row('Type', Object.keys(DEVICE_TYPES).filter(k => k in counts).map(k =>
+            chip(_mdPick.type === k, `_mdSelectType('${k}')`,
+                DEVICE_TYPES[k].badgeLabel || DEVICE_TYPES[k].title, counts[k])).join(''), '');
     }
 
     wrap.innerHTML = tenantRow + typeRow;
 }
 
+// Type chip click: pick that device type, or clear it when it is already picked.
 function _mdSelectType(key) {
-    (window._mdFilter || (window._mdFilter = { type: 'all', tenant: 'all' })).type = key;
+    _mdPick.type = (_mdPick.type === key) ? null : key;
     _renderManagedDeviceTabs();
     _renderManagedDeviceList();
 }
 
+// Tenant chip click ('' = Unassigned): pick it, or clear it when already picked.
 function _mdSelectTenant(tid) {
-    (window._mdFilter || (window._mdFilter = { type: 'all', tenant: 'all' })).tenant = tid;
+    _mdPick.tenant = (_mdPick.tenant === tid) ? null : tid;
     _renderManagedDeviceTabs();
     _renderManagedDeviceList();
 }
 
-// Render the (filtered) device rows into #all-devices-list. Reads the decorated
+// The red "Could not load" line for the lists the last load could not read,
+// or '' when every list loaded. The labels are code constants, not user text.
+function _mdFailNote() {
+    if (!_mdFailed.length) return '';
+    return `<p class="text-xs text-red-500 mb-2">Could not load: ${_mdFailed.join(', ')}. What is shown may be incomplete.</p>`;
+}
+
+// Render the picked device rows into #all-devices-list. Reads the decorated
 // window._allDevices; the spoke name + tenant were resolved in loadAllDevices.
 function _renderManagedDeviceList() {
     const listEl = document.getElementById('all-devices-list');
     if (!listEl) return;
-    const rows = _mdFilteredDevices();
-    if (rows.length === 0) {
-        listEl.innerHTML = '<p class="text-xs text-slate-500 italic">No devices match this filter.</p>';
+    const note = _mdFailNote();
+    // Select-first: while a row offers a choice and nothing is picked, ask for
+    // a pick instead of listing every device.
+    const offered = _mdOffered();
+    if (_mdPick.type === null && _mdPick.tenant === null && (offered.tenant || offered.type)) {
+        const what = [offered.tenant && 'a tenant', offered.type && 'a device type'].filter(Boolean).join(' or ');
+        listEl.innerHTML = note + `<p class="text-xs text-slate-500 italic">${(window._allDevices || []).length} devices. Pick ${what} above to list them.</p>`;
         return;
     }
-    listEl.innerHTML = rows.map(d => {
+    const rows = _mdFilteredDevices();
+    if (rows.length === 0) {
+        listEl.innerHTML = note || '<p class="text-xs text-slate-500 italic">No devices match this filter.</p>';
+        return;
+    }
+    listEl.innerHTML = note + rows.map(d => {
         const t = DEVICE_TYPES[d._typeKey];
         const name = d.name || d.id;
         const summary = t.rowSummary(d);
         const spoke = d.spoke_id
             ? ` · <span title="${escapeHtml(d.spoke_id)}">${escapeHtml(d._spokeName || d.spoke_id)}</span>`
             : '';
-        const tenant = (isAdmin() && d._tenantLabel)
-            ? `<span class="ml-2 px-2 py-0.5 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700" title="Tenant: ${escapeHtml(d._tenant)}">${escapeHtml(d._tenantLabel)}</span>`
+        // The tenant badge shows for a Global Admin, and for a tenant-admin
+        // whose devices span several tenants.
+        const tenant = ((isAdmin() || offered.tenant) && d._tenantLabel)
+            ? `<span class="ml-2 px-2 py-0.5 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700" title="Tenant: ${escapeHtml(d._tenantRaw.trim())}">${escapeHtml(d._tenantLabel)}</span>`
             : '';
         const eId = String(d._id).replace(/'/g, "\\'");
         return `<div class="flex items-center justify-between p-3 rounded-md bg-slate-50 border border-slate-200">

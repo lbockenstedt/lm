@@ -3295,16 +3295,22 @@ async function refreshDebugButtonState() {
     }
 }
 
-async function loadApprovedSpokes() {
+// The approved spokes the caller may see, or [] when they cannot be read.
+// `strict` throws instead, so a caller can tell "no approved spokes" from "the
+// list did not load" (a reply with no spokes list counts as not loaded: both
+// routes always send one).
+async function loadApprovedSpokes({ strict = false } = {}) {
     try {
         // Global Admins read the full roster (/setup/pending_spokes, admin-only);
         // tenant-admins read only the spokes they may bind to via the
         // session-scoped /tenant/devices/spokes (same row shape).
         const data = await apiJson(isAdmin() ? '/setup/pending_spokes' : '/tenant/devices/spokes');
+        if (strict && !Array.isArray(data && data.spokes)) throw new Error('reply has no spokes list');
         (data.spokes || []).forEach(s => { if (typeof _spokeName === 'function') _spokeName(s); });
         return (data.spokes || []).filter(s => s.approved);
     } catch (err) {
         console.error('Error loading approved spokes:', err);
+        if (strict) throw err;
         return [];
     }
 }

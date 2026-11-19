@@ -2405,19 +2405,14 @@ async function setTenant(tenant) {
         // fetch agree on the same tenant. Without this, a multi-tenant user
         // switching tenant would filter on stale session-tenant prefixes.
         await loadTenantPrefixes();
-        // Re-point the Managed Devices tenant filter at the tenant we just
-        // switched to. That filter lives on window (_mdFilter) so the tab
-        // handlers survive re-renders, which also means it survived a TENANT
-        // switch -- and for a Global Admin the device fetch is unscoped
-        // (_devEndpoint returns the bare /setup/* path, no ?tenant=), so
-        // every tenant's devices are always present. The self-heal in
-        // loadAllDevices only clears a filter whose tenant owns NO device,
-        // so it could never fire here: the old tenant still owned devices
-        // and the list stayed pinned to it. The page really did refetch --
-        // it was re-filtered back to the previous tenant, which is why this
-        // read as "My Devices does not refresh" (lm#486). loadAllDevices()
-        // falls back to 'all' if the new tenant owns nothing.
-        if (window._mdFilter) window._mdFilter.tenant = tenant;
+        // Managed Devices / My Devices: the re-render below is a tenant
+        // switch, not a new visit, so the device picks are kept and a tenant
+        // pick moves to the tenant just switched to. The device fetch is not
+        // scoped to the header tenant (a Global Admin gets every tenant's
+        // devices, a tenant-admin every assigned tenant's), so a pick left on
+        // the old tenant kept listing its devices under the new tenant's name,
+        // which read as "My Devices does not refresh" (lm#486).
+        if (typeof _mdFollowTenant === 'function') _mdFollowTenant(tenant);
         // The serial console dock floats over every view and lists the
         // consoles of the tenant it was opened under; re-list for this one.
         if (document.getElementById('serial-console-modal') && typeof serialRefreshAvailablePorts === 'function') {

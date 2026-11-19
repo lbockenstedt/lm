@@ -1,13 +1,15 @@
 """WebUI regressions for two bugs that both looked like "the page didn't refresh".
 
 1. lm#486 -- switching tenants left "My Devices" showing the PREVIOUS tenant.
-   The page did refetch. ``window._mdFilter`` (the Managed Devices tenant tab
-   filter) lives on window so the tab handlers survive re-renders -- which also
-   means it survived a TENANT switch. For a Global Admin ``_devEndpoint()``
-   returns the bare ``/setup/*`` path with no ``?tenant=``, so the fetch carries
-   EVERY tenant's devices; the self-heal in ``loadAllDevices`` only clears a
-   filter whose tenant owns no device, so it could never fire -- the old tenant
-   still owned devices. Fresh data, re-filtered straight back to the old tenant.
+   The page did refetch, but the Managed Devices tenant pick survived the
+   TENANT switch. For a Global Admin ``_devEndpoint()`` returns the bare
+   ``/setup/*`` path with no ``?tenant=``, so the fetch carries EVERY tenant's
+   devices; the self-heal in ``loadAllDevices`` only clears a pick whose tenant
+   owns no device, so it could never fire -- the old tenant still owned
+   devices. Fresh data, re-filtered straight back to the old tenant. setTenant
+   now calls ``_mdFollowTenant(tenant)``, which moves a tenant pick to the new
+   tenant before the re-render (test_webui_managed_devices_drilldown.py runs
+   it in a browser).
 
 2. lm#487 -- with a Credential Vault dialog open, the footer "Bug/Feature
    Request" button did nothing. ``openModal()`` builds a full-viewport
@@ -72,52 +74,59 @@ def _z(class_attr):
 
 # ── lm#486 ────────────────────────────────────────────────────────────────────
 
-def test_set_tenant_repoints_managed_devices_tenant_filter(main_js):
+def test_set_tenant_moves_the_managed_devices_tenant_pick(main_js):
     """The fix must live INSIDE setTenant -- that is the only place that knows
     the tenant changed. Asserting on the whole file would pass on a stray
     mention anywhere in 30k lines."""
     body = _fn_body(main_js, "async function setTenant(tenant)")
-    assert "_mdFilter" in body, (
-        "setTenant no longer re-points window._mdFilter.tenant -- lm#486 regressed: "
+    m = re.search(r"_mdFollowTenant\((\w+)\)", body)
+    assert m, (
+        "setTenant no longer calls _mdFollowTenant -- lm#486 regressed: "
         "My Devices will stay filtered to the tenant you switched AWAY from."
     )
-    m = re.search(r"_mdFilter\.tenant\s*=\s*(\w+)", body)
-    assert m, "expected an assignment to _mdFilter.tenant inside setTenant"
     assert m.group(1) == "tenant", (
-        f"_mdFilter.tenant is set to {m.group(1)!r}; it must be the `tenant` argument "
+        f"_mdFollowTenant is passed {m.group(1)!r}; it must be the `tenant` argument "
         "setTenant was called with, otherwise the list follows the wrong tenant."
     )
 
 
-def test_set_tenant_repoint_happens_before_the_rerender(main_js):
+def test_set_tenant_moves_the_pick_before_the_rerender(main_js):
     """Ordering matters: the re-render triggers loadAllDevices(), which reads the
-    filter. Setting it afterwards would leave the first paint showing the old
-    tenant."""
+    picks. Moving them afterwards would leave the first paint showing the old
+    tenant, and the re-render would count as a new visit and clear them."""
     body = _fn_body(main_js, "async function setTenant(tenant)")
-    assert body.index("_mdFilter.tenant") < body.index("setSubView(currentSubView)"), (
-        "the _mdFilter re-point must precede the sub-view/view re-render"
+    assert body.index("_mdFollowTenant(") < body.index("setSubView(currentSubView)"), (
+        "the _mdFollowTenant call must precede the sub-view/view re-render"
     )
 
 
 def test_load_all_devices_keeps_the_empty_tenant_self_heal(main_js):
-    """The re-point relies on this fallback: if the newly selected tenant owns no
-    devices, the filter must drop back to 'all' rather than showing an empty list."""
+    """The follow relies on this fallback: if the newly selected tenant owns no
+    devices, the pick must drop back to "not picked" rather than showing an
+    empty list."""
     assert re.search(
-        r"f\.tenant\s*!==\s*'all'\s*&&\s*!all\.some\(.*?_tenant.*?\)\s*\)\s*f\.tenant\s*=\s*'all'",
+        r"_mdPick\.tenant\s*!==\s*null\s*&&\s*!all\.some\(.*?_tenant.*?\)\s*\)\s*_mdPick\.tenant\s*=\s*null",
         main_js, re.S,
-    ), "the loadAllDevices tenant self-heal is gone; the re-point can strand an empty list"
+    ), "the loadAllDevices tenant self-heal is gone; the follow can strand an empty list"
 
 
 def test_filter_semantics_model_reproduces_the_stale_tenant_bug():
-    """Executable model of the real filter semantics, proving WHY the self-heal
+    """Executable model of the real pick semantics, proving WHY the self-heal
     could not save us: for a Global Admin the fetch is unscoped, so the old
-    tenant still owns devices and the filter is never cleared."""
-    def self_heal(f, devices):
-        if f["tenant"] != "all" and not any(d["_tenant"] == f["tenant"] for d in devices):
-            f["tenant"] = "all"
+    tenant still owns devices and the pick is never cleared. None = not picked
+    (the page asks for a pick instead of listing)."""
+    def self_heal(pick, devices):
+        if pick["tenant"] is not None and not any(d["_tenant"] == pick["tenant"] for d in devices):
+            pick["tenant"] = None
 
-    def visible(f, devices):
-        return [d["n"] for d in devices if f["tenant"] == "all" or d["_tenant"] == f["tenant"]]
+    def visible(pick, devices):
+        if pick["tenant"] is None:
+            return []
+        return [d["n"] for d in devices if d["_tenant"] == pick["tenant"]]
+
+    def follow(pick, tenant):
+        if pick["tenant"] is not None:
+            pick["tenant"] = tenant
 
     all_devices = [{"n": "lrb-fw", "_tenant": "lrb"}, {"n": "dxp-fw", "_tenant": "dxp"}]
 
@@ -127,15 +136,19 @@ def test_filter_semantics_model_reproduces_the_stale_tenant_bug():
     assert visible(stale, all_devices) == ["lrb-fw"], "this is the bug users reported"
 
     fixed = {"tenant": "lrb"}
-    fixed["tenant"] = "dxp"            # the fix
+    follow(fixed, "dxp")               # the fix
     self_heal(fixed, all_devices)
     assert visible(fixed, all_devices) == ["dxp-fw"]
 
     empty = {"tenant": "lrb"}
-    empty["tenant"] = "newtenant"      # a tenant that owns nothing
+    follow(empty, "newtenant")         # a tenant that owns nothing
     self_heal(empty, all_devices)
-    assert empty["tenant"] == "all", "self-heal must rescue a tenant with no devices"
-    assert visible(empty, all_devices) == ["lrb-fw", "dxp-fw"]
+    assert empty["tenant"] is None, "self-heal must rescue a tenant with no devices"
+    assert visible(empty, all_devices) == [], "nothing picked: the page asks for a pick"
+
+    unpicked = {"tenant": None}
+    follow(unpicked, "dxp")            # nothing picked stays unpicked
+    assert unpicked["tenant"] is None
 
 
 # ── lm#487 ────────────────────────────────────────────────────────────────────

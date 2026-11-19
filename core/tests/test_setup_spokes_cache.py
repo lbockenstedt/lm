@@ -163,6 +163,20 @@ def test_aggregate_payload_shape():
     assert by["opn-1"]["tenant_shared"] is True
 
 
+def test_aggregate_rows_carry_the_hub_tenant_key():
+    # The WebUI groups spoke-bound devices by tenant_key, never by its own case
+    # fold: JS toLowerCase() keeps "ß" while Python casefold() makes it "ss",
+    # so only the hub's key puts "Straße" and "STRASSE" under one tenant.
+    _reset_spokes_cache()
+    hub = _FakeHub(known=("a", "b", "c"),
+                   tenants={"a": " Straße ", "b": "STRASSE"},
+                   approved={"a": True, "b": True, "c": True})
+    by = {s["spoke_id"]: s for s in asyncio.run(setup._aggregate_spokes(hub))["spokes"]}
+    assert by["a"]["tenant_id"] == " Straße "
+    assert by["a"]["tenant_key"] == by["b"]["tenant_key"] == "strasse"
+    assert by["c"]["tenant_id"] == "" and by["c"]["tenant_key"] == ""
+
+
 def test_aggregate_keeps_direct_agent_that_collides_with_relay_inventory():
     sid = "dns-worker-agent"
     hub = _FakeHub(

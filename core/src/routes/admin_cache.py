@@ -16,7 +16,7 @@ routes only LOOK at it or nudge it — there is nothing to configure:
 # helpers, and the time module (all re-exported by the main api module).
 from api import (
     HTTPException, Request, _legacy_cache_namespaces, _save_sessions,
-    _session_cache_scopes, _sessions, time,
+    _session_cache_scopes, _sessions, access, time,
 )
 
 # Maps internal cache namespace keys to the labels users see in the UI footer.
@@ -39,7 +39,7 @@ def _visible(entry_tenants, scopes: set) -> bool:
     if not entry_tenants:
         return True
     # Otherwise the session needs at least one tenant scope in common with the entry.
-    return bool(set(entry_tenants) & scopes)
+    return any(access.tenant_among(t, scopes) for t in entry_tenants)
 
 
 def register(app, hub, ctx):

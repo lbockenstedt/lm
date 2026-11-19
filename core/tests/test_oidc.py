@@ -386,6 +386,15 @@ def test_provision_resync_no_change_keeps_sessions():
     assert any(s.get("user_id") == "user-oid-1" for s in api_mod._sessions.values())
 
 
+def test_build_user_data_drops_blank_tenant_grants():
+    # A blank grant stored before the routes refused one names no tenant.
+    hub = _FakeHub({"permission_groups": _groups_state(), "users": {
+        "u": {"auth_type": "entra", "groups": [], "tenants": [" ", "t-a", ""],
+              "permissions": {}}}})
+    ud = oidc.build_user_data(hub, hub.state.system_state["users"]["u"], "u")
+    assert (ud["tenants"], ud["tenant_id"]) == (["t-a"], "t-a")
+
+
 def test_build_user_data_carries_perms_and_tenants():
     hub = _FakeHub({"permission_groups": _groups_state(), "users": {
         "user-oid-1": {"auth_type": "entra", "groups": ["noc", "certs"],

@@ -30,6 +30,7 @@ from urllib.parse import urlsplit
 
 import hub_secret_store
 import instance_vault
+from access import _norm_tenant_id
 from display_names import node_name
 
 logger = logging.getLogger("Hub")
@@ -88,8 +89,10 @@ def archive_backend(role) -> Optional[str]:
 # ── storage ──────────────────────────────────────────────────────────────────
 
 def _tkey(tenant) -> str:
-    """Canonical storage key for a tenant (case-insensitive)."""
-    return str(tenant or "").strip().casefold()
+    """Canonical storage key for a tenant: the id as access compares it (case
+    and spaces aside), so legacy tenants spelt only by case ("acme" beside
+    "ACME") never share a record or its archive password."""
+    return _norm_tenant_id(tenant)
 
 
 def _all(hub) -> Dict[str, Any]:

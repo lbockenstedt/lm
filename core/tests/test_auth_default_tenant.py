@@ -108,3 +108,42 @@ def test_encrypted_login_succeeds_once_and_cannot_be_replayed(tmp_path):
 def test_encrypted_login_with_wrong_password_is_refused(tmp_path):
     c, _hub = _client(tmp_path, {"admin": _admin_user()})
     assert c.post("/auth/login", json=_encrypt_login(c, "nope")).status_code == 401
+
+
+def test_blank_tenant_grants_never_reach_a_session(tmp_path):
+    """A blank grant stored before the routes refused one names no tenant. It
+    is dropped from the login session, /auth/me and a restored saved session,
+    so a scope check never reads it as "no tenant selected"."""
+    import json
+    import time
+    user = {**_admin_user(), "permissions": {"ipam": True}, "tenants": [" ", "acme", ""]}
+    c, hub = _client(tmp_path, {"bob": user})
+    r = c.post("/auth/login", json={"username": "bob", "password": "pass1234"})
+    assert r.status_code == 200, r.text
+    tok = r.cookies.get("lm_session")
+    assert (api_mod._sessions[tok]["user"]["tenants"],
+            api_mod._sessions[tok]["user"]["tenant_id"]) == (["acme"], "acme")
+    me = c.get("/auth/me", cookies={"lm_session": tok}).json()
+    assert (me["tenants"], me["tenant_id"]) == (["acme"], "acme")
+    # A session saved before then is restored without it.
+    api_mod._sessions.clear()
+    with open(api_mod._sessions_file(hub), "w") as f:
+        json.dump({"t1": {"user_id": "bob", "expires": time.time() + 600, "user": {
+            "user_id": "bob", "tenants": ["", "acme"], "tenant_id": " "}}}, f)
+    api_mod._load_sessions(hub)
+    assert (api_mod._sessions["t1"]["user"]["tenants"],
+            api_mod._sessions["t1"]["user"]["tenant_id"]) == (["acme"], "acme")
+
+
+def test_a_grant_spelled_unlike_the_stored_id_can_be_the_default(tmp_path):
+    """A grant saved as "ACME" names the stored "acme". The default is saved
+    and returned in the caller's spelling, the one the WebUI then sends as
+    ?tenant=, which the access check compares exactly."""
+    c, hub = _client(tmp_path, {"bob": _tenant_user(["ACME"])})
+    tok = _mint_tenant_session(hub, "bob", ["ACME"])
+    r = c.put("/auth/default-tenant", json={"tenant_id": "ACME"}, cookies={"lm_session": tok})
+    assert r.status_code == 200 and r.json()["default_tenant"] == "ACME"
+    assert hub.state.system_state["users"]["bob"]["default_tenant"] == "ACME"
+    assert c.get("/auth/me", cookies={"lm_session": tok}).json()["default_tenant"] == "ACME"
+    r = c.put("/auth/default-tenant", json={"tenant_id": "acme"}, cookies={"lm_session": tok})
+    assert r.status_code == 403

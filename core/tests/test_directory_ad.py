@@ -273,6 +273,16 @@ def test_setup_list_and_add_show_the_credential_by_name_only(monkeypatch):
     assert all(c["vault_credential"]["bucket"] == "acme" for c in stored)
 
 
+def test_setup_list_carries_the_hub_tenant_key_without_storing_it(monkeypatch):
+    # Managed Devices groups a spokeless AD connection under its own tenant by
+    # the hub's tenant_key; the list returns copies, so nothing stores the key.
+    client, hub = _crud_client(monkeypatch, [{**ACME, "tenant_id": " ACME "}])
+    listed = client.get("/setup/ad-connections").json()["instances"][0]
+    assert listed["tenant_id"] == " ACME " and listed["tenant_key"] == "acme"
+    stored = hub.state.system_state["global_config"]["ad_connections"]
+    assert all("tenant_key" not in c for c in stored)
+
+
 def test_connections_are_read_side_by_side(monkeypatch):
     import asyncio
     import time

@@ -591,6 +591,16 @@ async def test_tenant_without_netbox_mapping_is_skipped_never_given_everything()
     assert "dhcp-nomap" not in hub.pushed()
 
 
+def test_a_spoke_of_a_stored_default_twin_reads_only_that_tenants_netbox(monkeypatch):
+    # A "Default" record stored beside the built-in Admin tenant makes the id
+    # ambiguous, so a DHCP spoke bound to "Default" is that tenant's own: it is
+    # scoped to its NetBox tenant, not served the Admin's unfiltered data.
+    import access
+    monkeypatch.setattr(access, "_AMBIGUOUS_TENANT_IDS", access._case_collisions({"Default": {}}))
+    hub = _TenantHub({"dhcp-twin": "Default"}, {"Default": {"netbox_tenant_slug": "default-co"}})
+    assert hub._sync_scope("dhcp-twin") == ("tenant:default-co", {"tenant": "default-co"})
+
+
 class _LrbKeaDownHub(_TenantHub):
     """The lrb tenant's own Kea rejects its push."""
     async def request_response(self, spoke_id, command, payload, timeout=30.0):
