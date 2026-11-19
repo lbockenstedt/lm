@@ -2391,7 +2391,12 @@ def register(app, hub, ctx):
             # buckets name the tenant is refused (see _execute_nw_scan), so it
             # is not a discovery-only pass either.
             vault_error = ""
-            if _scan_uses_vault_sets(cred_ids):
+            # Only a schedule that will run and reaches the vault read (it has
+            # a usable spoke) can be refused; a disabled one or one with no
+            # spoke is never refused.
+            runnable = bool(sched.get("enabled")) and bool(resolve_nw_scan_spoke(
+                hub, tid, spoke_id, access.shared_tenant_id()))
+            if runnable and _scan_uses_vault_sets(cred_ids):
                 try:
                     _vault_scan_sets(hub, tid)
                 except ValueError as e:
