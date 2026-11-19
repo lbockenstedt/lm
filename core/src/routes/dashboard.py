@@ -202,8 +202,9 @@ def register(app, hub, ctx):
         else:
             _gs = hub.get_hypervisor_spoke()
             hv_spokes = [_gs] if access.spoke_is_unbound(hub, _gs) else []
-        # A tenant with its own ClearPass counts only its own sessions.
-        spoke_nac        = access.scoped_spoke_of_type(hub, _tid, "nac")
+        # A tenant sees only its own/shared NAC source; unscoped views use the
+        # explicit global resolver rather than the first connected NAC spoke.
+        spoke_nac        = hub.get_cppm_spoke_for_scope(_tid)
 
         # Whole-host PINNED-agent ownership. A Proxmox host can dial a SHARED
         # spoke yet be PINNED to one tenant (per-agent Tenant button →
@@ -411,17 +412,22 @@ def register(app, hub, ctx):
                        for v in all_vms}
             _merged.update(_spoke_owned)
             all_vms = list(_merged.values())
-        # NAC sessions come from the SHARED (global) nac spoke — CPPM_GET_ACCESS_TRACKER
-        # returns every tenant's sessions, so subnet scoping is the ONLY isolation.
-        # A tenant with no bound prefixes must therefore show 0, NOT the global list
-        # (else every unbound tenant shows the same cross-tenant total). Strict,
-        # matching the tenant-bound hypervisor VM isolation.
-        _nac_owner = access.spoke_owner_tenant(hub, spoke_nac)
+        # NAC sessions from a shared or hub ClearPass hold every tenant's
+        # sessions, so subnet scoping is the ONLY isolation: a tenant with no
+        # bound prefixes must show 0, NOT the global list (else every unbound
+        # tenant shows the same cross-tenant total). A spoke serving only the
+        # tenant's own ClearPass, by its NAC records or else its binding
+        # (access.spoke_data_owner), counts in full.
+        _nac_owner = access.spoke_data_owner(hub, spoke_nac)
         if _nac_owner:
             sessions_list = sessions_list if access.tenant_in(_nac_owner, _tid) else []
         else:
             sessions_list = (filter_items_by_prefixes(sessions_list, sess_prefixes, ["ip"])
                              if sess_prefixes else [])
+            # Count only the sessions the Access Tracker shows the tenant: none
+            # a more specific tenant owns.
+            sessions_list = await access._owned_rows(hub, sessions_list, _tid, sess_prefixes,
+                                                     "nac", ["ip"], spoke_nac)
         # Count running VMs and sessions.
         vms      = sum(1 for v in all_vms if v.get("status") == "running")
         sessions = len(sessions_list)
@@ -681,9 +687,9 @@ def register(app, hub, ctx):
         else:
             _gs = hub.get_hypervisor_spoke()
             spoke_hypervisor = _gs if access.spoke_is_unbound(hub, _gs) else None
-        # The tenant's own (or shared) ClearPass spoke.
+        # The tenant's own/shared ClearPass source, or the safe global source.
         _scoped_t = resolved if resolved and resolved != "default" else None
-        spoke_nac        = access.scoped_spoke_of_type(hub, _scoped_t, "nac")
+        spoke_nac        = hub.get_cppm_spoke_for_scope(_scoped_t)
         # Tenant-bound directory: a non-admin only reaches the LDAP spoke bound
         # to its tenant (None → no user results). The spoke additionally scopes
         # by the tenant's OU base DN (see ldap_spoke SEARCH_USERS), so even a

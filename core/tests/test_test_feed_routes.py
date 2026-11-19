@@ -552,6 +552,25 @@ def test_mirror_shared_tenant_keeps_partial_progress_on_a_mid_loop_failure():
     assert changed is True
 
 
+def test_mirror_shared_tenant_drops_nac_caches_when_the_flag_moves(monkeypatch):
+    """A new shared tenant changes which ClearPass each tenant reads, and a
+    cached NAC entry is served without re-resolving it, so the mirror drops
+    the NAC caches when it moves the flag, and not when nothing changed."""
+    import access
+    import routes.cppm as cppm_routes
+    from routes.test_feed import _mirror_shared_tenant
+    drops = []
+    monkeypatch.setattr(cppm_routes, "drop_nac_caches", drops.append)
+    monkeypatch.setattr(access, "_SHARED_TENANT_ID", access._SHARED_TENANT_ID)
+    monkeypatch.setattr(access, "_GROUP_MEMBERS", access._GROUP_MEMBERS)
+    hub = _FakeHub({"a": {"name": "A", "shared": True}, "c": {"name": "C"}})
+    registry = {"c": {"name": "C", "shared": True}}
+    assert _mirror_shared_tenant(hub, registry) is True
+    assert drops == [hub]
+    assert _mirror_shared_tenant(hub, registry) is False
+    assert drops == [hub]
+
+
 def test_mirror_shared_tenant_logs_incomplete_not_mirrored_on_partial_failure(caplog):
     """Log-fidelity nit from the lm#1005 reviewer panel: if the write that
     would SET the new shared tenant is the one that fails (others' clears

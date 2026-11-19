@@ -44,7 +44,7 @@ were removed. The GET side loads config for module setup pages. Likely
 
 | Path | GET | POST | Notes |
 |---|---|---|---|
-| `/setup/cppm-config` | 590 | 596 | ClearPass (CPPM/NAC) module config |
+| `/setup/cppm-config` | 590 | 596 | ClearPass (CPPM/NAC) module config; the POST answers 409 while NAC instance records exist (edit them in Setup → NAC) |
 | `/setup/pxmx-config` | 627 | 636 | pxmx module config |
 | `/setup/ldap-config` | 667 | 673 | LDAP IdP config |
 | `/setup/dns-config` | 712 | 718 | DNS module config |

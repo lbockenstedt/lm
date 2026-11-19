@@ -24,6 +24,7 @@ These lock in:
 import asyncio
 import types
 
+from hub_spoke_registry import SpokeRegistryMixin
 from routes.dashboard import register
 
 _TIMEOUT = {"status": "ERROR", "message": "Timed out waiting for spoke response"}
@@ -54,6 +55,17 @@ class _Hub:
 
     def get_spoke_by_type(self, t):
         return {"ipam": "ipam", "nac": "nac"}.get(t)
+
+    def get_cppm_spoke_for_global(self):
+        """No global NAC source is needed by these dashboard fixtures."""
+        return None
+
+    def get_cppm_spokes_for_tenant(self, tenant_id):
+        """No tenant NAC source is needed by these dashboard fixtures."""
+        return []
+
+    # The real scope pick, over the two fixture sources above.
+    get_cppm_spoke_for_scope = SpokeRegistryMixin.get_cppm_spoke_for_scope
 
     def _agent_relay_name(self, agent_id):
         return agent_id

@@ -47,6 +47,18 @@ def _hub(instances_by_key=None, active=None, module_types=None):
         m.push_calls.append(spoke_id)
     m.push_config_to_spoke = _push_config_to_spoke
 
+    # NAC re-sends every NAC spoke: record where the NAC records point when
+    # it runs, and whether it was asked to drop the NAC cache.
+    m.reconcile_calls = []
+    m.reconcile_drop_caches = []
+
+    async def _reconcile_nac_spokes(*, drop_caches=True):
+        nac = m.state.system_state["global_config"].get("nac_instances") or []
+        m.reconcile_calls.append([i.get("spoke_id") for i in nac])
+        m.reconcile_drop_caches.append(drop_caches)
+        return {}
+    m.reconcile_nac_spokes = _reconcile_nac_spokes
+
     return m
 
 
@@ -94,7 +106,12 @@ async def test_down_instance_relocates_to_next_pool_candidate():
     assert hub.load_role_calls == [("spokeB", {"role": "cppm", "config": {}})]
     inst = hub.state.system_state["global_config"]["nac_instances"][0]
     assert inst["spoke_id"] == "spokeB-cppm"
-    assert hub.push_calls == ["spokeB-cppm"]
+    # Every NAC spoke is re-sent its config after the record moved.
+    assert hub.reconcile_calls == [["spokeB-cppm"]]
+    # Same record, tenant and ClearPass: the 30 s loop keeps the NAC cache
+    # (and so the Access Tracker query floor).
+    assert hub.reconcile_drop_caches == [False]
+    assert hub.push_calls == []
 
 
 @pytest.mark.asyncio
@@ -166,6 +183,9 @@ async def test_cycle_covers_all_three_products_independently():
     await hub._instance_relocate_cycle()
     roles_loaded = {payload["role"] for _sid, payload in hub.load_role_calls}
     assert roles_loaded == {"cppm", "netbox", "ldap"}
+    # NAC re-sends every NAC spoke; the other products push their new spoke.
+    assert hub.reconcile_calls == [["spokeC-cppm"]]
+    assert sorted(hub.push_calls) == ["spokeC-ldap", "spokeC-netbox"]
 
 
 # ── load-based rebalancing (PR3) ─────────────────────────────────────────────
@@ -191,7 +211,8 @@ async def test_rebalance_moves_instance_to_a_much_less_loaded_candidate():
     assert hub.load_role_calls == [("spokeB", {"role": "cppm", "config": {}})]
     inst = hub.state.system_state["global_config"]["nac_instances"][0]
     assert inst["spoke_id"] == "spokeB-cppm"
-    assert hub.push_calls == ["spokeB-cppm"]
+    assert hub.reconcile_calls == [["spokeB-cppm"]]
+    assert hub.push_calls == []
 
 
 @pytest.mark.asyncio

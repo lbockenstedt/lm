@@ -14,6 +14,38 @@ from access import (
     valid_hostname as _valid_hostname,
     valid_identifier as _valid_identifier,
 )
+# Drops the cached NAC lists when a tenant write changes who reads the shared ClearPass.
+from routes.cppm import drop_nac_caches
+
+
+def _sharing(hub) -> dict:
+    """Each tenant's shared flag and shared-access mode. Together they decide
+    which tenants read the shared ClearPass (``get_cppm_spokes_for_tenant``)."""
+    tenants = hub.state.tenant_state.get("tenants", {}) or {}
+    return {tid: (bool(cfg.get("shared")), cfg.get("shared_access") or "auto")
+            for tid, cfg in tenants.items() if isinstance(cfg, dict)}
+
+
+def _clear_other_shared(hub, tenant_id: str, config: dict) -> None:
+    """Single-shared invariant: a write that sets ``shared`` on a tenant
+    clears the flag on every OTHER tenant, so exactly one shared tenant
+    exists (otherwise the shared tenant would depend on dict order)."""
+    if not config.get("shared"):
+        return
+    for other_tid, other_cfg in (hub.state.tenant_state.get("tenants", {}) or {}).items():
+        if other_tid != tenant_id and isinstance(other_cfg, dict) and other_cfg.get("shared"):
+            hub.state.update_tenant(other_tid, {"shared": False})
+
+
+def _after_tenant_write(hub, before: dict) -> None:
+    """Refresh the cached shared-tenant id after a tenant write, and drop the
+    cached NAC lists when the write changed ``_sharing``. A cached NAC entry
+    is served without re-resolving its ClearPass, so a tenant denied shared
+    access, or a new shared tenant, would otherwise keep reading the old
+    ClearPass's snapshot for as long as refreshes fail."""
+    refresh_shared_tenant(hub)
+    if _sharing(hub) != before:
+        drop_nac_caches(hub)
 
 
 def register(app, hub, ctx):
@@ -448,12 +480,14 @@ def register(app, hub, ctx):
                 ),
             )
 
-        # Remove the tenant, save immediately and refresh the shared-tenant cache.
+        # Remove the tenant, save immediately, refresh the shared-tenant cache
+        # and drop the NAC caches if who reads the shared ClearPass changed.
+        before = _sharing(hub)
         removed = hub.state.delete_tenant(clean)
         if not removed:
             raise HTTPException(status_code=404, detail=f"Tenant {clean} not found")
         await hub.state.save_state_now()
-        refresh_shared_tenant(hub)
+        _after_tenant_write(hub, before)
         return {"status": "ok", "message": f"Tenant {clean} deleted."}
 
     @app.post("/setup/ldap/provision-ous")
@@ -495,15 +529,10 @@ def register(app, hub, ctx):
             tenant_id = data.get("tenant_id", "default")
             config = data.get("config", {})
             _check_shared_access(config)
+            before = _sharing(hub)
 
-            # Single-shared invariant: setting shared=True on a tenant clears the
-            # flag on every OTHER tenant, so exactly one shared tenant exists.
-            if "shared" in config and config.get("shared"):
-                for other_tid, other_cfg in (hub.state.tenant_state.get("tenants", {}) or {}).items():
-                    if other_tid != tenant_id and isinstance(other_cfg, dict) and other_cfg.get("shared"):
-                        hub.state.update_tenant(other_tid, {"shared": False})
-
-            # Save the config changes.
+            # Keep exactly one shared tenant, then save the config changes.
+            _clear_other_shared(hub, tenant_id, config)
             hub.state.update_tenant(tenant_id, config)
 
             # Optionally make this the active tenant.
@@ -513,8 +542,8 @@ def register(app, hub, ctx):
             # Mark state for saving.
             hub.state._mark_dirty()
             # Refresh the cached shared-tenant id so the visibility gate is
-            # correct on the very next request.
-            refresh_shared_tenant(hub)
+            # correct on the very next request (and drop stale NAC caches).
+            _after_tenant_write(hub, before)
 
             return {"status": "ok", "message": f"Tenant {tenant_id} updated."}
         # Any failure is reported as a bad request.
@@ -1207,9 +1236,14 @@ def register(app, hub, ctx):
                 raise HTTPException(
                     status_code=400,
                     detail="No editable fields supplied (a tenant admin may only set name, description, quotas)")
-            # Apply the changes and mark state for saving.
+            # Apply the changes and mark state for saving. A Global Admin may
+            # change sharing here too, so keep one shared tenant, then refresh
+            # and drop as /setup/tenant does.
+            before = _sharing(hub)
+            _clear_other_shared(hub, tenant, merged)
             hub.state.update_tenant(tenant, merged)
             hub.state._mark_dirty()
+            _after_tenant_write(hub, before)
             return {"status": "ok", "message": f"Tenant {tenant} updated.",
                     "updated": merged}
         # Let HTTP errors through unchanged; wrap anything else as a 500.

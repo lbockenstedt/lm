@@ -1302,6 +1302,15 @@ def tenant_may_manage(manager_tenant, target_tenant) -> bool:
 # tenant's dedicated resources.
 ADMIN_TENANT_ID = "default"
 
+# The owner ``spoke_data_owner`` gives a spoke whose data belongs to no one
+# tenant: a NAC spoke serving several tenants' ClearPass records, or a
+# tenant's spoke the hub pushed its own ClearPass record. It is not a tenant id, so
+# ``tenant_in`` and ``spoke_visible_to_session`` match it for nobody but a
+# Global Admin with no tenant selected. ADMIN would not do: non-admin users
+# can be members of the ADMIN tenant, and its scope never covers another
+# tenant's dedicated resources.
+ADMIN_ONLY_OWNER = "<admin only>"
+
 
 def tenant_scope_ids(requested) -> Optional[set]:
     """Effective tenant ids for a picker selection.
@@ -1375,10 +1384,15 @@ def spoke_is_unbound(hub, spoke_id) -> bool:
     except Exception:  # noqa: BLE001 - unreadable binding → never leak
         return False
     # Unassigned, shared, or admin-bound counts as unbound.
-    normalized = str(tenant_id or "").strip()
-    if not normalized:
-        return True
-    return tenant_is_shared(normalized) or normalized.lower() == ADMIN_TENANT_ID
+    return tenant_is_unbound(tenant_id)
+
+
+def tenant_is_unbound(tenant_id) -> bool:
+    """Whether ``tenant_id`` names no real tenant: unassigned, the shared
+    tenant, or the ADMIN tenant. The rule ``spoke_is_unbound`` applies to a
+    spoke's binding, shared so a record's tenant is judged the same way."""
+    normalized = _norm_tenant_id(tenant_id)
+    return not normalized or tenant_is_shared(normalized) or normalized == ADMIN_TENANT_ID
 
 
 # ── NW per-tenant poll config (jitter / caps / default cadence) ──────────────
@@ -1672,6 +1686,29 @@ def tenant_has_own_firewall(hub, tenant_id) -> bool:
     return tenant_has_own_spoke(hub, t, "firewall")
 
 
+def tenant_has_own_nac(hub, tenant_id) -> bool:
+    """``tenant_id`` has its own ClearPass: a ``nac_instances`` record of its
+    own (bound to any spoke or to none, connected or not) or a NAC spoke
+    bound to it. Such a tenant no longer sees the shared ClearPass, the way
+    ``tenant_has_own_firewall`` counts firewall records. Counting an offline
+    or unapproved record too keeps the tenant from silently falling back to
+    the shared ClearPass whenever its own spoke drops."""
+    # Admin, shared, or blank tenants never own a ClearPass.
+    t = _norm_tenant_id(tenant_id)
+    if not t or t == ADMIN_TENANT_ID or tenant_is_shared(t):
+        return False
+    # Any NAC instance record of this tenant? Read as the NAC resolvers do.
+    try:
+        gc = hub.state.get_global_config() or {}
+    except Exception:  # noqa: BLE001
+        gc = {}
+    for rec in gc.get("nac_instances") or []:
+        if isinstance(rec, dict) and _norm_tenant_id(rec.get("tenant_id")) == t:
+            return True
+    # Or a NAC spoke of its own.
+    return tenant_has_own_spoke(hub, t, "nac")
+
+
 def firewall_dhcp_prefixes(hub, tenant_id, prefixes):
     """The prefixes global search's firewall DHCP leg filters on. A shared
     firewall serves the common routing domain (``shared_slice_prefixes``), so a
@@ -1710,7 +1747,8 @@ def tenant_shared_access(hub, tenant_id) -> str:
 def tenant_left_shared(hub, tenant_id, module_type) -> bool:
     """True when ``module_type``'s shared resources are hidden from ``tenant_id``.
     Follows the tenant's shared-access mode; ``auto`` hides them once the tenant
-    owns its own ``module_type`` (``"firewall"`` → ``tenant_has_own_firewall``).
+    owns its own ``module_type`` (``"firewall"`` → ``tenant_has_own_firewall``,
+    ``"nac"`` → ``tenant_has_own_nac``).
     No tenant, ADMIN or the shared tenant itself → False."""
     t = _norm_tenant_id(tenant_id)
     if not t or t == ADMIN_TENANT_ID or tenant_is_shared(t):
@@ -1718,8 +1756,12 @@ def tenant_left_shared(hub, tenant_id, module_type) -> bool:
     mode = tenant_shared_access(hub, t)
     if mode != "auto":
         return mode == "deny"
-    if canon_module_type(module_type) == "firewall":
+    # Firewalls and NAC also count the tenant's own records, not only spokes.
+    mt = canon_module_type(module_type)
+    if mt == "firewall":
         return tenant_has_own_firewall(hub, tenant_id)
+    if mt == "nac":
+        return tenant_has_own_nac(hub, tenant_id)
     return tenant_has_own_spoke(hub, tenant_id, module_type)
 
 
@@ -1763,6 +1805,23 @@ def scoped_spoke_of_type(hub, tenant_id, module_type) -> Optional[str]:
     return None
 
 
+def spoke_data_owner(hub, spoke_id) -> Optional[str]:
+    """The tenant whose data ``spoke_id`` serves, for the read and write
+    gates below. For most modules that is the spoke's own binding
+    (``spoke_owner_tenant``). A NAC spoke serves whichever ClearPass the
+    hub pushes it, and a ``nac_instances`` record keeps its tenant when
+    Setup → NAC moves it to another spoke, so the hub's
+    ``get_nac_spoke_owner`` decides for NAC: the one tenant the spoke serves
+    alone, ``ADMIN_ONLY_OWNER`` when it serves no one tenant alone, and None
+    for the shared ClearPass, which the subnet filter narrows for every
+    reader."""
+    if spoke_id and spoke_module_type(hub, spoke_id) == "nac":
+        owner_of = getattr(hub, "get_nac_spoke_owner", None)
+        if callable(owner_of):
+            return owner_of(spoke_id)
+    return spoke_owner_tenant(hub, spoke_id)
+
+
 def _shared_spoke_masked(hub, spoke_id, tid, firewall_id=None) -> bool:
     """A shared/unassigned spoke's (or shared firewall's) data is hidden from
     ``tid`` because ``tid`` owns its own of that module."""
@@ -1775,12 +1834,13 @@ def _owned_spoke_visible(hub, sessions, request, spoke_id, explicit_tenant=None,
                          owner=None, firewall_id=None) -> Optional[bool]:
     """Read visibility of data from a tenant-dedicated spoke: shown when the
     reader's selected/effective tenant is the owner or a group containing it
-    (a Global Admin with no selection sees all), hidden otherwise. A shared/
-    unassigned spoke is hidden (False) from a tenant that owns a spoke of the
-    same module type (``tenant_has_own_spoke``). None otherwise (the IP filter
-    applies)."""
+    (a Global Admin with no selection sees all), hidden otherwise. The owner
+    is the tenant whose data the spoke serves (``spoke_data_owner``: for NAC
+    the tenant of the ClearPass it is pushed). A shared/unassigned spoke is
+    hidden (False) from a tenant that owns its own of the same module
+    (``tenant_left_shared``). None otherwise (the IP filter applies)."""
     # Find the owner; nothing to decide for unidentified data.
-    owner = owner or spoke_owner_tenant(hub, spoke_id)
+    owner = owner or spoke_data_owner(hub, spoke_id)
     if not owner and not (spoke_id or firewall_id):
         return None
     # Unauthenticated: hide owned data.
@@ -1807,10 +1867,11 @@ def _owned_spoke_writable(hub, sess, spoke_id, owner=None,
                           firewall_id=None) -> Optional[bool]:
     """Write/control counterpart of ``_owned_spoke_visible``: any of the
     caller's tenants owns (or is a group containing) the dedicated spoke's
-    tenant. A shared/unassigned spoke is not writable when every one of the
-    caller's tenants owns its own spoke of that type. None otherwise."""
+    tenant (``spoke_data_owner``). A shared/unassigned spoke is not writable
+    when every one of the caller's tenants owns its own of that module. None
+    otherwise."""
     # Owner of the spoke; admins may write dedicated spokes.
-    owner = owner or spoke_owner_tenant(hub, spoke_id)
+    owner = owner or spoke_data_owner(hub, spoke_id)
     if is_admin(sess):
         return True if owner else None
     # Shared spoke: not writable if every caller tenant has its own.
@@ -2663,7 +2724,7 @@ def filter_enabled(hub, module: str) -> bool:
 
 
 async def filter_session(hub, sessions: dict, request: "Request", data, module: str, ip_fields,
-                         spoke_id=None, spoke_of=None):
+                         spoke_id=None, spoke_of=None, shared_source: bool = False):
     """Apply server-side subnet filtering to ``data`` for ``module``.
 
     No-op for admins and for disabled modules. Otherwise drops items whose
@@ -2688,13 +2749,17 @@ async def filter_session(hub, sessions: dict, request: "Request", data, module: 
     :func:`effective_tenant` falls back to the session tenant for an absent or
     unowned selection, so a crafted ``?tenant=`` can never widen the filter —
     the cross-tenant backstop is preserved.
+
+    ``shared_source`` is as in :func:`filter_tenant`: rows from shared
+    infrastructure are kept only when no other tenant owns them more
+    specifically (``_owned_rows``).
     """
     # Data merged from several spokes: filter each spoke's part separately.
     if spoke_of is not None:
         return await filter_by_source_spoke(
             hub, sessions, request, data, spoke_of,
             lambda d, sid=None: filter_session(hub, sessions, request, d, module, ip_fields,
-                                               spoke_id=sid))
+                                               spoke_id=sid, shared_source=shared_source))
     # Dedicated-spoke data: all or nothing.
     visible = _owned_spoke_visible(hub, sessions, request, spoke_id, None)
     if visible is not None:
@@ -2720,7 +2785,8 @@ async def filter_session(hub, sessions: dict, request: "Request", data, module: 
     prefixes = shared_slice_prefixes(hub, tid, raw, module, spoke_id)
     if not prefixes:
         return _vrf_only_result(data, ip_fields) if raw else _empty_filter_result(data)
-    return filter_items_by_prefixes(data, prefixes, ip_fields)
+    out = filter_items_by_prefixes(data, prefixes, ip_fields)
+    return await _owned_rows(hub, out, tid, prefixes, module, ip_fields, spoke_id, shared_source)
 
 
 # In-process memo of per-firewall OPNsense alias maps, so the rules subnet
@@ -3089,11 +3155,13 @@ async def gate_record(hub, sessions: dict, request: "Request", record, module: s
         return record
     if not filter_enabled(hub, module):
         return record
+    tid = _session_tenant_id(sess)
     raw = await resolve_prefixes(hub, sess)
-    prefixes = shared_slice_prefixes(hub, _session_tenant_id(sess), raw, module, spoke_id)
+    prefixes = shared_slice_prefixes(hub, tid, raw, module, spoke_id)
     if not prefixes:
         return _vrf_only_record(record) if raw else None
-    return filter_record_by_prefixes(record, prefixes, ip_fields)
+    return await _owned_record(hub, filter_record_by_prefixes(record, prefixes, ip_fields),
+                               tid, prefixes, module, ip_fields, spoke_id)
 
 
 def _vrf_only_record(record):
@@ -3206,18 +3274,62 @@ def _tenant_tag_set(hub, tid) -> set:
             if x}
 
 
-def _keep_owned_items(data, tid: str, nets_by_tid: Dict[str, List[Any]], ip_fields):
-    """Keep only records whose address belongs to ``tid`` by most-specific
-    prefix (``_prefix_owner``). A CIDR record (a DHCP subnet) counts by its
-    network address."""
+# Modules whose rows reach the IP filter only from infrastructure several
+# tenants share. NAC: a tenant's own ClearPass is a dedicated spoke, shown all
+# or nothing (``_owned_spoke_visible``), or its rows carry OWN_SOURCE_MARKER in
+# a merged list, so every other NAC row is from the shared ClearPass.
+_SHARED_SOURCE_MODULES = frozenset({"nac"})
+
+
+async def _served_networks(hub, module: str, spoke_id=None) -> List[Any]:
+    """Every tenant's NetBox networks that shared infrastructure serves: the
+    global table and the VRFs several tenants share (``shared_slice_prefixes``).
+
+    These decide who owns a shared source's row (``_keep_owned_items``). A
+    prefix in a tenant's own VRF is a routing domain the shared source does
+    not serve, so it must not claim the source's rows: DXP's own-VRF /24s
+    inside RA's common 172.16.0.0/16 would otherwise hide RA's rows there.
+    The shared tenant's prefixes don't count either: shared infrastructure is
+    visible to every tenant (as in ``foreign_tenant_ips``)."""
+    served: List[Any] = []
+    for tid, nets in (await _tenant_networks(hub)).items():
+        if tenant_is_shared(tid):
+            continue
+        # Keep the networks this tenant's VRF cut leaves.
+        kept = set(shared_slice_prefixes(hub, tid, [str(n) for n in nets], module, spoke_id))
+        served.extend(n for n in nets if str(n) in kept)
+    return served
+
+
+def _keep_owned_items(data, prefixes, served, ip_fields):
+    """Keep the records the viewing tenant owns on a shared source: one of the
+    record's addresses is in the tenant's ``prefixes`` and no ``served``
+    network holding it is more specific (the most-specific rule the syncs use,
+    ``_prefix_owner``). A tie, such as two hub tenants on one NetBox tenant,
+    keeps the record for both. Records from the tenant's own source
+    (``OWN_SOURCE_MARKER``) are always kept. A CIDR record (a DHCP subnet)
+    counts by its network address."""
     # Locate the record list.
     container, key = _find_list_slot(data)
     if container is None:
         return data
+    mine = _nets(prefixes)
+    verdicts: Dict[Any, bool] = {}  # per address: rows repeat the same addresses
+
+    def longest(addr, nets) -> int:
+        """Length of the most specific network in ``nets`` holding ``addr``, else -1."""
+        return max((n.prefixlen for n in nets if addr in n), default=-1)
+
+    def ours(addr) -> bool:
+        """True if one of our prefixes holds ``addr`` and no served network is more specific."""
+        if addr not in verdicts:
+            own = longest(addr, mine)
+            verdicts[addr] = own >= 0 and own >= longest(addr, served)
+        return verdicts[addr]
 
     def owned(item) -> bool:
-        """True if any of the item's addresses is owned by ``tid`` (non-dicts pass)."""
-        if not isinstance(item, dict):
+        """True if the item is from our own source or one of its addresses is ours (non-dicts pass)."""
+        if not isinstance(item, dict) or item.get(OWN_SOURCE_MARKER):
             return True
         for f in ip_fields:
             for a in extract_addrs(item.get(f)) or []:
@@ -3225,7 +3337,7 @@ def _keep_owned_items(data, tid: str, nets_by_tid: Dict[str, List[Any]], ip_fiel
                     addr = ipaddress.ip_network(a, strict=False).network_address
                 except ValueError:
                     continue
-                if same_tenant(_prefix_owner(addr, nets_by_tid) or "", tid):
+                if ours(addr):
                     return True
         return False
 
@@ -3233,6 +3345,34 @@ def _keep_owned_items(data, tid: str, nets_by_tid: Dict[str, List[Any]], ip_fiel
     lst = container if key is None else container[key]
     kept = [i for i in lst if owned(i)]
     return kept if key is None else _replace_slot(data, container, key, kept)
+
+
+async def _owned_rows(hub, data, tid, prefixes, module: str, ip_fields,
+                      spoke_id=None, shared_source: bool = False):
+    """``data``, already cut to ``tid``'s ``prefixes``, narrowed to the rows
+    ``tid`` owns when it comes from shared infrastructure (``shared_source``,
+    or a module in ``_SHARED_SOURCE_MODULES``).
+
+    Tenants' common prefixes can nest: with A on 10.0.0.0/8 and B on
+    10.1.0.0/16, the shared source's rows in 10.1.x are B's, yet plain
+    containment shows them to A as well. The shared tenant is not narrowed:
+    it sees shared infrastructure as a whole."""
+    if not (shared_source or module in _SHARED_SOURCE_MODULES) or tenant_is_shared(tid):
+        return data
+    # Nothing to narrow: skip the prefix reads.
+    if _list_len(data) <= 0:
+        return data
+    served = await _served_networks(hub, module, spoke_id)
+    return _keep_owned_items(data, prefixes, served, ip_fields)
+
+
+async def _owned_record(hub, record, tid, prefixes, module: str, ip_fields, spoke_id=None):
+    """Single-record twin of ``_owned_rows``: ``record``, or None when another
+    tenant owns it on the shared source."""
+    if not isinstance(record, dict):
+        return record
+    kept = await _owned_rows(hub, [record], tid, prefixes, module, ip_fields, spoke_id)
+    return record if kept else None
 
 
 async def filter_tenant(hub, sessions: dict, request: "Request", data, module: str, ip_fields,
@@ -3253,10 +3393,11 @@ async def filter_tenant(hub, sessions: dict, request: "Request", data, module: s
     are shown to that tenant regardless of subnet.
 
     ``shared_source`` marks data from a server shared by every tenant (the
-    shared Kea). Tenants overlap (one VRF each), so a tenant whose prefixes
-    are broad containers (DXP's 10.0.0.0/8) would otherwise match everyone's
-    records; there a record is kept only when the tenant is its most specific
-    prefix owner — the same rule the syncs use (``_prefix_owner``).
+    shared Kea); NAC data always is (``_SHARED_SOURCE_MODULES``). Tenants'
+    common prefixes can nest, so a tenant with a broad container would
+    otherwise match everyone's records; there a record is kept only when no
+    other tenant has a more specific prefix the shared source serves for it
+    (``_owned_rows``).
 
     ``spoke_id`` (here and on the other read filters) names the source spoke:
     data from a tenant-dedicated spoke is its tenant's whole, never IP
@@ -3312,10 +3453,8 @@ async def filter_tenant(hub, sessions: dict, request: "Request", data, module: s
                                         empty_keeps_all=not vrf_only)
         else:
             out = filter_items_by_prefixes(data, prefixes, ip_fields)
-            if shared_source and not tenant_is_shared(tid):
-                nets_by_tid = await _tenant_networks(hub)
-                if any(same_tenant(t, tid) for t in nets_by_tid):
-                    out = _keep_owned_items(out, tid, nets_by_tid, ip_fields)
+            out = await _owned_rows(hub, out, tid, prefixes, module, ip_fields,
+                                    spoke_id, shared_source)
         logger.debug("DIAG filter_tenant[%s] filtered %d -> %d prefixes=%s",
                        module, before, _list_len(out), prefixes)
         return out
@@ -3339,7 +3478,7 @@ async def filter_tenant(hub, sessions: dict, request: "Request", data, module: s
     logger.debug("DIAG filter_tenant[%s] FALLBACK legacy (explicit=%r tid=%r) "
                    "-> admin-bypass/no-op path", module, explicit_tenant, tid)
     return await filter_session(hub, sessions, request, data, module, ip_fields,
-                                spoke_id=spoke_id)
+                                spoke_id=spoke_id, shared_source=shared_source)
 
 
 async def gate_record_tenant(hub, sessions: dict, request: "Request", record, module: str, ip_fields,
@@ -3361,8 +3500,10 @@ async def gate_record_tenant(hub, sessions: dict, request: "Request", record, mo
         if not prefixes:
             # FAIL-CLOSED: a no-prefix tenant sees no foreign record.
             return _vrf_only_record(record) if raw else None
-        return filter_record_by_prefixes(record, prefixes, ip_fields)
-    return await gate_record(hub, sessions, request, record, module, ip_fields)
+        return await _owned_record(hub, filter_record_by_prefixes(record, prefixes, ip_fields),
+                                   tid, prefixes, module, ip_fields, spoke_id)
+    return await gate_record(hub, sessions, request, record, module, ip_fields,
+                             spoke_id=spoke_id)
 
 async def filter_by_source_spoke(hub, sessions: dict, request: "Request", data, spoke_of, ip_filter,
                                  explicit_tenant: str = None):
