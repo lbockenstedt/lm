@@ -124,15 +124,11 @@ def _undefined_names(path):
 #: because they sit in unrelated modules and each needs its own judgement about
 #: what the missing name should be:
 #:
-#:   cert_distribution `_unwrap`  — the LE_LIST_CERTS fallback in the two
-#:       distribute_* paths; both sit inside a try/except, so the lookup
-#:       silently degrades instead of crashing. Probably meant `unwrap_spoke`.
 #:   oidc `cfg`                   — one site.
 #:
 #: The list is self-cleaning: fix one and this test FAILS until it is removed
 #: from here, so the baseline cannot quietly rot into a permanent exemption.
 _BASELINE = {
-    ("cert_distribution.py", "_unwrap"),
     ("oidc.py", "cfg"),
 }
 

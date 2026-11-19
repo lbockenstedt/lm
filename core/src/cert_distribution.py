@@ -457,19 +457,22 @@ async def distribute_mtls_materials_to_all_spokes(
     # distribute_wildcard_to_all_spokes; ledger-derived + recomputed each run, so
     # deploying/removing a unique cert auto-toggles the skip. The caller passes the
     # claim-set; a direct caller that omits it gets a one-shot LE_LIST_CERTS lookup.
-    # Claim set not supplied: look it up. Note `_unwrap` is not defined in this module, so the
-    # resulting NameError is caught below and the claim set falls back to empty.
-    if claimed_ids is None or claimed_group_types is None:
-        try:
-            _res = _unwrap(await rr(le_spoke_id, "LE_LIST_CERTS", {}, timeout=15.0))
-            _ld = (_res.get("data") if isinstance(_res, dict) and isinstance(_res.get("data"), dict)
-                   else _res) or {}
-            claimed_ids, claimed_group_types = _build_claimed_targets(_ld.get("certs") or [])
-        except Exception:  # noqa: BLE001 - never block the fan-out on a claim-set lookup
-            claimed_ids, claimed_group_types = set(), set()
-    # Drop spokes that hold their own unique cert.
-    _excluded = [(sid, mt) for (sid, mt) in primary
-                 if sid in claimed_ids or mt in claimed_group_types]
+    # When that lookup fails, no spoke's claim is known, so no stale spoke is
+    # written (see the stale step below): pushing anyway could overwrite a spoke's
+    # own cert. Spokes already current and the hub's CA-only install need no
+    # claims, so an all-current call still reports its skip and a stale hub is
+    # still installed. The hourly sweep (distribute_all_certs) retries with a
+    # fresh list, and it too distributes nothing when the list fails.
+    claims_unknown = False
+    if primary and (claimed_ids is None or claimed_group_types is None):
+        claims = await _claimed_targets_from_le(rr, le_spoke_id)
+        if claims is None:
+            claims_unknown = True
+        else:
+            claimed_ids, claimed_group_types = claims
+    # Drop spokes that hold their own unique cert (none is known if the lookup failed).
+    _excluded = [] if claims_unknown else [(sid, mt) for (sid, mt) in primary
+                                           if sid in claimed_ids or mt in claimed_group_types]
     if _excluded:
         logger.info("[mtls] %s: skipping %d spoke(s) with their own unique cert: %s",
                     domain, len(_excluded), ", ".join(sid for (sid, _mt) in _excluded))
@@ -564,14 +567,30 @@ async def distribute_mtls_materials_to_all_spokes(
                  "message": f"all {len(primary) + (1 if include_hub else 0)} mTLS target(s) current",
                  "skipped": True, "mtls": True}]
 
+    # Claims unknown (the lookup above failed): any stale spoke may hold its own
+    # cert, which the wildcard client cert must never overwrite, so none is
+    # written; one ERROR says so. The hub's CA-only install needs no claims, so
+    # a stale hub is still installed below.
+    if claims_unknown and stale_spokes:
+        logger.warning("[mtls] %s: LE_LIST_CERTS failed — cannot tell which of %d stale "
+                       "spoke(s) hold their own cert, so none is written",
+                       domain, len(stale_spokes))
+        summary.append({"domain": domain, "module_type": None, "identifier": None,
+                        "status": "ERROR", "mtls": True,
+                        "message": (f"{len(stale_spokes)} stale spoke(s) not written: could "
+                                    "not list LE certs to find spokes with their own cert")})
+        stale_spokes = []
+        if hub_current:
+            return summary
+
     # Pull material (only when something is stale).
     mat = await rr(le_spoke_id, "LE_GET_CERT", {"domain": domain}, timeout=15.0)
     mat_ret = unwrap_spoke(mat)
     if not (isinstance(mat_ret, dict) and mat_ret.get("status") == "SUCCESS"):
         msg = mat_ret.get("message") if isinstance(mat_ret, dict) else "LE_GET_CERT failed"
         logger.warning("[mtls] %s: LE_GET_CERT failed — %s", domain, msg)
-        return [{"domain": domain, "module_type": None, "identifier": None,
-                 "status": "ERROR", "message": msg, "mtls": True}]
+        return summary + [{"domain": domain, "module_type": None, "identifier": None,
+                           "status": "ERROR", "message": msg, "mtls": True}]
     # Pull out the PEM parts and hash.
     cert = mat_ret.get("data") or {}
     fullchain = cert.get("fullchain", "")
@@ -583,10 +602,10 @@ async def distribute_mtls_materials_to_all_spokes(
     if not fullchain or not privkey or not chain:
         logger.warning("[mtls] %s: LE_GET_CERT returned incomplete material "
                        "(fullchain/privkey/chain) — cannot provision mTLS", domain)
-        return [{"domain": domain, "module_type": None, "identifier": None,
-                 "status": "ERROR",
-                 "message": "incomplete cert material (need fullchain+privkey+chain)",
-                 "mtls": True}]
+        return summary + [{"domain": domain, "module_type": None, "identifier": None,
+                           "status": "ERROR",
+                           "message": "incomplete cert material (need fullchain+privkey+chain)",
+                           "mtls": True}]
 
     # Log the fan-out.
     logger.info("[mtls] %s: fanning out mTLS materials to %d primary spoke(s)%s",
@@ -691,6 +710,32 @@ def _build_claimed_targets(certs: List[Dict[str, Any]]):
     return claimed_ids, claimed_group_types
 
 
+async def _claimed_targets_from_le(rr: Callable, le_spoke_id: str):
+    """The ``_build_claimed_targets`` claim set from a fresh LE_LIST_CERTS, or
+    None when the le spoke can't list its certs: no reply, a reply that is not
+    SUCCESS, or a SUCCESS whose cert list is missing or unreadable. The
+    fan-outs use it when their caller passes no claim set."""
+    # Ask le for its certs; a raised call counts as a failed lookup.
+    try:
+        ret = unwrap_spoke(await rr(le_spoke_id, "LE_LIST_CERTS", {}, timeout=15.0))
+    except Exception:  # noqa: BLE001 - the caller reports the failed lookup
+        return None
+    if not (isinstance(ret, dict) and ret.get("status") == "SUCCESS"):
+        return None
+    # The certs sit under the spoke's own ``data`` wrapper (see distribute_all_certs).
+    data = ret.get("data") if isinstance(ret.get("data"), dict) else ret
+    certs = data.get("certs")
+    # le always sends a list, even an empty one. Without a readable list the
+    # reply says nothing about which spokes hold their own cert, and reading it
+    # as "none do" would push the wildcard over them.
+    if not isinstance(certs, list):
+        return None
+    try:
+        return _build_claimed_targets(certs)
+    except (AttributeError, TypeError):  # a cert or target that is not a dict
+        return None
+
+
 async def distribute_wildcard_to_all_spokes(
         rr: Callable, get_all_by_type: Callable, capable: Set[str],
         le_spoke_id: str, domain: str,
@@ -742,20 +787,22 @@ async def distribute_wildcard_to_all_spokes(
     # INSTALL_CERT already replaced the wildcard on disk), so future wildcard
     # pushes skip it; removing that cert re-enables the wildcard. The caller
     # (distribute_all_certs) passes the claim-set; a direct caller that omits it
-    # gets a one-shot LE_LIST_CERTS lookup here.
-    # Claim set not supplied: look it up. Note `_unwrap` is not defined in this module, so the
-    # resulting NameError is caught below and the claim set falls back to empty.
-    if claimed_ids is None or claimed_group_types is None:
-        try:
-            _res = _unwrap(await rr(le_spoke_id, "LE_LIST_CERTS", {}, timeout=15.0))
-            _ld = (_res.get("data") if isinstance(_res, dict) and isinstance(_res.get("data"), dict)
-                   else _res) or {}
-            claimed_ids, claimed_group_types = _build_claimed_targets(_ld.get("certs") or [])
-        except Exception:  # noqa: BLE001 - never block the fan-out on a claim-set lookup
-            claimed_ids, claimed_group_types = set(), set()
-    # Drop spokes that hold their own unique cert.
-    _excluded = [t for t in spoke_targets
-                 if t["spoke_id"] in claimed_ids or t["module_type"] in claimed_group_types]
+    # gets a one-shot LE_LIST_CERTS lookup here. When that lookup fails, no
+    # spoke's claim is known, so no stale spoke is written (see the stale step
+    # below, and the same step in distribute_mtls_materials_to_all_spokes);
+    # spokes already current need no claims, so an all-current call still
+    # reports its skip.
+    claims_unknown = False
+    if spoke_targets and (claimed_ids is None or claimed_group_types is None):
+        claims = await _claimed_targets_from_le(rr, le_spoke_id)
+        if claims is None:
+            claims_unknown = True
+        else:
+            claimed_ids, claimed_group_types = claims
+    # Drop spokes that hold their own unique cert (none is known if the lookup failed).
+    _excluded = [] if claims_unknown else [
+        t for t in spoke_targets
+        if t["spoke_id"] in claimed_ids or t["module_type"] in claimed_group_types]
     if _excluded:
         logger.info("[cert] wildcard %s: skipping %d spoke(s) with their own unique cert: %s",
                     domain, len(_excluded), ", ".join(t["spoke_id"] for t in _excluded))
@@ -792,6 +839,19 @@ async def distribute_wildcard_to_all_spokes(
                  "status": "SUCCESS",
                  "message": f"all {len(spoke_targets) + (1 if include_hub else 0)} wildcard target(s) current",
                  "skipped": True, "wildcard": True}]
+
+    # Claims unknown (the lookup above failed): any stale spoke may hold its own
+    # cert, which the wildcard must never overwrite, so none is written. The hub
+    # is never a wildcard target (include_hub above), so a stale spoke is why
+    # the skip above did not return, and nothing else is left to do.
+    if claims_unknown:
+        logger.warning("[cert] wildcard %s: LE_LIST_CERTS failed — cannot tell which of %d "
+                       "stale spoke(s) hold their own cert, so none is written",
+                       domain, len(stale_spokes))
+        return [{"domain": domain, "module_type": None, "identifier": None,
+                 "status": "ERROR", "wildcard": True,
+                 "message": (f"{len(stale_spokes)} stale spoke(s) not written: could not "
+                             "list LE certs to find spokes with their own cert")}]
 
     # Pull material (only when something is stale). material_hash from the list
     # avoids the pull when every target is current; here at least one is stale.
