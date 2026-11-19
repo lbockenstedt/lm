@@ -21,7 +21,9 @@ Tenant-aware: managed records are grouped by ``tenant_id`` and each group is
 written with THAT scope's account login (the tenant's own assigned credential,
 falling back to the global slot) — mirroring
 ``net_services._henet_resolve_account_login``. A scope with no assignable
-credential is skipped (not an error).
+credential is skipped (not an error). A tenant that several credential slots
+name (saved before slots were matched in any case) is an error, so the run
+reports ``error`` rather than ``ok``, and none of its records are written.
 
 This module is a **leaf**: it imports only stdlib + sibling leaves and must NOT
 import ``main`` or ``api`` (dependency direction is ``main → henet_sync`` only).
@@ -66,14 +68,19 @@ def _valid_ref(ref: Any) -> bool:
 def cred_ref_for_scope(hub, tenant_id: str) -> Optional[Dict[str, str]]:
     """The assigned HE account-login credential {bucket,name} for ``tenant_id``
     (its own slot), falling back to the module-level global slot. ``None`` when
-    neither is assigned. Mirrors ``net_services._henet_get_assigned_cred`` (with
+    neither is assigned. Raises ``ValueError`` when several slots name the
+    tenant (see below). Mirrors ``net_services._henet_get_assigned_cred`` (with
     the global fallback ``_henet_resolve_account_login`` applies)."""
     # Read the HE.NET section of the hub-wide settings.
     gc = hub.state.system_state.get("global_config", {}) or {}
     hn = gc.get("henet") or {}
-    # A tenant scope first tries its own assigned credential: the slot spelt
-    # exactly like it, else one same_tenant matches, never a legacy twin's
-    # (a blank tenant id means the global scope).
+    # A tenant scope first tries its own assigned credential: the one slot
+    # same_tenant matches, in any case or spaces, never a legacy twin's (a
+    # blank tenant id means the global scope). Several such slots (saved
+    # before slots were matched in any case) raise, even when one is spelt
+    # exactly like the scope, rather than one being picked, with no global
+    # fallback: the tenant assigned its own HE account, so its records must
+    # not be written with the global one.
     creds = hn.get("tenant_credentials") or {}
     key = tenant_key_in(creds, tenant_id)
     if key is not None:
@@ -155,10 +162,19 @@ class HenetSyncMixin:
         """Write one tenant scope's managed records to HE via the account login,
         then relay the accepted ones to the spoke as ``HENET_WEB_RECORD``.
 
-        Returns ``{applied, errors, skipped}`` (skipped=1 with no write when the
-        scope has no assignable credential / account login)."""
-        # Which vault credential applies to this scope?
-        ref = cred_ref_for_scope(self, tenant_id)
+        Returns ``{applied, errors, skipped}``: every record skipped, with no
+        write, when the scope has no assignable credential or account login;
+        every record an error when several credential slots name the tenant
+        or the vault read fails."""
+        # Which vault credential applies to this scope? Several slots for the
+        # tenant are refused as errors, not skips, so the run reports "error"
+        # rather than "ok" until the credential is assigned again.
+        try:
+            ref = cred_ref_for_scope(self, tenant_id)
+        except ValueError as e:
+            logger.warning("henet scheduled sync: scope %r not synced: %s; assign its "
+                           "credential again to keep one", tenant_id or "global", e)
+            return {"applied": 0, "errors": len(records), "skipped": 0}
         # No credential: skip this scope's records (not an error).
         if not ref:
             logger.debug("henet scheduled sync: scope %r has no credential — skipped",
@@ -250,7 +266,11 @@ class HenetSyncMixin:
                 continue
             # Group by tenant scope ("" = global) so each scope uses its own
             # credential; one scope per tenant as same_tenant compares ids (a
-            # legacy " ACME " twin keeps its own scope and credential).
+            # legacy " ACME " twin keeps its own scope and credential). Built
+            # this way, the keys are one per tenant, so tenant_key_in never
+            # finds several here. The first record's spelling names the scope,
+            # but it does not decide the credential: cred_ref_for_scope
+            # matches slots in any case and refuses several.
             scope = raw_tenant_id(r.get("tenant_id"))
             scope = tenant_key_in(by_scope, scope) or scope
             by_scope.setdefault(scope, []).append(

@@ -1051,7 +1051,7 @@ async function _renderNwScanTab() {
     // Pull the tenant's effective config + its visible scan-credential sets in
     // parallel. Both are tenant-scoped server-side (tenant-admins see only their
     // own tenant + shared).
-    let cfg = {}, creds = [];
+    let cfg = {}, creds = [], vaultError = '';
     const tenantQs = currentTenant ? `?tenant=${encodeURIComponent(currentTenant)}` : '';
     try {
         const [cfgR, credR] = await Promise.all([
@@ -1061,7 +1061,12 @@ async function _renderNwScanTab() {
             setupFetch(`/setup/nw-scan-credentials${tenantQs}`),
         ]);
         if (cfgR.ok) cfg = await cfgR.json();
-        if (credR.ok) creds = (await credR.json()).instances || [];
+        if (credR.ok) {
+            const cj = await credR.json();
+            creds = cj.instances || [];
+            // Set when several vault buckets name the tenant: no vault login is offered.
+            vaultError = cj.vault_error || '';
+        }
     } catch (e) {
         c.innerHTML = `<div class="py-12 text-center text-amber-600 italic">Could not load scan settings: ${escapeHtml(e.message)}</div>`;
         return;
@@ -1080,7 +1085,9 @@ async function _renderNwScanTab() {
             <input type="checkbox" class="nwt-cred rounded border-slate-300 text-primary-text focus:ring-green-500" value="${escapeHtml(String(cr.id))}" ${selectedCreds.has(String(cr.id)) ? 'checked' : ''}>
             <span class="font-mono">${escapeHtml(cr.name || cr.id)}</span>${cr.username ? `<span class="text-slate-500">· ${escapeHtml(cr.username)}</span>` : ''}
           </label>`).join('')
-        : `<p class="text-xs text-slate-500 italic">No scan credential sets belong to this tenant (or the shared tenant). Scans run <b>discovery-only</b> until one exists — it reports which hosts are reachable and what management ports they expose, but cannot identify or add devices. To identify devices, add a set in Setup → Network Devices → Scan Credentials, bind it to <b>this</b> tenant (or the shared tenant so every tenant can use it), and point it at a Credential Vault entry. Note a vault credential on its own is not enough — the scan uses the credential <em>set</em> that references it.</p>`;
+        // A refused scan is not discovery-only, so that hint is dropped when
+        // the vault error below explains why no vault login is listed.
+        : vaultError ? '' : `<p class="text-xs text-slate-500 italic">No scan credential sets belong to this tenant (or the shared tenant). Scans run <b>discovery-only</b> until one exists — it reports which hosts are reachable and what management ports they expose, but cannot identify or add devices. To identify devices, add a set in Setup → Network Devices → Scan Credentials, bind it to <b>this</b> tenant (or the shared tenant so every tenant can use it), and point it at a Credential Vault entry. Note a vault credential on its own is not enough — the scan uses the credential <em>set</em> that references it.</p>`;
 
     const opt = (opts, cur) => opts.map(([v, l]) =>
         `<option value="${escapeHtml(v)}" ${String(cur) === v ? 'selected' : ''}>${escapeHtml(l)}</option>`).join('');
@@ -1113,6 +1120,7 @@ async function _renderNwScanTab() {
         <div class="mb-4">
           <p class="${lblCls}">Scan Credential Sets</p>
           <div id="nwt-creds" class="space-y-1.5">${credRows}</div>
+          ${vaultError ? '<p class="text-xs text-red-600 mt-1">No vault login is offered, and a scan with no set ticked or a vault login ticked is refused: <span id="nwt-vault-error"></span></p>' : ''}
         </div>
         <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
           <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-crawl" class="rounded border-slate-300 text-primary-text" ${chk(scan.crawl)}> Crawl LLDP neighbors</label>
@@ -1182,6 +1190,9 @@ async function _renderNwScanTab() {
         <div id="nwt-sched-list"><p class="text-xs text-slate-500 italic">Loading…</p></div>
       </div>
     </div>`;
+    // Fill in the vault error as text, so the server's message is never parsed as markup.
+    const vaultErrEl = document.getElementById('nwt-vault-error');
+    if (vaultErrEl) vaultErrEl.textContent = vaultError;
     _loadNwScanSchedules();
 }
 
@@ -1236,7 +1247,11 @@ function _nwScanSchedulesHtml(d) {
         const mode = s.dry_run
             ? '<span class="px-1.5 py-0.5 rounded text-xs font-bold bg-slate-100 text-slate-600" title="Reports discoveries without adding them">preview</span>'
             : '<span class="px-1.5 py-0.5 rounded text-xs font-bold bg-amber-100 text-amber-700" title="Adds identified devices to the fleet automatically">auto-add</span>';
-        const creds = s.discovery_only
+        // A run that needs the tenant's vault logins is refused while several
+        // vault buckets name it, so it is neither discovery-only nor using its sets.
+        const creds = s.vault_error
+            ? '<span class="text-red-600" title="Several Credential Vault buckets name this tenant, so this run is refused until a Global Admin keeps one">refused</span>'
+            : s.discovery_only
             ? '<span class="text-amber-600" title="No credential sets selected — this run probes reachability and open ports only, and can never add a device">discovery only</span>'
             : escapeHtml(s.credential_names.join(', '));
         const agent = s.spoke_id
@@ -1246,8 +1261,11 @@ function _nwScanSchedulesHtml(d) {
             ? `${escapeHtml(_nwSchedWhen(s.last_run_at))} · ${escapeHtml(s.last_status)}${s.last_added ? ` (+${s.last_added})` : ''}`
             : _nwSchedWhen(s.last_run_at);
         html += `<tr class="border-t border-slate-100 text-slate-600"><td class="py-1 font-semibold">${escapeHtml(s.tenant_name)}</td><td>${escapeHtml(_nwSchedEvery(s.interval_seconds))}</td><td>${mode}</td><td class="text-xs">${creds}</td><td class="text-xs">${agent}</td><td class="text-xs">${last}</td><td class="text-xs">${escapeHtml(_nwSchedWhen(s.next_due_at, { future: true }))}</td></tr>`;
-        if (s.last_error) {
-            html += `<tr class="text-xs text-red-500"><td colspan="7" class="pb-1 pl-2">last error: ${escapeHtml(s.last_error)}</td></tr>`;
+        // The vault error, then the last run's error unless it is the same message.
+        const errs = [s.vault_error,
+            s.last_error && s.last_error !== s.vault_error && `last error: ${s.last_error}`].filter(Boolean);
+        if (errs.length) {
+            html += `<tr class="text-xs text-red-500"><td colspan="7" class="pb-1 pl-2">${escapeHtml(errs.join(' · '))}</td></tr>`;
         }
     }
     return html + '</tbody></table>';

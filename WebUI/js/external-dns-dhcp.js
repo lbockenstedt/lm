@@ -228,6 +228,23 @@ function _henetScope() {
     return (currentTenant && currentTenant !== 'default') ? currentTenant : '';
 }
 
+// Why no credential is used when several credential slots name the scoped
+// tenant (the server's 409 detail), else ''. Set by loadHenet.
+let _henetCredConflict = '';
+
+// Show the slot conflict in the action bar, as text so the server's message is
+// never parsed as markup.
+function _henetShowCredConflict() {
+    const el = document.getElementById('henet-cred-conflict');
+    if (el) el.textContent = _henetCredConflict;
+}
+
+// The toast for a write that needs an assigned credential: the slot conflict
+// when there is one, else `fallback` (a prompt to assign one).
+function _henetNoCredMsg(fallback) {
+    return _henetCredConflict || fallback;
+}
+
 function _henetPushBadge(r) {
     if (!r.last_push_status) return '<span class="text-slate-500">—</span>';
     if (r.last_push_status === 'imported') {
@@ -311,11 +328,15 @@ async function loadHenet() {
     // Stored as a non-secret {bucket,name} reference (GET /api/henet/credential).
     let assignedCred = null;
     let tenantCreds = {};
+    _henetCredConflict = '';
     try {
         const c = await credReq;
         if (c.ok && c.data) {
             assignedCred = c.data.credential || null;
             tenantCreds = c.data.tenants || {};
+        } else if (c.status === 409) {
+            // Several slots name this tenant, so the server uses none of them.
+            _henetCredConflict = c.detail || 'Several HE.NET credential slots name this tenant';
         }
     } catch (e) { /* best-effort */ }
     window._henetAssignedCred = assignedCred;
@@ -325,6 +346,8 @@ async function loadHenet() {
     const credInfo = canWrite
         ? (assignedCred
             ? ` · <span class="text-slate-600">${credScope}DNS credential: <span class="font-mono">🔐 ${escapeHtml(assignedCred.name)}</span></span>`
+            : _henetCredConflict
+            ? ' · <span id="henet-cred-conflict" class="text-red-600 font-medium"></span>'
             : ` · <span class="text-amber-600 font-medium">no ${credScope.toLowerCase()}DNS credential assigned</span>`)
         : '';
     const tenantCredN = Object.keys(tenantCreds).length;
@@ -388,6 +411,9 @@ async function loadHenet() {
             : bodyHtml);
     } catch (err) {
         container.innerHTML = backBar + actionBar + `<p class="p-4 text-red-500 text-sm">Error: ${err.message}</p>`;
+    } finally {
+        // Every branch above repaints the action bar, so fill the conflict in after it.
+        _henetShowCredConflict();
     }
 }
 
@@ -454,13 +480,14 @@ async function showHenetCredModal() {
     openModal('henet-cred-modal', `
         <h3 class="text-lg font-bold text-navy">Assign HE.NET DDNS credential</h3>
         <p class="text-sm text-slate-500">The HE.NET module uses this Credential Vault secret to push records — assign it once and you won't be asked per record. Use the SAME Hurricane Electric credential as certificates: add it under <b>Credential Vault → + Add secret → DNS → Hurricane Electric (account login)</b> (automation mode), or reuse an existing one — the same HE credential works for both certs and DNS.</p>
+        ${_henetCredConflict ? '<p class="text-sm text-red-600">Several credential slots name this tenant, so none of them is used. Save assigns the credential you pick and replaces them all; Clear removes them all.</p>' : ''}
         <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">DDNS credential</label>
           ${creds.length
             ? `<select id="henet-assign-cred" class="${inputCls}" title="Credential Vault Hurricane Electric credential (shared with certificate DNS-01 issuance) used to push records unattended">${opts}</select>`
             : `<p class="text-sm text-amber-600 italic">No automation-readable Hurricane Electric credential found in the Credential Vault. Add a <b>DNS → Hurricane Electric (account login)</b> secret first (it serves both certs and DNS).</p>`}
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            ${assigned ? `<button onclick="_henetClearCred()" class="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 px-4 py-2 rounded-full text-sm mr-auto" title="Clear assigned HE.NET DDNS credential">Clear</button>` : ''}
+            ${assigned || _henetCredConflict ? `<button onclick="_henetClearCred()" class="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 px-4 py-2 rounded-full text-sm mr-auto" title="Clear assigned HE.NET DDNS credential">Clear</button>` : ''}
             ${creds.length ? `<button onclick="_henetSaveCred()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold" title="Save assigned HE.NET credential">Save</button>` : ''}
             <button onclick="document.getElementById('henet-cred-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm" title="Cancel and close dialog">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
@@ -626,7 +653,7 @@ async function saveHenetRecord() {
         }
     }
 
-    if (!window._henetAssignedCred) { showToast('Assign an HE.NET account credential first', 'error'); return; }
+    if (!window._henetAssignedCred) { showToast(_henetNoCredMsg('Assign an HE.NET account credential first'), 'error'); return; }
     try {
         const { ok, data: d, detail } = await _spokeFetch('/api/henet/record', {
             method: editing ? 'PUT' : 'POST',
@@ -740,7 +767,7 @@ async function _henetMoveAll() {
 }
 
 async function importHenet() {
-    if (!window._henetAssignedCred) { showToast('Assign an HE.NET credential first', 'error'); return showHenetCredModal(); }
+    if (!window._henetAssignedCred) { showToast(_henetNoCredMsg('Assign an HE.NET credential first'), 'error'); return showHenetCredModal(); }
     if (!await showConfirmToast('Read the existing records in your HE.NET zone(s) and bring any A/AAAA records not already managed under management? (Reads the dns.he.net web panel with the assigned account login — nothing is pushed or changed at HE.)')) return;
     try {
         const scope = _henetScope();
@@ -764,7 +791,7 @@ async function syncHenet() {
     const records = (window._henetRecords || []).filter(r => r.type === 'A' || r.type === 'AAAA')
         .map(r => ({ name: r.name, type: r.type, value: r.value, ttl: r.ttl }));
     if (!records.length) { showToast('No A/AAAA records under management yet — use “⇩ Import existing” to pull in the records already in your HE.NET zone.', 'error'); return; }
-    if (!window._henetAssignedCred) { showToast('Assign an HE.NET account credential first', 'error'); return showHenetCredModal(); }
+    if (!window._henetAssignedCred) { showToast(_henetNoCredMsg('Assign an HE.NET account credential first'), 'error'); return showHenetCredModal(); }
     if (!await showConfirmToast(`Re-apply all ${records.length} managed A/AAAA record(s) at HE.NET using your account login?\n\nEach record is create/updated in the dns.he.net control panel — no per-record DDNS key needed.`)) return;
     try {
         const scope = _henetScope();

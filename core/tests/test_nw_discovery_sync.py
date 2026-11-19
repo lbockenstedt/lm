@@ -973,6 +973,42 @@ def test_sweep_loop_includes_the_admin_tenant_without_a_tenant_record(monkeypatc
     assert swept == ["default"]
 
 
+def test_scan_schedule_loop_shows_why_a_scheduled_scan_failed(monkeypatch):
+    """A scheduled scan that returns an error (refused, or every batch failed)
+    shows its reason on the Scan tab; a skipped run is not an error."""
+    class _Stop(Exception):
+        pass
+
+    sleeps = []
+
+    async def fake_sleep(_s):
+        sleeps.append(_s)
+        if len(sleeps) > 2:          # boot wait, the tick that seeds the timers, then stop
+            raise _Stop
+
+    monkeypatch.setattr(nw_discovery_sync.asyncio, "sleep", fake_sleep)
+    hub = NwDiscoverySyncMixin()
+    hub.state = FakeState(system_state={"global_config": {"nw_scan_last_run": {
+        "acme": 1.0, "beta": 1.0}}}, tenants={"acme": {}, "beta": {}})
+    hub.get_all_spokes_by_type = lambda _t: ["nw-1"]
+    hub.nw_scan_schedule_for_tenant = lambda _tid: {"enabled": True, "interval_seconds": 3600}
+    results = {"acme": {"status": "error", "reason": "Credential Vault: two buckets"},
+               "beta": {"status": "skipped", "reason": "no nw spoke connected"}}
+
+    async def runner(tid):
+        return results[tid]
+    hub.run_nw_scheduled_scan = runner
+
+    async def run():
+        with pytest.raises(_Stop):
+            await hub.run_nw_scan_schedule_loop()
+    asyncio.run(run())
+    rt = hub.nw_scan_runtime
+    assert (rt["acme"]["last_status"], rt["acme"]["last_error"]) == (
+        "error", "Credential Vault: two buckets")
+    assert (rt["beta"]["last_status"], rt["beta"]["last_error"]) == ("skipped", "")
+
+
 @pytest.mark.asyncio
 async def test_fleet_of_device_pushes_holds_only_a_few_netbox_slots():
     h = _SyncHub(global_config=_global_config())
