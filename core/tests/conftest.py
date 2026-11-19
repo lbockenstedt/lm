@@ -81,3 +81,15 @@ def _clear_app_token_cache():
     if clear is not None:
         clear()
     yield
+
+
+@pytest.fixture(autouse=True)
+def _restore_tenant_caches(monkeypatch):
+    """access caches the shared tenant, the tenant-group members and the twin
+    ids module-wide, and StateManager rebuilds them whenever it loads or
+    writes tenants: put them back after every test, so the tenants one test
+    builds never decide what the next one sees."""
+    import access
+    for name in ("_SHARED_TENANT_ID", "_GROUP_MEMBERS", "_AMBIGUOUS_TENANT_IDS"):
+        monkeypatch.setattr(access, name, getattr(access, name))
+    yield

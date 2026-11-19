@@ -112,6 +112,20 @@ def test_henet_slot_is_the_tenants_own():
     assert henet_sync.cred_ref_for_scope(hub, "OTHER") == other
 
 
+def test_henet_refuses_several_slots_for_one_tenant():
+    """Slots "Beta" and "BETA" (saved before slots matched in any case) name
+    one tenant: every spelling raises, the exact one included, rather than
+    syncing with either, or with the global login, since the tenant assigned
+    its own."""
+    glob = {"bucket": "b", "name": "global"}
+    hub = _hub(global_config={"henet": {"vault_credential": glob, "tenant_credentials": {
+        "Beta": {"bucket": "b", "name": "old"}, "BETA": {"bucket": "b", "name": "beta"}}}})
+    for spelling in ("beta", "BETA", "Beta"):
+        with pytest.raises(ValueError):
+            henet_sync.cred_ref_for_scope(hub, spelling)
+    assert henet_sync.cred_ref_for_scope(hub, "") == glob
+
+
 async def test_console_probe_claim_resolves_to_the_stored_tenant(monkeypatch):
     """A probe from a shared console spoke may claim a tenant only when the
     device IP is in that tenant's prefixes, and a twin's claim never takes

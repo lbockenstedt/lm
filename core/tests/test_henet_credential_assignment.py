@@ -284,3 +284,48 @@ def test_record_write_gate_matches_the_list_in_any_case():
     assert c.get("/api/henet/records").json()["records"] == []
     r = c.request("DELETE", "/api/henet/record", json={"name": "h.example.com", "type": "A"})
     assert r.status_code == 404 and "HENET_DELETE" not in sent
+
+
+# ── several slots for one tenant (saved before slots matched in any case) ───
+_OTHER_SLOT = {"bucket": "b", "name": "other-key"}
+
+
+def _two_slots_for_acme(hub):
+    """Slots "ACME" and "acme" for one tenant, beside another tenant's slot."""
+    hub.state.update_global_config({"henet": {"tenant_credentials": {
+        "ACME": {"bucket": "b", "name": "old"}, "acme": {"bucket": "b", "name": "older"},
+        "other": dict(_OTHER_SLOT)}}})
+
+
+@pytest.mark.parametrize("spelling", ["Acme", "ACME", "acme"])
+def test_several_slots_for_a_tenant_are_refused_not_guessed(spelling):
+    # Refused even when one slot is spelt exactly like the request: which
+    # slot is current can't depend on how the caller spelt the tenant id.
+    c, hub, holder = _build()
+    _two_slots_for_acme(hub)
+    holder.current = _global_admin()
+    r = c.get("/api/henet/credential", params={"tenant": spelling})
+    assert r.status_code == 409
+    assert "assign the credential again" in r.json()["detail"]
+
+
+def test_assigning_again_leaves_one_slot_for_the_tenant(patch_vault):
+    patch_vault({"ddns_key": "s3cr3t"})
+    c, hub, holder = _build()
+    _two_slots_for_acme(hub)
+    holder.current = _global_admin()
+    r = c.post("/api/henet/credential", json={"tenant": "Acme", "bucket": "b", "name": "new"})
+    assert r.status_code == 200
+    assert hub.state.get_global_config()["henet"]["tenant_credentials"] == {
+        "Acme": {"bucket": "b", "name": "new"}, "other": _OTHER_SLOT}
+    r = c.get("/api/henet/credential", params={"tenant": "acme"})
+    assert r.json()["credential"] == {"bucket": "b", "name": "new"}
+
+
+def test_clearing_removes_every_slot_for_the_tenant():
+    c, hub, holder = _build()
+    _two_slots_for_acme(hub)
+    holder.current = _global_admin()
+    assert c.delete("/api/henet/credential", params={"tenant": "Acme"}).status_code == 200
+    assert hub.state.get_global_config()["henet"]["tenant_credentials"] == {
+        "other": _OTHER_SLOT}

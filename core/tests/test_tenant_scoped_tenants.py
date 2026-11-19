@@ -578,6 +578,21 @@ def test_create_refuses_another_spelling_of_a_stored_tenant(keep_tenant_cache):
     assert set(hub.state.tenant_state["tenants"]) == {"acme", "beta"}
 
 
+@pytest.mark.parametrize("spelling", ["ACME", "Acme"])
+def test_create_names_the_tenant_and_the_deleted_twin_it_clashes_with(keep_tenant_cache,
+                                                                      spelling):
+    """Before, this clash was reported as "Tenant 'ACME' already exists",
+    naming the id the caller typed, which no stored tenant has."""
+    c, hub, holder = _build(_acme_record())
+    hub.state.tenant_state["retired_twin_ids"] = ["ACME"]
+    holder.current = _global_admin()
+    r = c.post("/setup/tenants", json={"tenant_id": spelling})
+    detail = r.json()["detail"]
+    assert r.status_code == 409
+    assert "'acme'" in detail and "deleted" in detail and "already exists" not in detail
+    assert set(hub.state.tenant_state["tenants"]) == {"acme"}
+
+
 @pytest.mark.parametrize("spelling", [" acme ", "acme ", " ACME"])
 def test_create_refuses_a_padded_spelling_of_a_stored_tenant(keep_tenant_cache, spelling):
     """Surrounding spaces make another spelling too. Before, " acme " passed

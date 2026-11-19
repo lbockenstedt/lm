@@ -173,3 +173,21 @@ def test_vault_sets_come_from_the_tenants_own_bucket_never_a_case_twins(monkeypa
                         nw.access._case_collisions({"acme": {}, "ACME": {}}))
     assert _ids(c.get("/setup/nw-scan-credentials?tenant=acme")) == ["vault:acme:lower"]
     assert _ids(c.get("/setup/nw-scan-credentials?tenant=ACME")) == ["vault:ACME:upper"]
+
+
+@pytest.mark.parametrize("spelling", ["acme", "ACME", "Acme"])
+def test_no_vault_sets_when_several_buckets_name_the_tenant(spelling):
+    """Buckets "ACME" and "acme" with no legacy twin tenants (saved before
+    buckets matched in any case) both name tenant acme: neither bucket's
+    logins are offered, even for the exact spelling, rather than one of them.
+    The stored sets are still listed, and ``vault_error`` says why and how a
+    Global Admin clears it."""
+    c, hub = _build()
+    _seed(hub)
+    login = {"mode": "hub", "type": "login"}
+    hub.state.system_state["global_config"]["cred_vault"] = {"secrets": {
+        "ACME": {"upper": login}, "acme": {"lower": login}}}
+    r = c.get(f"/setup/nw-scan-credentials?tenant={spelling}")
+    assert r.status_code == 200, r.text
+    assert _ids(r) == ["c-shared"]
+    assert "Move a secret out" in r.json()["vault_error"]
