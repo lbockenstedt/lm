@@ -26,7 +26,7 @@ FAKE_GH = """#!/bin/sh
 # from $FAKE_GH_DIR: line 1 is pr-<n>.oid (blank when absent, as for a PR
 # never merged), then pr-<n>.body. pr-<n>.fail makes the call fail as an outage
 # does; a PR with neither file gets GitHub's real "no such PR" answer. Logs
-# each PR viewed; keeps the created body.
+# each PR viewed; keeps the created title and body.
 case "$1 $2" in
   "pr view")
     echo "$3" >> "$FAKE_GH_DIR/viewed"
@@ -45,6 +45,7 @@ case "$1 $2" in
   "pr create")
     while [ $# -gt 0 ]; do
       if [ "$1" = "--body-file" ]; then cp "$2" "$FAKE_GH_DIR/created.md"; fi
+      if [ "$1" = "--title" ]; then printf '%s' "$2" > "$FAKE_GH_DIR/created.title"; fi
       shift
     done
     exit 0 ;;
@@ -260,6 +261,13 @@ class PromotionBodyQuotesEveryUnit(unittest.TestCase):
         # The sections after the intent are still there.
         self.assertIn("\n## Proposed Solution & Changes\n", body)
         self.assertIn("\n## Guardrails & Side-Effect Assessment\n", body)
+
+    def test_the_pr_keeps_its_own_title(self):
+        """Quoting merged PR #11 under its own title leaves the promotion
+        PR's title naming the promotion, as promote.sh described it."""
+        self.run_step()
+        self.assertEqual((self.ghdir / "created.title").read_text(),
+                         "promote: dev -> qa (#11: Add feature A (+3 more))")
 
     def test_a_failed_fetch_is_unknown_not_absent(self):
         """A PR that cannot be read is not reported as stating no intent, nor
