@@ -495,8 +495,13 @@ class HubVncConsoleMixin:
             # Attribution failure means the claim cannot be corroborated.
             buckets = {}
         # Honour the claim only when the IP actually falls in that tenant's
-        # prefixes (the bucket key is the tenant's stored id).
-        hit = access.tenant_key_in(buckets, claimed) if device_ip else None
+        # prefixes (the bucket key is the tenant's stored id). Buckets come
+        # one per stored tenant, so several matching the claim cannot happen;
+        # if they ever did, the claim is not corroborated.
+        try:
+            hit = access.tenant_key_in(buckets, claimed) if device_ip else None
+        except ValueError:
+            hit = None
         if hit:
             return hit
         # Otherwise refuse the cross-tenant claim and fall back to the registered tenant.

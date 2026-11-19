@@ -2255,7 +2255,10 @@ class NwDiscoverySyncMixin:
                             rt["last_status"] = (res or {}).get("status")
                             rt["last_added"] = len((res or {}).get("added", []) or [])
                             rt["last_identified"] = len((res or {}).get("identified", []) or [])
-                            rt["last_error"] = ""
+                            # A run that returned an error (refused, or every
+                            # batch failed) shows its reason; a skip is no error.
+                            rt["last_error"] = (str((res or {}).get("reason") or "")
+                                                if rt["last_status"] == "error" else "")
                             logger.info("nw scheduled scan tenant=%s status=%s added=%d",
                                         tid, (res or {}).get("status"),
                                         len((res or {}).get("added", []) or []))

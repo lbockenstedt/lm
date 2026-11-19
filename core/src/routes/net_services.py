@@ -1896,10 +1896,17 @@ def register(app, hub, ctx):
         gc = hub.state.get_global_config() or {}
         henet_cfg = gc.get("henet") or {}
         if tenant_id:
-            # The slot spelt exactly like the tenant, else one access.same_tenant
-            # matches (never a legacy twin's).
+            # The one slot access.same_tenant matches, in any case or spaces
+            # (never a legacy twin's). Several such slots (saved before slots
+            # were matched in any case) are refused, even when one is spelt
+            # exactly like the tenant, rather than one being picked; assigning
+            # the credential again leaves one.
             creds = henet_cfg.get("tenant_credentials") or {}
-            key = access.tenant_key_in(creds, tenant_id)
+            try:
+                key = access.tenant_key_in(creds, tenant_id)
+            except ValueError as e:
+                raise HTTPException(status_code=409, detail=(
+                    f"HE.NET credential: {e}; assign the credential again to keep one"))
             ref = creds.get(key) if key is not None else None
         else:
             ref = henet_cfg.get("vault_credential")
@@ -2167,8 +2174,13 @@ def register(app, hub, ctx):
             gc = hub.state.get_global_config() or {}
             tenant_creds = dict((gc.get("henet") or {}).get("tenant_credentials") or {})
             # Replace the tenant's existing slot (as same_tenant matches it),
-            # else add one under the id as given.
-            key = access.tenant_key_in(tenant_creds, tenant_id) or tenant_id
+            # else add one under the id as given. Several slots for it (saved
+            # before slots were matched in any case) become one, under the id
+            # as given.
+            hits = access.tenant_keys_in(tenant_creds, tenant_id)
+            key = hits[0] if len(hits) == 1 else tenant_id
+            for stale in hits:
+                tenant_creds.pop(stale)
             tenant_creds[key] = {"bucket": bucket, "name": name}
             _henet_update_cfg(hub, tenant_credentials=tenant_creds)
         else:
@@ -2192,12 +2204,11 @@ def register(app, hub, ctx):
             tenant_id = access.raw_tenant_id(request.query_params.get("tenant"))
         else:
             tenant_id = _henet_tenant_scope(sess)
-        # Remove the tenant's slot (as same_tenant matches it), or clear the global one.
+        # Remove every slot of the tenant (as same_tenant matches it), or clear the global one.
         if tenant_id:
             gc = hub.state.get_global_config() or {}
             tenant_creds = dict((gc.get("henet") or {}).get("tenant_credentials") or {})
-            key = access.tenant_key_in(tenant_creds, tenant_id)
-            if key is not None:
+            for key in access.tenant_keys_in(tenant_creds, tenant_id):
                 tenant_creds.pop(key)
             _henet_update_cfg(hub, tenant_credentials=tenant_creds)
         else:
