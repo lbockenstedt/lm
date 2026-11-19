@@ -49,6 +49,13 @@ so a change is exercised on lm dev before the other repos pick it up from main.
   (LDAP, Entra, AD) that is sent to that directory once and never stored by LM.
   Put the marker on the same line as `type="password"`, and never on an input
   whose value LM saves.
+- **Review scope budget** (rule 1.8): a note (`::notice`), never a failure,
+  in CI and in smoke.sh, when a change adds code to more than 15 source files
+  (`.py`, `.js`, `.html`, `.sh`, `.ps1`, `.json`, `.j2`) or adds or changes
+  more than 1,500 source lines. Tests, docs, comments, docstrings and blank
+  lines don't count. Promotion and back-merge PRs are skipped. AB's PR
+  reviews and fixes don't get the note, because no fix makes a change
+  smaller.
 - **Ruff, new errors only**: `.github/scripts/ruff_new.py` lints each changed
   `.py` file at the base and at HEAD (E9, F63, F7, F82) and fails only on
   findings the change adds. Inherited findings are warnings, so touching an
