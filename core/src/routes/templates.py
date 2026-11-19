@@ -26,7 +26,7 @@ import shutil
 import time
 
 # FastAPI request/error types plus the hub-wide logger, re-exported by the api module.
-from api import HTTPException, Request, logger
+from api import HTTPException, Request, access, logger
 
 # Upper bound on a single stored template (guards a runaway/oversized upload).
 # Maximum template size in GB (default 300, overridable via LM_TEMPLATE_MAX_GB), and the
@@ -149,11 +149,11 @@ def register(app, hub, ctx):
         # The agent's stored config, keyed by its primary key.
         agent_cfg = (hub.state.system_state.get("agent_config", {}) or {}).get(
             hub._agent_primary_key(agent_id), {})
-        tenant_id = str((agent_cfg.get("client_simulation") or {}).get("tenant_id") or "").strip()
+        tenant_id = access.raw_tenant_id((agent_cfg.get("client_simulation") or {}).get("tenant_id"))
         # No agent tenant: fall back to the owning spoke's tenant (none on error).
         if not tenant_id:
             try:
-                tenant_id = str(hub.state.get_spoke_tenant(owning_spoke) or "").strip()
+                tenant_id = access.raw_tenant_id(hub.state.get_spoke_tenant(owning_spoke))
             except Exception:  # noqa: BLE001
                 tenant_id = ""
         # Show the tenant's display name when it can be looked up; otherwise the id.
@@ -359,7 +359,7 @@ def register(app, hub, ctx):
         if _is_admin(sess):
             return True
         # Others own only their assigned tenants; a blank tenant is owned by nobody.
-        return bool(tenant_id) and tenant_id in _acting_tenants(sess)
+        return access.tenant_among(tenant_id, _acting_tenants(sess))
 
     def _clean_storage(raw):
         """Validate + normalise an optional destination-storage id from a request
@@ -483,8 +483,8 @@ def register(app, hub, ctx):
         if _is_admin(sess):
             return {"templates": allt}
         # Others see only templates stamped with one of their tenants.
-        mine = set(_acting_tenants(sess))
-        return {"templates": [t for t in allt if (t.get("tenant_id") or "") in mine]}
+        mine = _acting_tenants(sess)
+        return {"templates": [t for t in allt if access.tenant_among(t.get("tenant_id"), mine)]}
 
     # Tenant-admin: restore a template backup onto its original host.
     @app.post("/tenant/templates/{tid}/refresh")
@@ -522,7 +522,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=400, detail="a template name is required")
         # Tenant is the caller's acting sim tenant (stamped by the WebUI). A
         # tenant-admin may only upload to a tenant they own; admin → any.
-        tenant_id = str(body.get("tenant_id") or "").strip()
+        tenant_id = access.raw_tenant_id(body.get("tenant_id"))
         if not _owns_tenant(sess, tenant_id):
             raise HTTPException(status_code=403, detail="not permitted for this tenant")
         # Resolve a readable display name the same way trigger_backup does.
@@ -615,7 +615,7 @@ def register(app, hub, ctx):
         ac = (getattr(hub, "state", None) and hub.state.system_state.get("agent_config", {}) or {}) \
             .get(hub._agent_primary_key(agent_id), {})
         # Tenant id from the client_simulation section.
-        return str((ac.get("client_simulation") or {}).get("tenant_id") or "").strip()
+        return access.raw_tenant_id((ac.get("client_simulation") or {}).get("tenant_id"))
 
     # Tenant-admin fleet action: push one seed backup onto several hosts.
     @app.post("/tenant/templates/refresh-hosts")
@@ -667,10 +667,10 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=404, detail="template not found")
         else:
             # Default: newest COMPLETE template in a tenant the caller owns.
-            mine = set(_acting_tenants(sess))
+            mine = _acting_tenants(sess)
             cands = [t for t in _repo().list()
                      if t.get("status") == "complete"
-                     and (_is_admin(sess) or (t.get("tenant_id") or "") in mine)]
+                     and (_is_admin(sess) or access.tenant_among(t.get("tenant_id"), mine))]
             if not cands:
                 raise HTTPException(status_code=404,
                                      detail="no completed template backup in your tenant — "
@@ -843,11 +843,11 @@ def register(app, hub, ctx):
         # The agent's stored config, keyed by its primary key.
         agent_cfg = (hub.state.system_state.get("agent_config", {}) or {}).get(
             hub._agent_primary_key(agent_id), {})
-        tenant_id = str((agent_cfg.get("client_simulation") or {}).get("tenant_id") or "").strip()
+        tenant_id = access.raw_tenant_id((agent_cfg.get("client_simulation") or {}).get("tenant_id"))
         # No agent tenant: fall back to the owning spoke's tenant (none on error).
         if not tenant_id:
             try:
-                tenant_id = str(hub.state.get_spoke_tenant(owning_spoke) or "").strip()
+                tenant_id = access.raw_tenant_id(hub.state.get_spoke_tenant(owning_spoke))
             except Exception:  # noqa: BLE001
                 tenant_id = ""
         # Show the tenant's display name when it can be looked up; otherwise the id.
@@ -1006,13 +1006,13 @@ def register(app, hub, ctx):
             # tenant is selected in the picker, scope the chip to it so a global
             # admin viewing tenant A doesn't see tenant B's refresh.
             if sel:
-                entries = [e for e in entries if (e.get("tenant_id") or "") == sel]
+                entries = [e for e in entries if access.same_tenant(e.get("tenant_id"), sel)]
         # Others see only their own tenants' entries, narrowed to the selection if it is theirs.
         else:
-            mine = set(_acting_tenants(sess))
-            entries = [e for e in entries if (e.get("tenant_id") or "") in mine]
-            if sel and sel in mine:
-                entries = [e for e in entries if (e.get("tenant_id") or "") == sel]
+            mine = _acting_tenants(sess)
+            entries = [e for e in entries if access.tenant_among(e.get("tenant_id"), mine)]
+            if sel and access.tenant_among(sel, mine):
+                entries = [e for e in entries if access.same_tenant(e.get("tenant_id"), sel)]
         # Newest updates first.
         entries.sort(key=lambda e: e.get("updated_at") or 0, reverse=True)
         return {"hosts": entries}

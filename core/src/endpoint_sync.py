@@ -34,8 +34,10 @@ from typing import Any, Dict, List, Optional
 # Shared scheduling helpers: compute the next delay and run the periodic loop.
 from sync_loop import next_schedule_delay, run_sync_loop  # sibling leaf
 
-# Unwraps a spoke's reply envelope; tells whether a tenant still uses shared NAC.
-from access import tenant_left_shared, unwrap_spoke  # sibling leaf (no main/api back-import)
+# Unwraps a spoke's reply envelope, tells whether a tenant still uses shared
+# NAC, and gives the tenant id a push goes under.
+from access import (  # sibling leaf (no main/api back-import)
+    push_tenant_key, raw_tenant_id, tenant_left_shared, unwrap_spoke)
 
 # Use the hub's main logger so sync lines (incl. [sync-error]) land in the hub log.
 logger = logging.getLogger("Hub")
@@ -188,6 +190,17 @@ class EndpointSyncMixin:
         """
         # UTC timestamp for this sync's status record.
         now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # Sync under the stored tenant id the target names (access.push_tenant_key).
+        # One that names no single tenant is synced nowhere: get_tenant finds a
+        # twin's slug for " ACME" while the ClearPass pick finds neither twin, so
+        # that twin's endpoints would go (replace=True) to the shared ClearPass.
+        key = push_tenant_key(self, tenant_id)
+        if not key:
+            raw = raw_tenant_id(tenant_id)
+            return {"tenant_id": raw, "tenant_name": raw, "status": "skipped",
+                    "pushed": 0, "errors": 0, "message": "tenant id names no single tenant",
+                    "last_sync_ts": now, "endpoints_total": 0}
+        tenant_id = key
         # Friendly tenant name for logs (fallback to id).
         tenant_name = (self.state.get_tenant(tenant_id) or {}).get("name") or tenant_id
         # Active IPAM source and its connected spoke.
@@ -380,6 +393,12 @@ class EndpointSyncMixin:
         import ipaddress
         import cred_vault
         from access import fetch_tenant_prefixes
+        # The stored tenant id the target names (access.push_tenant_key), as for
+        # the endpoints; one that names no single tenant registers nothing.
+        key = push_tenant_key(self, tenant_id)
+        if not key:
+            return {"status": "skipped", "message": "tenant id names no single tenant"}
+        tenant_id = key
         # Friendly tenant name for logs.
         tenant_name = (self.state.get_tenant(tenant_id) or {}).get("name") or tenant_id
         # Vault buckets to search: the tenant's own (plus the admin bucket for "default").

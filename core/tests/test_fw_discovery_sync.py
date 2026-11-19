@@ -710,3 +710,58 @@ async def test_unchanged_push_is_not_resent_within_the_hour(monkeypatch):
     monkeypatch.setattr(fw.time, "monotonic", lambda: now + fw._FW_RESEND_S + 1)
     await h.sync_tenant_devices("acme")
     assert pushes() == 3
+
+
+# ── per-tenant pushes go under the stored tenant id ───────────────────────────
+
+def _acme_hub(**twins):
+    """A full-response hub whose stored tenant is "ACME" (plus ``twins``),
+    looked up as StateManager looks tenants up."""
+    from _fakes import bind_state_tenant_lookups
+    h = _hub_with_full_responses()
+    h.state = bind_state_tenant_lookups(FakeState(
+        system_state={"global_config": {}},
+        tenants={"ACME": {"name": "Acme", "netbox_tenant_slug": "acme"}, **twins}))
+    return h
+
+
+def _device_pushes(h):
+    """(tenant_id, tenant_slug, device count) of every NetBox device push."""
+    return [(p["tenant_id"], p["tenant_slug"], len(p["devices"]))
+            for _, cmd, p in h.request_log if cmd == "NETBOX_SYNC_DEVICES"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["ACME", "acme", " ACME "])
+async def test_sync_now_in_another_spelling_pushes_the_tenants_own_devices(target):
+    """'Sync now' for any spelling of the stored "ACME" pushes ACME's devices
+    under "ACME". Before, the target's own (empty) bucket was pushed: " ACME "
+    found ACME's slug through get_tenant, so replace=True deleted ACME's
+    devices, and "acme" found no record and was skipped."""
+    h = _acme_hub()
+    await h.sync_tenant_devices(target)
+    assert _device_pushes(h) == [("ACME", "acme", 2)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", [" ACME", "Acme", "   "])
+async def test_sync_now_for_an_id_naming_no_single_tenant_pushes_nothing(target):
+    """A target that names both stored twins, or is blank, is pushed nowhere.
+    Before, " ACME"'s empty bucket was pushed with replace=True into "ACME"'s
+    slug (get_tenant ignores surrounding spaces)."""
+    h = _acme_hub(**{" ACME ": {"name": "Acme legacy", "netbox_tenant_slug": "acme-old"}})
+    status = await h.sync_tenant_devices(target)
+    assert status["status"] == "skipped"
+    assert _device_pushes(h) == []
+
+
+@pytest.mark.asyncio
+async def test_reconciling_push_goes_under_the_stored_id_a_remembered_tenant_names():
+    """A tenant remembered under another spelling (" ACME " for the stored
+    "ACME") is reconciled as "ACME", which this cycle pushes with its
+    devices. Before, " ACME " got its own empty replace=True push, which
+    get_tenant also sent to ACME's slug, racing ACME's real push."""
+    h = _acme_hub()
+    h.simulations_store._last_nonzero_tenants["OPNsense"] = [" ACME "]
+    await h.run_fw_discovery_sync_all()
+    assert _device_pushes(h) == [("ACME", "acme", 2)]

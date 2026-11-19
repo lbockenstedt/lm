@@ -35,18 +35,21 @@ def _global_config(hub):
 
 
 def get_tenants(hub, domain):
-    """The cleaned, de-duplicated owner-tenant id list for ``domain`` (possibly
-    empty). Order-stable."""
+    """The cleaned owner-tenant id list for ``domain`` (possibly empty): each
+    id as stored (access.raw_tenant_id), one per tenant as access.tenant_among
+    compares them. Order-stable."""
     # Read the stored list for this domain; anything but a list means no owners.
     m = (hub.state.system_state.get("global_config", {}) or {}).get(STORE_KEY) or {}
     v = m.get(domain)
     if not isinstance(v, list):
         return []
-    # Keep trimmed, non-empty, unique ids in their original order.
+    # Keep one non-blank id per tenant in its original order, unstripped:
+    # stripping would turn a legacy " ACME " owner into its twin "ACME".
     out = []
     for t in v:
-        if isinstance(t, str) and t.strip() and t.strip() not in out:
-            out.append(t.strip())
+        t = access.raw_tenant_id(t) if isinstance(t, str) else ""
+        if t and not access.tenant_among(t, out):
+            out.append(t)
     return out
 
 
@@ -55,11 +58,11 @@ def set_tenants(hub, domain, tenants):
     the entry entirely. Returns the stored list."""
     # Get (or create) the owner map.
     m = _global_config(hub).setdefault(STORE_KEY, {})
-    # Clean and de-duplicate the requested ids.
+    # Clean and de-duplicate the requested ids, kept as given (get_tenants).
     clean = []
     for t in tenants or []:
-        t = t.strip() if isinstance(t, str) else ""
-        if t and t not in clean:
+        t = access.raw_tenant_id(t) if isinstance(t, str) else ""
+        if t and not access.tenant_among(t, clean):
             clean.append(t)
     # Store the list, or remove the entry when it is empty.
     if clean:
@@ -71,13 +74,13 @@ def set_tenants(hub, domain, tenants):
 
 def add_tenant(hub, domain, tid):
     """Add ``tid`` as an owner of ``domain`` (idempotent). Returns the list."""
-    # Normalise the tenant id; with no domain or id there is nothing to add.
-    tid = (tid or "").strip() if isinstance(tid, str) else ""
+    # The tenant id as given; with no domain or id there is nothing to add.
+    tid = access.raw_tenant_id(tid) if isinstance(tid, str) else ""
     if not (domain and tid):
         return get_tenants(hub, domain)
-    # Append the tenant only if it is not already an owner.
+    # Append the tenant only if it is not already an owner (as tenant_among compares).
     cur = get_tenants(hub, domain)
-    if tid not in cur:
+    if not access.tenant_among(tid, cur):
         cur.append(tid)
         set_tenants(hub, domain, cur)
     return cur
@@ -108,7 +111,7 @@ def current_tenant(sess):
     u = (sess or {}).get("user", {}) or {}
     tid = u.get("tenant_id")
     if isinstance(tid, str) and tid.strip():
-        return tid.strip()
+        return tid
     # Otherwise use their first tenant, or "default" when they have none.
     mine = user_tenants(sess)
     return mine[0] if mine else "default"
@@ -123,8 +126,14 @@ def is_shared(hub, domain):
     """True when the shared tenant is one of the cert's owners → deployable by
     any user to their own devices."""
     # Look up the shared tenant id and check it is on the owner list.
-    sid = access.shared_tenant_id()
-    return bool(sid) and sid in get_tenants(hub, domain)
+    return access.tenant_among(access.shared_tenant_id(), get_tenants(hub, domain))
+
+
+def _overlap(tenants, mine):
+    """True if any of ``tenants`` is one of ``mine``, compared as
+    access.same_tenant compares: an owner list and a user's tenant list can
+    spell the same tenant differently (fleet rule 6.1)."""
+    return any(access.tenant_among(t, mine) for t in tenants or ())
 
 
 def is_owner(hub, sess, domain):
@@ -134,7 +143,7 @@ def is_owner(hub, sess, domain):
     if access.is_admin(sess):
         return True
     # Otherwise the user must share a tenant with the owner list.
-    return bool(set(get_tenants(hub, domain)) & set(user_tenants(sess)))
+    return _overlap(get_tenants(hub, domain), user_tenants(sess))
 
 
 def visible_to(hub, sess, domain, want_tenants, admin_all=True):
@@ -160,11 +169,10 @@ def visible_to(hub, sess, domain, want_tenants, admin_all=True):
     if admin_all and access.is_admin(sess):
         return True
     # Visible when an owner is one of the wanted tenants.
-    if set(owners) & set(want_tenants or []):
+    if _overlap(owners, want_tenants):
         return True
     # Or when the cert is owned by the shared tenant.
-    sid = access.shared_tenant_id()
-    return bool(sid and sid in owners)
+    return access.tenant_among(access.shared_tenant_id(), owners)
 
 
 def can_change(hub, sess, domain):
@@ -178,7 +186,7 @@ def can_change(hub, sess, domain):
     if not has_owners(hub, domain):
         return True
     # Otherwise the user must be an owner.
-    return bool(set(get_tenants(hub, domain)) & set(user_tenants(sess)))
+    return _overlap(get_tenants(hub, domain), user_tenants(sess))
 
 
 def can_deploy(hub, sess, domain, device_tenant):
@@ -193,8 +201,8 @@ def can_deploy(hub, sess, domain, device_tenant):
     if is_owner(hub, sess, domain):
         return True
     # Others may deploy only a shared cert to a device in one of their own tenants.
-    return bool(is_shared(hub, domain) and device_tenant
-                and device_tenant in user_tenants(sess))
+    return bool(is_shared(hub, domain)
+                and access.tenant_among(device_tenant, user_tenants(sess)))
 
 
 def meta(hub, sess, domain):
@@ -221,26 +229,29 @@ def validate_tenant_edit(hub, sess, domain, new_tenants, tenant_exists):
       remain, and no currently-owned tenant of theirs may be removed).
 
     Admins may set any existing-tenant list, including removing themselves."""
-    # Clean the requested list, rejecting unknown tenants and skipping blanks/duplicates.
+    # Clean the requested list, rejecting unknown tenants and skipping
+    # blanks/duplicates. Ids are kept as given and must exist so: the picker
+    # sends stored ids, and stripping " ACME " would make its twin "ACME" an
+    # owner (a padded spelling of a stored id is refused as unknown).
     clean = []
     for t in new_tenants or []:
-        t = t.strip() if isinstance(t, str) else ""
+        t = access.raw_tenant_id(t) if isinstance(t, str) else ""
         if not t:
             continue
         if not tenant_exists(t):
             raise TenantEditError(f"unknown tenant '{t}'")
-        if t not in clean:
+        if not access.tenant_among(t, clean):
             clean.append(t)
     # Non-admins may not drop any of their own tenants.
     if not access.is_admin(sess):
-        mine = set(user_tenants(sess))
-        cur = set(get_tenants(hub, domain))
+        mine = user_tenants(sess)
         # Reject removal of any tenant of theirs that currently owns the cert.
-        if (cur & mine) - set(clean):
+        if any(access.tenant_among(t, mine) and not access.tenant_among(t, clean)
+               for t in get_tenants(hub, domain)):
             raise TenantEditError(
                 "You cannot remove your own tenant from a certificate you own.")
         # Their active tenant must always stay on the list.
-        if current_tenant(sess) not in clean:
+        if not access.tenant_among(current_tenant(sess), clean):
             raise TenantEditError(
                 "You cannot remove your own tenant from a certificate you own.")
     return clean

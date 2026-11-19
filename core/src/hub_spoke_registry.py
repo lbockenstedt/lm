@@ -213,12 +213,14 @@ def _nac_instance_owners(hub, spoke_id) -> set:
     Setup → NAC moves it to another spoke (routes/nw.py update_instance), and
     a Global Admin can give a spoke-less instance a tenant. The records are
     the ones ``_nac_spoke_records`` finds. Unassigned, shared and ADMIN
-    records own nothing (``access.tenant_is_unbound``).
+    records own nothing (``access.tenant_is_unbound``). Each owner keeps its
+    stored spelling (``access.raw_tenant_id``): stripping " ACME " would name
+    its legacy twin "ACME" instead.
     """
     # Lazy import: access imports hub modules at load time.
-    from access import tenant_is_unbound
+    from access import raw_tenant_id, tenant_is_unbound
     # Keep only real tenants.
-    return {str(i.get("tenant_id")).strip() for i in _nac_spoke_records(hub, spoke_id)
+    return {raw_tenant_id(i.get("tenant_id")) for i in _nac_spoke_records(hub, spoke_id)
             if not tenant_is_unbound(i.get("tenant_id"))}
 
 
@@ -262,6 +264,23 @@ def _nac_spoke_serves_only(hub, spoke_id, tenant_id) -> bool:
     # Every record it serves: the tenant's, or the hub's own for the shared view.
     return all(is_tenant(t) or (shared and hubs_own(t))
                for t in (i.get("tenant_id") for i in records))
+
+
+def _tagged(record, tenant_id) -> bool:
+    """Whether a spoke's metadata, or a module instance record, is tagged with
+    ``tenant_id``, compared as the access checks compare tenants (fleet rule
+    6.1: any case). An untagged record never matches, so a picker never claims
+    an unbound spoke this way."""
+    # Imported here, as elsewhere in this module, to avoid an import cycle.
+    from access import tenant_among
+    return tenant_among((record or {}).get("tenant_id"), [tenant_id])
+
+
+def _admin_view(tenant_id) -> bool:
+    """No tenant, or the built-in ADMIN tenant "default" in any case: the
+    admin/global view, which the single-spoke pickers answer with any spoke."""
+    from access import ADMIN_TENANT_ID, same_tenant
+    return not tenant_id or same_tenant(tenant_id, ADMIN_TENANT_ID)
 
 
 class SpokeRegistryMixin:
@@ -607,7 +626,7 @@ class SpokeRegistryMixin:
         still shows a global count (unchanged legacy behavior).
         """
         # Admin/global view: any hypervisor-capable spoke will do.
-        if not tenant_id or tenant_id == "default":
+        if _admin_view(tenant_id):
             return self.get_hypervisor_spoke()
         # Collect every hypervisor and simulation spoke as candidates.
         cands = (list(self.get_all_spokes_by_type("hypervisor") or [])
@@ -619,7 +638,7 @@ class SpokeRegistryMixin:
             return None
         # Return the first candidate bound to this tenant, else None (no cross-tenant fallback).
         md = self.state.system_state.get("module_metadata", {})
-        bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
+        bound = [sid for sid in cands if _tagged(md.get(sid), tenant_id)]
         return bound[0] if bound else None
 
     def _spoke_effective_tenants(self, spoke_id: str) -> set:
@@ -638,11 +657,13 @@ class SpokeRegistryMixin:
         mirrors ``_inherit_agent_tenant``). A spoke with no indexed agents yet
         (``agent_info`` lags connect ~30s) falls back to its own binding so a
         freshly-bound spoke still resolves. Empty set = no scope (unbound)."""
-        # Read the module metadata and the spoke's own tenant binding.
+        # Read the module metadata and the spoke's own tenant binding, as
+        # stored: stripping " ACME " would merge it with a twin "ACME".
+        from access import raw_tenant_id
         md = self.state.system_state.get("module_metadata", {}) or {}
         spoke_pk = self._primary_key(spoke_id)
-        spoke_tid = str((md.get(spoke_id, {}) or md.get(spoke_pk, {}) or {})
-                        .get("tenant_id") or "").strip()
+        spoke_tid = raw_tenant_id((md.get(spoke_id, {}) or md.get(spoke_pk, {}) or {})
+                                  .get("tenant_id"))
         # Per-agent config holds any per-agent tenant pin.
         agent_cfg = self.state.system_state.get("agent_config", {}) or {}
         # Agents on this spoke, from BOTH the live index (agent_info, wiped on hub
@@ -671,8 +692,8 @@ class SpokeRegistryMixin:
         # Each agent contributes its pinned tenant, else inherits the spoke's tenant.
         effs = set()
         for apk in agents:
-            pin = str(((agent_cfg.get(apk, {}) or {}).get("client_simulation") or {})
-                      .get("tenant_id") or "").strip()
+            pin = raw_tenant_id(((agent_cfg.get(apk, {}) or {}).get("client_simulation") or {})
+                                .get("tenant_id"))
             eff = pin or spoke_tid
             if eff:
                 effs.add(eff)
@@ -716,8 +737,11 @@ class SpokeRegistryMixin:
         this, a Proxmox host the admin deliberately assigned to the ADMIN
         tenant would never appear on its own Overview — the reported "servers
         I just added don't show up" bug."""
-        # No tenant given means nothing is visible.
-        if not tenant_id:
+        # Ids compared as the access checks compare them (any case).
+        from access import ADMIN_TENANT_ID, first_shared_tenant, _norm_tenant_id as _norm
+        me = _norm(tenant_id)
+        # No tenant given (or a blank one) means nothing is visible.
+        if not me:
             return []
         # Candidates are all pxmx and cs spokes.
         cands = (list(self.get_all_spokes_by_type("hypervisor") or [])
@@ -725,17 +749,16 @@ class SpokeRegistryMixin:
         # Find the tenant flagged as "shared" (visible to everyone), if any.
         try:
             _tenants = (getattr(self.state, "tenant_state", {}) or {}).get("tenants", {}) or {}
-            shared = next((tid for tid, cfg in _tenants.items()
-                           if isinstance(cfg, dict) and cfg.get("shared")), None)
+            shared = first_shared_tenant(_tenants)
         except Exception:
             # Tenant state unreadable: behave as if there is no shared tenant.
             shared = None
         # Build the set of tenant ids whose spokes this tenant may see.
-        want = {tenant_id}
-        if tenant_id == "default":
+        want = {me}
+        if me == ADMIN_TENANT_ID:
             want.add("")  # UNASSIGNED resources are visible to the ADMIN scope
         if shared:
-            want.add(shared)
+            want.add(_norm(shared))
         # Helpers that work out a spoke's module type and whether a tenant owns its own spoke.
         from access import spoke_module_type, tenant_left_shared
         # Walk the candidates and keep those visible to the tenant.
@@ -747,12 +770,12 @@ class SpokeRegistryMixin:
             if not self.approved_modules.get(sid, False):
                 continue
             # Skip spokes whose effective scope does not overlap the visible set.
-            effs = self._spoke_effective_tenants(sid) or {""}
+            effs = {_norm(t) for t in self._spoke_effective_tenants(sid)} or {""}
             if not effs & want:
                 continue
             # A tenant with its own spoke of this type is out of the shared
             # environment: only hosts scoped to the tenant itself remain.
-            if tenant_id not in effs and tenant_left_shared(
+            if me not in effs and tenant_left_shared(
                     self, tenant_id, spoke_module_type(self, sid)):
                 continue
             # Visible: include it.
@@ -777,7 +800,7 @@ class SpokeRegistryMixin:
         Devices page still shows the global fleet (unchanged legacy behavior).
         """
         # Admin/global view: return any nw spoke.
-        if not tenant_id or tenant_id == "default":
+        if _admin_view(tenant_id):
             return self.get_spoke_by_type("nw")
         # Candidates are connected, approved nw spokes.
         cands = [sid for sid in (self.get_all_spokes_by_type("nw") or [])
@@ -788,7 +811,7 @@ class SpokeRegistryMixin:
             return None
         # Return the nw spoke bound to this tenant, or None (never another tenant's).
         md = self.state.system_state.get("module_metadata", {})
-        bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
+        bound = [sid for sid in cands if _tagged(md.get(sid), tenant_id)]
         return bound[0] if bound else None
 
     def get_directory_spoke_for_tenant(self, tenant_id: str = None) -> Optional[str]:
@@ -814,7 +837,7 @@ class SpokeRegistryMixin:
         sees / manages every tenant's OU (unchanged legacy behavior).
         """
         # Admin/global view: return any directory spoke.
-        if not tenant_id or tenant_id == "default":
+        if _admin_view(tenant_id):
             return self.get_spoke_by_type("directory")
         # Candidates are connected, approved directory spokes.
         cands = [sid for sid in (self.get_all_spokes_by_type("directory") or [])
@@ -825,7 +848,7 @@ class SpokeRegistryMixin:
             return None
         # Look for a directory spoke bound to this tenant; use it if found.
         md = self.state.system_state.get("module_metadata", {})
-        bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
+        bound = [sid for sid in cands if _tagged(md.get(sid), tenant_id)]
         if bound:
             return bound[0]
         # No spoke bound to this tenant → the shared OU-partitioned server: an
@@ -870,7 +893,7 @@ class SpokeRegistryMixin:
         unscoped), fall back to ``get_spoke_by_type("storage")`` so the admin's
         Storage page still shows the global fleet."""
         # Admin/global view: return any storage spoke.
-        if not tenant_id or tenant_id == "default":
+        if _admin_view(tenant_id):
             return self.get_spoke_by_type("storage")
         # Candidates are connected, approved storage spokes.
         cands = [sid for sid in (self.get_all_spokes_by_type("storage") or [])
@@ -881,7 +904,7 @@ class SpokeRegistryMixin:
             return None
         # Return the storage spoke bound to this tenant, or None (never another tenant's).
         md = self.state.system_state.get("module_metadata", {})
-        bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
+        bound = [sid for sid in cands if _tagged(md.get(sid), tenant_id)]
         return bound[0] if bound else None
 
     def get_logging_spokes_for_tenant(self, tenant_id: str) -> list:
@@ -946,7 +969,7 @@ class SpokeRegistryMixin:
         candidate spokes are sorted by id, so the pick no longer depends on
         connection order."""
         # Admin/global view: use only the shared or unassigned NAC source.
-        if not tenant_id or tenant_id == "default":
+        if _admin_view(tenant_id):
             return self.get_cppm_spoke_for_global()
         from access import same_tenant
         # Connected, approved, not stale NAC spokes, sorted so the pick is stable.
@@ -988,7 +1011,7 @@ class SpokeRegistryMixin:
         global view), fall back to ``get_spoke_by_type("dhcp")`` so the admin's
         DHCP page still shows a spoke (unchanged legacy behavior)."""
         # Admin/global view: return any dhcp spoke.
-        if not tenant_id or tenant_id == "default":
+        if _admin_view(tenant_id):
             return self.get_spoke_by_type("dhcp")
         # Candidates are connected, approved dhcp spokes.
         cands = [sid for sid in (self.get_all_spokes_by_type("dhcp") or [])
@@ -999,7 +1022,7 @@ class SpokeRegistryMixin:
             return None
         # Return the dhcp spoke bound to this tenant, or None (never another tenant's).
         md = self.state.system_state.get("module_metadata", {})
-        bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
+        bound = [sid for sid in cands if _tagged(md.get(sid), tenant_id)]
         return bound[0] if bound else None
 
     def get_dns_spoke_for_tenant(self, tenant_id: str = None) -> Optional[str]:
@@ -1017,7 +1040,7 @@ class SpokeRegistryMixin:
         ``get_spoke_by_type("dns")`` so the admin's DNS page still shows a
         spoke (unchanged legacy behavior)."""
         # Admin/global view: return any dns spoke.
-        if not tenant_id or tenant_id == "default":
+        if _admin_view(tenant_id):
             return self.get_spoke_by_type("dns")
         # Candidates are connected, approved dns spokes.
         cands = [sid for sid in (self.get_all_spokes_by_type("dns") or [])
@@ -1028,7 +1051,7 @@ class SpokeRegistryMixin:
             return None
         # Return the dns spoke bound to this tenant, or None (never another tenant's).
         md = self.state.system_state.get("module_metadata", {})
-        bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
+        bound = [sid for sid in cands if _tagged(md.get(sid), tenant_id)]
         return bound[0] if bound else None
 
     def get_nac_live_spokes(self) -> list:
@@ -1081,7 +1104,7 @@ class SpokeRegistryMixin:
         # Look up the shared tenant id lazily (avoids an import cycle).
         from access import shared_tenant_id
         tenant_id = shared_tenant_id()
-        if tenant_id and tenant_id != "default":
+        if not _admin_view(tenant_id):
             return self.get_cppm_spoke_for_tenant(tenant_id)
         # No shared tenant: the unassigned (hub-owned) ClearPass is the shared one.
         return self._unbound_cppm_spoke()
@@ -1096,7 +1119,7 @@ class SpokeRegistryMixin:
         # Prefer the explicitly configured shared source when it is available.
         from access import shared_tenant_id
         shared_tid = shared_tenant_id()
-        if shared_tid and shared_tid != "default":
+        if not _admin_view(shared_tid):
             shared_spoke = self.get_cppm_spoke_for_tenant(shared_tid)
             if shared_spoke:
                 return shared_spoke
@@ -1106,15 +1129,16 @@ class SpokeRegistryMixin:
     def get_cppm_spoke_for_scope(self, tenant_id: str = None) -> Optional[str]:
         """The one NAC spoke that answers a single-source read for a scope.
 
-        ``tenant_id`` None or ``"default"`` (admin, no tenant selected) uses
-        the global source. A tenant uses the first spoke of its NAC view
+        ``tenant_id`` None or ``"default"`` in any case (admin, no tenant
+        selected) uses the global source. A tenant uses the first spoke of its NAC view
         (``get_cppm_spokes_for_tenant``: its own spoke, else the shared one
         when it may use shared), and never another tenant's spoke. Use this
         for one-spoke reads such as dashboard counts, search and a VM's
         policy lookup; the NAC pages merge every spoke in the view instead.
         """
-        # Admin, unscoped: the shared or unbound ClearPass only.
-        if not tenant_id or tenant_id == "default":
+        # Admin, unscoped (no tenant, or "default" in any case): the shared
+        # or unbound ClearPass only.
+        if _admin_view(tenant_id):
             return self.get_cppm_spoke_for_global()
         # Tenant: the first source of its own NAC view, or nothing.
         spokes = self.get_cppm_spokes_for_tenant(tenant_id)
@@ -1142,7 +1166,7 @@ class SpokeRegistryMixin:
         also tags each record by its owning tenant, a distinct need this list
         isn't for."""
         # The admin view uses a separate fan-out path, so return nothing here.
-        if not tenant_id or tenant_id == "default":
+        if _admin_view(tenant_id):
             return []
         # Find the tenant's own dedicated NAC spoke.
         own = self.get_cppm_spoke_for_tenant(tenant_id)
@@ -1310,7 +1334,7 @@ class SpokeRegistryMixin:
             md = self.state.system_state.get("module_metadata", {})
             # Sorted so the choice is deterministic.
             bound = sorted(sid for sid in cands
-                           if md.get(sid, {}).get("tenant_id") == tenant_id)
+                           if _tagged(md.get(sid), tenant_id))
             if bound:
                 return self._sticky_cs_broker(tenant_id, bound)
             # No spoke bound to this tenant — claim an UNASSIGNED one (no
@@ -1393,7 +1417,7 @@ class SpokeRegistryMixin:
         # Tenant-scoped request: return every spoke bound to the tenant.
         if tenant_id:
             md = self.state.system_state.get("module_metadata", {})
-            bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
+            bound = [sid for sid in cands if _tagged(md.get(sid), tenant_id)]
             if bound:
                 return bound
             # No spoke bound to this tenant — claim ONE unassigned (never a

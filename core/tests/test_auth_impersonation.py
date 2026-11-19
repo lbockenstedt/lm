@@ -77,3 +77,13 @@ def test_admin_revocation_ends_the_impersonating_session(tmp_path):
     c.post("/auth/impersonate", json={"user_id": "bob"})
     api_mod._invalidate_user_sessions(hub, "admin")
     assert c.get("/auth/me").status_code == 401
+
+
+def test_stopping_restores_the_admin_without_blank_grants():
+    # The admin's record saved in a session from before blank grants were refused.
+    sess = {"user_id": "bob", "user": {"user_id": "bob", "tenants": ["acme"]},
+            "impersonator": {"user_id": "admin", "user": {
+                "user_id": "admin", "tenants": [" ", "acme"], "tenant_id": ""}}}
+    api_mod._end_impersonation(sess)
+    assert sess["user_id"] == "admin" and "impersonator" not in sess
+    assert (sess["user"]["tenants"], sess["user"]["tenant_id"]) == (["acme"], "acme")

@@ -66,6 +66,36 @@ def test_admin_acting_as_a_tenant_sees_only_that_tenants_devices(monkeypatch, tm
     assert _names(r.json()) == {"shared"}
 
 
+def test_admin_acting_as_a_legacy_case_twin_maps_only_its_own(monkeypatch, tmp_path):
+    """With legacy tenants "acme" and "ACME" both stored, tenant ids compare by
+    exact spelling (access._AMBIGUOUS_TENANT_IDS), so one's map never shows
+    the other's device."""
+    import access
+    from test_nw_tenant_scoping import _ACME_SW, _OTHER_SW
+    c, hub = _build(monkeypatch, tmp_path,
+                    gc_extra={"nw_devices": [_ACME_SW, {**_OTHER_SW, "tenant_id": "ACME"}]})
+    tok = _mint(hub, "admin", tenants=[], admin=True)
+    hub.state.tenant_state["tenants"]["ACME"] = {"netbox_tenant_slug": "acme-upper"}
+    monkeypatch.setattr(access, "_AMBIGUOUS_TENANT_IDS",
+                        access._case_collisions(hub.state.tenant_state["tenants"]))
+    for tenant, names in (("acme", {"acme"}), ("ACME", {"other"})):
+        r = c.get(f"/api/nw/topology?tenant={tenant}", cookies={"lm_session": tok})
+        assert r.status_code == 200, r.text
+        assert _names(r.json()) == names
+
+
+def test_admin_acting_as_only_spaces_maps_no_unassigned_device(monkeypatch, tmp_path):
+    """An acting tenant of only spaces names no tenant, so the map shows no
+    unassigned device (those belong to the ADMIN scope, ?tenant=default)."""
+    from test_nw_tenant_scoping import _ACME_SW, _OTHER_SW
+    c, hub = _build(monkeypatch, tmp_path,
+                    gc_extra={"nw_devices": [_ACME_SW, {**_OTHER_SW, "tenant_id": ""}]})
+    tok = _mint(hub, "admin", tenants=[], admin=True)
+    r = c.get("/api/nw/topology?tenant=%20%20", cookies={"lm_session": tok})
+    assert r.status_code == 200, r.text
+    assert _names(r.json()) == set()
+
+
 def test_a_tenant_user_never_sees_another_tenants_device(monkeypatch, tmp_path):
     c, hub = _build(monkeypatch, tmp_path, shared=True)
     tok = _mint(hub, "u", tenants=["acme"])

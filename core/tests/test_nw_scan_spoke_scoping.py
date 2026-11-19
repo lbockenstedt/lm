@@ -180,3 +180,17 @@ def test_tenant_id_case_insensitive():
     got = nw_scan_spoke_choices(hub, "Default", SHARED)
     assert [(c["spoke_id"], c["scope"]) for c in got] == [("nw-default", "own")]
     assert resolve_nw_scan_spoke(hub, " DEFAULT ", "", SHARED) == "nw-default"
+
+
+def test_legacy_tenants_spelt_only_by_case_never_share_an_agent(monkeypatch):
+    """With "acme" and "ACME" both stored, tenant ids compare by exact spelling
+    (access._AMBIGUOUS_TENANT_IDS), so neither tenant is offered, nor resolves
+    to, the other's nw agent."""
+    import access
+    monkeypatch.setattr(access, "_AMBIGUOUS_TENANT_IDS",
+                        access._case_collisions({"acme": {}, "ACME": {}}))
+    hub = _Hub(spokes=["nw-lower", "nw-upper"],
+               metadata={"nw-lower": {"tenant_id": "acme"}, "nw-upper": {"tenant_id": "ACME"}})
+    assert [c["spoke_id"] for c in nw_scan_spoke_choices(hub, "acme", SHARED)] == ["nw-lower"]
+    assert [c["spoke_id"] for c in nw_scan_spoke_choices(hub, "ACME", SHARED)] == ["nw-upper"]
+    assert resolve_nw_scan_spoke(hub, "ACME", "nw-lower", SHARED) == "nw-upper"

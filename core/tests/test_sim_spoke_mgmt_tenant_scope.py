@@ -100,3 +100,34 @@ def test_admin_mutation_rejects_other_tenants_spoke_but_allows_unbound():
     assert r.status_code == 200
     r = c.delete("/sim/api/spokes/cs-b?tenant_id=A")
     assert r.status_code == 404
+
+
+def _add_lowercase_a_spoke(hub):
+    """Bind an approved Simulation spoke to "a", tenant "A" in other spelling."""
+    hub.state.system_state["module_metadata"]["cs-a2"] = {
+        "tenant_id": "a", "module_type": "Client-Sim"}
+    hub.state.system_state["approved_modules"]["cs-a2"] = True
+
+
+def test_list_matches_spoke_tenant_in_any_capitalisation():
+    """A spoke bound to "a" belongs to tenant "A" (fleet rule 6.1)."""
+    c, hub = _client(admin=False, user_tenants=["A"])
+    _add_lowercase_a_spoke(hub)
+    assert _ids(c.get("/sim/api/spokes?tenant_id=A")) == ["cs-a", "cs-a2"]
+    c, hub = _client(admin=True)
+    _add_lowercase_a_spoke(hub)
+    assert _ids(c.get("/sim/api/spokes?tenant_id=A")) == ["cs-a", "cs-a2", "cs-free"]
+
+
+def test_per_spoke_routes_accept_spoke_tenant_in_any_capitalisation():
+    """The per-spoke gates compare tenants as the list does, so a spoke the
+    list shows under tenant "A" can be opened and edited there too."""
+    c, hub = _client(admin=True)
+    _add_lowercase_a_spoke(hub)
+    assert c.get("/sim/api/A/spokes/cs-a2/config-diag?tenant_id=A").status_code == 200
+    r = c.patch("/sim/api/A/spokes/cs-a2/label?tenant_id=A", json={"label": "z"})
+    assert r.status_code == 200, r.text
+    assert hub.state.labels["cs-a2"] == "z"
+    # Another tenant's spoke is still out of reach.
+    r = c.patch("/sim/api/A/spokes/cs-b/label?tenant_id=A", json={"label": "z"})
+    assert r.status_code == 404

@@ -9,7 +9,7 @@ from api import (
     get_netbox_spoke, get_tenant_scoping, logger, os, secrets, time,
 )
 # Tenant access checks and RBAC (group + per-user) effective-permission resolution.
-from access import check_tenant_access, resolve_effective_permissions
+from access import check_tenant_access, granted_tenants, resolve_effective_permissions
 # One-time RSA key exchange so the browser never sends the password in clear text.
 from security import login_crypto
 # Resolves a user's password hash, including hashes held in the credential store.
@@ -122,8 +122,9 @@ def register(app, hub, ctx):
             # Always read the live record so migrations/admin changes take effect on next login.
             # Effective perms = group-derived rights unioned with per-user overrides (RBAC).
             perms   = resolve_effective_permissions(hub, user)
-            # The user's tenants and whether it is a protected (built-in) account.
-            tenants = user.get("tenants", [])
+            # The user's tenants (blank grants name no tenant and are dropped)
+            # and whether it is a protected (built-in) account.
+            tenants = granted_tenants(user.get("tenants"))
             protected = user.get("protected", False)
             # Protected accounts have no tenant assignment regardless of stored value
             if protected:
@@ -159,6 +160,16 @@ def register(app, hub, ctx):
             logger.exception("local_login failed")
             raise HTTPException(status_code=500, detail="Login request failed")
 
+    def _names_a_tenant(hub, tenant) -> bool:
+        """Whether ``tenant`` names one existing tenant, in any spelling the
+        access checks take for it (StateManager.tenant_key; the built-in
+        "default" always exists). One that names several, such as a third
+        spelling of twins, names none."""
+        try:
+            return hub.state.tenant_key(tenant) is not None
+        except ValueError:
+            return False
+
     def _default_tenant(hub, record, user_data):
         """The user's saved default tenant while it still exists and they may
         still view it; otherwise None (the WebUI falls back to its usual pick)."""
@@ -166,18 +177,20 @@ def register(app, hub, ctx):
         tenant = (record or {}).get("default_tenant")
         if not tenant:
             return None
-        # The tenant must still exist (the built-in "default" always does).
-        if tenant != "default" and tenant not in hub.state.tenant_state.get("tenants", {}):
+        # The tenant must still exist.
+        if not _names_a_tenant(hub, tenant):
             return None
-        # And the user must still be allowed to view it.
+        # And the user must still be allowed to view it, under the spelling the
+        # WebUI then opens on as ?tenant= (check_tenant_access is exact).
         return tenant if check_tenant_access({"user": user_data}, tenant) else None
 
     def _user_snapshot(hub, user_id, user):
         """Build the same session-shaped user dict login uses, so an API token
         carries identical effective permissions/tenants."""
-        # Effective permissions; protected accounts never carry tenants.
+        # Effective permissions; protected accounts never carry tenants, and
+        # blank grants name no tenant.
         perms = resolve_effective_permissions(hub, user)
-        tenants = [] if user.get("protected") else user.get("tenants", [])
+        tenants = [] if user.get("protected") else granted_tenants(user.get("tenants"))
         # Same shape as the login session's user record.
         return {"user_id": user_id, "auth_type": user.get("auth_type", "local"),
                 "permissions": perms, "tenants": tenants,
@@ -343,13 +356,15 @@ def register(app, hub, ctx):
         # back to the user_id (which IS the username for local accounts).
         _name = str(live.get("name") or sess["user"].get("name") or "")
         _email = str(live.get("email") or sess["user"].get("email") or "")
-        # Session record refreshed with live permissions, tenants, protection and names.
+        # Session record refreshed with live permissions, tenants, protection
+        # and names. Blank grants name no tenant and are dropped.
+        live_tenants = granted_tenants(live.get("tenants"))
         merged = {
             **sess["user"],
             "permissions": _eff_perms,
-            "tenants":     live.get("tenants",     sess["user"].get("tenants", [])),
-            "tenant_id":   live.get("tenants", [sess["user"].get("tenant_id")])[0]
-                           if live.get("tenants") else None,
+            "tenants":     (live_tenants if "tenants" in live
+                            else granted_tenants(sess["user"].get("tenants", []))),
+            "tenant_id":   live_tenants[0] if live_tenants else None,
             "protected":   live.get("protected", False),
             "name":        _name,
             "email":       _email,
@@ -390,10 +405,11 @@ def register(app, hub, ctx):
         user = hub.state.system_state.get("users", {}).get(user_id)
         if user is None:
             raise HTTPException(status_code=404, detail="User record not found")
-        # Setting a tenant: it must exist and the caller must be allowed to view it.
+        # Setting a tenant: it must exist and the caller must be allowed to view
+        # it. The spelling sent is the one checked and saved: the WebUI opens on
+        # it as ?tenant=, which check_tenant_access compares exactly.
         if tenant:
-            known = tenant == "default" or tenant in hub.state.tenant_state.get("tenants", {})
-            if not known:
+            if not _names_a_tenant(hub, tenant):
                 raise HTTPException(status_code=404, detail=f"Unknown tenant '{tenant}'")
             if not check_tenant_access(sess, tenant):
                 raise HTTPException(status_code=403, detail="You do not have access to that tenant")

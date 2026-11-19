@@ -117,6 +117,28 @@ def test_hub_push_groups_by_tenant_with_its_netbox_slug():
     assert [c[2]["tenant_slug"] for c in hub.calls] == ["acme-nb"]
 
 
+def test_hub_push_keeps_legacy_tenants_spelt_only_by_case_apart(monkeypatch):
+    # With "acme" and "ACME" both stored, tenant ids compare by exact spelling
+    # (access._AMBIGUOUS_TENANT_IDS): each tenant's links go under its own
+    # NetBox slug, never merged under whichever spelling came first.
+    import access
+    monkeypatch.setattr(access, "_AMBIGUOUS_TENANT_IDS",
+                        access._case_collisions({"acme": {}, "ACME": {}}))
+    devices = [{"id": "sw1", "name": "SW1", "tenant_id": "acme"},
+               {"id": "sw2", "name": "SW2", "tenant_id": "ACME"}]
+    row = {"local_port": "1", "remote_chassis": "aa:bb:cc:00:00:01",
+           "remote_port": "2", "remote_name": "NEIGH"}
+    hub = _Hub(devices, {"sw1": [row], "sw2": [dict(row, remote_chassis="aa:bb:cc:00:00:02")]})
+    slugs = {"acme": {"netbox_tenant_slug": "acme-nb"}, "ACME": {"netbox_tenant_slug": "acme-upper"}}
+    hub.state.get_tenant = slugs.get
+    asyncio.run(hub.push_lldp_links_to_netbox())
+    sent = {c[2]["tenant_slug"]: len(c[2]["links"]) for c in hub.calls if c[1] == "NETBOX_SYNC_LLDP"}
+    assert sent == {"acme-nb": 1, "acme-upper": 1}
+    hub.calls.clear()
+    asyncio.run(hub.push_lldp_links_to_netbox("ACME"))
+    assert [c[2]["tenant_slug"] for c in hub.calls] == ["acme-upper"]
+
+
 async def test_a_failing_background_refresh_is_not_resent_on_every_page_poll():
     # nw#233: a failed fetch never stamps the cache, so each poll re-sent it.
     from routes import nw as nw_routes

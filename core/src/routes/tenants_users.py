@@ -9,7 +9,8 @@ from api import (
 )
 # Access-control helpers: permission resolution, shared-tenant cache and input validators.
 from access import (
-    ENFORCED_RIGHTS, SHARED_ACCESS_MODES, resolve_effective_permissions, refresh_shared_tenant,
+    ENFORCED_RIGHTS, SHARED_ACCESS_MODES, _norm_tenant_id, resolve_effective_permissions, refresh_shared_tenant,
+    goes_with_deleted_tenant, granted_tenants, match_tenant_id, retired_twin_ids, tenant_among,
     valid_display_name as _valid_display_name,
     valid_hostname as _valid_hostname,
     valid_identifier as _valid_identifier,
@@ -329,12 +330,15 @@ def register(app, hub, ctx):
                 "group_slug": cfg.get("netbox_tenant_group_slug", "") if cfg.get("is_tenant_group")
                               else cfg.get("tenant_group_slug", ""),
                 "members": list(cfg.get("member_tenant_slugs") or []) if cfg.get("is_tenant_group") else [],
+                # The form the hub compares tenant ids in, so the WebUI matches
+                # a tenant to its bindings as the hub does (Managed Devices).
+                "tenant_key": _norm_tenant_id(tid),
             }
             for tid, cfg in tenants.items()
         ]
         # Add the default (ADMIN) tenant if it is not stored.
         if "default" not in [t["id"] for t in tenant_list]:
-            tenant_list.insert(0, {"id": "default", "name": "ADMIN", "slug": "default", "netbox_id": None, "description": "", "shared": False, "shared_access": "auto", "is_group": False, "group_slug": "", "members": []})
+            tenant_list.insert(0, {"id": "default", "name": "ADMIN", "slug": "default", "netbox_id": None, "description": "", "shared": False, "shared_access": "auto", "is_group": False, "group_slug": "", "members": [], "tenant_key": "default"})
         # Keep the shared-tenant cache fresh whenever the list is loaded.
         shared_id = refresh_shared_tenant(hub)
         return {"tenants": tenant_list, "shared_tenant_id": shared_id}
@@ -353,23 +357,32 @@ def register(app, hub, ctx):
             if data.get("status") != "SUCCESS":
                 raise HTTPException(status_code=502, detail=data.get("message", "NetBox error"))
 
-            # Track which tenants were added vs updated.
-            added, updated = [], []
-            existing_ids = set(hub.state.tenant_state.get("tenants", {}).keys())
+            # Track which tenants were added, updated or skipped.
+            added, updated, skipped = [], [], []
             nb_slugs = {t["slug"] for t in nb_tenants}
 
             # Upsert each NetBox tenant, keeping any extra hub-only fields it already had.
             for t in nb_tenants:
                 slug = t["slug"]
-                exists = slug in existing_ids
-                cfg = hub.state.get_tenant(slug) or {}
-                hub.state.update_tenant(slug, {
-                    "name": t["name"],
-                    "netbox_tenant_slug": slug,
-                    "netbox_id": t["id"],
-                    "description": t.get("description", ""),
-                    **{k: v for k, v in cfg.items() if k not in ("name", "netbox_tenant_slug", "netbox_id", "description")},
-                })
+                try:
+                    # Stored already in any case, or the built-in default
+                    # (update_tenant merges into it)?
+                    exists = hub.state.tenant_key(slug) is not None
+                    cfg = hub.state.get_tenant(slug) or {}
+                    hub.state.update_tenant(slug, {
+                        "name": t["name"],
+                        "netbox_tenant_slug": slug,
+                        "netbox_id": t["id"],
+                        "description": t.get("description", ""),
+                        **{k: v for k, v in cfg.items() if k not in ("name", "netbox_tenant_slug", "netbox_id", "description")},
+                    })
+                except ValueError as e:
+                    # This slug names several stored tenants that differ only
+                    # by case or surrounding spaces (StateManager.tenant_key):
+                    # skip it, sync the rest.
+                    logger.warning("sync_tenants_from_netbox: skipped %s: %s", slug, e)
+                    skipped.append(slug)
+                    continue
                 # Record whether this was an update or an add.
                 (updated if exists else added).append(slug)
 
@@ -378,8 +391,11 @@ def register(app, hub, ctx):
             # Report what changed.
             return {
                 "status": "ok",
-                "added": added, "updated": updated,
-                "message": f"Synced {len(nb_tenants)} tenant(s) from NetBox: {len(added)} added, {len(updated)} updated",
+                "added": added, "updated": updated, "skipped": skipped,
+                "message": (f"Synced {len(nb_tenants)} tenant(s) from NetBox: {len(added)} added, "
+                            f"{len(updated)} updated"
+                            + (f", {len(skipped)} skipped (tenant id matches several tenants: "
+                               f"{', '.join(skipped)})" if skipped else "")),
             }
         # Let HTTP errors through unchanged; wrap anything else as a 500.
         except HTTPException:
@@ -418,12 +434,27 @@ def register(app, hub, ctx):
         try:
             data = await request.json()
             tenant_id = data.get("tenant_id")
-            if not tenant_id:
+            # A blank id names no tenant (as a scope it would read as no
+            # selection), so it is refused like a missing one.
+            if not tenant_id or not str(tenant_id).strip():
                 raise HTTPException(status_code=400, detail="Missing tenant_id")
+            # Tenant ids are not case-sensitive (access._norm_tenant_id): refuse
+            # another spelling of a stored tenant or of the built-in default,
+            # in case or surrounding spaces, or of several (ValueError). Compared
+            # stripped, " ACME " passed, merged nothing into "ACME" and replied
+            # "created".
+            try:
+                key = hub.state.tenant_key(tenant_id)
+            except ValueError:
+                key = ""
+            if key is not None and str(key) != str(tenant_id):
+                raise HTTPException(status_code=409, detail=(
+                    f"Tenant '{key or tenant_id}' already exists (tenant ids are not case-sensitive)"))
 
             # Create the tenant with an empty config and mark state for saving.
             hub.state.update_tenant(tenant_id, {})
             hub.state._mark_dirty()
+            refresh_shared_tenant(hub)
             # TENANT == OU (1:1): stand up the tenant's directory OU
             # (ou=<slug>,<base_dn>) on the LDAP mirror. Best-effort — the OU is
             # idempotent (case-insensitive) and re-provisionable via the backfill
@@ -434,7 +465,9 @@ def register(app, hub, ctx):
             except Exception:  # noqa: BLE001
                 logger.debug("create_tenant: OU provisioning skipped", exc_info=True)
             return {"status": "ok", "message": f"Tenant {tenant_id} created."}
-        # Any failure (including a missing tenant_id) is reported as a 500.
+        # Let HTTP errors (400, 409) through unchanged; wrap anything else as a 500.
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("create_tenant failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -452,22 +485,38 @@ def register(app, hub, ctx):
         Data first if it must be moved/purged; this only removes the tenant
         shell + user assignments.
         """
-        # Normalise the id; the default tenant can never be deleted.
+        # The stored tenant this id names: its exact spelling, else the one
+        # tenant it names ignoring case and surrounding spaces (several is a
+        # 409, StateManager.tenant_key). The built-in Admin tenant can never be
+        # deleted; a legacy record spelt "Default" beside it is a tenant of its
+        # own (access._case_collisions), so it can be. So can a legacy record
+        # with a blank id, by that exact id (tenant_key names no tenant for a
+        # blank id).
         hub = app.state.hub
-        clean = (tenant_id or "").strip()
-        if clean.lower() == "default":
+        stored = set(map(str, hub.state.tenant_state.get("tenants", {}) or {}))
+        try:
+            clean = tenant_id if tenant_id in stored else hub.state.tenant_key(tenant_id)
+        except ValueError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        if clean == "default":
             raise HTTPException(status_code=400, detail="The default tenant cannot be deleted.")
         # The tenant must exist.
-        if hub.state.get_tenant(clean) is None:
-            raise HTTPException(status_code=404, detail=f"Tenant {clean} not found")
+        if clean is None or hub.state.get_tenant(clean) is None:
+            raise HTTPException(status_code=404, detail=f"Tenant {(tenant_id or '').strip()} not found")
 
         # Refuse while any spoke is still bound to this tenant — deleting would
-        # orphan the binding. List the bound spokes so the UI can name them.
+        # orphan the binding. A tag in another case is bound to it too (the
+        # access checks match tags in any case), except the exact id of a
+        # remaining twin (goes_with_deleted_tenant); a blank tag is an
+        # unassigned spoke, bound to no tenant. List the bound spokes so the UI
+        # can name them.
         meta = hub.state.system_state.get("module_metadata", {}) or {}
+        remaining = (stored - {clean}) | {"default"}
         bound = [
             node_name(hub.state.system_state, sid)
             for sid, m in meta.items()
-            if isinstance(m, dict) and (m.get("tenant_id") or "").strip() == clean
+            if isinstance(m, dict) and str(m.get("tenant_id") or "").strip()
+            and goes_with_deleted_tenant(m.get("tenant_id"), clean, remaining)
         ]
         if bound:
             raise HTTPException(
@@ -480,12 +529,16 @@ def register(app, hub, ctx):
                 ),
             )
 
-        # Remove the tenant, save immediately, refresh the shared-tenant cache
-        # and drop the NAC caches if who reads the shared ClearPass changed.
+        # Remove the tenant, end the sessions and API tokens of the users who
+        # lost it (each holds a snapshot of their tenants), save immediately,
+        # refresh the shared-tenant cache and drop the NAC caches if who reads
+        # the shared ClearPass changed.
         before = _sharing(hub)
-        removed = hub.state.delete_tenant(clean)
-        if not removed:
+        detached = hub.state.delete_tenant(clean)
+        if detached is None:
             raise HTTPException(status_code=404, detail=f"Tenant {clean} not found")
+        for user_id in detached:
+            _invalidate_user_sessions(hub, user_id)
         await hub.state.save_state_now()
         _after_tenant_write(hub, before)
         return {"status": "ok", "message": f"Tenant {clean} deleted."}
@@ -527,8 +580,15 @@ def register(app, hub, ctx):
         try:
             data = await request.json()
             tenant_id = data.get("tenant_id", "default")
+            # A blank id names no tenant (as a scope it would read as no
+            # selection), so it is refused like a missing one.
+            if tenant_id is None or not str(tenant_id).strip():
+                raise HTTPException(status_code=400, detail="Missing tenant_id")
             config = data.get("config", {})
             _check_shared_access(config)
+            # Use the stored spelling of an existing tenant (ids are not
+            # case-sensitive), so the shared and active writes below name it.
+            tenant_id = hub.state.tenant_key(tenant_id) or tenant_id
             before = _sharing(hub)
 
             # Keep exactly one shared tenant, then save the config changes.
@@ -546,7 +606,10 @@ def register(app, hub, ctx):
             _after_tenant_write(hub, before)
 
             return {"status": "ok", "message": f"Tenant {tenant_id} updated."}
-        # Any failure is reported as a bad request.
+        # A 400 raised above keeps its own message; any other failure is
+        # reported as a bad request.
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid request: {str(e)}")
 
@@ -583,7 +646,7 @@ def register(app, hub, ctx):
             user_id = data.get("user_id")
             tenant_id = data.get("tenant_id")
 
-            if not user_id or not tenant_id:
+            if not user_id or not tenant_id or not str(tenant_id).strip():
                 raise HTTPException(status_code=400, detail="Missing user_id or tenant_id")
 
             # The tenant must exist.
@@ -653,17 +716,23 @@ def register(app, hub, ctx):
                     detail="The protected admin account cannot be assigned to a tenant")
             # Track what was done and any problems.
             assigned, removed, errors = [], [], []
-            # Add each existing tenant; unknown tenants are reported as errors.
+            # Remove each listed tenant first: a removal drops every spelling of
+            # the grant, and the WebUI diffs spellings exactly, so a legacy
+            # "ACME" grant re-picked as the stored "acme" arrives as remove
+            # "ACME" plus add "acme". Adding first would lose the tenant.
+            for tid in remove:
+                hub.state.remove_user_from_tenant(user_id, tid)
+                removed.append(tid)
+            # Add each existing tenant; blank and unknown tenants are reported as errors.
             for tid in add:
+                if tid is None or not str(tid).strip():
+                    errors.append("blank tenant id")
+                    continue
                 if not hub.state.get_tenant(tid):
                     errors.append(f"tenant {tid} not found")
                     continue
                 hub.state.assign_user_to_tenant(user_id, tid)
                 assigned.append(tid)
-            # Remove each listed tenant.
-            for tid in remove:
-                hub.state.remove_user_from_tenant(user_id, tid)
-                removed.append(tid)
             # End the user's sessions once, only if something changed.
             if assigned or removed:
                 _invalidate_user_sessions(hub, user_id)
@@ -705,6 +774,9 @@ def register(app, hub, ctx):
             auth_type = data.get("auth_type", "local")
             tenant_id = data.get("tenant_id")
             groups = data.get("groups")  # None = leave unchanged; list = replace
+            # A blank tenant id names no tenant: treat it as none sent.
+            if tenant_id is not None and not str(tenant_id).strip():
+                tenant_id = None
 
             # The user id is required.
             if not user_id:
@@ -778,9 +850,10 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=400, detail="tenants must be a list")
             # Protected accounts keep their tenants untouched.
             if not existing.get("protected"):
-                # A tenants list replaces membership (plus any legacy tenant_id).
+                # A tenants list replaces membership (plus any legacy tenant_id);
+                # blank entries name no tenant and are dropped.
                 if tenants_list is not None:
-                    wanted = {t for t in tenants_list if t}
+                    wanted = set(granted_tenants(tenants_list))
                     if tenant_id:
                         wanted.add(tenant_id)
                     entry["tenants"] = sorted(wanted)
@@ -868,20 +941,42 @@ def register(app, hub, ctx):
     #     user RECORD entirely stays Global-Admin-only.
 
     def _ta_gate(request: Request, tenant: str):
-        """Auth + tier + tenant-ownership gate for the tenant-scoped user
-        routes. Returns the caller's session. A Global Admin (any tenant) or a
-        tenant Admin (own tenant only, via _check_tenant_access) passes; a
-        plain authenticated user is blocked — user management is an admin
-        operation, even at the tenant tier."""
+        """Auth + tier + tenant-ownership gate for the tenant-scoped user and
+        tenant routes. Returns ``(session, key)``: ``key`` is the stored id of
+        the tenant the path names (StateManager.tenant_key), and the route
+        uses it from then on, since a path, a grant and a stored id may spell
+        one tenant in different cases. A Global Admin (any existing tenant) or
+        a tenant Admin (a tenant it is granted, compared as tenant_among
+        compares) passes; a plain authenticated user is blocked — user
+        management is an admin operation, even at the tenant tier."""
         sess = ctx._session_user(request)
         if not sess:
             raise HTTPException(status_code=401, detail="Authentication required")
-        if not (ctx._is_admin(sess) or ctx._is_tenant_admin(sess)):
+        is_global = ctx._is_admin(sess)
+        if not (is_global or ctx._is_tenant_admin(sess)):
             raise HTTPException(status_code=403, detail="Admin access required")
-        if not ctx._check_tenant_access(sess, tenant):
+        # A blank path tenant names no tenant; a Global Admin passing one
+        # would otherwise file users under a blank grant.
+        if not str(tenant or "").strip():
+            raise HTTPException(status_code=400, detail="Missing tenant")
+        # Find the one stored tenant the path names. Several (twins saved
+        # before ids were kept unique; the exact id names one) is a 409 for a
+        # Global Admin and names no tenant for a tenant Admin.
+        try:
+            key = app.state.hub.state.tenant_key(tenant)
+        except ValueError as e:
+            if is_global:
+                raise HTTPException(status_code=409, detail=str(e))
+            key = None
+        # A Global Admin may manage any tenant, a tenant Admin one it is
+        # granted. Only then is a tenant with no record a 404, so a tenant
+        # Admin learns nothing about tenants it is not granted.
+        if not (is_global or tenant_among(tenant if key is None else key, _admin_tenants(sess))):
             raise HTTPException(status_code=403,
                                 detail=f"Not authorized for tenant '{tenant}'")
-        return sess
+        if key is None:
+            raise HTTPException(status_code=404, detail=f"Tenant {tenant} not found")
+        return sess, key
 
     def _admin_tenants(sess) -> set:
         """Return the set of tenant ids assigned to the session's user."""
@@ -924,13 +1019,13 @@ def register(app, hub, ctx):
         A tenant Admin sees its own tenant's roster; a Global Admin may list
         any. Password hashes are stripped; effective_permissions are resolved."""
         # Check the caller may manage users in this tenant.
-        sess = _ta_gate(request, tenant)
+        _sess, tenant = _ta_gate(request, tenant)
         hub = app.state.hub
         # Collect members of this tenant, without password hashes, with effective rights.
         raw = hub.state.system_state.get("users", {})
         out = {}
         for uid, u in raw.items():
-            if tenant in (u.get("tenants") or []):
+            if tenant_among(tenant, u.get("tenants")):
                 rec = {k: v for k, v in u.items() if k != "password_hash"}
                 rec["groups"] = u.get("groups", [])
                 rec["effective_permissions"] = resolve_effective_permissions(hub, u)
@@ -945,7 +1040,7 @@ def register(app, hub, ctx):
         added later via the edit route. Reject if the user_id already exists
         (the WebUI Add-User modal sends create=true semantics)."""
         # Check the caller may manage users in this tenant.
-        sess = _ta_gate(request, tenant)
+        sess, tenant = _ta_gate(request, tenant)
         hub = app.state.hub
         try:
             # Read the new user's fields.
@@ -1001,7 +1096,7 @@ def register(app, hub, ctx):
         cannot demote the protected account. Tenant membership for the path
         tenant is never removed here — use the DELETE route for that."""
         # Check the caller may manage users in this tenant.
-        sess = _ta_gate(request, tenant)
+        sess, tenant = _ta_gate(request, tenant)
         hub = app.state.hub
         try:
             # Read the requested changes.
@@ -1028,7 +1123,8 @@ def register(app, hub, ctx):
                 if _is_target_admin_tier(existing):
                     raise HTTPException(status_code=403,
                                         detail="Tenant admin cannot modify an admin-tier user")
-                if not set(existing.get("tenants") or []).issubset(_admin_tenants(sess)):
+                owned = _admin_tenants(sess)
+                if not all(tenant_among(t, owned) for t in existing.get("tenants") or []):
                     raise HTTPException(status_code=403,
                                         detail="User extends beyond your tenants — ask a Global admin")
                 _reject_role_escalation(permissions)
@@ -1062,11 +1158,18 @@ def register(app, hub, ctx):
                     raise HTTPException(status_code=400, detail="tenants must be a list")
                 owned = _admin_tenants(sess) if not is_global else None
                 # The path tenant is always retained (edit must not drop it; use
-                # DELETE to leave the tenant). A tenant admin can only ADD owned
-                # tenants; a Global admin may set any list.
-                wanted = set(extra_tenants) | {tenant}
-                if owned is not None:
-                    wanted &= owned | {tenant}  # drop tenants the admin doesn't own
+                # DELETE to leave the tenant). Each entry is stored as the id of
+                # the tenant it names (tenant_key); one that names no tenant, or
+                # several, is dropped, as are blank ones. A tenant admin can
+                # only ADD tenants it is granted; a Global admin any tenant.
+                wanted = {tenant}
+                for t in granted_tenants(extra_tenants):
+                    try:
+                        key = hub.state.tenant_key(t)
+                    except ValueError:
+                        key = None
+                    if key is not None and (owned is None or tenant_among(key, owned)):
+                        wanted.add(key)
                 entry["tenants"] = sorted(wanted)
             # A Tenant Admin must keep at least one tenant.
             if entry.get("permissions", {}).get("role") == "tenant_admin" and not entry.get("tenants"):
@@ -1090,7 +1193,7 @@ def register(app, hub, ctx):
         (an owned tenant). A tenant admin may not reset an admin-tier or
         protected user's password (no credential takeover of admins)."""
         # Check the caller may manage users in this tenant.
-        sess = _ta_gate(request, tenant)
+        sess, tenant = _ta_gate(request, tenant)
         hub = app.state.hub
         try:
             # Read the new password; it is required.
@@ -1106,7 +1209,7 @@ def register(app, hub, ctx):
             if existing.get("protected"):
                 raise HTTPException(status_code=403,
                                     detail="The protected admin account cannot be modified")
-            if tenant not in (existing.get("tenants") or []):
+            if not tenant_among(tenant, existing.get("tenants")):
                 raise HTTPException(status_code=403,
                                     detail="User is not a member of this tenant")
             # A Tenant Admin may not reset an admin-tier user's password.
@@ -1134,7 +1237,7 @@ def register(app, hub, ctx):
         admin-tier users are never removable by a tenant admin. Deleting the
         user RECORD entirely stays Global-Admin-only (/setup/users)."""
         # Check the caller may manage users in this tenant.
-        sess = _ta_gate(request, tenant)
+        sess, tenant = _ta_gate(request, tenant)
         hub = app.state.hub
         try:
             # The user must exist and not be protected.
@@ -1189,9 +1292,9 @@ def register(app, hub, ctx):
         full record (mirrors `/setup/tenants/{tenant_id}`); a tenant_admin gets
         only its editable fields plus the current scoping values read-only for
         display. The path {tenant} must be in the caller's `user.tenants`
-        (enforced by `_ta_gate` → `_check_tenant_access`)."""
+        (enforced by `_ta_gate`)."""
         # Check the caller may manage this tenant, and that the tenant exists.
-        sess = _ta_gate(request, tenant)
+        sess, tenant = _ta_gate(request, tenant)
         hub = app.state.hub
         tenant_rec = hub.state.get_tenant(tenant)
         if tenant_rec is None:
@@ -1213,7 +1316,7 @@ def register(app, hub, ctx):
         so this route is also a valid edit path for Global. The path {tenant}
         must be in the caller's `user.tenants` (enforced by `_ta_gate`)."""
         # Check the caller may manage this tenant.
-        sess = _ta_gate(request, tenant)
+        sess, tenant = _ta_gate(request, tenant)
         hub = app.state.hub
         try:
             # Read the requested config changes.
@@ -1246,9 +1349,12 @@ def register(app, hub, ctx):
             _after_tenant_write(hub, before)
             return {"status": "ok", "message": f"Tenant {tenant} updated.",
                     "updated": merged}
-        # Let HTTP errors through unchanged; wrap anything else as a 500.
+        # Let HTTP errors through unchanged; an id that names several stored
+        # tenants (StateManager.tenant_key) is a 409; wrap anything else as a 500.
         except HTTPException:
             raise
+        except ValueError as e:
+            raise HTTPException(status_code=409, detail=str(e))
         except Exception as e:
             logger.exception("ta_update_tenant failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -1335,16 +1441,24 @@ def register(app, hub, ctx):
             if raw_tenants is None:
                 # Not sent → preserve existing (edit flow); only replace on an
                 # explicit send (list = replace, empty list = clear).
-                granted_tenants = existing.get("tenants", [])
+                group_tenants = existing.get("tenants", [])
             else:
-                # Keep only real, distinct tenant ids from the list.
+                # Keep only real, distinct tenant ids from the list, each
+                # stored as the tenant's own id (match_tenant_id): stripping
+                # " ACME " first would grant its legacy twin "ACME", and an
+                # id that matches several twins, or a twin and a deleted
+                # twin, grants neither.
                 known_tenants = set(
                     (hub.state.tenant_state.get("tenants", {}) or {}).keys())
-                granted_tenants = []
+                retired = retired_twin_ids(hub.state.tenant_state)
+                group_tenants = []
                 for tid in raw_tenants or []:
-                    t = str(tid).strip()
-                    if t and t in known_tenants and t not in granted_tenants:
-                        granted_tenants.append(t)
+                    try:
+                        t = match_tenant_id(tid, known_tenants, retired)
+                    except ValueError:
+                        t = None
+                    if t and t not in group_tenants:
+                        group_tenants.append(t)
             # Store the merged group record.
             groups[group_id] = {
                 **existing,
@@ -1352,7 +1466,7 @@ def register(app, hub, ctx):
                 "description": data.get("description", existing.get("description", "")),
                 "permissions": perms,
                 "ldap_group": (data.get("ldap_group") or existing.get("ldap_group", "")).strip(),
-                "tenants": granted_tenants,
+                "tenants": group_tenants,
                 "updated_at": time.time(),
             }
             # Mark state for saving.

@@ -65,7 +65,8 @@ import zlib
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 
-# Cache file and staleness helpers.
+# Cache file and staleness helpers; canonical tenant-id membership.
+import access
 from cache_core import JsonCacheFile, ShardedCacheFile, StalenessPolicy
 
 # Log to the hub's logger.
@@ -614,7 +615,7 @@ class WarmCacheMixin:
             return False
         if tenants is None:
             return True
-        return any(t in scopes for t in tenants)
+        return any(access.tenant_among(t, scopes) for t in tenants)
 
     def _cache_interval(self, job: CacheJob, scopes: Optional[set] = None) -> float:
         """Return the job's refresh interval: active or idle, never below its floors."""

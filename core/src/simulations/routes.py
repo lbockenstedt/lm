@@ -58,7 +58,7 @@ from . import github_config_client
 # Decrypts/resolves stored Central credentials.
 from . import central_secrets
 # SSRF guards and edit-permission checks.
-from access import safe_external_url, host_resolves_external, has_edit_access
+from access import safe_external_url, host_resolves_external, has_edit_access, same_tenant, tenant_among
 # URL parsing for host validation.
 from urllib.parse import urlsplit
 
@@ -1146,7 +1146,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         out = {}
         for sid, data in (getattr(hub, "simulations_cache", {}) or {}).items():
             try:
-                if hub.state.get_spoke_tenant(sid) != tenant_id:
+                if not same_tenant(hub.state.get_spoke_tenant(sid), tenant_id):
                     continue
             except Exception:
                 continue
@@ -1168,7 +1168,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # Patch matching clients in this tenant's cached telemetry.
         for sid, data in (getattr(hub, "simulations_cache", {}) or {}).items():
             try:
-                if hub.state.get_spoke_tenant(sid) != tenant_id:
+                if not same_tenant(hub.state.get_spoke_tenant(sid), tenant_id):
                     continue
             except Exception:
                 continue
@@ -1260,7 +1260,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # Walk this tenant's cached spokes.
         for sid, data in (getattr(hub, "simulations_cache", {}) or {}).items():
             try:
-                if hub.state.get_spoke_tenant(sid) != tenant_id:
+                if not same_tenant(hub.state.get_spoke_tenant(sid), tenant_id):
                     continue
             except Exception:  # noqa: BLE001
                 continue
@@ -2846,7 +2846,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             try:
                 # Only spokes that report a config hash.
                 sids = [s for s in (hub.get_client_sim_spokes(tid) or [])
-                        if _cs_tenant_of(s) == tid
+                        if same_tenant(_cs_tenant_of(s), tid)
                         and "cs_config_hash" in (cache.get(s) or {})]
                 if not sids:
                     continue
@@ -3594,7 +3594,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         out = []
         for sid, data in (getattr(hub, "simulations_cache", {}) or {}).items():
             try:
-                if hub.state.get_spoke_tenant(sid) != tenant_id:
+                if not same_tenant(hub.state.get_spoke_tenant(sid), tenant_id):
                     continue
             except Exception:
                 continue
@@ -3673,10 +3673,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             t_id = m.get("tenant_id")
             # Admins see this tenant's spokes plus unbound ones.
             if admin:
-                if t_id and t_id != tenant_id:
+                if t_id and not same_tenant(t_id, tenant_id):
                     continue
             # Others see only this tenant's approved spokes.
-            elif (not t_id or t_id != tenant_id or t_id not in user_tenants
+            elif (not same_tenant(t_id, tenant_id) or not tenant_among(t_id, user_tenants)
                   or not approved.get(hub._primary_key(sid), False)):
                 continue
             # VM count from the Proxmox host inventory, if present.
@@ -3929,9 +3929,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             bound = hub.state.get_spoke_tenant(spoke_id)
         except Exception:
             bound = None
-        # Same tenant: allowed.
+        # Same tenant, in any case (a blank tag never matches): allowed.
         if bound:
-            if bound == tenant_id:
+            if tenant_among(bound, [tenant_id]):
                 return
         # Unbound and unbound is allowed.
         elif allow_unbound:
@@ -4119,8 +4119,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     def _may_touch(sess, rep):
         """Return whether the session may modify this report."""
-        # Admins, or users of the report's tenant.
-        return is_admin_fn(sess) or (rep.get("tenant") == _user_tenant(sess))
+        # Admins, or users of the report's tenant: the same match list_reports
+        # and reports_tenants use (any case, never blank), so a user may edit,
+        # delete and test-send exactly the reports they are listed.
+        return is_admin_fn(sess) or tenant_among(rep.get("tenant"), [_user_tenant(sess)])
 
     @app.get("/api/reports/list")
     async def list_reports(request: Request, tenant: str = None):
@@ -4131,7 +4133,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # Non-admins see only their tenant's reports.
         if not is_admin_fn(sess):
             tid = _user_tenant(sess)
-            reports = [r for r in reports if r.get("tenant") == tid]
+            reports = [r for r in reports if tenant_among(r.get("tenant"), [tid])]
         elif tenant:
             # Admin + the picker: scope the view to the selected tenant (the
             # non-admin filter above stays the security floor; this is view
@@ -4162,7 +4164,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # Non-admins see only their own tenant.
         if not is_admin_fn(sess):
             mine = _user_tenant(sess)
-            out = [t for t in out if t["id"] == mine]
+            out = [t for t in out if tenant_among(t["id"], [mine])]
         # Return the options.
         return {"tenants": out}
 
@@ -4513,7 +4515,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             # Drop cached clients for this tenant's spokes.
             for _sid, data in (getattr(hub, "simulations_cache", {}) or {}).items():
                 try:
-                    if hub.state.get_spoke_tenant(_sid) != tenant_id:
+                    if not same_tenant(hub.state.get_spoke_tenant(_sid), tenant_id):
                         continue
                 except Exception:  # noqa: BLE001
                     continue
@@ -4549,7 +4551,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     continue
                 # Skip other tenants' spokes.
                 try:
-                    if hub.state.get_spoke_tenant(sid) != tenant_id:
+                    if not same_tenant(hub.state.get_spoke_tenant(sid), tenant_id):
                         continue
                 except Exception:
                     pass
@@ -4620,7 +4622,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         try:
             for _sid, data in (getattr(hub, "simulations_cache", {}) or {}).items():
                 try:
-                    if hub.state.get_spoke_tenant(_sid) != tenant_id:
+                    if not same_tenant(hub.state.get_spoke_tenant(_sid), tenant_id):
                         continue
                 except Exception:  # noqa: BLE001
                     continue
@@ -4684,7 +4686,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         try:
             for _sid, data in (getattr(hub, "simulations_cache", {}) or {}).items():
                 try:
-                    if hub.state.get_spoke_tenant(_sid) != tenant_id:
+                    if not same_tenant(hub.state.get_spoke_tenant(_sid), tenant_id):
                         continue
                 except Exception:  # noqa: BLE001
                     continue
@@ -6619,7 +6621,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             except Exception:  # noqa: BLE001
                 continue
             # Only other tenants' spokes count.
-            if not other or other == tenant_id or not isinstance(data, dict):
+            if not other or same_tenant(other, tenant_id) or not isinstance(data, dict):
                 continue
             # Each host it reports.
             for h in (data.get("proxmox_hosts") or []):
@@ -7415,7 +7417,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 continue
             # Bound to this tenant, or unassigned.
             tid = meta.get("tenant_id")
-            if tid == tenant_id or not tid:
+            if not tid or same_tenant(tid, tenant_id):
                 reg_sids.append(sid)
         # Cached and registered spokes, deduplicated.
         all_sids = list(dict.fromkeys(list(cache.keys()) + reg_sids))
@@ -7503,7 +7505,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 continue
             # Bound to this tenant, or unassigned.
             tid = meta.get("tenant_id")
-            if tid == tenant_id or not tid:
+            if not tid or same_tenant(tid, tenant_id):
                 reg_sids.append(sid)
         # Cached and registered spokes, deduplicated.
         all_sids = list(dict.fromkeys(list(cache.keys()) + reg_sids))
@@ -7596,7 +7598,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 continue
             # Bound to this tenant, or unassigned.
             tid = meta.get("tenant_id")
-            if tid == tenant_id or not tid:
+            if not tid or same_tenant(tid, tenant_id):
                 reg_sids.append(sid)
         # Cached and registered spokes, deduplicated.
         all_sids = list(dict.fromkeys(list(cache.keys()) + reg_sids))

@@ -2096,7 +2096,7 @@ function _renderSetupModuleMgmtTile(content) {
                     <button onclick="saveTruenasPollConfig(this)" class="${btnCls} ml-auto" title="Save TrueNAS default auto-poll cadence">Save</button>
                 </div>
             </div>`;
-    loadAllDevices();
+    loadAllDevices({ fresh: true });
     loadNwPollConfig();
     loadNwNetboxImport();
     loadInstances('nwscan');

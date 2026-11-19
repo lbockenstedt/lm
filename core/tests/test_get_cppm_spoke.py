@@ -905,3 +905,32 @@ def test_binding_a_nac_spoke_to_another_tenant_drops_the_nac_caches():
     hub.dropped.clear()
     hub.bind_spoke_tenant("cppm-off", "tenantB")
     assert hub.dropped == list(NAC_CACHE_NAMESPACES)
+
+
+def test_for_tenant_matches_the_spoke_tag_in_any_case():
+    hub = _CppmHub(["cppm-1"], {"cppm-1": {"tenant_id": "TenantA"}})
+    assert LabManagerHub.get_cppm_spoke_for_tenant(hub, "tenanta") == "cppm-1"
+
+
+def test_for_tenant_default_in_any_case_is_the_admin_view(monkeypatch):
+    """Any spelling of "default" is the built-in ADMIN tenant, not a tenant
+    with no NAC spoke: it reads the global source, never a tenant's spoke."""
+    _no_shared_tenant(monkeypatch)
+    hub = _CppmHub(["cppm-a", "cppm-hub"],
+                   {"cppm-a": {"tenant_id": "tenantA"}, "cppm-hub": {}})
+    for spelling in ("default", "Default", " DEFAULT "):
+        assert LabManagerHub.get_cppm_spoke_for_tenant(hub, spelling) == "cppm-hub"
+        assert LabManagerHub.get_cppm_spoke_for_scope(hub, spelling) == "cppm-hub"
+
+
+def test_nac_spoke_owner_keeps_a_padded_twins_spelling(monkeypatch):
+    """With legacy twins "ACME" and " ACME " stored, a spoke whose only
+    record is " ACME "'s serves " ACME " alone. Its owner was the stripped
+    "ACME", the other twin, which then failed the serves-only check."""
+    import access
+    _no_shared_tenant(monkeypatch)
+    monkeypatch.setattr(access, "_AMBIGUOUS_TENANT_IDS", frozenset({"acme"}))
+    hub = _CppmHub(["cppm-1"], {}, nac_instances=[{"tenant_id": " ACME ", "spoke_id": "cppm-1"}])
+    assert LabManagerHub.get_nac_spoke_owner(hub, "cppm-1") == " ACME "
+    assert LabManagerHub.get_cppm_spoke_for_tenant(hub, " ACME ") == "cppm-1"
+    assert LabManagerHub.get_cppm_spoke_for_tenant(hub, "ACME") is None

@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 import access
 from access import resolve_effective_permissions  # noqa: F401  (import side-effect parity)
 import routes.tenants_users as tenants_users
+from state.manager import StateManager
 
 
 # ── session builders ───────────────────────────────────────────────────────
@@ -58,11 +59,15 @@ def _plain_cs_user(tenant="acme"):
 
 # ── fake hub/state ──────────────────────────────────────────────────────────
 class _State:
-    def __init__(self):
+    def __init__(self, tenants=("acme", "beta", "other")):
         self.system_state = {"users": {}, "permission_groups": {}}
+        self.tenant_state = {"tenants": {t: {"name": t} for t in tenants}}
 
-    def get_tenant(self, tid):
-        return {"id": tid, "name": tid} if tid else None
+    # The real lookups and removal, so the routes find a tenant from another
+    # spelling of its id as they do on the hub.
+    get_tenant = StateManager.get_tenant
+    tenant_key = StateManager.tenant_key
+    remove_user_from_tenant = StateManager.remove_user_from_tenant
 
     def save_state(self):
         return None
@@ -72,13 +77,6 @@ class _State:
 
     async def save_state_now(self):
         self.save_state()
-
-    def remove_user_from_tenant(self, user_id, tenant_id):
-        u = self.system_state.get("users", {}).get(user_id)
-        if u and tenant_id in (u.get("tenants") or []):
-            u["tenants"].remove(tenant_id)
-            return True
-        return False
 
     def assign_user_to_tenant(self, user_id, tenant_id):
         u = self.system_state.setdefault("users", {}).setdefault(
@@ -436,3 +434,81 @@ def test_remove_other_tenant_403():
     assert r.status_code == 403
     # User untouched.
     assert hub.state.system_state["users"]["op1"]["tenants"] == ["other"]
+
+# ── spellings of a tenant id ─────────────────────────────────────────────────
+# A path, a grant and a stored id may spell one tenant in different cases (ids
+# saved before they were kept unique). The routes act on the one stored tenant
+# the path names, so a tenant Admin manages its tenant under any spelling,
+# while twins that only case tells apart stay two tenants.
+@pytest.fixture
+def keep_tenant_cache(monkeypatch):
+    """Restore access's cached tenant data after a test reloads it."""
+    for name in ("_SHARED_TENANT_ID", "_GROUP_MEMBERS", "_AMBIGUOUS_TENANT_IDS"):
+        monkeypatch.setattr(access, name, getattr(access, name, None), raising=False)
+
+
+def test_tenant_admin_routes_take_any_spelling_of_a_granted_tenant():
+    # Stored "acme"; the caller's grant and op1's are spelled "ACME".
+    c, hub, holder = _build({
+        "op1": {"permissions": {}, "tenants": ["ACME"], "password_hash": "x"},
+        "op2": {"permissions": {}, "tenants": ["acme"], "password_hash": "x"}})
+    holder.current = _tenant_admin("ACME")
+    for path in ("acme", "ACME"):
+        r = c.get(f"/api/tenant/{path}/users")
+        assert r.status_code == 200 and set(r.json()["users"]) == {"op1", "op2"}
+    assert c.get("/api/tenant/ACME").json()["tenant_id"] == "acme"
+    # A new user is filed under the stored id.
+    assert c.post("/api/tenant/ACME/users", json={
+        "user_id": "newop", "permissions": {"cs": True}, "password": "secret123"}).status_code == 200
+    assert hub.state.system_state["users"]["newop"]["tenants"] == ["acme"]
+
+
+def test_tenant_admin_manages_a_member_granted_under_another_spelling():
+    c, hub, holder = _build({
+        "op1": {"permissions": {}, "tenants": ["ACME"], "password_hash": "x"},
+        "op2": {"permissions": {}, "tenants": ["ACME", "beta"], "password_hash": "x"}})
+    holder.current = _tenant_admin("acme")
+    assert c.post("/api/tenant/acme/users/op1/set-password",
+                  json={"password": "pw1"}).status_code == 200
+    # Each grant is stored as the id it names; unknown and unowned ones go.
+    r = c.post("/api/tenant/acme/users/op1", json={"tenants": ["ACME", "nope", "other"]})
+    assert r.status_code == 200
+    assert hub.state.system_state["users"]["op1"]["tenants"] == ["acme"]
+    # Removing a member drops its grant in any spelling.
+    assert c.request("DELETE", "/api/tenant/ACME/users/op2").status_code == 200
+    assert hub.state.system_state["users"]["op2"]["tenants"] == ["beta"]
+
+
+def test_twin_tenants_that_only_case_tells_apart_stay_apart(keep_tenant_cache):
+    c, hub, holder = _build({
+        "op-upper": {"permissions": {}, "tenants": ["ACME"], "password_hash": "x"},
+        "op-both": {"permissions": {}, "tenants": ["ACME", "acme"], "password_hash": "x"}})
+    hub.state.tenant_state["tenants"]["ACME"] = {"name": "ACME"}  # saved before ids were unique
+    access.refresh_shared_tenant(hub)
+    holder.current = _tenant_admin("acme")
+    assert c.get("/api/tenant/ACME/users").status_code == 403
+    assert set(c.get("/api/tenant/acme/users").json()["users"]) == {"op-both"}
+    # Leaving "acme" keeps the twin's grant.
+    assert c.request("DELETE", "/api/tenant/acme/users/op-both").status_code == 200
+    assert hub.state.system_state["users"]["op-both"]["tenants"] == ["ACME"]
+    # A Global Admin: a third spelling names neither twin, an unknown id none.
+    holder.current = _global_admin()
+    assert c.get("/api/tenant/Acme/users").status_code == 409
+    assert c.get("/api/tenant/nope/users").status_code == 404
+
+
+def test_removing_a_tenant_drops_every_spelling_of_the_grant(monkeypatch):
+    monkeypatch.setattr(tenants_users, "_invalidate_user_sessions", lambda hub, uid: 0)
+    c, hub, holder = _build({"op1": {"permissions": {}, "tenants": ["ACME"], "password_hash": "x"}})
+    holder.current = _global_admin()
+    # The WebUI diffs a user's tenants by exact spelling, so a legacy "ACME"
+    # grant re-picked as the stored "acme" arrives as remove "ACME" plus add
+    # "acme": the user keeps the tenant.
+    r = c.post("/setup/users/set-tenants",
+               json={"user_id": "op1", "add": ["acme"], "remove": ["ACME"]})
+    assert r.status_code == 200
+    assert hub.state.system_state["users"]["op1"]["tenants"] == ["acme"]
+    hub.state.system_state["users"]["op1"]["tenants"] = ["ACME", "beta"]
+    r = c.post("/setup/users/remove-tenant", json={"user_id": "op1", "tenant_id": "acme"})
+    assert r.status_code == 200
+    assert hub.state.system_state["users"]["op1"]["tenants"] == ["beta"]

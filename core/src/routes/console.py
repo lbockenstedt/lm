@@ -1732,7 +1732,8 @@ def register(app, hub, ctx):
         if not _is_tenant_admin(sess):
             return False
         st = hub.state.get_spoke_tenant(sid) or ""
-        return bool(st) and not access.tenant_is_shared(st) and access.check_tenant_access(sess, st)
+        mine = (sess or {}).get("user", {}).get("tenants") or []
+        return not access.tenant_is_shared(st) and access.tenant_among(st, mine)
 
     def _console_dpa_spoke(hub, body):
         """The console spoke named by body["spoke_id"] (or the first one), only
@@ -1939,7 +1940,7 @@ def register(app, hub, ctx):
                 sid for sid in all_spokes
                 if (lambda st: st and not access.tenant_is_shared(st)
                     and access.spoke_visible_to_session(sess, st)
-                    and (sel is None or st == sel))(hub.state.get_spoke_tenant(sid) or "")
+                    and (sel is None or access.same_tenant(st, sel)))(hub.state.get_spoke_tenant(sid) or "")
             }
             contributing = {k[0] for k in visible_keys}
             spokes = [s for s in all_spokes if s in ded_visible or s in contributing]

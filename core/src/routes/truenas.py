@@ -536,7 +536,8 @@ def register(app, hub, ctx):
             aa["api_key_set"] = bool(aa.get("api_key")) or instance_vault.has_vault_ref(aa)
             aa.pop("api_key", None)
             out.append(aa)
-        return {"truenas_appliances": out}
+        # Each row also carries ``tenant_key`` (Managed Devices groups by it).
+        return {"truenas_appliances": access.with_tenant_keys(out)}
 
     # Read the default TrueNAS poll interval.
     @app.get("/setup/truenas-poll-config")

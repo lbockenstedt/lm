@@ -5,7 +5,7 @@ import asyncio
 import re
 
 # List of every tenant id, used when warming per-tenant caches.
-from access import all_tenant_ids
+from access import all_tenant_ids, raw_tenant_id, same_tenant, tenant_among
 # Request/exception types and shared helpers re-exported by the main API module (access checks,
 # tenant scoping, logger, spoke lookup, and the secrets/time/uuid modules).
 from api import (
@@ -379,8 +379,8 @@ def _offline_relay_agents(hub, live_ids):
             # (what ``_tenantOf`` reads for the display label) so the offline row
             # shows the SAME tenant the agent had while connected.
             cs = dict(cfg.get("client_simulation") or {})
-            eff_tid = str(cs.get("tenant_id") or "").strip() \
-                or str(spoke_meta.get("tenant_id") or "").strip()
+            eff_tid = raw_tenant_id(cs.get("tenant_id")) \
+                or raw_tenant_id(spoke_meta.get("tenant_id"))
             if eff_tid:
                 cs["tenant_id"] = eff_tid
             # The offline row, shaped like a live row so the same UI renders it.
@@ -656,8 +656,7 @@ async def pxmx_agents_payload(hub, tid):
         def _agent_tid(a):
             """Effective tenant of an agent: its own pinned tenant, else its parent spoke's tenant.
             """
-            pin = str(((a.get("client_simulation") or {})
-                       .get("tenant_id")) or "").strip()
+            pin = raw_tenant_id((a.get("client_simulation") or {}).get("tenant_id"))
             if pin:
                 return pin
             return (md.get(a.get("spoke_id"), {}) or {}).get("tenant_id")
@@ -808,11 +807,11 @@ async def _merge_pinned_agent_vms(hub, data, tid, visible_spokes, timeout=10.0, 
     # Nothing to merge without a tenant or a usable dict.
     if not tid or not isinstance(data, dict):
         return data
-    # Case-insensitive compare: a pin recorded as "Default" must match a scope
-    # of "default" — same canonicalisation access.tenant_scope_ids/_norm_tenant_id
-    # use everywhere else, so an agent explicitly pinned to a tenant isn't
-    # silently dropped by a capitalisation mismatch.
-    norm_tid = tid.strip().casefold()
+    # Compared as the access checks compare tenant ids (tenant_among): a pin
+    # recorded as "ACME" matches a scope of "acme", a blank pin matches
+    # nothing, and legacy ids that differ only by case or spaces never match
+    # each other, so an agent pinned to a tenant is neither dropped by a
+    # capitalisation mismatch nor shown to another tenant.
     # Collect (agent, spoke) pairs for every agent pinned to this tenant.
     acfg = hub.state.system_state.get("agent_config", {}) or {}
     reqs = []
@@ -821,9 +820,8 @@ async def _merge_pinned_agent_vms(hub, data, tid, visible_spokes, timeout=10.0, 
         if agent_id and apk != agent_id:
             continue
         # The agent's pinned tenant (blank when not pinned).
-        pin = str(((cfg or {}).get("client_simulation") or {})
-                  .get("tenant_id") or "").strip()
-        if pin.casefold() != norm_tid:
+        pin = ((cfg or {}).get("client_simulation") or {}).get("tenant_id")
+        if not tenant_among(pin, [tid]):
             continue
         # The agent's spoke must be known and visible to the caller.
         sp = hub.get_spoke_for_agent(apk, fallback_hypervisor=False)
@@ -1273,9 +1271,14 @@ def register(app, hub, ctx):
         """Agents tile data source. See ``pxmx_agents_payload`` (module-level,
         reused by the tenant-self-service ``/tenant/{tenant}/agents`` route in
         onboarding.py) for the aggregation + tenant-scoping logic itself."""
-        # Resolve the tenant scope and build the payload.
+        # Resolve the tenant scope and build the payload. A None scope lists
+        # every tenant's agents, so (as for the nodes view) a non-admin with
+        # no tenant is refused rather than shown the whole roster.
         hub = app.state.hub
+        sess = _session_user(request)
         tid = _resolve_tenant(request, tenant)
+        if not tid and not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="Select a tenant to view its hypervisor agents")
         return await pxmx_agents_payload(hub, tid)
 
     @app.post("/api/pxmx/agents/{agent_id}/revoke")
@@ -1386,7 +1389,8 @@ def register(app, hub, ctx):
                 display_name = agent_id
             display_name = display_name or None
             cs = data.get("client_simulation") or {}
-            tenant_in = (cs.get("tenant_id") or "").strip() or None
+            # Stored as picked (unstripped): " ACME " is a legacy twin of "ACME".
+            tenant_in = raw_tenant_id(cs.get("tenant_id")) or None
             # Merge onto any existing client_simulation so a tenant/enabled-only
             # save from the UI doesn't wipe usb_config / protected_vmids the CS
             # bridge stored.
@@ -2362,15 +2366,15 @@ def register(app, hub, ctx):
             # tenants they belong to, so iLO names/addresses never leak across.
             sess = _session_user(request)
             tid = access.session_effective_tenant(sess, tenant)
-            scope = access.tenant_scope_ids(tid)
-            if scope is None:
-                # No tenant resolved: a None scope means "everything" to
-                # in_tenant_scope, so an admin falls back to the ADMIN scope
-                # and anyone else sees no controllers.
+            if not str(tid or "").strip():
+                # No tenant resolved (None, "" or only spaces): an admin falls
+                # back to the ADMIN scope and anyone else sees no controllers.
+                # tenant_scope_ids would read None or "" as "everything" and
+                # only spaces as the shared scope alone.
                 if not _is_admin(sess):
                     return out
                 tid = access.ADMIN_TENANT_ID
-                scope = access.tenant_scope_ids(tid)
+            scope = access.tenant_scope_ids(tid)
             hide_shared = access.tenant_left_shared(app.state.hub, tid, "nw")
 
             def _visible(ctl_tenant):
@@ -2671,7 +2675,7 @@ def register(app, hub, ctx):
         # A Tenant Admin may only open a shell on their own tenant's hypervisor.
         tenant_id = sess.get("tenant_id") or ""
         spoke_tenant = hub.state.get_spoke_tenant(pxmx_spoke) or ""
-        if not is_ga and spoke_tenant and spoke_tenant != tenant_id:
+        if not is_ga and spoke_tenant and not same_tenant(spoke_tenant, tenant_id):
             raise HTTPException(status_code=403, detail="not your tenant's hypervisor")
         # Opt-in gate: the target hypervisor's tenant config must enable the shell
         # (Setup → Hypervisors → "Enable host terminal"). OFF by default.
