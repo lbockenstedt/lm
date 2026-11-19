@@ -9,6 +9,7 @@ from api import (
 from access import tenant_is_shared as _tenant_is_shared, spoke_visible_to_session as _spoke_visible
 # Ids of spokes that connect directly to the hub (not relayed through another spoke).
 from spoke_alert_sync import direct_module_ids as _direct_module_ids
+from hub_spoke_registry import LEGACY_NAC_RECORD_ID
 
 # ── /setup/pending_spokes cache (stale-while-revalidate) ─────────────────────
 # The Spokes & Agents page polls /setup/pending_spokes on every load + every
@@ -1293,7 +1294,7 @@ def register(app, hub, ctx):
             # tenant_id leaves any existing binding untouched.
             tenant_id = data.get("tenant_id")
             if tenant_id is not None:
-                hub.state.set_spoke_tenant(spoke_id, tenant_id)
+                hub.bind_spoke_tenant(spoke_id, tenant_id)
 
             # Save state immediately.
             await hub.state.save_state_now()
@@ -1350,28 +1351,45 @@ def register(app, hub, ctx):
 
     @app.post("/setup/cppm-config")
     async def update_cppm_config(request: Request):
-        """Save the ClearPass (CPPM) settings and push them to the NAC spoke if connected."""
-        # Read the new settings.
+        """Save the legacy hub-wide ClearPass (CPPM) config and re-send it to
+        every connected, approved NAC spoke.
+
+        Only for a hub with no NAC instance records: ``push_nac_config`` sends
+        a spoke its NAC instance record whenever one exists and ignores this
+        config, so saving it then would change nothing a spoke uses. That is
+        a 409 that points to Setup → NAC instances."""
         hub = app.state.hub
         try:
-            data = await request.json()
-            config = data.get("config", {})
-
-            # Store them in the global config and mark state for saving.
+            # NAC instance records replace this config.
             global_config = hub.state.system_state.get("global_config", {})
-            global_config["cppm"] = config
+            if global_config.get("nac_instances"):
+                raise HTTPException(status_code=409, detail=(
+                    "NAC instances are configured, so this legacy ClearPass config is "
+                    "not used: edit them in Setup → NAC instances."))
+            # Store the new settings and mark state for saving.
+            data = await request.json()
+            global_config["cppm"] = data.get("config", {})
             hub.state.system_state["global_config"] = global_config
             hub.state._mark_dirty()
 
-            # Push to the NAC spoke if connected; otherwise report a partial success.
-            cppm_spoke = hub.get_spoke_by_type("nac")
-            if cppm_spoke:
-                msg = _hub_msg(cppm_spoke, "update_config", config)
-                await hub.send_to_spoke(msg)
+            # With no NAC instance record, every NAC spoke is sent this config
+            # on connect, so re-send it to every one, as a NAC record save
+            # does. The push ledger tracks it as the hub's own record
+            # (hub_spoke_registry.nac_legacy_record): a spoke that does not
+            # confirm the new host stays stale, so no NAC read or write uses
+            # it, and a spoke bound to a tenant serves the hub's ClearPass,
+            # so only a Global Admin reads it. The cached NAC lists are
+            # dropped once the spokes have answered.
+            sent = await hub.reconcile_nac_spokes()
+            pushed = LEGACY_NAC_RECORD_ID in sent.values()
+            if pushed:
                 return {"status": "ok", "message": "Configuration updated and pushed to spoke.", "pushed": True}
-            else:
-                return {"status": "partial_success", "message": "Configuration saved, but CPPM spoke is not connected.", "pushed": False}
-        # Any failure is reported as a 500.
+            return {"status": "partial_success", "pushed": False, "message": (
+                "Configuration saved, but not pushed: no NAC spoke is connected, "
+                "the config has no host, or no spoke confirmed it.")}
+        # A refusal keeps its status; any other failure is a 500.
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("update_cppm_config failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -2811,6 +2829,10 @@ def register(app, hub, ctx):
                         and (display_name_edited
                              or metadata["display_name"] != current_name)):
                     metadata["display_name_source"] = "operator"
+                # A tenant change goes through bind_spoke_tenant, which drops
+                # the NAC lists cached for the old tenant when a NAC spoke moves.
+                if "tenant_id" in metadata:
+                    hub.bind_spoke_tenant(spoke_pk, metadata.pop("tenant_id"))
             # Merge the metadata and mark state for saving.
             hub.state.update_module_metadata(spoke_pk, metadata)
             hub.state._mark_dirty()

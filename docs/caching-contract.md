@@ -99,6 +99,37 @@ envelope and revalidated in the background past 30s (never blocking the page);
 any non-read relayed command drops that spoke's entries so writes show on the
 next read.
 
+A `warm_cache.CacheJob`'s `refresh_s` sets only how often the background
+refresher re-reads it: a login kick, or `cache_refresh()` after a write, still
+refreshes it at once. A source that must not be queried more often than a fixed
+rate also sets `min_interval_s`, a hard floor that the background refresher,
+page reads, login kicks and `cache_refresh()` all honor (the NAC Access
+Tracker's 24-hour history uses 300 s). The floor counts from the last attempt,
+failed ones included. Inside it a page read serves what is cached, even when
+it is old or invalidated; with nothing cached the read raises
+`CacheFloorError`, which a route answers with 503 and a `Retry-After` header.
+Non-admins see the hub's generic 503 text, because 5xx details are scrubbed
+for them. `cache_fetch_now()` ignores the floor, because a security check must
+not trust an old copy. An admin `cache_purge` deletes the entry, so its next
+read fetches at once.
+
+`warm_drop()` starts the dropped keys over. It deletes the entries and also
+their read jobs, any failure floor and any fetch still running. That fetch is
+detached: a caller already waiting on it still gets its answer, but it stores
+nothing and sets no floor, so data read before the drop cannot come back.
+`cache_keys(ns)` lists every key a namespace holds in any of those places.
+
+A drop is lost if the hub crashes before the cache file is saved again, so the
+NAC lists also put their source in the key. Every NAC key ends in
+`src=<fingerprint>`, a hash of the saved settings that decide which ClearPass
+answers for whom (`nac_cache_fingerprint` in `routes/cppm.py`, see
+`docs/cppm.md`). After a change to those settings no read uses the old keys. A
+NAC fetch checks the fingerprint again before it asks a spoke and fails with
+503 if it changed, so nothing read under the new settings is stored under an
+old key. Each NAC feed pass drops the keys no current read uses
+(`drop_orphan_nac_caches`), and a NAC change still drops every NAC entry at
+once (`drop_nac_caches`).
+
 `core/tests/test_cache_modules_shared.py` asserts the uniformity across all
 four — restart survival, debounce, 0600 + valid JSON, and a shared policy — so
 a new cache that skips `cache_core` should be added there and will fail loudly.

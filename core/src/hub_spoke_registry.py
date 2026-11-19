@@ -38,6 +38,232 @@ _MODULE_TYPE_PREFIX = {
 }
 
 
+def _nac_instances(hub) -> list:
+    """The NAC instance records (``nac_instances``) in config order, without
+    malformed entries."""
+    return [i for i in (hub.state.get_global_config().get("nac_instances", []) or [])
+            if isinstance(i, dict)]
+
+
+# The record id the push ledger uses for the legacy single ClearPass config
+# (global_config["cppm"]). NAC record ids are UUIDs, so it never matches one.
+LEGACY_NAC_RECORD_ID = "legacy-cppm"
+
+
+def nac_legacy_record(gc) -> Optional[dict]:
+    """The legacy single ClearPass config (``global_config["cppm"]``) as the
+    hub's own NAC record with no spoke, or None when it does not apply.
+
+    It applies only while there is no NAC instance record at all; the push
+    then sends it to every NAC spoke (``push_nac_config``). As a record, the
+    push ledger and the NAC resolvers treat it like the hub's own spoke-less
+    record: a spoke is stale until it confirms it, and a spoke bound to a
+    tenant that holds it serves the hub's ClearPass, not the tenant's own.
+    A config without a host is never sent, so it is no record.
+    """
+    if not isinstance(gc, dict) or gc.get("nac_instances"):
+        return None
+    legacy = gc.get("cppm")
+    if not isinstance(legacy, dict) or not str(legacy.get("host") or "").strip():
+        return None
+    return {"id": LEGACY_NAC_RECORD_ID, "host": legacy["host"], "tenant_id": ""}
+
+
+def instance_records_for_spoke(hub, instances, spoke_id) -> list:
+    """The instance records (NAC, IPAM, directory) that configure ``spoke_id``.
+
+    Every record bound to the spoke counts, compared by primary key so a
+    record saved under the spoke's pre-migration id still matches. When none
+    is bound, the first spoke-less record counts: a single-instance
+    deployment never binds one, so every spoke gets it. main.py sends a spoke
+    the first of these, and the NAC resolvers judge a spoke by all of them,
+    so the push and the resolvers always read the same records.
+    """
+    records = [i for i in instances or [] if isinstance(i, dict)]
+    # The records bound to this spoke, else the first spoke-less one.
+    pk = hub._primary_key(spoke_id)
+    mine = [i for i in records if hub._primary_key(i.get("spoke_id") or "") == pk]
+    return mine or [i for i in records if not i.get("spoke_id")][:1]
+
+
+def _nac_spoke_records(hub, spoke_id) -> list:
+    """The NAC instance records that configure ``spoke_id``
+    (``instance_records_for_spoke``). All of them count, not only the first
+    one the push sends, so a spoke an admin bound to two tenants' records is
+    judged by both. With no NAC instance record at all, the legacy single
+    config configures every NAC spoke (``nac_legacy_record``)."""
+    records = instance_records_for_spoke(hub, _nac_instances(hub), spoke_id)
+    if records:
+        return records
+    # No instance record: the legacy single config, if it has a host.
+    legacy = nac_legacy_record(hub.state.get_global_config())
+    return [legacy] if legacy else []
+
+
+def nac_push_key(record) -> Optional[str]:
+    """What a NAC spoke holds once it is sent ``record``: the record's id and
+    host. None when there is no record or it has no host, because such a
+    config is never sent."""
+    if not isinstance(record, dict) or not str(record.get("host") or "").strip():
+        return None
+    return f"{record.get('id') or ''}@{str(record['host']).strip()}"
+
+
+def _nac_pushed(hub) -> dict:
+    """The persisted ``{spoke primary key: nac_push_key}`` map of the NAC
+    config each spoke last confirmed, or "" while that is unknown
+    (``system_state["nac_config_pushed"]``)."""
+    state = getattr(hub, "state", None)
+    return (getattr(state, "system_state", None) or {}).get("nac_config_pushed") or {}
+
+
+def record_nac_push(hub, spoke_id, record) -> None:
+    """Remember that ``spoke_id`` confirmed it now holds ``record``'s config.
+
+    The legacy single ClearPass config is recorded as its own record
+    (``nac_legacy_record``). ``record`` None drops the entry, so the spoke
+    counts as never sent one; ``_evict_spoke`` does this for a deleted
+    spoke. The map is saved with the rest of system_state.
+    """
+    pushed = hub.state.system_state.setdefault("nac_config_pushed", {})
+    pk = hub._primary_key(spoke_id)
+    key = nac_push_key(record)
+    # Store or drop the entry, and save only when it changed.
+    if key is None:
+        changed = pushed.pop(pk, None) is not None
+    else:
+        changed = pushed.get(pk) != key
+        pushed[pk] = key
+    if changed:
+        hub.state._mark_dirty()
+
+
+def mark_nac_push_unknown(hub, spoke_id, sending=None) -> None:
+    """Mark that the hub does not know which NAC config ``spoke_id`` holds.
+
+    The entry becomes "" until the spoke confirms a push (``record_nac_push``),
+    and ``nac_spoke_stale`` reads "" as stale, so no NAC read or write
+    reaches the spoke meanwhile. Two moments call for it:
+
+    - A new connection (``sending`` None): the cppm spoke keeps the config
+      the hub sent it in memory only, so a new process holds its ``.env``
+      config until the reconnect push is confirmed.
+    - Just before a push (``sending`` is the record being sent): the spoke
+      may refuse the config or not answer, and holds its old one until it
+      confirms the new one.
+
+    The entry is kept when nothing is in doubt: the spoke was never sent a
+    config and none is on its way (it runs on its own ``.env``), or it is
+    about to be re-sent exactly what it confirmed last.
+    """
+    # Hub objects built without state (tests) have no ledger.
+    system_state = getattr(getattr(hub, "state", None), "system_state", None)
+    if system_state is None:
+        return
+    pushed = system_state.setdefault("nac_config_pushed", {})
+    pk = hub._primary_key(spoke_id)
+    current = pushed.get(pk)
+    # Nothing in doubt: keep the entry.
+    if current is None and sending is None:
+        return
+    if current == "" or (current is not None and current == nac_push_key(sending)):
+        return
+    pushed[pk] = ""
+    hub.state._mark_dirty()
+
+
+def nac_spoke_stale(hub, spoke_id) -> bool:
+    """Whether ``spoke_id`` may hold a ClearPass other than the one the hub gives it now.
+
+    A cppm spoke keeps the last config it was sent until it restarts: it
+    rejects a config without a host and has no command to forget one. The
+    hub remembers what each spoke confirmed it holds (``record_nac_push``),
+    and the NAC resolvers skip a stale spoke until it confirms the right
+    config:
+
+    - A spoke a NAC record configures is stale until it confirmed that
+      record. Until then it may still answer from a ClearPass set up through
+      its own ``.env`` or from another record. A record with no host is
+      never sent, so its spoke stays stale.
+    - A spoke no record configures is stale only while it holds a record
+      the hub sent it before (the record moved away or was deleted). A spoke
+      set up through its own ``.env`` and never sent a record is not stale.
+    - An entry of "" (``mark_nac_push_unknown``: a new connection, or a push
+      not yet confirmed) is stale in both cases.
+
+    With no NAC instance record at all, the legacy single config is the
+    record that configures every NAC spoke (``nac_legacy_record``), so a
+    spoke is stale until it confirmed that config's current host.
+    """
+    pushed = _nac_pushed(hub).get(hub._primary_key(spoke_id))
+    records = _nac_spoke_records(hub, spoke_id)
+    # No record configures it: stale only while it holds one the hub sent.
+    if not records:
+        return pushed is not None
+    # A record configures it: stale until it holds exactly that record.
+    expected = nac_push_key(records[0])
+    return expected is None or pushed != expected
+
+
+def _nac_instance_owners(hub, spoke_id) -> set:
+    """Real tenants whose NAC instance records configure ``spoke_id``.
+
+    A spoke's own binding (``module_metadata``) can say unassigned while the
+    spoke serves a tenant's ClearPass: an instance keeps its tenant when
+    Setup → NAC moves it to another spoke (routes/nw.py update_instance), and
+    a Global Admin can give a spoke-less instance a tenant. The records are
+    the ones ``_nac_spoke_records`` finds. Unassigned, shared and ADMIN
+    records own nothing (``access.tenant_is_unbound``).
+    """
+    # Lazy import: access imports hub modules at load time.
+    from access import tenant_is_unbound
+    # Keep only real tenants.
+    return {str(i.get("tenant_id")).strip() for i in _nac_spoke_records(hub, spoke_id)
+            if not tenant_is_unbound(i.get("tenant_id"))}
+
+
+def _nac_spoke_serves_only(hub, spoke_id, tenant_id) -> bool:
+    """Whether everything ``spoke_id`` serves belongs to ``tenant_id``.
+
+    A tenant's own spoke is read without the tenant's subnet filter, so a
+    spoke that also serves someone else must not count as the tenant's own,
+    or the tenant would see every session on that ClearPass.
+
+    The NAC records that configure the spoke (``_nac_spoke_records``)
+    decide, whatever the spoke's own binding says: every one must be the
+    tenant's. A record with no tenant (blank or ADMIN) is the hub's own
+    ClearPass, as is the legacy single config (``nac_legacy_record``): only
+    the shared view may read it unfiltered, because with no
+    shared tenant configured the hub's ClearPass is the shared one. Without
+    this, a spoke bound to a tenant but holding no record of its own, which
+    the reconnect push hands the hub's spoke-less record, would show that
+    tenant the hub's ClearPass unfiltered. A spoke no record configures
+    serves the ClearPass it was set up with locally, so its binding decides.
+
+    For the shared tenant, any spelling of shared matches
+    (``access.tenant_is_shared``).
+    """
+    # Lazy import: access imports hub modules at load time.
+    from access import ADMIN_TENANT_ID, same_tenant, tenant_is_shared
+    shared = tenant_is_shared(tenant_id)
+
+    def is_tenant(tag):
+        """Whether ``tag`` names ``tenant_id``."""
+        return tenant_is_shared(tag) if shared else same_tenant(tag, tenant_id)
+
+    def hubs_own(tag):
+        """Blank or ADMIN: the hub's own ClearPass."""
+        return not str(tag or "").strip() or same_tenant(tag, ADMIN_TENANT_ID)
+
+    # No record configures it: its binding decides.
+    records = _nac_spoke_records(hub, spoke_id)
+    if not records:
+        return is_tenant(hub.state.get_spoke_tenant(spoke_id))
+    # Every record it serves: the tenant's, or the hub's own for the shared view.
+    return all(is_tenant(t) or (shared and hubs_own(t))
+               for t in (i.get("tenant_id") for i in records))
+
+
 class SpokeRegistryMixin:
     """Read-only spoke/agent registry lookups mixed into ``LabManagerHub``."""
 
@@ -110,6 +336,9 @@ class SpokeRegistryMixin:
         # Also drop the persisted last-seen so a deleted spoke doesn't keep a
         # stale timestamp that would surface as a ghost "last seen" entry.
         self.state.clear_spoke_last_seen(pk)
+        # Forget which ClearPass config it was sent (keyed by the same primary
+        # key), so a spoke re-approved under this id is not stale (nac_spoke_stale).
+        record_nac_push(self, spoke_id, None)
         # Purge the IDENTITY-correlation indices too. remove_module() clears the
         # persisted module_metadata, but the in-memory spoke_id_alias (NOT
         # persisted — rebuilt at runtime) and install_uuid_index still map this
@@ -684,17 +913,24 @@ class SpokeRegistryMixin:
     def get_cppm_spoke_for_tenant(self, tenant_id: str = None) -> Optional[str]:
         """Tenant-aware NAC (ClearPass/cppm) spoke — mirrors
         ``get_nw_spoke_for_tenant``. With a real ``tenant_id``, return ONLY a
-        connected, approved ``nac`` spoke BOUND to that tenant — NEVER one
-        bound to a different tenant (that would answer a tenant's NAC
-        sessions/devices/logs query from ANOTHER tenant's ClearPass
-        appliance). No unassigned fallback here — see
+        live ``nac`` spoke (``get_nac_live_spokes``) that serves that tenant alone
+        (``_nac_spoke_serves_only``) — NEVER one that also serves another
+        tenant or the shared ClearPass, because a tenant's own spoke is read
+        without the tenant's subnet filter. No shared fallback here — see
         ``get_cppm_spoke_for_shared`` for the explicit shared-tenant path a
         caller falls back to when the tenant has no dedicated spoke of its
         own. With ``tenant_id`` None / ``"default"`` (admin unscoped / global
-        view), fall back to ``get_spoke_by_type("nac")`` so the admin's NAC
-        page still shows a spoke (unchanged legacy behavior; the admin merge
-        view fans out to every tenant-bound spoke separately — see
-        routes/cppm.py).
+        view), use ``get_cppm_spoke_for_global`` so a global request never
+        falls through to an arbitrary tenant-bound spoke.
+
+        The tenant's own ``nac_instances`` records decide first, in config
+        order, the way main.py push_nac_config sends them: a bound
+        record is served by its spoke (compared by primary key, so a record
+        saved under a spoke's pre-migration id still matches), and the first
+        spoke-less record by every NAC spoke that no record is bound to.
+        Tenant ids compare case-insensitively (``access.same_tenant``). Only
+        then does a spoke bound to the tenant without a record of its own
+        count.
 
         Regression this fixes: a tenant with TWO nac spokes (two ClearPass
         appliances, e.g. on different network segments only one spoke can
@@ -706,37 +942,37 @@ class SpokeRegistryMixin:
         every time EITHER nac spoke's connection blipped — intermittently
         routing a query to a spoke with no network route to the OTHER
         instance's ClearPass host ("no route to host", then working again
-        once the order flipped back). Prefer the tenant's own
-        ``nac_instances`` record(s) instead — a config-ordered list, stable
-        across reconnects — and pin to the FIRST bound, connected instance's
-        own ``spoke_id`` every time, exactly like the config-push path
-        (``main.py``'s ``push_config_to_spoke``) already does. Only fall back
-        to the connection-order pool pick for a spoke that self-registered
-        this tenant_id without a formal instance record."""
-        # Admin/global view: return any nac spoke.
+        once the order flipped back). Records are walked in config order and
+        candidate spokes are sorted by id, so the pick no longer depends on
+        connection order."""
+        # Admin/global view: use only the shared or unassigned NAC source.
         if not tenant_id or tenant_id == "default":
-            return self.get_spoke_by_type("nac")
-        # Walk configured NAC instances in config order for a stable choice.
-        instances = (self.state.get_global_config().get("nac_instances", []) or [])
+            return self.get_cppm_spoke_for_global()
+        from access import same_tenant
+        # Connected, approved, not stale NAC spokes, sorted so the pick is stable.
+        live = self.get_nac_live_spokes()
+        # Which spokes have a record bound to them, and which record the rest receive.
+        instances = _nac_instances(self)
+        bound = {self._primary_key(i["spoke_id"]) for i in instances if i.get("spoke_id")}
+        first_spokeless = next((i for i in instances if not i.get("spoke_id")), None)
+        # The tenant's own records first, in config order.
         for inst in instances:
-            # Skip malformed entries and instances for other tenants.
-            if not isinstance(inst, dict) or inst.get("tenant_id") != tenant_id:
+            if not same_tenant(inst.get("tenant_id"), tenant_id):
                 continue
-            # Use this instance's spoke if it is connected and approved.
-            sid = inst.get("spoke_id") or ""
-            if sid and sid in self.active_connections and self.approved_modules.get(sid, False):
+            if inst.get("spoke_id"):
+                served = [self._primary_key(inst["spoke_id"])]
+            elif inst is first_spokeless:
+                served = [sid for sid in live if sid not in bound]
+            else:
+                served = []  # never pushed to any spoke
+            sid = next((s for s in served
+                        if s in live and _nac_spoke_serves_only(self, s, tenant_id)), None)
+            if sid:
                 return sid
-        # No instance record matched: fall back to connected, approved nac spokes.
-        cands = [sid for sid in (self.get_all_spokes_by_type("nac") or [])
-                 if sid in self.active_connections
-                 and self.approved_modules.get(sid, False)]
-        # None connected means nothing to route to.
-        if not cands:
-            return None
-        # Return the nac spoke bound to this tenant, or None (never another tenant's).
-        md = self.state.system_state.get("module_metadata", {})
-        bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
-        return bound[0] if bound else None
+        # Else a spoke bound to the tenant that serves no one else.
+        return next((sid for sid in live
+                     if same_tenant(self.state.get_spoke_tenant(sid), tenant_id)
+                     and _nac_spoke_serves_only(self, sid, tenant_id)), None)
 
     def get_dhcp_spoke_for_tenant(self, tenant_id: str = None) -> Optional[str]:
         """Tenant-aware DHCP (Kea) spoke — mirrors ``get_nw_spoke_for_tenant``.
@@ -795,32 +1031,110 @@ class SpokeRegistryMixin:
         bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
         return bound[0] if bound else None
 
+    def get_nac_live_spokes(self) -> list:
+        """The NAC spokes the hub may send NAC reads and writes to: connected,
+        approved and not stale (``nac_spoke_stale``: possibly holding a
+        ClearPass other than the one the hub gives it now).
+        Sorted, so a pick from it never depends on connection order."""
+        return sorted(sid for sid in (self.get_all_spokes_by_type("nac") or [])
+                      if sid in self.active_connections
+                      and self.approved_modules.get(sid, False)
+                      and not nac_spoke_stale(self, sid))
+
+    def get_nac_usable_spokes(self) -> list:
+        """The live NAC spokes (``get_nac_live_spokes``) the hub has a
+        ClearPass config for. ``push_nac_config`` puts a spoke it has no
+        config for in ``_nac_unconfigured_spokes`` until it can send one."""
+        unconfigured = getattr(self, "_nac_unconfigured_spokes", None) or set()
+        return [sid for sid in self.get_nac_live_spokes() if sid not in unconfigured]
+
+    def _unbound_cppm_spoke(self) -> Optional[str]:
+        """A connected, approved NAC spoke that no real tenant owns.
+
+        "Unbound" is ``access.spoke_is_unbound``: unassigned, or bound to the
+        shared or admin tenant. A spoke bound to any other tenant is never
+        returned, because its ClearPass belongs to that tenant alone, and
+        neither is a spoke whose NAC instance records belong to one
+        (``_nac_instance_owners``), whatever its own binding says, or a stale
+        spoke (``get_nac_live_spokes``). Spoke ids are sorted so the pick
+        does not flip with connection order when two unbound spokes are
+        connected.
+        """
+        # Lazy import: access imports hub modules at load time.
+        from access import spoke_is_unbound
+        return next((sid for sid in self.get_nac_live_spokes() if spoke_is_unbound(self, sid)
+                     and not _nac_instance_owners(self, sid)), None)
+
     def get_cppm_spoke_for_shared(self) -> Optional[str]:
-        """The NAC spoke that owns the SHARED-tenant ClearPass appliance — the
-        fallback a tenant with no dedicated NAC spoke of its own resolves to.
-        Mirrors ``get_nw_spoke_for_shared``."""
+        """The NAC spoke that owns the SHARED ClearPass appliance — the source
+        a tenant with no dedicated NAC spoke of its own resolves to, and the
+        target of shared writes (endpoint sync, NAD registration, 802.1X JIT
+        for the shared tenant).
+
+        With a shared tenant configured, only that tenant's spoke qualifies;
+        an unassigned spoke is not silently substituted when it is offline.
+        With no shared tenant configured, the hub's own ClearPass is the
+        shared one: the single-ClearPass deployment registers it unassigned.
+        Only an unbound spoke qualifies then, never a spoke bound to a real
+        tenant (the generic ``get_spoke_by_type("nac")`` pick used before
+        could hand shared writes to another tenant's ClearPass)."""
         # Look up the shared tenant id lazily (avoids an import cycle).
         from access import shared_tenant_id
-        sid = shared_tenant_id()
-        # Resolve that tenant's nac spoke, or any nac spoke if no shared tenant exists.
-        return (self.get_cppm_spoke_for_tenant(sid)
-                if sid else self.get_spoke_by_type("nac"))
+        tenant_id = shared_tenant_id()
+        if tenant_id and tenant_id != "default":
+            return self.get_cppm_spoke_for_tenant(tenant_id)
+        # No shared tenant: the unassigned (hub-owned) ClearPass is the shared one.
+        return self._unbound_cppm_spoke()
+
+    def get_cppm_spoke_for_global(self) -> Optional[str]:
+        """Return the configured shared NAC spoke or an unbound NAC spoke.
+
+        A global read must not be answered by an arbitrary tenant's ClearPass
+        instance. If the configured shared source is unavailable, an unbound
+        spoke (unassigned, shared or admin) is the only safe fallback.
+        """
+        # Prefer the explicitly configured shared source when it is available.
+        from access import shared_tenant_id
+        shared_tid = shared_tenant_id()
+        if shared_tid and shared_tid != "default":
+            shared_spoke = self.get_cppm_spoke_for_tenant(shared_tid)
+            if shared_spoke:
+                return shared_spoke
+        # Otherwise choose only a connected, approved NAC spoke no tenant owns.
+        return self._unbound_cppm_spoke()
+
+    def get_cppm_spoke_for_scope(self, tenant_id: str = None) -> Optional[str]:
+        """The one NAC spoke that answers a single-source read for a scope.
+
+        ``tenant_id`` None or ``"default"`` (admin, no tenant selected) uses
+        the global source. A tenant uses the first spoke of its NAC view
+        (``get_cppm_spokes_for_tenant``: its own spoke, else the shared one
+        when it may use shared), and never another tenant's spoke. Use this
+        for one-spoke reads such as dashboard counts, search and a VM's
+        policy lookup; the NAC pages merge every spoke in the view instead.
+        """
+        # Admin, unscoped: the shared or unbound ClearPass only.
+        if not tenant_id or tenant_id == "default":
+            return self.get_cppm_spoke_for_global()
+        # Tenant: the first source of its own NAC view, or nothing.
+        spokes = self.get_cppm_spokes_for_tenant(tenant_id)
+        return spokes[0] if spokes else None
 
     def get_cppm_spokes_for_tenant(self, tenant_id: str = None) -> list:
         """Every nac spoke whose records belong in ``tenant_id``'s NAC view:
         their own dedicated spoke when they have one (connected or not: a
-        tenant with its own ClearPass is out of the shared environment), else
+        tenant with its own ClearPass, a NAC spoke bound to it or a NAC
+        instance record of its own, is out of the shared environment), else
         the hub's shared-tenant CPPM spoke, IF a shared tenant is actually
         configured. A shared CPPM's records are narrowed to just this
         tenant's own by the SAME downstream subnet/tag filter every NAC route
         already applies to a single source.
 
-        Deliberately does NOT call ``get_cppm_spoke_for_shared()`` — that
-        method falls back to ``get_spoke_by_type("nac")`` (ANY connected nac
-        spoke, tenant-blind) when no shared tenant is configured at all, which
-        would silently pull an unrelated spoke into this tenant's combined
-        view. Resolves the shared tenant's spoke directly instead, so an
-        unconfigured shared tenant contributes nothing.
+        Deliberately resolves the shared tenant directly instead of using
+        ``get_cppm_spoke_for_shared()``: with no shared tenant configured,
+        that method returns the hub's unassigned ClearPass as the target of
+        shared writes, but a tenant's read view gains a shared source only
+        once a shared tenant is actually configured (unchanged behavior).
 
         With ``tenant_id`` None / ``"default"`` (admin, unscoped), returns
         ``[]`` — that view fans out across EVERY connected nac spoke via a
@@ -832,18 +1146,64 @@ class SpokeRegistryMixin:
             return []
         # Find the tenant's own dedicated NAC spoke.
         own = self.get_cppm_spoke_for_tenant(tenant_id)
-        # Helpers for the shared tenant id and own-spoke detection.
-        from access import (shared_tenant_id as _shared_tenant_id,
-                            tenant_left_shared, tenant_shared_access)
-        if tenant_left_shared(self, tenant_id, "nac") or (
-                own and tenant_shared_access(self, tenant_id) == "auto"):
-            # Out of the shared NAC environment (own ClearPass, or shared access denied).
+        # Helpers for the shared tenant id and own-ClearPass detection.
+        from access import shared_tenant_id as _shared_tenant_id, tenant_left_shared
+        # Out of shared: its own spoke or NAC record (tenant_has_own_nac), or shared access denied.
+        if tenant_left_shared(self, tenant_id, "nac"):
             return [own] if own else []
         # Otherwise add the shared tenant's NAC spoke, but only if a shared tenant exists.
         shared_tid = _shared_tenant_id()
         shared = self.get_cppm_spoke_for_tenant(shared_tid) if shared_tid else None
         # De-duplicate while keeping order and dropping empty entries.
         return list(dict.fromkeys(sid for sid in (own, shared) if sid))
+
+    def get_nac_spoke_owner(self, spoke_id) -> Optional[str]:
+        """The tenant whose own ClearPass ``spoke_id`` serves, read without
+        that tenant's subnet filter (``access.spoke_data_owner``). None means
+        the shared or an unassigned ClearPass, which holds every tenant's
+        sessions, so readers get them filtered by their subnets.
+        ``access.ADMIN_ONLY_OWNER`` means the spoke serves no one tenant
+        alone, so only a Global Admin with no tenant selected reads it.
+
+        The NAC records the hub pushes to the spoke (``_nac_spoke_records``)
+        decide first, whatever the spoke's own binding says, because a record
+        keeps its tenant when Setup → NAC moves it to another spoke:
+
+        - real tenants' records: that tenant when every record is that
+          tenant's (``_nac_spoke_serves_only``), else admin-only. Two
+          tenants' records on one spoke, or a tenant's record next to a
+          shared or hub record, are a misconfiguration; filtering it by
+          subnet instead would still show one tenant's ClearPass to another.
+        - a shared record: None, the shared ClearPass.
+        - no record, or only the hub's own (blank or ADMIN): the spoke's
+          binding (``access.spoke_owner_tenant``: None for unassigned or
+          shared, ``"default"`` for ADMIN). A spoke bound to a tenant but
+          pushed the hub's record serves the hub's ClearPass, not that
+          tenant's, so it is admin-only too.
+
+        A stale spoke (``nac_spoke_stale``) may still hold a record's
+        ClearPass that its records no longer show, so it is admin-only."""
+        # Lazy import: access imports hub modules at load time.
+        from access import ADMIN_ONLY_OWNER, spoke_owner_tenant, tenant_is_shared, tenant_is_unbound
+        if not spoke_id:
+            return None
+        # It may still hold a ClearPass the hub no longer gives it.
+        if nac_spoke_stale(self, spoke_id):
+            return ADMIN_ONLY_OWNER
+        # Records naming real tenants: the spoke serves those tenants' ClearPass.
+        owners = sorted(_nac_instance_owners(self, spoke_id))
+        if not owners:
+            # A shared record: the shared ClearPass, filtered for everyone.
+            if any(tenant_is_shared(i.get("tenant_id")) for i in _nac_spoke_records(self, spoke_id)):
+                return None
+            # Otherwise the spoke's own binding decides.
+            bound = spoke_owner_tenant(self, spoke_id)
+            if not bound or tenant_is_unbound(bound):
+                return bound
+            owners = [bound]
+        # The one tenant the spoke serves alone, else admin-only.
+        return next((t for t in owners if _nac_spoke_serves_only(self, spoke_id, t)),
+                    ADMIN_ONLY_OWNER)
 
     def get_dhcp_spoke_for_shared(self) -> Optional[str]:
         """The DHCP spoke that owns the SHARED-tenant Kea server — the

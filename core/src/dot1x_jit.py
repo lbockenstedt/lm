@@ -228,18 +228,26 @@ async def _rr(hub, spoke_id: Optional[str], cmd: str, payload: Dict[str, Any],
 
 
 def _nac_spoke(hub, tenant_id: str) -> Optional[str]:
-    """Same resolution as routes/cppm.py ``_nac_spoke_for_request`` for a
-    known tenant: the tenant's own ``nac_instances`` spoke, else a nac spoke
-    bound to the tenant (or the shared-tenant spoke)."""
-    # The tenant's own NAC instance, if connected.
-    instances = (hub.state.system_state.get("global_config", {}) or {}).get("nac_instances", []) or []
-    inst = next((i for i in instances if isinstance(i, dict) and i.get("tenant_id") == tenant_id), None)
-    sid = (inst or {}).get("spoke_id") or ""
-    if sid and hub._primary_key(sid) in hub.active_connections:
-        return sid
-    # Otherwise the shared or tenant-bound ClearPass spoke.
-    return (hub.get_cppm_spoke_for_shared() if access.tenant_is_shared(tenant_id)
-            else hub.get_cppm_spoke_for_tenant(tenant_id))
+    """The ClearPass that holds ``tenant_id``'s JIT local users: the shared
+    spoke for the shared tenant, else the spoke serving the tenant's own
+    ClearPass (``get_cppm_spoke_for_tenant``: its ``nac_instances`` records
+    first, then a spoke bound to it, and never a spoke that also serves
+    another tenant). A local copy of the record lookup used to skip that
+    check, so a JIT user could be created on a ClearPass another tenant's
+    record also configures.
+
+    A tenant that only uses the shared ClearPass gets a clear error, as it
+    got "no spoke connected" before. ClearPass local users are keyed by
+    username alone, so on a shared appliance one tenant's JIT user would
+    overwrite the password of, or delete, another tenant's user of the same
+    name (Entra has ``_entra_conflict`` for this; ClearPass has no guard)."""
+    if access.tenant_is_shared(tenant_id):
+        return hub.get_cppm_spoke_for_shared()
+    spoke = hub.get_cppm_spoke_for_tenant(tenant_id)
+    if not spoke and hub.get_cppm_spoke_for_scope(tenant_id):
+        raise Dot1xJitError("ClearPass 802.1X accounts need the tenant's own ClearPass: "
+                            "local users on the shared ClearPass are not tenant-scoped")
+    return spoke
 
 
 def _entra_cfg(hub):

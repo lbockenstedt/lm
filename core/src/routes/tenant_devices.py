@@ -37,39 +37,14 @@ from routes.setup import _module_type_for
 from routes.role_pool import PRODUCT_ROLE, ensure_role_loaded, maybe_unload_orphaned_role
 
 
-# String values that mean "off" when a flag was stored as text; "" counts as off too.
-_FALSEY = {"0", "false", "no", "off", "none", "null", ""}
-
-
-def _as_bool(value, default=True):
-    """Coerce a stored/relayed config flag to a real bool WITHOUT the
-    ``bool("false") is True`` trap. ``verify_ssl`` can be persisted as a string
-    ("false"/"0") by an older UI, a hand-edited config, or a stringifying relay;
-    pushing that verbatim let the cppm spoke re-enable TLS verification on a
-    self-signed ClearPass and 502 every call. Mirror of cppm ``client._as_bool``
-    — keep the two in sync. ``None``/absent → ``default``."""
-    # Missing flag: use the caller's default.
-    if value is None:
-        return default
-    # Strings are compared against the "off" words, ignoring case and whitespace.
-    if isinstance(value, str):
-        return value.strip().lower() not in _FALSEY
-    # Anything else (bool, int) uses normal truthiness.
-    return bool(value)
-
-
 # Per-product descriptor. ``key`` is the global_config storage list; ``resp`` is
 # the JSON response key the WebUI reads; ``payload_key`` is the POST body
 # wrapper; ``kind`` is the human label for error messages; ``push`` selects the
 # spoke-config push strategy (see _push_record); ``payload_fn`` projects the
 # spoke-side config for instance products. The instance payload projections
-# MIRROR nw.py ``_instance_crud`` — keep the two in sync.
-# ClearPass (NAC) spoke config: API host and credentials, with verify_ssl forced to a real bool.
-_NAC_PAYLOAD = lambda i: {  # noqa: E731
-    "host": i.get("host"), "client_id": i.get("client_id"),
-    "client_secret": i.get("client_secret"), "user": i.get("user"),
-    "password": i.get("password"), "verify_ssl": _as_bool(i.get("verify_ssl"), True),
-}
+# MIRROR main.py ``_INSTANCE_CONFIG_SOURCES`` — keep the two in sync. NAC has
+# no projection here: its records go through hub.reconcile_nac_spokes, the
+# same path as Setup → NAC and every spoke reconnect.
 # NetBox (IPAM) spoke config: URL, token and TLS-verify flag in the spoke's key names.
 _IPAM_PAYLOAD = lambda i: {  # noqa: E731
     "netbox_url": i.get("url"), "api_token": i.get("api_token"),
@@ -85,7 +60,7 @@ _LDAP_PAYLOAD = lambda i: {  # noqa: E731
 _PRODUCTS = {
     "firewalls":      {"key": "firewalls",      "resp": "firewalls",  "payload_key": "firewall", "kind": "firewall",        "push": "firewall"},
     "nw-devices":     {"key": "nw_devices",     "resp": "nw_devices", "payload_key": "device",   "kind": "network device",  "push": "nw"},
-    "nac-instances":  {"key": "nac_instances",  "resp": "instances",  "payload_key": "instance", "kind": "NAC connection",  "push": "instance", "payload_fn": _NAC_PAYLOAD},
+    "nac-instances":  {"key": "nac_instances",  "resp": "instances",  "payload_key": "instance", "kind": "NAC connection",  "push": "nac"},
     "ipam-instances": {"key": "ipam_instances", "resp": "instances",  "payload_key": "instance", "kind": "IPAM connection", "push": "instance", "payload_fn": _IPAM_PAYLOAD},
     "ldap-instances": {"key": "ldap_instances", "resp": "instances",  "payload_key": "instance", "kind": "directory",       "push": "instance", "payload_fn": _LDAP_PAYLOAD},
     "dns-instances":  {"key": "dns_instances",  "resp": "instances",  "payload_key": "instance", "kind": "DNS connection",  "push": None},
@@ -140,8 +115,16 @@ def register(app, hub, ctx):
         """Push a record's config to its bound spoke when connected. Mirrors each
         product's ``/setup`` push: firewall → the spoke's whole firewall list
         (hub.opn_config_for_spoke, as on reconnect); nw → the
-        bound fleet slice; instance → UPDATE_CONFIG(payload_fn(record)); dns/dhcp
-        → save-only (no push). Returns True when a message was sent."""
+        bound fleet slice; nac → every NAC spoke is re-sent its config
+        (hub.reconcile_nac_spokes), because a move changes what other spokes
+        should hold too; instance → UPDATE_CONFIG(payload_fn(record)); dns/dhcp
+        → save-only (no push). Returns True when a message was sent (for nac:
+        when a spoke confirmed this record's own config)."""
+        # NAC: every NAC spoke, whether or not this record's spoke is connected.
+        if prod.get("push") == "nac":
+            sent = await hub.reconcile_nac_spokes()
+            rid = str((record or {}).get("id") or "")
+            return bool(rid) and rid in sent.values()
         # Only push when the record is bound to a spoke that is connected right now.
         spoke_id = (record or {}).get("spoke_id")
         if not spoke_id or hub._primary_key(spoke_id) not in hub.active_connections:
@@ -267,19 +250,27 @@ def register(app, hub, ctx):
         sess = _session_user(request)
         from routes.setup import _aggregate_spokes  # lazy: avoid import cycle
         payload = await _aggregate_spokes(hub)
-        # Keep approved spokes the caller is allowed to see.
+        # Approved spokes only; a Global Admin sees them all.
         rows = (payload or {}).get("spokes", []) or []
-        out = [r for r in rows
-               if r.get("approved")
-               and access.spoke_visible_to_session(sess, r.get("tenant_id") or "")]
-        # Shared spokes of a module the tenant has its own of are hidden.
-        if not access.is_admin(sess):
-            tid = access.request_effective_tenant(sess, request)
-            out = [r for r in out
-                   if access.spoke_owner_tenant(hub, r.get("spoke_id"))
-                   or not access.tenant_left_shared(hub, tid, r.get("module_type") or "")]
+        out = [r for r in rows if r.get("approved")]
+        if access.is_admin(sess):
+            return {"spokes": out}
+        tid = access.request_effective_tenant(sess, request)
+
+        def _row_visible(r):
+            """A spoke whose data belongs to a tenant (``spoke_data_owner``;
+            for a NAC spoke the tenant of the ClearPass record it serves,
+            whatever its binding) is shown to that tenant only. A shared or
+            unassigned one follows its binding, and a shared one is hidden
+            once the tenant has its own of that module."""
+            owner = access.spoke_data_owner(hub, r.get("spoke_id"))
+            if owner:
+                return access.spoke_visible_to_session(sess, owner)
+            return (access.spoke_visible_to_session(sess, r.get("tenant_id") or "")
+                    and not access.tenant_left_shared(hub, tid, r.get("module_type") or ""))
+
         # Return the filtered rows in the admin endpoint's shape.
-        return {"spokes": out}
+        return {"spokes": [r for r in out if _row_visible(r)]}
 
     def _register_product(route, prod):
         """Register list/add/update/delete routes for one product under /tenant/devices/<route>."""
@@ -381,6 +372,18 @@ def register(app, hub, ctx):
                 upd.pop("tenant_id", None)
                 new_spoke = upd.get("spoke_id")
                 old_spoke = rec.get("spoke_id")
+                # A tenant-admin may not unbind a product whose spoke-less
+                # records the reconnect push hands to any spoke of the module
+                # with no record bound to it (main.py push_config_to_spoke: nw
+                # devices and NAC/IPAM/directory instances): the record would
+                # then configure, and for NAC be owned through, spokes outside
+                # the tenant. A firewall has no such fallback, so unbinding one
+                # only parks it.
+                if ("spoke_id" in upd and not new_spoke and old_spoke
+                        and _prod.get("push") in ("nw", "instance", "nac")
+                        and not access.is_admin(sess)):
+                    raise HTTPException(status_code=403, detail=(
+                        f"A {_prod['kind']} must stay bound to a spoke assigned to your tenant"))
                 # Spoke changed: re-check the bind and, for coordinator products, auto-load the
                 # role.
                 if new_spoke and new_spoke != old_spoke:
@@ -404,7 +407,8 @@ def register(app, hub, ctx):
                 _save(_prod, _store(_prod))
                 # Push the updated config to the (possibly new) bound spoke.
                 # Moved off a spoke: the old one is re-sent its list (as on
-                # reconnect), and an unbind has no new spoke to push to.
+                # reconnect), and an unbind has no new spoke to push to. NAC
+                # re-sends every NAC spoke, the old one included (_push_record).
                 moved = _prod.get("push") == "firewall" and old_spoke and old_spoke != rec.get("spoke_id")
                 pushed = True if moved and not rec.get("spoke_id") else await _push_record(_prod, rec)
                 if moved:
@@ -443,6 +447,12 @@ def register(app, hub, ctx):
             pushed = False
             if _prod.get("push") in ("nw", "firewall") and spoke_id and hub._primary_key(spoke_id) in hub.active_connections:
                 pushed = await _push_record(_prod, {"spoke_id": spoke_id})
+            # NAC: re-send every NAC spoke its config, even for a spoke-less
+            # record (a spoke with no record of its own may have held it).
+            # pushed: the record's spoke confirmed a new config.
+            elif _prod.get("push") == "nac":
+                sent = await hub.reconcile_nac_spokes()
+                pushed = bool(spoke_id) and hub._primary_key(spoke_id) in sent
             # Unload the role from the spoke if no remaining record still uses it.
             if route in PRODUCT_ROLE and spoke_id:
                 role, _mt = PRODUCT_ROLE[route]

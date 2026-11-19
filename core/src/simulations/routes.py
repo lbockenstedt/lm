@@ -3999,7 +3999,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         hub.approved_modules[hub._primary_key(spoke_id)] = approved
         # Bind a tenant if one was given.
         if (body or {}).get("tenant_id"):
-            hub.state.set_spoke_tenant(spoke_id, body["tenant_id"])
+            hub.bind_spoke_tenant(spoke_id, body["tenant_id"])
         # Save now and report.
         await hub.state.save_state_now()
         return {"saved": True, "spoke_id": spoke_id, "approved": approved}

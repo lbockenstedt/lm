@@ -421,7 +421,7 @@ def register(app, hub, ctx):
         pairs = [
             (hub.get_spoke_by_type("ipam"), "NETBOX_SEARCH"),
             (hub.get_hypervisor_spoke(), "SEARCH_VMS"),
-            (hub.get_spoke_by_type("nac"), "SEARCH_SESSIONS"),
+            (hub.get_cppm_spoke_for_global(), "SEARCH_SESSIONS"),
             (hub.get_spoke_by_type("directory"), "SEARCH_USERS"),
             (hub.get_spoke_by_type("firewall"), "SEARCH_DHCP"),
         ]

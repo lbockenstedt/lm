@@ -18,6 +18,7 @@ import logging
 import pytest
 
 import realtime_ipam_nac_sync as rt
+from hub_spoke_registry import SpokeRegistryMixin
 from realtime_ipam_nac_sync import RealtimeIpamNacSyncMixin
 from _fakes import FakeState
 
@@ -70,10 +71,16 @@ class _RtHub(RealtimeIpamNacSyncMixin):
     both faked via FakeState)."""
 
     def __init__(self, responses=None, tenants=None, global_config=None,
-                 nac_spoke="cppm-1", ipam_spoke="netbox-1"):
+                 nac_spoke="cppm-1", ipam_spoke="netbox-1", bindings=None):
+        # ``bindings`` is each spoke's tenant binding ({spoke id: tenant id});
+        # ``global_config`` may carry ``nac_instances`` records.
+        gc = global_config or {}
         self.state = FakeState(
-            system_state={"global_config": global_config or {}},
+            system_state={"global_config": gc, "module_metadata": {
+                sid: {"tenant_id": tid} for sid, tid in (bindings or {}).items()}},
+            global_config=gc,
             tenants=tenants or {"acme": {"name": "Acme", "netbox_tenant_slug": "acme"}},
+            spoke_tenants=bindings,
         )
         self.refreshed_caches = []
         self.simulations_store = _FakeSimulationsStore()
@@ -81,6 +88,27 @@ class _RtHub(RealtimeIpamNacSyncMixin):
         self._nac = nac_spoke
         self._ipam = ipam_spoke
         self.request_log = []
+        # Every NAC spoke is connected, approved and registered as "nac".
+        nacs = self.get_all_spokes_by_type("nac")
+        self.active_connections = set(nacs)
+        self.approved_modules = {sid: True for sid in nacs}
+        self.spoke_module_types = {sid: "nac" for sid in nacs}
+
+    def _primary_key(self, sid):
+        """Spoke ids are their own primary keys here."""
+        return sid
+
+    def get_nac_live_spokes(self):
+        """The production live-spoke list (connected, approved, not stale)."""
+        return SpokeRegistryMixin.get_nac_live_spokes(self)
+
+    def get_nac_usable_spokes(self):
+        """The production usable-spoke list (live and configured)."""
+        return SpokeRegistryMixin.get_nac_usable_spokes(self)
+
+    def get_nac_spoke_owner(self, spoke_id):
+        """The production NAC owner lookup (records decide, then the binding)."""
+        return SpokeRegistryMixin.get_nac_spoke_owner(self, spoke_id)
 
     def get_spoke_by_type(self, module_type):
         if module_type == "nac":
@@ -196,9 +224,8 @@ async def test_each_tenant_clearpass_is_pulled_and_keeps_its_overlapping_ip():
             "status": "ERROR", "message": "unreachable"}}},
     }, nac_spoke=["cppm-ra", "cppm-down", "cppm-lrb"],
        tenants={"ra": {"name": "RA", "netbox_tenant_slug": "ra"},
-                "lrb": {"name": "LRB", "netbox_tenant_slug": "lrb"}})
-    h.state.system_state["module_metadata"] = {
-        "cppm-ra": {"tenant_id": "ra"}, "cppm-lrb": {"tenant_id": "lrb"}}
+                "lrb": {"name": "LRB", "netbox_tenant_slug": "lrb"}},
+       bindings={"cppm-ra": "ra", "cppm-lrb": "lrb"})
     sessions, info = await h._rt_pull_sessions()
     assert len(sessions) == 2
     assert info["total"] == 2
@@ -207,6 +234,66 @@ async def test_each_tenant_clearpass_is_pulled_and_keeps_its_overlapping_ip():
     assert dropped == 0
     assert [s["mac"] for s in buckets["ra"]] == ["aa:aa:aa:aa:aa:01"]
     assert [s["mac"] for s in buckets["lrb"]] == ["bb:bb:bb:bb:bb:02"]
+
+
+_TWO_TENANTS = {"ra": {"name": "RA", "netbox_tenant_slug": "ra"},
+                "lrb": {"name": "LRB", "netbox_tenant_slug": "lrb"}}
+
+
+def _stamps(sessions):
+    """Each session's (owner_tenant_id, source_tenant_id)."""
+    return [(s.get("owner_tenant_id"), s.get("source_tenant_id")) for s in sessions]
+
+
+@pytest.mark.asyncio
+async def test_sessions_belong_to_the_tenant_of_the_clearpass_the_spoke_was_sent():
+    """Setup → NAC moved tenant ra's record onto a spoke bound to lrb. The
+    spoke answers from ra's ClearPass, so its sessions are ra's, not lrb's."""
+    h = _hub(responses={
+        ("cppm-b", "CPPM_GET_RECENT_SESSIONS"): _one_session("aa:aa:aa:aa:aa:01"),
+    }, nac_spoke=["cppm-b"], tenants=_TWO_TENANTS, bindings={"cppm-b": "lrb"},
+       global_config={"nac_instances": [
+           {"id": "rec-ra", "tenant_id": "ra", "spoke_id": "cppm-b", "host": "cp-ra"}]})
+    # The hub sent cppm-b that record, so it is not stale.
+    h.state.system_state["nac_config_pushed"] = {"cppm-b": "rec-ra@cp-ra"}
+    sessions, _ = await h._rt_pull_sessions()
+    assert _stamps(sessions) == [("ra", "ra")]
+
+
+@pytest.mark.asyncio
+async def test_spoke_serving_two_tenants_clearpass_is_not_pulled():
+    """A spoke configured by both ra's and lrb's records serves no one tenant
+    alone, so tenants may not read it; its sessions are not pulled or
+    written into either tenant's NetBox by prefix."""
+    h = _hub(responses={
+        ("cppm-b", "CPPM_GET_RECENT_SESSIONS"): _one_session("aa:aa:aa:aa:aa:01"),
+    }, nac_spoke=["cppm-b"], tenants=_TWO_TENANTS, bindings={"cppm-b": "lrb"},
+       global_config={"nac_instances": [
+           {"id": "rec-ra", "tenant_id": "ra", "spoke_id": "cppm-b", "host": "cp-ra"},
+           {"id": "rec-lrb", "tenant_id": "lrb", "spoke_id": "cppm-b", "host": "cp-lrb"}]})
+    sessions, _ = await h._rt_pull_sessions()
+    assert sessions == []
+    assert not any(cmd == "CPPM_GET_RECENT_SESSIONS" for _, cmd, _ in h.request_log)
+
+
+@pytest.mark.asyncio
+async def test_spoke_still_holding_a_moved_record_is_not_pulled():
+    """ra's record moved from cppm-old to cppm-new. cppm-old was sent that
+    record and keeps answering from ra's ClearPass until it is sent another
+    config, so only cppm-new is pulled."""
+    h = _hub(responses={
+        ("cppm-old", "CPPM_GET_RECENT_SESSIONS"): _one_session("bb:bb:bb:bb:bb:02"),
+        ("cppm-new", "CPPM_GET_RECENT_SESSIONS"): _one_session("aa:aa:aa:aa:aa:01"),
+    }, nac_spoke=["cppm-old", "cppm-new"], tenants=_TWO_TENANTS,
+       global_config={"nac_instances": [
+           {"id": "rec-a", "tenant_id": "ra", "spoke_id": "cppm-new", "host": "cp-a"}]})
+    h.state.system_state["nac_config_pushed"] = {
+        "cppm-old": "rec-a@cp-a", "cppm-new": "rec-a@cp-a"}
+    sessions, _ = await h._rt_pull_sessions()
+    assert [sid for sid, cmd, _ in h.request_log
+            if cmd == "CPPM_GET_RECENT_SESSIONS"] == ["cppm-new"]
+    assert [s["mac"] for s in sessions] == ["aa:aa:aa:aa:aa:01"]
+    assert _stamps(sessions) == [("ra", "ra")]
 
 
 # ── push / entry points ──────────────────────────────────────────────────────
