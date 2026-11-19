@@ -727,3 +727,62 @@ def test_os_updates_tenant_ids_never_merge_into_hub_unassigned_or_each_other(hub
             assert not errors, errors
         finally:
             browser.close()
+
+
+def test_os_updates_deploy_listed_covers_only_the_listed_nodes(hub_url_and_session):  # noqa: F811
+    """Fleet rule 7.5: "Approve & deploy listed" deploys only the listed nodes
+    that have pending updates and can be deployed. It is disabled until a pick
+    lists one, and posts exactly their keys, never an empty body (the hub reads
+    that as every node in scope, the nodes the list hides included)."""
+    base, token = hub_url_and_session
+    data = {
+        "totals": {"with_updates": 3, "packages": 4}, "checked_at": 1700000000,
+        # z-02 has nothing pending and z-03 is blocked: neither can be deployed.
+        "nodes": [_node("a-01", "Acme", 1), _node("z-01", "Zulu", 2), _node("z-02", "Zulu"),
+                  _node("z-03", "Zulu", 1, apply_blocker="disk full")],
+    }
+    with sync_api.sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            context = browser.new_context()
+            context.add_cookies([{"name": "lm_session", "value": token, "url": base}])
+            page = context.new_page()
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            page.on("dialog", lambda d: d.accept())
+            nodes = lambda r: r.fulfill(content_type="application/json", body=json.dumps(data))  # noqa: E731
+            page.route("**/api/os-updates", nodes)
+            page.route("**/api/os-updates/check", nodes)
+            page.route("**/api/os-updates/cves/fleet", lambda r: r.fulfill(
+                content_type="application/json", body="[]"))
+            page.route("**/api/os-updates/apply", lambda r: r.fulfill(
+                content_type="application/json", body=json.dumps({"queued": 1})))
+            page.goto(base + "/")
+            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.evaluate("setView('osupdates')")
+            page.locator('#osu-body [data-action="pickTenant"]').first.wait_for()
+            deploy = page.locator("#osu-apply")
+
+            # Nothing is listed yet, so there is nothing to deploy.
+            assert deploy.is_disabled()
+            assert deploy.inner_text() == "Approve & deploy listed (0)"
+
+            def posted():
+                """Click the button and return the JSON body it posts."""
+                with page.expect_request(lambda req: req.url.endswith("/api/os-updates/apply")) as req:
+                    deploy.click()
+                return json.loads(req.value.post_data)
+
+            # One tenant picked: only its node with updates and no blocker is sent.
+            _pick(page, "Tenant", "tenant-zulu")
+            assert deploy.inner_text() == "Approve & deploy listed (1)"
+            assert posted() == {"nodes": ["agent:z-01"], "security_only": False}
+
+            # A state picked on its own lists, and sends, every tenant's nodes in it.
+            _pick(page, "Tenant", "tenant-zulu")
+            _pick(page, "State", "pending")
+            assert deploy.inner_text() == "Approve & deploy listed (2)"
+            assert posted() == {"nodes": ["agent:a-01", "agent:z-01"], "security_only": False}
+            assert not errors, errors
+        finally:
+            browser.close()
