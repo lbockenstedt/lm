@@ -24,8 +24,10 @@ import asyncio
 
 from fastapi import FastAPI
 from starlette.testclient import TestClient
+import pytest
 
 from simulations import aruba as _aruba
+from simulations import central_secrets
 from simulations.routes import register_simulations_routes
 from simulations.service import SimulationsService
 import access as access_mod
@@ -109,6 +111,7 @@ class _OnPremStore:
 
     def __init__(self):
         self.configs = {}
+        self.central_configs = {}
         self.sites = {}
         self.modes = {}
         self.history = []  # items recorded by _record_alert_insight_history
@@ -118,6 +121,12 @@ class _OnPremStore:
 
     async def set_central_on_prem_config(self, tenant_id, cfg):
         self.configs[tenant_id] = dict(cfg or {})
+
+    async def get_central_config(self, tenant_id):
+        return dict(self.central_configs.get(tenant_id, {}))
+
+    async def set_central_config(self, tenant_id, cfg):
+        self.central_configs[tenant_id] = dict(cfg or {})
 
     async def get_central_on_prem_sites_config(self, tenant_id):
         return dict(self.sites.get(tenant_id, {}))
@@ -177,9 +186,12 @@ class _Holder:
         self.current = None
 
 
-def _cs_user(tenant):
+def _cs_user(tenant, edit=True):
+    permissions = {"cs": True}
+    if edit:
+        permissions["edit"] = True
     return {"user": {"user_id": "u", "auth_type": "local",
-                     "permissions": {"cs": True}, "tenants": [tenant],
+                     "permissions": permissions, "tenants": [tenant],
                      "tenant_id": tenant, "protected": False}}
 
 
@@ -230,6 +242,94 @@ def test_save_central_on_prem_accepts_new_central_no_cluster_url():
     assert body["saved"] is True
 
 
+def test_view_only_cs_user_cannot_save_central_configs():
+    c, store, holder = _build_sim()
+    holder.current = _cs_user("acme", edit=False)
+    for path, key in (
+            ("/sim/api/aggregate/central", "hub_central_config"),
+            ("/sim/api/aggregate/central-on-prem", "hub_central_on_prem_config")):
+        r = c.post(path, json={key: {"client_secret": "attempted-write"}})
+        assert r.status_code == 403, r.text
+    assert store.central_configs == {}
+    assert store.configs == {}
+
+
+@pytest.mark.parametrize(
+    ("path", "key", "slot"),
+    [
+        ("/sim/api/aggregate/central", "hub_central_config", "central"),
+        ("/sim/api/aggregate/central-on-prem", "hub_central_on_prem_config", "on_prem"),
+    ],
+)
+def test_save_preserves_existing_secret_when_form_sends_blank(path, key, slot):
+    c, store, holder = _build_sim()
+    holder.current = _cs_user("acme")
+    configs = store.central_configs if slot == "central" else store.configs
+    configs["acme"] = {"client_secret": "stored-secret"}
+    r = c.post(path, json={key: {"api_version": "new_central", "client_secret": ""}})
+    assert r.status_code == 200, r.text
+    assert configs["acme"]["client_secret"] == "stored-secret"
+    assert "client_secret_clear" not in configs["acme"]
+
+
+@pytest.mark.parametrize(
+    ("path", "key", "slot"),
+    [
+        ("/sim/api/aggregate/central", "hub_central_config", "central"),
+        ("/sim/api/aggregate/central-on-prem", "hub_central_on_prem_config", "on_prem"),
+    ],
+)
+def test_save_explicitly_clears_existing_secret(path, key, slot):
+    c, store, holder = _build_sim()
+    holder.current = _cs_user("acme")
+    configs = store.central_configs if slot == "central" else store.configs
+    configs["acme"] = {"client_secret": "stored-secret"}
+    r = c.post(path, json={key: {"api_version": "new_central",
+                                "client_secret_clear": True}})
+    assert r.status_code == 200, r.text
+    assert "client_secret" not in configs["acme"]
+    assert "client_secret_clear" not in configs["acme"]
+
+
+def test_save_clear_deletes_managed_vault_value(monkeypatch):
+    c, store, holder = _build_sim()
+    holder.current = _cs_user("acme")
+    name = central_secrets.secret_name(
+        "central_on_prem_config", "acme", "client_secret")
+    store.configs["acme"] = {"client_secret": "kv:" + name}
+    deleted = []
+
+    async def fake_delete(hub, secret_name):
+        deleted.append(secret_name)
+        return True
+
+    monkeypatch.setattr(central_secrets, "_vault_on", lambda hub: True)
+    monkeypatch.setattr(central_secrets.cloud_vault, "delete_secret", fake_delete)
+    r = c.post("/sim/api/aggregate/central-on-prem",
+               json={"hub_central_on_prem_config": {"client_secret_clear": True}})
+    assert r.status_code == 200, r.text
+    assert deleted == [name]
+    assert "client_secret" not in store.configs["acme"]
+
+
+def test_save_clear_reports_vault_delete_failure_without_removing_reference(monkeypatch):
+    c, store, holder = _build_sim()
+    holder.current = _cs_user("acme")
+    name = central_secrets.secret_name(
+        "central_on_prem_config", "acme", "client_secret")
+    store.configs["acme"] = {"client_secret": "kv:" + name}
+
+    async def fail_delete(hub, secret_name):
+        return False
+
+    monkeypatch.setattr(central_secrets, "_vault_on", lambda hub: True)
+    monkeypatch.setattr(central_secrets.cloud_vault, "delete_secret", fail_delete)
+    r = c.post("/sim/api/aggregate/central-on-prem",
+               json={"hub_central_on_prem_config": {"client_secret_clear": True}})
+    assert r.status_code == 502
+    assert store.configs["acme"]["client_secret"] == "kv:" + name
+
+
 def test_save_central_on_prem_coerces_poll_interval_floor():
     c, store, holder = _build_sim()
     holder.current = _cs_user("acme")
@@ -245,16 +345,50 @@ def test_save_central_on_prem_coerces_poll_interval_floor():
 # ── get_central_on_prem_status merges hub_central_on_prem_config ───────────
 def test_get_central_on_prem_status_merges_hub_config():
     c, store, holder = _build_sim()
-    holder.current = _cs_user("acme")
+    holder.current = _cs_user("acme", edit=False)
     # Seed an on-prem config so the status route merges it into the response.
-    store.configs["acme"] = {"api_version": "new_central", "client_id": "cid",
-                             "client_secret": "sec", "mode": "central"}
+    store.configs["acme"] = {
+        "api_version": "new_central", "client_id": "cid",
+        "client_secret": "inline-secret", "access_token": "kv:access-ref",
+        "refresh_token": "", "mode": "central", "unlisted": "also-secret",
+    }
     r = c.get("/sim/api/aggregate/central-on-prem-status")
     assert r.status_code == 200, r.text
     body = r.json()
-    # mode is surfaced; the secret-bearing creds are under hub_central_on_prem_config.
+    # Mode and safe settings are surfaced, but secret values/references are not.
     assert body["mode"] == "central"
     assert body["hub_central_on_prem_config"]["client_id"] == "cid"
+    assert body["hub_central_on_prem_config"]["client_secret_set"] is True
+    assert body["hub_central_on_prem_config"]["access_token_set"] is True
+    assert body["hub_central_on_prem_config"]["refresh_token_set"] is False
+    assert "client_secret" not in body["hub_central_on_prem_config"]
+    assert "access_token" not in body["hub_central_on_prem_config"]
+    assert "unlisted" not in body["hub_central_on_prem_config"]
+    assert "inline-secret" not in r.text
+    assert "kv:access-ref" not in r.text
+
+
+def test_get_central_status_never_returns_secret_values_or_refs():
+    c, store, holder = _build_sim()
+    holder.current = _cs_user("acme", edit=False)
+    store.central_configs["acme"] = {
+        "client_id": "cid", "client_secret": "kv:client-ref",
+        "access_token": "access-secret", "refresh_token": "",
+        "mode": "central", "unknown": "should-not-appear",
+    }
+    r = c.get("/sim/api/aggregate/central-status")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    config = body["hub_central_config"]
+    assert config["client_secret_set"] is True
+    assert config["access_token_set"] is True
+    assert config["refresh_token_set"] is False
+    assert "client_secret" not in config
+    assert "access_token" not in config
+    assert "refresh_token" not in config
+    assert "unknown" not in config
+    assert "kv:client-ref" not in r.text
+    assert "access-secret" not in r.text
 
 
 # ── browse: centralized runs browse_all_from_config + tags central_on_prem ─

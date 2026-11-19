@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 
 # The Central config fields that hold credentials and therefore belong in the vault.
 SECRET_FIELDS = ("client_secret", "access_token", "refresh_token")
+_PUBLIC_CONFIG_FIELDS = (
+    "client_id", "customer_id", "cluster_url", "token_url", "api_version",
+    "poll_interval_s",
+)
+_PUBLIC_THRESHOLD_FIELDS = ("warn_pct", "error_pct", "die_off_pct", "min_peak")
 # Short labels per config slot, used to build readable, distinct vault secret names.
 _SLOT_LABELS = {"central_config": "central", "central_on_prem_config": "central-on-prem"}
 
@@ -33,6 +38,72 @@ _resolved: Dict[str, str] = {}
 # younger than _CACHE_S is used without asking the vault again.
 _fetched: Dict[str, float] = {}
 _CACHE_S = 900
+
+
+def public_status_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Return only non-secret Central settings and credential-presence flags."""
+    source = cfg if isinstance(cfg, dict) else {}
+    out = {field: source[field] for field in _PUBLIC_CONFIG_FIELDS if field in source}
+    for field in SECRET_FIELDS:
+        out[f"{field}_set"] = bool(source.get(field))
+    thresholds = source.get("cc_thresholds")
+    if isinstance(thresholds, dict):
+        out["cc_thresholds"] = {
+            field: value for field, value in thresholds.items()
+            if field in _PUBLIC_THRESHOLD_FIELDS
+            and isinstance(value, (int, float))
+            and not isinstance(value, bool)
+        }
+    return out
+
+
+def merge_secret_updates(cfg: Dict[str, Any], existing: Dict[str, Any]):
+    """Preserve omitted/blank secrets and return explicitly cleared field names."""
+    out = dict(cfg or {})
+    previous = existing if isinstance(existing, dict) else {}
+    cleared = []
+    for field in SECRET_FIELDS:
+        clear_key = f"{field}_clear"
+        clear = out.pop(clear_key, False)
+        value = out.get(field)
+        if not isinstance(clear, bool):
+            raise ValueError(f"{clear_key} must be a boolean")
+        if clear:
+            if value not in (None, "") and not (
+                    isinstance(value, str) and not value.strip()):
+                raise ValueError(f"{field} cannot be set while clearing it")
+            out.pop(field, None)
+            cleared.append(field)
+        elif value is None or (isinstance(value, str) and not value.strip()):
+            out.pop(field, None)
+            if field in previous:
+                out[field] = previous[field]
+        elif not isinstance(value, str):
+            raise ValueError(f"{field} must be a string")
+    return out, cleared
+
+
+async def delete_cleared_secrets(hub, slot: str, tenant_id: str,
+                                 existing: Dict[str, Any], fields: list) -> None:
+    """Delete app-managed vault values for explicitly cleared credentials."""
+    previous = existing if isinstance(existing, dict) else {}
+    managed = []
+    for field in fields or []:
+        if field not in SECRET_FIELDS:
+            continue
+        expected = "kv:" + secret_name(slot, tenant_id, field)
+        if previous.get(field) == expected:
+            managed.append((field, expected[3:]))
+    if not managed:
+        return
+    if not _vault_on(hub):
+        raise RuntimeError("the vault must be configured to clear its stored credential")
+    for field, name in managed:
+        if not await cloud_vault.delete_secret(hub, name):
+            raise RuntimeError(f"could not delete the stored {field} from the vault")
+        ref = "kv:" + name
+        _resolved.pop(ref, None)
+        _fetched.pop(ref, None)
 
 
 def _vault_on(hub) -> bool:

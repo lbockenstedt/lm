@@ -7661,6 +7661,16 @@ async function csRenderSetupCentralApi() {
     const val = id => (csEl(id) && csEl(id).value) || '';
     const f = (id, label, v, type) => `<label class="text-xs text-slate-500">${csEscape(label)}
       <input id="${id}" ${type === 'password' ? 'type="password"' : 'type="text"'} value="${csEscape(v != null ? v : '')}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></label>`;
+    // Render credential state without ever placing a stored secret in the DOM.
+    const secretField = (id, label, isSet, clearId) => `<div>
+      <label class="text-xs text-slate-500">${csEscape(label)}
+        <input id="${id}" type="password" value="" autocomplete="new-password" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+      </label>
+      <div class="mt-1 flex items-center justify-between gap-2 text-xs text-slate-500">
+        <span>${isSet ? 'Credential saved; leave blank to keep it.' : 'No hub credential saved; Clear also removes a stale spoke copy.'}</span>
+        <label class="inline-flex items-center gap-1"><input id="${clearId}" type="checkbox"> Clear</label>
+      </div>
+    </div>`;
     const modeSel = `<select id="cs-csc-mode" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
       <option value="classic" ${mode === 'classic' ? 'selected' : ''}>Classic (access token)</option>
       <option value="central" ${mode === 'central' ? 'selected' : ''}>Central (OAuth client)</option>
@@ -7705,15 +7715,15 @@ async function csRenderSetupCentralApi() {
 
     const connCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <h3 class="text-sm font-bold text-slate-500 mb-2">Central API Connection ${helpIcon('cs', null, 'Simulations help')}</h3>
-      <p class="text-xs text-slate-500 mb-3">Aruba Central cluster credentials. Pushed to the spoke as <code>central_config</code>; the spoke sentinel-merges them — secrets only overwrite when non-empty.</p>
+      <p class="text-xs text-slate-500 mb-3">Aruba Central cluster credentials are never returned by the status API. Leave secret fields blank to keep saved credentials, or select Clear to remove one.</p>
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
         <label class="text-xs text-slate-500">Mode${modeSel}</label>
         ${clusterField}
         ${f('cs-csc-clientid', 'Client ID', hc.client_id)}
         ${f('cs-csc-customerid', 'Customer ID', hc.customer_id)}
-        ${f('cs-csc-clientsecret', 'Client Secret', hc.client_secret, 'password')}
-        ${f('cs-csc-accesstoken', 'Access Token (classic)', hc.access_token, 'password')}
-        ${f('cs-csc-refreshtoken', 'Refresh Token (classic)', hc.refresh_token, 'password')}
+        ${secretField('cs-csc-clientsecret', 'Client Secret', hc.client_secret_set, 'cs-csc-clientsecret-clear')}
+        ${secretField('cs-csc-accesstoken', 'Access Token (classic)', hc.access_token_set, 'cs-csc-accesstoken-clear')}
+        ${secretField('cs-csc-refreshtoken', 'Refresh Token (classic)', hc.refresh_token_set, 'cs-csc-refreshtoken-clear')}
         <label class="text-xs text-slate-500">Poll interval (minutes)
           <input id="cs-csc-pollmin" type="number" min="1" step="1" value="${Math.max(1, Math.round((Number(hc.poll_interval_s) || 300) / 60))}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
           <span class="block text-xs text-slate-500 mt-1">How often the hub polls Aruba Central for this tenant (default 5, minimum 1).</span>
@@ -7932,11 +7942,13 @@ window.csSaveCentralConn = async function () {
         customer_id: v('cs-csc-customerid'),
         api_version: mode === 'central' ? 'new_central' : 'classic',
     };
-    // Secrets: include only when non-empty so the spoke's sentinel merge
-    // doesn't wipe an existing credential with a blank field.
-    if (v('cs-csc-clientsecret')) hub_central_config.client_secret = v('cs-csc-clientsecret');
-    if (v('cs-csc-accesstoken'))  hub_central_config.access_token  = v('cs-csc-accesstoken');
-    if (v('cs-csc-refreshtoken')) hub_central_config.refresh_token = v('cs-csc-refreshtoken');
+    // Send only supplied rotations or explicit clears; blank inputs preserve stored secrets.
+    for (const [field, id] of [['client_secret', 'cs-csc-clientsecret'], ['access_token', 'cs-csc-accesstoken'], ['refresh_token', 'cs-csc-refreshtoken']]) {
+        const value = v(id), clear = csEl(id + '-clear');
+        if (clear && clear.checked && value.trim()) { showToast('Enter a new secret or clear the saved one, not both.', 'error'); return; }
+        if (clear && clear.checked) hub_central_config[field + '_clear'] = true;
+        else if (value) hub_central_config[field] = value;
+    }
     // Central poll interval (minutes in the UI → seconds stored; the hub floors at 60s).
     const _pm = parseInt(v('cs-csc-pollmin'), 10);
     if (!isNaN(_pm) && _pm > 0) hub_central_config.poll_interval_s = Math.max(60, _pm * 60);
@@ -8013,6 +8025,16 @@ async function csRenderSetupCentralOnPremApi() {
     const val = id => (csEl(id) && csEl(id).value) || '';
     const f = (id, label, v, type) => `<label class="text-xs text-slate-500">${csEscape(label)}
       <input id="${id}" ${type === 'password' ? 'type="password"' : 'type="text"'} value="${csEscape(v != null ? v : '')}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></label>`;
+    // Render credential state without ever placing a stored secret in the DOM.
+    const secretField = (id, label, isSet, clearId) => `<div>
+      <label class="text-xs text-slate-500">${csEscape(label)}
+        <input id="${id}" type="password" value="" autocomplete="new-password" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+      </label>
+      <div class="mt-1 flex items-center justify-between gap-2 text-xs text-slate-500">
+        <span>${isSet ? 'Credential saved; leave blank to keep it.' : 'No hub credential saved; Clear also removes a stale spoke copy.'}</span>
+        <label class="inline-flex items-center gap-1"><input id="${clearId}" type="checkbox"> Clear</label>
+      </div>
+    </div>`;
     const modeSel = `<select id="cs-cop-csc-mode" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
       <option value="classic" ${mode === 'classic' ? 'selected' : ''}>Classic (access token)</option>
       <option value="central" ${mode === 'central' ? 'selected' : ''}>Central (OAuth client)</option>
@@ -8057,15 +8079,15 @@ async function csRenderSetupCentralOnPremApi() {
 
     const connCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <h3 class="text-sm font-bold text-slate-500 mb-2">Central On-Prem API Connection ${helpIcon('central-on-prem', null, 'Central On-Prem help')}</h3>
-      <p class="text-xs text-slate-500 mb-3">Aruba Central cluster credentials. Pushed to the spoke as <code>central_config</code>; the spoke sentinel-merges them — secrets only overwrite when non-empty.</p>
+      <p class="text-xs text-slate-500 mb-3">Aruba Central On-Prem credentials are never returned by the status API. Leave secret fields blank to keep saved credentials, or select Clear to remove one.</p>
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
         <label class="text-xs text-slate-500">Mode${modeSel}</label>
         ${clusterField}
         ${f('cs-cop-csc-clientid', 'Client ID', hc.client_id)}
         ${f('cs-cop-csc-customerid', 'Customer ID', hc.customer_id)}
-        ${f('cs-cop-csc-clientsecret', 'Client Secret', hc.client_secret, 'password')}
-        ${f('cs-cop-csc-accesstoken', 'Access Token (classic)', hc.access_token, 'password')}
-        ${f('cs-cop-csc-refreshtoken', 'Refresh Token (classic)', hc.refresh_token, 'password')}
+        ${secretField('cs-cop-csc-clientsecret', 'Client Secret', hc.client_secret_set, 'cs-cop-csc-clientsecret-clear')}
+        ${secretField('cs-cop-csc-accesstoken', 'Access Token (classic)', hc.access_token_set, 'cs-cop-csc-accesstoken-clear')}
+        ${secretField('cs-cop-csc-refreshtoken', 'Refresh Token (classic)', hc.refresh_token_set, 'cs-cop-csc-refreshtoken-clear')}
         <label class="text-xs text-slate-500">Poll interval (minutes)
           <input id="cs-cop-csc-pollmin" type="number" min="1" step="1" value="${Math.max(1, Math.round((Number(hc.poll_interval_s) || 300) / 60))}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
           <span class="block text-xs text-slate-500 mt-1">How often the hub polls Aruba Central for this tenant (default 5, minimum 1).</span>
@@ -8258,11 +8280,13 @@ window.csSaveCentralOnPremConn = async function () {
         customer_id: v('cs-cop-csc-customerid'),
         api_version: mode === 'central' ? 'new_central' : 'classic',
     };
-    // Secrets: include only when non-empty so the spoke's sentinel merge
-    // doesn't wipe an existing credential with a blank field.
-    if (v('cs-cop-csc-clientsecret')) hub_central_on_prem_config.client_secret = v('cs-cop-csc-clientsecret');
-    if (v('cs-cop-csc-accesstoken'))  hub_central_on_prem_config.access_token  = v('cs-cop-csc-accesstoken');
-    if (v('cs-cop-csc-refreshtoken')) hub_central_on_prem_config.refresh_token = v('cs-cop-csc-refreshtoken');
+    // Send only supplied rotations or explicit clears; blank inputs preserve stored secrets.
+    for (const [field, id] of [['client_secret', 'cs-cop-csc-clientsecret'], ['access_token', 'cs-cop-csc-accesstoken'], ['refresh_token', 'cs-cop-csc-refreshtoken']]) {
+        const value = v(id), clear = csEl(id + '-clear');
+        if (clear && clear.checked && value.trim()) { showToast('Enter a new secret or clear the saved one, not both.', 'error'); return; }
+        if (clear && clear.checked) hub_central_on_prem_config[field + '_clear'] = true;
+        else if (value) hub_central_on_prem_config[field] = value;
+    }
     // Central poll interval (minutes in the UI → seconds stored; the hub floors at 60s).
     const _pm = parseInt(v('cs-cop-csc-pollmin'), 10);
     if (!isNaN(_pm) && _pm > 0) hub_central_on_prem_config.poll_interval_s = Math.max(60, _pm * 60);

@@ -58,7 +58,7 @@ from . import github_config_client
 # Decrypts/resolves stored Central credentials.
 from . import central_secrets
 # SSRF guards and edit-permission checks.
-from access import safe_external_url, host_resolves_external, has_edit_access, same_tenant, tenant_among
+from access import safe_external_url, host_resolves_external, has_edit_access, same_tenant, tenant_among, write_scope
 # URL parsing for host validation.
 from urllib.parse import urlsplit
 
@@ -260,6 +260,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if inspect.isawaitable(tid):
             tid = await tid
         return tid
+
+    def _require_central_config_write(request, tenant_id):
+        """Require full write scope before replacing a tenant's Central credentials."""
+        if not tenant_id or write_scope(session_user_fn(request), tenant_id) != "full":
+            raise HTTPException(
+                status_code=403,
+                detail="Full write access to this tenant's Central configuration is required",
+            )
 
     # ── Auth adapters ───────────────────────────────────────────────────
     # LM owns authentication via the lm_session cookie. These endpoints map the
@@ -3051,8 +3059,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # the Central tab's form populates.
         # Add the stored config (without mode) and its mode.
         cc = await store.get_central_config(tenant_id)
+        data["hub_central_config"] = central_secrets.public_status_config(cc)
         if isinstance(cc, dict):
-            data["hub_central_config"] = {k: v for k, v in cc.items() if k != "mode"}
             if cc.get("mode"):
                 data["mode"] = cc["mode"]
         # Return the merged view.
@@ -3125,6 +3133,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.post("/sim/api/aggregate/central")
     async def save_central(request: Request, tenant_id: str = Depends(get_tenant_id)):
         """Save the tenant's Central API config (SSRF-checked) and push it to the spokes."""
+        _require_central_config_write(request, tenant_id)
         # Parse the body and fold the mode into the config.
         body = await request.json()
         mode = body.get("mode")
@@ -3132,10 +3141,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         cfg = dict(hub_cc)
         if mode:
             cfg["mode"] = mode
+        existing = await store.get_central_config(tenant_id)
+        try:
+            cfg, cleared_secrets = central_secrets.merge_secret_updates(cfg, existing)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         # SSRF guard: ``cluster_url`` is the host the hub POSTs the Aruba
         # ``client_id``/``client_secret`` to (classic mode) and GETs monitoring
-        # data from. This route is reachable by any cs-righted tenant user (NOT
-        # just admins), so without a guard a tenant user can point the hub's
+        # data from. A tenant full-write user can point the hub's
         # outbound HTTP at an internal host / cloud-metadata endpoint and have
         # the hub exfiltrate the stored Central creds there. Confine it to a
         # public HTTPS host, and DNS-resolve it to block rebinding to an
@@ -3201,10 +3214,12 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # With a vault configured the secrets go there and only kv: references
         # are stored; spokes still get the real values.
         try:
+            await central_secrets.delete_cleared_secrets(
+                hub, "central_config", tenant_id, existing, cleared_secrets)
             stored = await central_secrets.to_vault(hub, "central_config", tenant_id, cfg)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502,
-                                detail=f"Could not store the Central secret in the vault: {exc}")
+                                detail=f"Could not update the Central vault credentials: {exc}")
         # Save the stored form; resolve real values for the push.
         await store.set_central_config(tenant_id, stored)
         cfg = await central_secrets.resolve(hub, stored)
@@ -3212,7 +3227,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # cluster creds, and the spoke's poller (_build_config) needs ``mode`` to
         # pick classic vs new_central. Pushing hub_cc dropped mode, so the spoke
         # defaulted to classic regardless of the operator's choice.
-        pushed = await _push_config(tenant_id, {"central_config": cfg})
+        push_config = {"central_config": cfg}
+        if cleared_secrets:
+            push_config["central_config_clear_secrets"] = cleared_secrets
+        pushed = await _push_config(tenant_id, push_config)
         # Report the push result.
         return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
@@ -3449,8 +3467,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # Merge hub-owned on-prem config (mode + cluster creds) from the store so
         # the Central On-Prem tab's form populates (mirror of central-status).
         cc = await store.get_central_on_prem_config(tenant_id)
+        data["hub_central_on_prem_config"] = central_secrets.public_status_config(cc)
         if isinstance(cc, dict):
-            data["hub_central_on_prem_config"] = {k: v for k, v in cc.items() if k != "mode"}
             if cc.get("mode"):
                 data["mode"] = cc["mode"]
         # Return the merged view.
@@ -3490,6 +3508,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     async def save_central_on_prem(request: Request,
                                    tenant_id: str = Depends(get_tenant_id)):
         """Save the tenant's Central On-Prem config (SSRF-checked) and push it to spokes."""
+        _require_central_config_write(request, tenant_id)
         # Parse the body and fold the mode into the config.
         body = await request.json()
         mode = body.get("mode")
@@ -3497,15 +3516,20 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         cfg = dict(hub_cc)
         if mode:
             cfg["mode"] = mode
+        existing = await store.get_central_on_prem_config(tenant_id)
+        try:
+            cfg, cleared_secrets = central_secrets.merge_secret_updates(cfg, existing)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         # Optional SSO token URL for a cluster outside the public list. The hub
         # POSTs the client secret there, so it gets the same guard.
         await _check_token_url(cfg)
         # SSRF guard: same as cloud Central — on-prem cluster_url is still an
         # outbound hub target (the hub POSTs the Aruba client_id/secret to it in
-        # classic mode and GETs monitoring data from it). This route is reachable
-        # by any cs-righted tenant user, so confine cluster_url to a public HTTPS
-        # host and DNS-resolve it to block rebinding to an internal IP. Only
-        # validate when present (new_central mode uses a fixed token URL).
+        # classic mode and GETs monitoring data from it). Only full-write users
+        # can save this config. Confine cluster_url to a public HTTPS host and
+        # DNS-resolve it to block rebinding to an internal IP. Only validate
+        # when present (new_central mode uses a fixed token URL).
         cluster_url = (cfg.get("cluster_url") or "").strip()
         # Validate the cluster URL when present.
         if cluster_url:
@@ -3560,17 +3584,22 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # With a vault configured the secrets go there and only kv: references
         # are stored; spokes still get the real values.
         try:
+            await central_secrets.delete_cleared_secrets(
+                hub, "central_on_prem_config", tenant_id, existing, cleared_secrets)
             stored = await central_secrets.to_vault(hub, "central_on_prem_config", tenant_id, cfg)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502,
-                                detail=f"Could not store the Central secret in the vault: {exc}")
+                                detail=f"Could not update the Central vault credentials: {exc}")
         # Save the stored form; resolve real values for the push.
         await store.set_central_on_prem_config(tenant_id, stored)
         cfg = await central_secrets.resolve(hub, stored)
         # Push ``cfg`` (carries ``mode`` on top of the cluster creds) — mirror of
         # cloud Central's save; the spoke's on-prem poller needs ``mode`` to pick
         # classic vs new_central (Phase 5).
-        pushed = await _push_config(tenant_id, {"central_on_prem_config": cfg})
+        push_config = {"central_on_prem_config": cfg}
+        if cleared_secrets:
+            push_config["central_on_prem_config_clear_secrets"] = cleared_secrets
+        pushed = await _push_config(tenant_id, push_config)
         # Report the push result.
         return {"saved": True, "pushed_to_spokes": pushed,
                 "queued": bool(getattr(pushed, "queued", False))}

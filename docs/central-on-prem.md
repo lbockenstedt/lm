@@ -72,6 +72,17 @@ A single hub config-push that carries BOTH `central_config` and
   → centralized) or `"distributed"`. `central_on_prem_api_is_centralized(modes)`
   mirrors the cloud `central_api_is_centralized` check.
 
+For both cloud Central and Central On-Prem, status responses expose only
+allowlisted connection settings and `client_secret_set`, `access_token_set`,
+and `refresh_token_set` flags — never secret values or vault references. The
+Setup form keeps secret inputs blank: leaving one blank preserves its stored
+value, while **Clear** explicitly removes it and can remove a stale spoke copy
+even when the hub no longer has a credential. Saving requires full tenant
+write scope. If a managed vault deletion fails, the save fails and keeps the
+existing reference. Spokes must have the matching clear-handling update to
+remove an already stored secret; older spokes ignore the clear list and retain
+their local value until updated.
+
 In **centralized** mode (default) the **hub** runs the on-prem poller + serves
 browse/available/test from the on-prem config directly — the spoke is not
 contacted. In **distributed** mode the hub forwards `CS_CENTRAL_ON_PREM_*`
