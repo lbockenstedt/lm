@@ -341,3 +341,70 @@ def test_a_blank_tenant_flagged_shared_is_not_the_shared_tenant(monkeypatch):
     monkeypatch.setattr(access, "_SHARED_TENANT_ID", "  ")
     assert access.tenant_scope_ids("acme") == {"acme"}
 
+
+
+def test_every_tenant_write_refreshes_the_tenant_caches(monkeypatch):
+    """StateManager rebuilds access's tenant caches whenever it writes a
+    tenant, so a write path with no refresh of its own (the tenant sync loop,
+    POST /setup/sync-tenants) can't leave them stale."""
+    _keep_tenant_cache(monkeypatch)
+    s = _state({"acme": {}})
+    # A tenant newly flagged shared is the shared tenant at once ...
+    s.update_tenant("shr", {"shared": True})
+    assert access.shared_tenant_id() == "shr"
+    # ... and once it is deleted there is none.
+    s.delete_tenant("shr")
+    assert access.shared_tenant_id() is None
+
+
+def test_a_tenant_created_beside_a_deleted_twin_is_told_apart_at_once(monkeypatch):
+    # "ACME" was deleted while a twin survived, so records may still carry it.
+    _keep_tenant_cache(monkeypatch)
+    s = _state({})
+    s.tenant_state["retired_twin_ids"] = ["ACME"]
+    access.refresh_tenant_caches(s.tenant_state)
+    assert access.same_tenant("ACME", "acme")
+    # Creating "acme" makes the two ids twins again, whichever path created it.
+    s.update_tenant("acme", {})
+    assert not access.same_tenant("ACME", "acme")
+
+
+def test_loading_the_tenants_rebuilds_the_tenant_caches(tmp_path, monkeypatch):
+    from state.manager import StateManager
+    _keep_tenant_cache(monkeypatch)
+    s = _state({"shr": {"shared": True}, "ACME": {}, "acme": {}})
+    s.system_path = str(tmp_path / "system.json")
+    s.tenants_path = str(tmp_path / "tenants.json")
+    s.save_state()
+    # The caches as a fresh process has them, before its state is loaded.
+    monkeypatch.setattr(access, "_SHARED_TENANT_ID", None)
+    monkeypatch.setattr(access, "_AMBIGUOUS_TENANT_IDS", frozenset())
+    loaded = StateManager()
+    loaded.system_path, loaded.tenants_path = s.system_path, s.tenants_path
+    loaded.load_state()
+    assert access.shared_tenant_id() == "shr"
+    assert not access.same_tenant("ACME", "acme")
+
+
+def test_several_slots_for_one_tenant_are_refused_not_picked_by_order():
+    slots = {"ACME": 1, "acme": 2, "other": 3}
+    # The only slot that names a tenant, in any spelling, is its slot ...
+    assert access.tenant_key_in(slots, "OTHER") == "other"
+    assert access.tenant_key_in(slots, "other") == "other"
+    assert access.tenant_key_in(slots, "") is None
+    # ... but two slots name "acme", so neither is picked, whatever the
+    # spelling, the exact one included.
+    assert sorted(access.tenant_keys_in(slots, "Acme")) == ["ACME", "acme"]
+    for spelling in ("Acme", "acme", "ACME", " acme "):
+        with pytest.raises(ValueError, match="2 entries"):
+            access.tenant_key_in(slots, spelling)
+
+
+def test_legacy_twins_each_keep_their_own_slot(monkeypatch):
+    # Tenants "ACME" and "acme" stored side by side (legacy twins) are matched
+    # by exact spelling only, so each slot is one twin's, not a duplicate.
+    monkeypatch.setattr(access, "_AMBIGUOUS_TENANT_IDS", frozenset({"acme"}))
+    slots = {"ACME": 1, "acme": 2}
+    assert access.tenant_key_in(slots, "ACME") == "ACME"
+    assert access.tenant_key_in(slots, "acme") == "acme"
+    assert access.tenant_key_in(slots, "Acme") is None

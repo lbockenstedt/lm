@@ -2231,12 +2231,19 @@ def register(app, hub, ctx):
 
     def _tenant_owned_scan_sets(hub, tenant_id):
         """Scan credential sets the tenant owns: stored sets in its scope plus its vault-held sets.
+        Raises ValueError when several vault buckets name the tenant (see _vault_scan_sets).
         """
         gc = hub.state.system_state.get("global_config", {}) or {}
         owned = access.tenant_scope_ids(tenant_id)
         sets = [c for c in (gc.get("nw_scan_credentials") or []) if isinstance(c, dict)]
         return ([c for c in sets if owned is not None and access.in_tenant_scope(c.get("tenant_id"), owned)]
                 + _vault_scan_sets(hub, tenant_id))
+
+    def _scan_uses_vault_sets(cred_ids):
+        """Whether a scan with ``cred_ids`` picked uses the tenant's vault login
+        sets: with none picked every owned set is tried, else only picked
+        ``vault:<bucket>:<name>`` ids are."""
+        return not cred_ids or any(str(c).startswith("vault:") for c in cred_ids)
 
     def _tenant_has_own_nw_spoke(hub, tenant_id):
         """True when the tenant has an nw spoke of its own."""
@@ -2366,7 +2373,7 @@ def register(app, hub, ctx):
         # Narrow to the selected tenant, if any.
         selected = str(request.query_params.get("tenant") or "").strip()
         if selected:
-            ids = [t for t in ids if t == selected]
+            ids = [t for t in ids if access.same_tenant(t, selected)]
         # Runtime status kept by the hub, and credential sets by id (for names).
         runtime = getattr(hub, "nw_scan_runtime", {}) or {}
         gc = hub.state.system_state.get("global_config", {}) or {}
@@ -2380,6 +2387,20 @@ def register(app, hub, ctx):
             cred_ids = [str(x) for x in (cfg.get("credential_ids") or [])]
             spoke_id = str(cfg.get("spoke_id") or "").strip()
             rt = runtime.get(tid) or {}
+            # Several vault buckets naming the tenant is a configuration error
+            # of a schedule whose scan needs the tenant's vault logins: a run
+            # that reaches them is refused (see _execute_nw_scan), so it is not
+            # a discovery-only pass either. It is reported whether or not the
+            # schedule can run now (it is disabled, or no agent is connected),
+            # as a warning to fix before it runs; what a run did stays in
+            # last_status ("skipped" with no agent). discovery_only below reads
+            # the vault sets only when this read did not fail, so it can't raise.
+            vault_error = ""
+            if _scan_uses_vault_sets(cred_ids):
+                try:
+                    _vault_scan_sets(hub, tid)
+                except ValueError as e:
+                    vault_error = str(e)
             rows.append({
                 "tenant_id": tid,
                 "tenant_name": (all_t.get(tid, {}) or {}).get("name") or tid,
@@ -2396,7 +2417,9 @@ def register(app, hub, ctx):
                     (by_id.get(cid, {}) or {}).get("name") or cid for cid in cred_ids],
                 # No set selected and none owned → the scheduled run is a
                 # discovery-only pass (reachability + open ports, no auto-add).
-                "discovery_only": not cred_ids and not _tenant_owned_scan_sets(hub, tid),
+                "discovery_only": (not vault_error and not cred_ids
+                                   and not _tenant_owned_scan_sets(hub, tid)),
+                "vault_error": vault_error,
                 "last_run_at": rt.get("last_run_at"),
                 "next_due_at": rt.get("next_due_at"),
                 "last_status": rt.get("last_status"),
@@ -2572,8 +2595,19 @@ def register(app, hub, ctx):
         # Assemble the candidate credential sets (from the request or saved
         # config), overlaying each set's vault secret just before the push.
         cred_ids = [str(x) for x in (data.get("credential_ids") or saved.get("credential_ids") or [])]
-        all_sets = (hub.state.system_state.get("global_config", {}) or {}).get("nw_scan_credentials", []) or []
-        all_sets = list(all_sets) + _vault_scan_sets(hub, tenant_id)
+        all_sets = list((hub.state.system_state.get("global_config", {}) or {}).get("nw_scan_credentials", []) or [])
+        # The tenant's vault logins are needed only when no set is picked or a
+        # vault one is. Several buckets naming the tenant refuse that scan:
+        # running it without them would silently drop to discovery-only.
+        if _scan_uses_vault_sets(cred_ids):
+            try:
+                all_sets += _vault_scan_sets(hub, tenant_id)
+            except ValueError as e:
+                logger.warning("nw scan refused (tenant=%s): %s", tenant_id, e)
+                if system:
+                    return {"status": "error", "reason": str(e), "tenant": tenant_id,
+                            "added": [], "identified": []}
+                raise HTTPException(status_code=409, detail=str(e))
         # No sets picked → try every set the tenant owns (scoped below), so a
         # new tenant's scans identify + add devices without manual setup.
         use_all = not cred_ids
@@ -3734,14 +3768,28 @@ def register(app, hub, ctx):
         """Synthetic scan credential sets for the tenant's own Credential Vault
         bucket (login/console secrets, automation-readable), so a vault login is
         selectable on the scan tab without hand-creating a set. Ids are
-        ``vault:<bucket>:<name>`` and resolve at scan time via the normal overlay."""
-        # The tenant's vault bucket: its exact spelling, else one access.same_tenant
-        # matches (in any case, but never a legacy twin's); none (or no tenant)
+        ``vault:<bucket>:<name>`` and resolve at scan time via the normal overlay.
+
+        Raises ValueError when several vault buckets name the tenant (in any
+        case or spaces), even with one spelt exactly like it: picking one would
+        guess which tenant's logins to scan with. Callers refuse the scan or
+        show the error; they never fall back to a discovery-only pass."""
+        # The tenant's vault bucket: the one access.same_tenant matches (in
+        # any case or spaces, but never a legacy twin's); none (or no tenant)
         # means no sets.
         tid = access.raw_tenant_id(tenant_id)
         buckets = (((hub.state.system_state.get("global_config", {}) or {})
                     .get("cred_vault", {}) or {}).get("secrets", {}) or {})
-        bucket = access.tenant_key_in(buckets, tid)
+        try:
+            bucket = access.tenant_key_in(buckets, tid)
+        except ValueError as e:
+            # A stray bucket is an orphan on the Credential Vault page (only an
+            # exact tenant id is live), so its secrets can be moved and the
+            # bucket deleted there.
+            raise ValueError(
+                f"Credential Vault: {e}; a Global Admin must move the secrets "
+                "into one of these buckets and delete the others (Credential "
+                "Vault → Move a secret out…, then Delete this bucket)") from e
         if bucket is None:
             return []
         # One set per hub-mode login or console secret in the bucket.
@@ -3801,6 +3849,7 @@ def register(app, hub, ctx):
             # Copy the stored instance list.
             global_config = hub.state.system_state.get("global_config", {})
             instances = list(global_config.get(storage_key, []))
+            vault_error = ""
             # Move a legacy single config into the list once (unless it is already there).
             if legacy_key and legacy_to_instance:
                 legacy = global_config.get(legacy_key)
@@ -3865,11 +3914,18 @@ def register(app, hub, ctx):
                 instances = [i for i in instances
                              if isinstance(i, dict) and access.in_tenant_scope(i.get("tenant_id"), scope)]
                 if storage_key == "nw_scan_credentials":
-                    instances = instances + _vault_scan_sets(hub, req_tenant)
+                    # Several vault buckets naming the tenant: list the stored
+                    # sets and say why no vault login is offered.
+                    try:
+                        instances = instances + _vault_scan_sets(hub, req_tenant)
+                    except ValueError as e:
+                        vault_error = str(e)
             # Each row also carries ``tenant_key`` (Managed Devices groups by it).
             instances = access.with_tenant_keys(instances)
             if present:
                 instances = [present(i) for i in instances if isinstance(i, dict)]
+            if vault_error:
+                return {"instances": instances, "vault_error": vault_error}
             return {"instances": instances}
 
         @app.post(f"/setup/{route_prefix}", operation_id=f"add_{op}")

@@ -1182,8 +1182,9 @@ def write_scope(sess, tenant_id) -> str:
 # but it stays a real tenant for ownership/scoping/quotas/sync — so shared infra
 # (a shared lab firewall/DNS/…) has a real tenant home without becoming private.
 # The id is cached module-level because ``check_tenant_access`` /
-# ``spoke_visible_to_session`` have no ``hub`` handle; ``refresh_shared_tenant``
-# is called at startup and after every tenant write.
+# ``spoke_visible_to_session`` have no ``hub`` handle. StateManager refreshes
+# it (refresh_tenant_caches) whenever its tenant records change: on load, in
+# update_tenant and in delete_tenant, so no tenant write leaves it stale.
 #
 # INVARIANT change: an UNASSIGNED spoke (no tenant_id) is NO LONGER global — it's
 # admin-only (a holding state until an admin assigns it). Shared infra must live
@@ -1275,15 +1276,19 @@ def first_shared_tenant(tenants) -> Optional[str]:
                  if str(tid).strip() and isinstance(cfg, dict) and cfg.get("shared")), None)
 
 
-def refresh_shared_tenant(hub):
-    """Recompute + cache the single shared-tenant id from tenant state. Returns
-    the id (or None). Safe to call often; called on state load + tenant writes."""
+def refresh_tenant_caches(tenant_state) -> Optional[str]:
+    """Recompute + cache, from ``tenant_state`` (StateManager.tenant_state),
+    the single shared-tenant id, the tenant-group members and the ids only case
+    or spaces tell apart (_AMBIGUOUS_TENANT_IDS). Returns the shared id (or
+    None). StateManager calls it whenever its tenant records change (load,
+    update_tenant, delete_tenant): a write path that skipped a refresh, such
+    as the tenant sync, left a new twin matching its sibling's records."""
     global _SHARED_TENANT_ID, _GROUP_MEMBERS, _AMBIGUOUS_TENANT_IDS
     try:
         # Tenant records, the ids that only case or spaces tell apart (first,
         # as the group keys below are built with _norm_tenant_id), then the
         # cached group membership.
-        tenant_state = getattr(hub.state, "tenant_state", {}) or {}
+        tenant_state = tenant_state or {}
         tenants = tenant_state.get("tenants", {}) or {}
         ambiguous = _case_collisions(tenants, retired_twin_ids(tenant_state))
         if ambiguous and ambiguous != _AMBIGUOUS_TENANT_IDS:
@@ -1302,8 +1307,20 @@ def refresh_shared_tenant(hub):
     return _SHARED_TENANT_ID
 
 
+def refresh_shared_tenant(hub):
+    """refresh_tenant_caches for ``hub.state``'s tenant state; the shared id
+    (or None). Kept for callers, and test hubs, that hold only a hub."""
+    global _SHARED_TENANT_ID
+    try:
+        tenant_state = getattr(hub.state, "tenant_state", {})
+    except Exception:  # noqa: BLE001 — a hub without state has no shared tenant
+        _SHARED_TENANT_ID = None
+        return None
+    return refresh_tenant_caches(tenant_state)
+
+
 def shared_tenant_id():
-    """The cached shared-tenant id (or None). Refreshed by refresh_shared_tenant."""
+    """The cached shared-tenant id (or None). Refreshed by refresh_tenant_caches."""
     return _SHARED_TENANT_ID
 
 
@@ -1387,16 +1404,35 @@ def raw_tenant_id(value) -> str:
     return raw if raw.strip() else ""
 
 
-def tenant_key_in(mapping, tenant_id):
-    """The key of ``mapping`` (keyed by tenant id) that names ``tenant_id``:
-    its exact spelling, else the first key same_tenant matches, which is
-    never a legacy twin's. None when none does or ``tenant_id`` is blank."""
+def tenant_keys_in(mapping, tenant_id) -> list:
+    """Every key of ``mapping`` (keyed by tenant id) that names ``tenant_id``
+    as same_tenant compares ids: its exact spelling and any other case or
+    spaces of it, never a legacy twin's. [] when none does or ``tenant_id``
+    is blank."""
     tid = raw_tenant_id(tenant_id)
     if not tid or not mapping:
-        return None
-    if tid in mapping:
-        return tid
-    return next((k for k in mapping if same_tenant(k, tid)), None)
+        return []
+    return [k for k in mapping if same_tenant(k, tid)]
+
+
+def tenant_key_in(mapping, tenant_id):
+    """The one key of ``mapping`` (keyed by tenant id) that names
+    ``tenant_id`` as same_tenant compares ids: its exact spelling or another
+    case or spaces of it, never a legacy twin's. None when none does or
+    ``tenant_id`` is blank.
+
+    Raises ValueError when several keys match (a mapping saved with "ACME"
+    and "acme" slots for one tenant), even when one is spelt exactly like
+    ``tenant_id``. The slots are all that tenant's, and the caller cannot
+    tell which one is current. Picking the exact spelling would make the
+    answer depend on how the caller spelt the id, and the picker, the tenant
+    record and a record's tag disagree about case."""
+    hits = tenant_keys_in(mapping, tenant_id)
+    if len(hits) > 1:
+        names = ", ".join(sorted(repr(str(k)) for k in hits))
+        raise ValueError(f"tenant '{raw_tenant_id(tenant_id)}' has {len(hits)} entries that "
+                         f"differ only by case or surrounding spaces ({names})")
+    return hits[0] if hits else None
 
 
 def push_tenant_key(hub, tenant_id) -> str:

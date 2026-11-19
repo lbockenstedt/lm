@@ -445,11 +445,13 @@ def register(app, hub, ctx):
             # "created".
             try:
                 key = hub.state.tenant_key(tenant_id)
-            except ValueError:
-                key = ""
+            except ValueError as e:
+                # Several stored tenants, or one and a deleted twin: name them,
+                # rather than claim the id itself "already exists".
+                raise HTTPException(status_code=409, detail=str(e))
             if key is not None and str(key) != str(tenant_id):
                 raise HTTPException(status_code=409, detail=(
-                    f"Tenant '{key or tenant_id}' already exists (tenant ids are not case-sensitive)"))
+                    f"Tenant '{key}' already exists (tenant ids are not case-sensitive)"))
 
             # Create the tenant with an empty config and mark state for saving.
             hub.state.update_tenant(tenant_id, {})
