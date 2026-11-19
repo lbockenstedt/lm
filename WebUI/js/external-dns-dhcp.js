@@ -343,11 +343,11 @@ async function loadHenet() {
     // Label the scope: "Admin" for the global slot, nothing for a tenant slot
     // (the record list already makes the selected tenant obvious).
     const credScope = (admin && !adminScope) ? 'Admin ' : '';
-    const credInfo = canWrite
+    const credInfo = _henetCredConflict
+        ? ' · <span id="henet-cred-conflict" class="text-red-600 font-medium"></span>'
+        : canWrite
         ? (assignedCred
             ? ` · <span class="text-slate-600">${credScope}DNS credential: <span class="font-mono">🔐 ${escapeHtml(assignedCred.name)}</span></span>`
-            : _henetCredConflict
-            ? ' · <span id="henet-cred-conflict" class="text-red-600 font-medium"></span>'
             : ` · <span class="text-amber-600 font-medium">no ${credScope.toLowerCase()}DNS credential assigned</span>`)
         : '';
     const tenantCredN = Object.keys(tenantCreds).length;
