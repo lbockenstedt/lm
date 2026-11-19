@@ -70,6 +70,14 @@ CI/tooling changes are omitted unless they change what an operator sees.
   legacy names and suffixes inferred from pinned `agent-` ids are kept. A role
   sub-spoke of a generic agent is named `<host>-<role>` instead of repeating
   its parent's name. See [architecture-topology.md](architecture-topology.md).
+- **Failover no longer doubles up a spoke.** A NAC, IPAM or directory
+  instance with a failover pool could fail over, or be rebalanced, onto a pool
+  spoke already serving another instance of the same product. A spoke is sent
+  only one instance of a product, so one of the two went unserved, and two
+  tenants' ClearPass instances on one spoke left it serving neither tenant.
+  Failover and rebalancing now skip such a spoke; failover logs
+  `[instance-relocate] … already serves …` and tries the next pool spoke, or
+  stays put when none is left. See [dhcp.md](dhcp.md#tenant-isolation).
 
 ### WebUI
 

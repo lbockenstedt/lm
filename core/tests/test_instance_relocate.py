@@ -5,6 +5,8 @@ directly (no full LabManagerHub) and attach the minimal fake surface its
 methods actually touch (state, active_connections, spoke_module_types,
 _primary_key, request_response, push_config_to_spoke).
 """
+import logging
+
 import pytest
 
 from instance_relocate import InstanceRelocateMixin, _INSTANCE_ROLE
@@ -345,3 +347,92 @@ async def test_rebalance_skips_pool_candidate_in_another_tenant():
     hub.state._spoke_tenants = {"busy": "lrb", "idle-dxp": "dxp"}
     await hub._instance_rebalance_cycle()
     assert hub.load_role_calls == []
+
+
+# ── One record per spoke: failover/rebalance never co-locate a product ──────
+# A role sub-spoke serves one record (the push sends it the first record bound
+# to it), so a second record moved there would leave one of the two unserved.
+
+@pytest.mark.asyncio
+async def test_failover_skips_a_candidate_that_already_serves_another_record(caplog):
+    caplog.set_level(logging.WARNING, logger="Hub")
+    moved = {"id": "p1", "name": "nb1", "spoke_id": "spokeA-netbox",
+             "spoke_pool": ["spokeA", "spokeB", "spokeC"]}
+    other = {"id": "p2", "name": "nb2", "spoke_id": "spokeB-netbox"}
+    hub = _hub({"ipam_instances": [moved, other]},
+               active={"spokeB": 1, "spokeB-netbox": 1, "spokeC": 1},
+               module_types={"spokeB-netbox": "ipam"})
+    await hub._instance_relocate_cycle()
+    assert moved["spoke_id"] == "spokeC-netbox" and other["spoke_id"] == "spokeB-netbox"
+    assert [c[0] for c in hub.load_role_calls] == ["spokeC"]
+    assert hub.push_calls == ["spokeC-netbox"]
+    assert "pool candidate spokeB already serves 'nb2'" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_two_records_on_one_dead_agent_fail_over_to_different_candidates():
+    """The first move in a cycle is seen by the next record in the same cycle."""
+    a = {"id": "n1", "name": "CPPM-1", "spoke_id": "spokeA-cppm", "spoke_pool": ["spokeB", "spokeC"]}
+    b = {"id": "n2", "name": "CPPM-2", "spoke_id": "spokeA-cppm", "spoke_pool": ["spokeB", "spokeC"]}
+    hub = _hub({"nac_instances": [a, b]}, active={"spokeB": 1, "spokeC": 1})
+    await hub._instance_relocate_cycle()
+    assert (a["spoke_id"], b["spoke_id"]) == ("spokeB-cppm", "spokeC-cppm")
+
+
+@pytest.mark.asyncio
+async def test_self_heal_in_place_is_not_blocked_by_a_record_sharing_the_spoke():
+    """The instance's own spoke never counts as taken, so a role that died
+    there still restarts in place."""
+    a = {"id": "n1", "name": "CPPM-1", "spoke_id": "spokeA-cppm", "spoke_pool": ["spokeA", "spokeB"]}
+    b = {"id": "n2", "name": "CPPM-2", "spoke_id": "spokeA-cppm"}
+    hub = _hub({"nac_instances": [a, b]}, active={"spokeA": 1, "spokeB": 1})
+    await hub._instance_relocate_cycle()
+    assert hub.load_role_calls == [("spokeA", {"role": "cppm", "config": {}})]
+    assert a["spoke_id"] == "spokeA-cppm"
+
+
+@pytest.mark.asyncio
+async def test_failover_compares_spokes_by_primary_key():
+    """A record saved under the sub-spoke's guid still holds that spoke, and the
+    occupied agent is sent no LOAD_ROLE."""
+    moved = {"id": "p1", "name": "nb1", "spoke_id": "spokeA-netbox", "spoke_pool": ["spokeB"]}
+    other = {"id": "p2", "name": "nb2", "spoke_id": "guid-b-netbox"}
+    hub = _hub({"ipam_instances": [moved, other]}, active={"spokeB": 1})
+    hub._primary_key = lambda sid: {"spokeB-netbox": "guid-b-netbox"}.get(sid, sid)
+    await hub._instance_relocate_cycle()
+    assert moved["spoke_id"] == "spokeA-netbox" and hub.load_role_calls == []
+
+
+@pytest.mark.asyncio
+async def test_failover_rechecks_the_sub_spoke_id_the_agent_reports():
+    """The pool can name an agent by guid while the agent reports its sub-spoke
+    under its own connect id; that reported id is checked too."""
+    moved = {"id": "p1", "name": "nb1", "spoke_id": "spokeA-netbox", "spoke_pool": ["guid-b"]}
+    other = {"id": "p2", "name": "nb2", "spoke_id": "spokeB-netbox"}
+    hub = _hub({"ipam_instances": [moved, other]}, active={"guid-b": 1})
+
+    async def _load_role(spoke_id, cmd, payload, timeout=None):
+        hub.load_role_calls.append((spoke_id, payload))
+        return {"payload": {"data": {"status": "SUCCESS", "sub_spoke_id": "spokeB-netbox"}}}
+    hub.request_response = _load_role
+    await hub._instance_relocate_cycle()
+    assert [c[0] for c in hub.load_role_calls] == ["guid-b"]
+    assert moved["spoke_id"] == "spokeA-netbox" and hub.push_calls == []
+
+
+@pytest.mark.asyncio
+async def test_rebalance_skips_a_candidate_that_already_serves_another_record():
+    """spokeB is less loaded than spokeA by the threshold, but it already
+    serves CPPM-2, so CPPM-1 stays where it is."""
+    moved = {"id": "n1", "name": "CPPM-1", "spoke_id": "spokeA-cppm", "spoke_pool": ["spokeA", "spokeB"]}
+    other = {"id": "n2", "name": "CPPM-2", "spoke_id": "spokeB-cppm"}
+    hub = _hub({"nac_instances": [moved, other],
+                "ipam_instances": [{"id": "p1", "spoke_id": "spokeA-netbox"}],
+                "ldap_instances": [{"id": "l1", "spoke_id": "spokeA-ldap"}]},
+               active={"spokeA-cppm": 1, "spokeA-netbox": 1, "spokeA-ldap": 1,
+                       "spokeB": 1, "spokeB-cppm": 1},
+               module_types={"spokeA-cppm": "nac", "spokeA-netbox": "ipam",
+                             "spokeA-ldap": "directory", "spokeB-cppm": "nac"})
+    await hub._instance_rebalance_cycle()
+    assert moved["spoke_id"] == "spokeA-cppm"
+    assert hub.load_role_calls == [] and hub.reconcile_calls == []
