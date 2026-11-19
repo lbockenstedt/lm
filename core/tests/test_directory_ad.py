@@ -285,19 +285,22 @@ def test_setup_list_carries_the_hub_tenant_key_without_storing_it(monkeypatch):
 
 def test_connections_are_read_side_by_side(monkeypatch):
     import asyncio
-    import time
     conns = [{**ACME, "id": f"c{i}", "name": f"AD {i}"} for i in range(2)]
     hub = _Hub(conns)
+    reads = {"now": 0, "max": 0}
 
     async def slow_read(ns, key, fetch, tenants=None, lane=None):
-        await asyncio.sleep(0.5)
+        reads["now"] += 1
+        reads["max"] = max(reads["max"], reads["now"])
+        await asyncio.sleep(0.05)
+        reads["now"] -= 1
         return await fetch()
     hub.cache_read = slow_read
     client = _client(monkeypatch, hub)
-    # Two 0.5 s reads: ~0.5 s side by side, 1.0 s one after the other.
-    start = time.monotonic()
     r = client.get("/api/ldap/ad?tenant=acme")
-    assert time.monotonic() - start < 0.75
+    # Counted, not timed: a wall-clock bound failed on a busy CI runner
+    # (fleet rule 9.4). One after the other would peak at 1.
+    assert reads["max"] == 2
     assert [b["name"] for b in r.json()["connections"]] == ["AD 0", "AD 1"]
 
 
