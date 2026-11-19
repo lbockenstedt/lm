@@ -621,9 +621,11 @@ jobs:
               if [ "$got" = "yes" ] && [ "$(printf '%s\n' "$view" | sed -n 1p)" = "$u" ]; then
                 kind="pr"
                 if [ -n "$merge_style" ]; then
-                  title="$(awk 'NF { print; exit }' "$udir/msg")"
-                  if [ -n "$title" ]; then
-                    subj="$title"
+                  # Not `title`: that is this promotion PR's own title, which
+                  # the loop must leave as built above.
+                  pr_title="$(awk 'NF { print; exit }' "$udir/msg")"
+                  if [ -n "$pr_title" ]; then
+                    subj="$pr_title"
                   fi
                 fi
                 printf '%s\n' "$view" | sed 1d | tr -d '\r' > "$udir/body"
