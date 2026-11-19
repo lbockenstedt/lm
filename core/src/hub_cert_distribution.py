@@ -335,12 +335,18 @@ class HubCertDistributionMixin:
         distribute_mtls_materials_to_all_spokes so a multi-role generic agent
         gets ONE push (to its base spoke_id), not one per loaded role (each of
         which would os._exit(3) the shared agent). Returns ``[(spoke_id,
-        module_type)]``."""
-        # Connected spokes that have no parent (i.e. not role sub-spokes).
+        module_type)]``.
+
+        Synthetic (Test Data Feed / load-test) spokes are left out too: they
+        have no host or cert dir, skip the materials push and refuse
+        SPOKE_GET_MTLS_STATUS, so counting them would only keep the mTLS
+        readiness check "not ready" while a feed runs."""
+        # Connected spokes that have no parent (i.e. not role sub-spokes) and are not synthetic.
         out = []
+        synthetic = getattr(self, "synthetic_spokes", ())
         for sid, mt in getattr(self, "spoke_module_types", {}).items():
             if sid in getattr(self, "active_connections", {}) and not getattr(
-                    self, "spoke_parent_map", {}).get(sid):
+                    self, "spoke_parent_map", {}).get(sid) and sid not in synthetic:
                 out.append((sid, mt))
         return out
 

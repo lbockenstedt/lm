@@ -79,6 +79,11 @@ CI/tooling changes are omitted unless they change what an operator sees.
   `[instance-relocate] … already serves …` and tries the next pool spoke, or
   stays put when none is left. See [dhcp.md](dhcp.md#tenant-isolation).
 
+### Test Data Feed
+
+- **Feed and load-test spokes never act on the hub's own box.** The feeder runs as a child of the receiving hub, so OS updates, a reboot or a Remote Console command sent to one of its spokes acted on the hub itself, under a production spoke's name. These synthetic spokes now refuse host commands, skip hub pushes that would write files or restart them, and never write the host's `.env` or cert directory (a load test used to write its recovery PSK into the host's `.env`). The hub also leaves them out of OS Updates, Remote Console, mTLS cert issuance, the hub URL, hub-contact watchdog and Hub TLS Verification pushes (listed as `skipped`), and code updates. See [lm-hub.md](lm-hub.md#synthetic-spokes-have-no-host-of-their-own).
+- **Stop feed no longer reports an error.** Stop sends the feeder SIGTERM, which used to kill it outright, so the status showed `stopped · exit -15` in red. The feeder now exits cleanly and the status reads `stopped`, even while a poll of a slow source is still waiting. Once Stop is clicked the feeder starts no new token rotation, and one already in flight is allowed to finish first, so the new tokens are kept (Stop now kills a feeder that is still running after 75 seconds, up from 10). A load test stopped with SIGTERM also exits cleanly.
+
 ### WebUI
 
 - **History selectors match on Firewalls and Storage.** On both Firewalls →

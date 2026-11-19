@@ -317,12 +317,43 @@ def test_capabilities_are_recorded_and_cleared():
 def test_zabbix_server_capability_recorded_and_cleared():
     hub = types.SimpleNamespace(netbox_server_agents=set(), ldap_server_agents=set(),
                                 zabbix_server_agents=set(), spoke_enc_capable={},
-                                spoke_mtls_csr_capable={})
+                                spoke_mtls_csr_capable={}, synthetic_spokes=set())
     rec = main_mod.LabManagerHub._record_spoke_capabilities
-    rec(hub, "zbx", main_mod._SpokeHello.from_auth_frame({**AUTH, "zabbix_server": True}))
+    rec(hub, "zbx", main_mod._SpokeHello.from_auth_frame({**AUTH, "zabbix_server": True}), True)
     assert hub.zabbix_server_agents == {"zbx"}
-    rec(hub, "zbx", main_mod._SpokeHello.from_auth_frame(AUTH))
+    rec(hub, "zbx", main_mod._SpokeHello.from_auth_frame(AUTH), True)
     assert hub.zabbix_server_agents == set()
+
+
+class _SnapshotWS(FakeWS):
+    """Records the hub's synthetic set once the message loop starts."""
+
+    def _iter(self):
+        self.run.live_synthetic = set(self.run.hub.synthetic_spokes)
+        return super()._iter()
+
+
+@pytest.mark.parametrize("auth, live", [({**AUTH, "synthetic": 1}, {"spk"}), (AUTH, set())])
+def test_synthetic_marker_is_held_only_while_connected(auth, live):
+    run = connect(auth=auth, ws_cls=_SnapshotWS)
+    assert run.live_synthetic == live
+    assert run.hub.synthetic_spokes == set()
+
+
+@pytest.mark.parametrize("ghost, before", [({"synthetic": 1}, set()), ({}, {"spk"})],
+                         ids=["cannot-mark", "cannot-unmark"])
+def test_a_ghost_cannot_change_the_live_spokes_synthetic_marker(ghost, before):
+    # A secret-less connection reusing a live spoke's id runs on without the
+    # slot. It must not hide the real spoke from OS Updates or Remote Console,
+    # nor expose a live synthetic one to them.
+    def pre(hub):
+        hub.active_connections["spk"] = "live-ws"
+        hub.spoke_authenticated["spk"] = True
+        hub.synthetic_spokes.update(before)
+    run = connect(auth={**AUTH, "secret": None, **ghost}, proof=main_mod.asyncio.TimeoutError(),
+                  pre=pre, ws_cls=_SnapshotWS, _install_pending_connection="keep")
+    assert run.hub.active_connections["spk"] == "live-ws"
+    assert run.live_synthetic == before and run.hub.synthetic_spokes == before
 
 
 def test_module_type_logged_only_when_new():

@@ -96,6 +96,18 @@ def test_targets_skip_an_agent_on_a_spoke_host():
     assert [t["id"] for t in hub._osu_targets()] == ["spoke-1", "agent-2", "hub"]
 
 
+def test_targets_leave_out_synthetic_spokes_and_their_hostnames():
+    # A Test Data Feed spoke replays a production name but has no OS; its name
+    # must not hide the real agent on that host either.
+    hub = _FakeHub(
+        connections={"spoke-1": object(), "feed-1": object()},
+        agent_info={"agent-1": {"spoke_id": "spoke-1", "hostname": "pve1"}},
+        module_metadata={"spoke-1": {"display_name": "svcs01"},
+                         "feed-1": {"display_name": "pve1"}})
+    hub.synthetic_spokes = {"feed-1"}
+    assert [t["id"] for t in hub._osu_targets()] == ["spoke-1", "agent-1", "hub"]
+
+
 def test_targets_include_connected_spokes_agents_and_hub():
     hub = _FakeHub(
         connections={"spoke-1": object()},

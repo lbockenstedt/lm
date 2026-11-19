@@ -120,6 +120,18 @@ _proc = {"p": None, "started": 0.0, "log": "", "psk": "", "tenants": []}
 #: the whole family, which is why the feed used to die for good after an update.
 TOKEN_ROTATION_SENTINEL = "##LM-TEST-FEED-TOKEN## "
 
+#: Seconds Stop waits after SIGTERM before it SIGKILLs the feeder. The feeder's
+#: SIGTERM handler lets no new token refresh start (SourceHub.stop_rotating in
+#: scripts/hub_feed.py), and the feeder waits for one already in flight to print
+#: the new pair before it exits (SourceHub.close), because a kill in between
+#: leaves this hub holding a spent refresh token, and reusing that revokes the
+#: whole token family. Such a refresh began before the SIGTERM and runs
+#: alongside the spokes' close, so its deadline does not depend on how long they
+#: take (up to 50s on websockets 13). Each network step of the refresh (connect,
+#: TLS handshake, answer) times out after hub_feed.REFRESH_TIMEOUT (20s); 75s
+#: covers all three and also bounds the spokes' close.
+_STOP_GRACE_S = 75
+
 
 def register(app, hub, ctx):
     _session_user = ctx._session_user
@@ -562,6 +574,8 @@ def register(app, hub, ctx):
 
     @app.post("/api/test-feed/stop")
     async def stop_feed(request: Request):
+        """Stop the feeder (SIGTERM, then SIGKILL after _STOP_GRACE_S) and
+        revoke the feed's onboarding PSK."""
         sess = _require_admin(request)
         p = _proc["p"]
         if not (p and p.poll() is None):
@@ -574,7 +588,7 @@ def register(app, hub, ctx):
             # tasks and synthetic spoke connections, and killing only the parent
             # would leave those sockets attached to the hub.
             os.killpg(os.getpgid(p.pid), signal.SIGTERM)
-            await asyncio.to_thread(p.wait, 10)
+            await asyncio.to_thread(p.wait, _STOP_GRACE_S)
         except Exception:  # noqa: BLE001
             try:
                 os.killpg(os.getpgid(p.pid), signal.SIGKILL)
