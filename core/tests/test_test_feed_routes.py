@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from routes.test_feed import _collect_fleet, _probe_source, _source_tenants, _DEFAULTS  # noqa: E402
 from routes.test_feed import TOKEN_ROTATION_SENTINEL as _ROUTE_SENTINEL  # noqa: E402
+from state.manager import StateManager  # noqa: E402
 
 
 class _Hub:
@@ -421,6 +422,9 @@ def test_tenant_registry_survives_unreadable_state():
 
 
 class _FakeState:
+    # The real id resolution, so the test feed matches ids as the hub does.
+    tenant_key = StateManager.tenant_key
+
     def __init__(self, tenants=None):
         self.tenant_state = {"tenants": dict(tenants or {})}
         self.saved = 0
@@ -569,6 +573,24 @@ def test_mirror_shared_tenant_drops_nac_caches_when_the_flag_moves(monkeypatch):
     assert drops == [hub]
     assert _mirror_shared_tenant(hub, registry) is False
     assert drops == [hub]
+
+
+def test_mirror_shared_tenant_skips_a_blank_source_id(monkeypatch):
+    """A source record whose id is only spaces names no tenant, so the
+    mirror flags the source's real shared tenant instead of stopping at the
+    blank one."""
+    import access
+    import routes.cppm as cppm_routes
+    from routes.test_feed import _mirror_shared_tenant
+    monkeypatch.setattr(cppm_routes, "drop_nac_caches", lambda _hub: None)
+    for name in ("_SHARED_TENANT_ID", "_GROUP_MEMBERS", "_AMBIGUOUS_TENANT_IDS"):
+        monkeypatch.setattr(access, name, getattr(access, name))
+    hub = _FakeHub({"a": {"name": "A", "shared": True}, "c": {"name": "C"}})
+    registry = {"  ": {"shared": True}, "c": {"name": "C", "shared": True}}
+    assert _mirror_shared_tenant(hub, registry) is True
+    tenants = hub.state.tenant_state["tenants"]
+    assert tenants["c"]["shared"] is True
+    assert tenants["a"]["shared"] is False
 
 
 def test_mirror_shared_tenant_logs_incomplete_not_mirrored_on_partial_failure(caplog):
@@ -728,3 +750,89 @@ def test_feeder_argv_omits_refresh_token_when_absent():
     argv = _argv_for(receiver_refresh_token="")
     assert not any(a.startswith("--refresh-token") for a in argv)
     assert "--emit-token-rotations" not in argv
+
+
+def test_ensure_local_tenants_treats_another_spelling_as_existing():
+    """Tenant ids are not case-sensitive: the source's "ra" is the receiver's
+    "RA", so no second tenant is created beside it."""
+    from routes.test_feed import _ensure_local_tenants
+    hub = _FakeHub({"RA": {"name": "MY-OWN-RA"}})
+    created = _run(_ensure_local_tenants(hub, {"ra": {"name": "RA"}}, {"RA"}))
+    assert created == []
+    assert hub.state.tenant_state["tenants"] == {"RA": {"name": "MY-OWN-RA"}}
+
+
+def test_preserve_maps_a_source_tenant_to_its_local_spelling():
+    """Having created no shell for the source's "ra", preserve mode must replay
+    its spokes into "RA" rather than the fallback (often the shared tenant,
+    visible to everyone). Only a tenant with no local twin falls back, and the
+    built-in "default" always maps to itself."""
+    from routes.test_feed import _map_source_tenants
+    hub = _FakeHub({"RA": {}, "other": {}})
+    assert _map_source_tenants(hub, {}, {"ra", "OTHER", "default", "gone"}, "shared") == {
+        "ra": "RA", "OTHER": "other", "default": "default", "gone": "shared"}
+
+
+def test_preserve_maps_a_default_tag_to_the_built_in_tenant():
+    """A spoke tagged "Default" by a source that publishes no registry is in
+    the built-in Admin tenant here even with no "default" record stored, not
+    an unknown tenant to fall back from. The shared flag is left alone while
+    that tenant has no record to carry it."""
+    from routes.test_feed import _map_source_tenants, _mirror_shared_tenant
+    hub = _FakeHub({"other": {"shared": True}})
+    assert _map_source_tenants(hub, {}, {"Default"}, "shared") == {"Default": "default"}
+    assert _mirror_shared_tenant(hub, {"Default": {"shared": True}}) is False
+    assert hub.state.tenant_state["tenants"] == {"other": {"shared": True}}
+
+
+def test_mirror_shared_tenant_flags_the_local_spelling():
+    """The source's shared "ra" is this hub's "RA": the flag moves onto "RA"
+    and off every other tenant, instead of being skipped as unknown."""
+    from routes.test_feed import _mirror_shared_tenant
+    hub = _FakeHub({"RA": {}, "other": {"shared": True}})
+    assert _mirror_shared_tenant(hub, {"ra": {"shared": True}}) is True
+    assert hub.state.tenant_state["tenants"]["RA"]["shared"] is True
+    assert hub.state.tenant_state["tenants"]["other"]["shared"] is False
+
+
+def test_ambiguous_source_tenants_are_named_for_the_409():
+    """The start route refuses (409, before writing) any source id it cannot
+    match to one tenant: two source ids that differ only by case would land in
+    one tenant here, and an id several local tenants share in other cases
+    cannot be placed without guessing. The exact spelling always matches."""
+    from routes.test_feed import _ambiguous_source_tenants
+    hub = _FakeHub({"RA": {}, "Ra": {}, "ok": {}})
+    assert _ambiguous_source_tenants(hub, {}, {"x", "X", "OK"}) == ["X", "x"]
+    assert _ambiguous_source_tenants(hub, {}, {"rA"}) == ["rA"]
+    assert _ambiguous_source_tenants(hub, {}, {"RA", "new"}) == []
+
+
+def test_a_spoke_tag_names_its_registry_tenant_in_any_case():
+    """The source's own access checks match a spoke tagged "acme" to its
+    registry's "ACME", so the feed does too: one tenant, not a refusal, and
+    its spokes join that tenant here."""
+    from routes.test_feed import _ambiguous_source_tenants, _map_source_tenants
+    hub = _FakeHub({"ACME": {}})
+    reg = {"ACME": {"name": "Acme"}}
+    assert _ambiguous_source_tenants(hub, reg, {"acme", "ACME"}) == []
+    assert _map_source_tenants(hub, reg, {"acme", "gone"}, "shared") == {
+        "acme": "ACME", "gone": "shared"}
+    # The source's built-in "default" has no record there either.
+    assert _ambiguous_source_tenants(hub, {"default": {}}, {"Default"}) == []
+    assert _map_source_tenants(hub, {"default": {}}, {"Default"}, "shared") == {
+        "Default": "default"}
+
+
+def test_registry_tenants_only_case_or_spaces_tell_apart_are_refused():
+    """The source keeps such tenants apart by exact spelling, but here they
+    would merge into one: refuse them (and any tag that cannot pick between
+    them). A source record spelt "Default" sits beside the source's built-in
+    "default" the same way."""
+    from routes.test_feed import _ambiguous_source_tenants
+    hub = _FakeHub({})
+    assert _ambiguous_source_tenants(hub, {"x": {}, "X": {}}, {"x"}) == ["X", "x"]
+    assert _ambiguous_source_tenants(hub, {"ACME": {}, " ACME ": {}}, set()) == [
+        " ACME ", "ACME"]
+    assert _ambiguous_source_tenants(hub, {"ACME": {}, "acme": {}}, {"Acme"}) == [
+        "ACME", "Acme", "acme"]
+    assert _ambiguous_source_tenants(hub, {"Default": {}}, set()) == ["Default", "default"]

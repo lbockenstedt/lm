@@ -101,6 +101,9 @@ def register(app, hub, ctx):
         # Tenant-admins can't reach the admin slot, only their own tenants.
         if bucket == _cv.ADMIN_BUCKET:
             return False
+        # Exact on purpose, unlike access.tenant_among: the bucket is the
+        # vault's storage key (cred_vault's "buckets"/"secrets" dicts), so
+        # another spelling names a different bucket. Refusing it fails closed.
         return bucket in _acting_tenants(sess)
 
     def _require_reach(sess, bucket: str):

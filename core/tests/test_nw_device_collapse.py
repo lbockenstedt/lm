@@ -99,6 +99,19 @@ def test_hub_primaries_same_name_conflicting_serials_stay_apart():
     assert p == {"1": "1", "2": "2"}
 
 
+def test_hub_primaries_never_merge_legacy_tenants_spelt_only_by_case(monkeypatch):
+    # One tenant's rows fold whatever their case, but with "acme" and "ACME"
+    # both stored, tenant ids compare by exact spelling
+    # (access._AMBIGUOUS_TENANT_IDS), so a serial seen in each stays two rows.
+    import access
+    devs = [_dev(1, "SW", "10.0.0.1", tenant="acme"), _dev(2, "SW", "10.0.0.2", tenant="ACME")]
+    ident = {"1": {"serial": "S1"}, "2": {"serial": "S1"}}
+    assert nw_hardware_primaries(devs, ident) == {"1": "1", "2": "1"}
+    monkeypatch.setattr(access, "_AMBIGUOUS_TENANT_IDS",
+                        access._case_collisions({"acme": {}, "ACME": {}}))
+    assert nw_hardware_primaries(devs, ident) == {"1": "1", "2": "2"}
+
+
 @pytest.mark.asyncio
 async def test_alias_row_is_not_pushed_to_netbox():
     from nw_discovery_sync import NwDiscoverySyncMixin

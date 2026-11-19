@@ -10,10 +10,15 @@ resolves server-side, and the visibility rule must scope on it.
 import json
 import os
 import sys
+from types import SimpleNamespace
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from hub_bug_store import HubBugStoreMixin  # noqa: E402
+from routes import setup_admin  # noqa: E402
 
 
 class _Store(HubBugStoreMixin):
@@ -55,27 +60,21 @@ def test_warm_load_rebuilds_tenant_id_from_disk(tmp_path):
     assert store2.bug_reports[rid]["tenant_id"] == "dxp"
 
 
-# ── Visibility rule (mirrors routes.setup_admin._bug_report_visible) ──────────
-def _report_tenant(report):
-    """Standalone copy of the route's tenant-resolution: top-level tenant_id,
-    else the tenant in context.currentTenant ('default' sentinel → untagged)."""
-    r = report or {}
-    tid = str(r.get("tenant_id") or "").strip()
-    if tid:
-        return tid
-    cmeta = r.get("context") or {}
-    if isinstance(cmeta, dict):
-        ctid = str(cmeta.get("currentTenant") or "").strip()
-        return "" if ctid == "default" else ctid
-    return ""
-
-
+# ── Visibility rule (drives the real /tenant/bug-reports routes) ──────────────
 def _visible(is_admin, acting_tenants, report):
-    """Standalone copy of the route's scoping predicate for unit testing."""
-    if is_admin:
-        return True
-    tid = _report_tenant(report)
-    return bool(tid) and tid in (acting_tenants or [])
+    """True when the real tenant list route shows ``report`` to this caller.
+    The detail route must agree: 200 when listed, 404 when hidden."""
+    app = FastAPI()
+    hub = SimpleNamespace(_list_bug_reports=lambda: [dict(report, id="r1")],
+                          _get_bug_report=lambda rid: dict(report, id=rid))
+    app.state.hub = hub
+    sess = {"user": {"tenants": list(acting_tenants or [])}}
+    ctx = SimpleNamespace(_is_admin=lambda s: is_admin, _session_user=lambda req: sess)
+    setup_admin.register(app, hub, ctx)
+    c = TestClient(app)
+    listed = bool(c.get("/tenant/bug-reports").json()["reports"])
+    assert c.get("/tenant/bug-reports/r1").status_code == (200 if listed else 404)
+    return listed
 
 
 def test_global_admin_sees_every_report():
@@ -112,3 +111,11 @@ def test_default_sentinel_context_is_untagged():
     r = {"tenant_id": "", "context": {"currentTenant": "default"}}
     assert _visible(False, ["default"], r) is False
     assert _visible(False, ["lrb"], r) is False
+
+
+def test_tenant_admin_sees_own_report_in_any_capitalisation():
+    """A report filed under "ACME" belongs to a user assigned "acme" (tenant ids
+    compare canonically, fleet rule 6.1), but never to another tenant."""
+    assert _visible(False, ["acme"], {"tenant_id": "ACME"}) is True
+    assert _visible(False, ["acme"], {"tenant_id": "", "context": {"currentTenant": "Acme"}}) is True
+    assert _visible(False, ["other"], {"tenant_id": "ACME"}) is False

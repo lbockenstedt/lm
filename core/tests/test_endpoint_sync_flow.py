@@ -323,3 +323,73 @@ async def test_ipam_edit_syncs_through_the_tenants_own_usable_clearpass():
     hub.trigger_endpoint_sync("acme")
     await asyncio.sleep(0)
     assert started == ["acme"]
+# ── a sync goes under the stored tenant id the target names ──────────────────
+
+def _acme_hub(hub, **twins):
+    """``hub`` with the stored tenant "ACME" (plus ``twins``), looked up as
+    StateManager looks tenants up."""
+    from _fakes import bind_state_tenant_lookups
+    hub.state = bind_state_tenant_lookups(FakeState(
+        global_config={},
+        tenants={"ACME": {"name": "Acme", "netbox_tenant_slug": "acme"}, **twins}))
+    return hub
+
+
+_TWIN = {" ACME ": {"name": "Acme legacy", "netbox_tenant_slug": "acme-old"}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["acme", " ACME "])
+async def test_sync_in_another_spelling_goes_under_the_stored_id(target):
+    """'Sync now' for another spelling of "ACME" syncs ACME under "ACME".
+    Before, "acme" was skipped as unbound, and " ACME " was pushed and
+    recorded under " ACME "."""
+    hub = _acme_hub(_SyncHub(responses={
+        ("netbox-spoke-1", "NETBOX_GET_IPS"): _netbox_ips_payload(),
+        ("cppm-spoke-1", "CPPM_SYNC_ENDPOINTS"): _cppm_ok_payload(),
+    }))
+    status = await hub.sync_tenant_endpoints(target)
+    (_, _, ipam), (_, _, push) = hub.request_log
+    assert ipam == {"tenant": "acme"}
+    assert push["tenant_id"] == "ACME" and len(push["endpoints"]) == 2
+    assert status["status"] == "success"
+    assert list(hub.simulations_store.recorded) == ["ACME"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", [" ACME", "   "])
+async def test_sync_for_an_id_naming_no_single_tenant_calls_no_spoke(target):
+    """A target that names both stored twins, or is blank, calls no spoke and
+    records no status. Before, " ACME" read "ACME"'s endpoints (get_tenant
+    ignores surrounding spaces) and pushed them with replace=True to the
+    ClearPass spoke the picker fell back to."""
+    hub = _acme_hub(_SyncHub(responses={}), **_TWIN)
+    status = await hub.sync_tenant_endpoints(target)
+    assert status["status"] == "skipped"
+    assert hub.request_log == []
+    assert hub.simulations_store.recorded == {}
+
+
+@pytest.mark.asyncio
+async def test_nad_sync_in_another_spelling_uses_the_stored_tenant(monkeypatch):
+    """Network devices for "acme" come from the stored "ACME"'s vault bucket
+    and are registered under "ACME" (before, the bucket searched was "acme")."""
+    hub = _acme_hub(await _nad_hub(
+        monkeypatch, [{"bucket": "ACME", "value": {"radius_secret": "r1"}}], ["10.1.0.0/16"]))
+    res = await hub.sync_tenant_nads("acme")
+    assert res["status"] == "SUCCESS"
+    (_, _, payload), = hub.request_log
+    assert payload["tenant_id"] == "ACME" and payload["radius_secret"] == "r1"
+
+
+@pytest.mark.asyncio
+async def test_nad_sync_for_an_id_naming_both_twins_registers_nothing(monkeypatch):
+    """" ACME" names both stored twins, so nothing is registered for it, even
+    from a vault bucket spelt " ACME" (the prefixes stand in for "ACME"'s,
+    which get_tenant's slug lookup would return for it)."""
+    hub = _acme_hub(await _nad_hub(
+        monkeypatch, [{"bucket": " ACME", "value": {"radius_secret": "r1"}}], ["10.1.0.0/16"]),
+        **_TWIN)
+    res = await hub.sync_tenant_nads(" ACME")
+    assert res["status"] == "skipped"
+    assert hub.request_log == []

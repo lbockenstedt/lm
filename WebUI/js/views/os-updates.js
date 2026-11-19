@@ -31,6 +31,8 @@ const _osuActions = {
     toggleNode: el => osuToggleNode(el.dataset.node, el.checked),
     toggleGroup: el => osuToggleGroup(el.dataset.tenant, el.dataset.state, el.checked),
     setSort: el => osuSetSort(el.value),
+    pickTenant: el => osuPick('tenant', el.dataset.pick),
+    pickState: el => osuPick('state', el.dataset.pick),
     togglePkg: el => osuTogglePkg(el.dataset.node, el.dataset.pkg, el.checked),
     reboot: el => osuReboot(el.dataset.node),
     fixAccess: el => osuFixAccess(el.dataset.node),
@@ -39,8 +41,11 @@ const _osuActions = {
 };
 
 function renderOsUpdatesView(content) {
-    // A fresh visit starts from the default order (the dropdown below is new too).
+    // A fresh visit starts from the default order (the dropdown below is new
+    // too), with nothing picked and nothing ticked.
     _osuUi.sort = 'attention';
+    _osuUi.pick = { tenant: null, state: null };
+    _osuClearSel();
     // Fleet-wide settings are Global Admin only; a Tenant Admin sees just their nodes.
     const osuFleetCls = isAdmin() ? '' : 'hidden';
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
@@ -57,7 +62,9 @@ function renderOsUpdatesView(content) {
 • Auto-reboot (on by default for auto-patch nodes) reboots nodes that installed something once the run is done, hub last.
 • Proxmox cluster nodes reboot only when needed, in HA maintenance mode (guests move off first), one node at a time.
 • Nodes update one at a time; the hub goes last (this page restarts).
-• Nodes are grouped by tenant, then by state (needs attention, patching, updates pending, not checked yet, up to date); each group has a Select all and the Sort box orders them.
+• Nothing is listed until you pick a tenant or a state (needs attention, patching, updates pending, not checked yet, up to date) in the bar above the list; click a picked one again to clear it. Changing the pick unticks every node.
+• The picked nodes are grouped by tenant, then by state; each group has a Select all and the Sort box orders them.
+• Ticks and Select fixes (Who is affected?) cover only the listed nodes. The summary of failed nodes names the listed ones, plus any whose spoke is offline (they drop out of the list, so even a lone one is named) while no tenant and no state other than needs attention is picked, and always when no node reports at all.
 • Separate from LM code updates.">ⓘ</span></h3>
                 <span class="flex items-center gap-3"><span id="osu-status" class="text-xs text-slate-500"></span><span id="osu-checked" class="text-xs text-slate-500"></span></span>
             </div>
@@ -65,7 +72,7 @@ function renderOsUpdatesView(content) {
             <div class="flex flex-wrap items-center gap-2">
                 <button data-action="check" class="${btnSecCls}">↻ Check for updates</button>
                 <button id="osu-apply-selected" data-action="applySelected" class="${btnCls}" disabled>Deploy selected (0)</button>
-                <button id="osu-apply" data-action="apply" class="${btnSecCls}">Approve &amp; deploy all</button>
+                <button id="osu-apply" data-action="apply" class="${btnSecCls}" title="Every node you manage that has pending updates, not only the nodes listed below">Approve &amp; deploy all</button>
                 <label class="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer ml-1" title="Nodes without picked packages get only their pending security updates"><input type="checkbox" id="osu-security-only" class="w-4 h-4 rounded">Security updates only</label>
                 <button id="osu-cancel" data-action="cancel" class="${btnSecCls} hidden">Cancel run</button>
                 <span id="osu-run" class="text-xs text-slate-500 ml-auto"></span>
@@ -353,9 +360,13 @@ async function osuCheck() {
 // leave a full dist-upgrade selected.
 const _osuSel = { nodes: new Set(), pkgs: {} };
 
-// How the node list is ordered ('attention' | 'name' | 'updates'). Not saved:
-// leaving the tab and coming back resets it (renderOsUpdatesView).
-const _osuUi = { sort: 'attention' };
+// How the node list is ordered ('attention' | 'name' | 'updates'), and the
+// drill-down picks. Nothing is listed until a tenant or a state is picked
+// (owner request: never open on every node and then filter). null = not
+// picked; a tenant pick is a group key from _osuTenantKey(), a state pick an
+// _OSU_STATES id. Not saved: leaving the tab and coming back resets both
+// (renderOsUpdatesView).
+const _osuUi = { sort: 'attention', pick: { tenant: null, state: null } };
 
 // The node list is a view (js/core/view.js): a re-render morphs the page, so
 // open package lists stay open while polling.
@@ -396,20 +407,50 @@ function osuSetSort(sort) {
     _osuView.refresh();
 }
 
-// Pending upgrades on each affected node that belong to the vulnerable packages.
-function _osuCveFixes(d) {
-    const nodes = {};
-    (_osuView.state.data.nodes || []).forEach(n => { nodes[`${n.kind}:${n.id}`] = n; });
-    const picks = [];
-    (d.results || []).forEach(r => r.affected.forEach(a => {
-        const pending = new Set(((nodes[a.node] || {}).packages || []).map(p => p.package));
-        a.binaries.filter(b => pending.has(b)).forEach(b => picks.push([a.node, b]));
-    }));
-    return picks;
+// Untick every node and package.
+function _osuClearSel() {
+    _osuSel.nodes.clear();
+    Object.keys(_osuSel.pkgs).forEach(k => delete _osuSel.pkgs[k]);
 }
 
+// A drill-down chip was clicked ('tenant' or 'state' row): pick it, or clear
+// the pick when it is already picked. Every tick is cleared too, so none is
+// left on a node the new pick hides. The list is redrawn from scratch: a new
+// pick is a new view, so its groups open as the defaults say rather than as
+// the user left them under the old pick.
+function osuPick(row, value) {
+    _osuUi.pick[row] = _osuUi.pick[row] === value ? null : value;
+    _osuClearSel();
+    const body = document.getElementById('osu-body');
+    if (body) body.innerHTML = '';
+    _osuRender(_osuView.state.data);
+}
+
+// What "Select fixes" can tick for a CVE lookup: the pending upgrades of the
+// vulnerable packages on each affected node whose packages can be picked.
+// `listed` holds the [node key, package] pairs on nodes the list shows under
+// the current picks; `hidden` counts those on nodes it hides. Only the listed
+// ones are ticked: a tick on a hidden node could not be seen or cleared before
+// "Deploy selected". A package that two CVEs share counts once.
+function _osuCveFixes(d) {
+    const data = _osuView.state.data;
+    const busy = _osuBusy();
+    const nodes = (data.nodes || []).map(n => _osuClassify(n, data.run, busy));
+    const shown = new Set((_osuListed(nodes) || []).map(c => c.key));
+    const pending = new Map(nodes.filter(c => _osuCanPick(c.n, busy))
+        .map(c => [c.key, new Set((c.n.packages || []).map(p => p.package))]));
+    const fixes = new Map();  // node key -> its fix packages
+    (d.results || []).forEach(r => r.affected.forEach(a => {
+        const avail = pending.get(a.node);
+        if (avail) a.binaries.filter(b => avail.has(b)).forEach(b => fixes.set(a.node, (fixes.get(a.node) || new Set()).add(b)));
+    }));
+    const pairs = [...fixes].flatMap(([key, pkgs]) => [...pkgs].map(p => [key, p]));
+    return { listed: pairs.filter(([key]) => shown.has(key)), hidden: pairs.filter(([key]) => !shown.has(key)).length };
+}
+
+// "Select fixes": tick the CVE's fixes on the listed nodes (_osuCveFixes).
 function osuCveSelectFixes(d) {
-    const picks = _osuCveFixes(d);
+    const picks = _osuCveFixes(d).listed;
     picks.forEach(([key, pkg]) => {
         (_osuSel.pkgs[key] || (_osuSel.pkgs[key] = new Set())).add(pkg);
         _osuSel.nodes.delete(key);
@@ -506,10 +547,11 @@ function CveResult({ d }) {
     } else if (!(d.results || []).length) {
         body = note('text-slate-500', `No open CVEs match "${d.query}" on any checked node.`);
     } else {
-        const fixes = _osuCveFixes(d).length;
+        const fixes = _osuCveFixes(d);
         body = phtml`<div class="flex flex-wrap items-center gap-2 text-xs">
                 <b class=${d.affected_nodes ? 'text-red-700' : 'text-emerald-700'}>${d.affected_nodes} of ${d.checked_nodes} checked node(s) affected</b>
-                ${fixes ? phtml`<button type="button" onClick=${() => osuCveSelectFixes(d)} class="text-xs font-bold text-emerald-800 border border-emerald-300 rounded px-2 py-0.5 hover:bg-emerald-50" title="Pick the pending updates of the vulnerable packages on affected nodes">Select fixes (${fixes})</button>` : null}
+                ${fixes.listed.length ? phtml`<button type="button" onClick=${() => osuCveSelectFixes(d)} class="text-xs font-bold text-emerald-800 border border-emerald-300 rounded px-2 py-0.5 hover:bg-emerald-50" title="Pick the pending updates of the vulnerable packages on the affected nodes listed under Nodes">Select fixes (${fixes.listed.length})</button>` : null}
+                ${fixes.hidden ? phtml`<span class="text-slate-500" title="Select fixes ticks only nodes listed under Nodes">${fixes.hidden} fix(es) on nodes not listed above: pick their tenant or state to select them</span>` : null}
                 ${d.truncated ? phtml`<span class="text-slate-500">showing the first 200 CVEs — narrow the search</span>` : null}</div>
             ${d.results.map(r => phtml`<${CveCard} r=${r} />`)}`;
     }
@@ -535,7 +577,7 @@ async function _osuDeploy(body, summary) {
     try {
         const r = await apiJson('/api/os-updates/apply', { method: 'POST', body: JSON.stringify(body) });
         showToast(`Deploying to ${r.queued} node(s) — one at a time.`, 'success');
-        _osuSel.nodes.clear(); Object.keys(_osuSel.pkgs).forEach(k => delete _osuSel.pkgs[k]);
+        _osuClearSel();
         _osuStartPoll();
     } catch (e) { showToast('Apply failed: ' + (e.message || e), 'error'); }
 }
@@ -613,6 +655,23 @@ function _osuRender(d) {
     if (!document.getElementById('osu-body')) return;
     const run = d.run;
     const busy = _osuBusy();
+    // A picked tenant that no longer has a node (its spokes went away) falls
+    // back to "not picked", with its ticks: its chip could not be drawn to
+    // clear it. A state pick is kept even when empty: nodes move between
+    // states during a run, and its chip is drawn while any node reports. With
+    // no node at all there is no bar, so it falls back too: nodes that report
+    // again are not listed under a pick the page no longer shows.
+    const pick = _osuUi.pick;
+    if (pick.tenant !== null && !(d.nodes || []).some(n => _osuTenantKey(n) === pick.tenant)) {
+        pick.tenant = null;
+        _osuClearSel();
+    }
+    if (!(d.nodes || []).length) pick.state = null;
+    // A re-check or a run can move a ticked node out of the picked tenant or
+    // state: its tick goes too, so "Deploy selected" never counts a node the
+    // list hides.
+    const listed = new Set((_osuListed((d.nodes || []).map(n => _osuClassify(n, run, busy))) || []).map(c => c.key));
+    _osuSelectedKeys().filter(k => !listed.has(k)).forEach(k => { _osuSel.nodes.delete(k); delete _osuSel.pkgs[k]; });
     const runEl = document.getElementById('osu-run');
     if (runEl) {
         const label = { finished: 'complete', cancelled: 'cancelled', interrupted: 'interrupted by a hub restart' };
@@ -642,34 +701,54 @@ function _osuRender(d) {
     const checkedEl = document.getElementById('osu-checked');
     if (checkedEl) checkedEl.textContent = 'Last checked: ' + (d.checked_at ? new Date(d.checked_at * 1000).toLocaleString() : 'never');
     _osuView.refresh();
+    // The CVE card's "Select fixes" count follows the picks and the data. Same
+    // component at the same root: Preact keeps its search and result.
+    const cveEl = document.getElementById('osu-cve');
+    if (cveEl) render(phtml`<${CveLookup} />`, cveEl);
     if (busy && !_osuPoll) _osuStartPoll();
 }
 
 // Failed nodes of the last run that share a cause (e.g. one offline spoke),
-// shown once with the nodes it took down instead of N identical row errors.
-function _osuFailureGroups(run) {
+// shown once with the nodes it took down. It names only nodes the picks cover:
+// those listed (`listed`, from _osuListed: null while the list asks for a
+// pick), and failed nodes the hub no longer reports. An offline spoke and its
+// agents drop out of `nodes` (every classified node), so they have no row,
+// tenant or chip and this is the only place they show: they count as needing
+// attention with no tenant, named unless a tenant or another state is picked,
+// and their cause shows even when it took down only them. With no node
+// reported there is no drill-down bar, so no pick hides them.
+function _osuFailureGroups(run, nodes, listed) {
+    const pick = _osuUi.pick;
+    const reported = new Set(nodes.map(c => c.key));
+    const shown = new Set((listed || []).map(c => c.key));
+    const gone = !nodes.length || (pick.tenant === null && (pick.state === null || pick.state === 'attention'));
     const groups = new Map();
-    (run && run.items || []).filter(i => i.status === 'failed').forEach(i => {
+    (run && run.items || []).filter(i => i.status === 'failed' && (shown.has(i.key) || (gone && !reported.has(i.key)))).forEach(i => {
         const cause = i.cause || i.message || 'failed';
-        if (!groups.has(cause)) groups.set(cause, []);
-        groups.get(cause).push(i.label || i.key);
+        if (!groups.has(cause)) groups.set(cause, { labels: [], unreported: false });
+        const g = groups.get(cause);
+        g.labels.push(i.label || i.key);
+        g.unreported = g.unreported || !reported.has(i.key);
     });
-    const shared = [...groups].filter(([, labels]) => labels.length > 1);
-    if (!shared.length) return '';
-    return safeHtml`<div class="space-y-2 mb-3">${shared.map(([cause, labels]) => safeHtml`
+    // A listed node's row shows its own failure, so a cause is named once it
+    // took down two nodes, or any node that has no row.
+    const banners = [...groups].filter(([, g]) => g.labels.length > 1 || g.unreported);
+    if (!banners.length) return '';
+    return safeHtml`<div class="space-y-2 mb-3">${banners.map(([cause, { labels }]) => safeHtml`
         <div class="rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-            <div class="font-bold">${labels.length} nodes not patched — ${cause}</div>
+            <div class="font-bold">${labels.length} ${labels.length === 1 ? 'node' : 'nodes'} not patched — ${cause}</div>
             <div class="mt-1 text-red-600">${labels.join(', ')}</div>
         </div>`)}</div>`;
 }
 
-// Display order and labels of the state groups inside a tenant, worst first.
+// Display order, labels and drill-down chip tooltips of the state groups
+// inside a tenant, worst first. The tooltips list what _osuClassify puts in each.
 const _OSU_STATES = [
-    { id: 'attention', label: 'Needs attention' },
-    { id: 'patching', label: 'Patching' },
-    { id: 'pending', label: 'Updates pending' },
-    { id: 'unchecked', label: 'Not checked yet' },
-    { id: 'current', label: 'Up to date' },
+    { id: 'attention', label: 'Needs attention', title: 'Failed, interrupted or skipped patches, unreachable nodes, blocked deploys, and reboots that are due or did not finish cleanly' },
+    { id: 'patching', label: 'Patching', title: 'Queued, snapshotting, installing or rebooting in the current run' },
+    { id: 'pending', label: 'Updates pending', title: 'Updates waiting to be deployed' },
+    { id: 'unchecked', label: 'Not checked yet', title: 'Not checked for updates yet' },
+    { id: 'current', label: 'Up to date', title: 'Patched: nothing left to install' },
 ];
 
 // A reboot was scheduled in the last 15 minutes (the node is about to restart).
@@ -696,6 +775,17 @@ function _osuRebootProblem(item) {
 // Node can be ticked for "Deploy selected" (and by a group's select-all).
 function _osuSelectable(n, busy) { return !!(n.eligible && n.count && !n.apply_blocker && !busy); }
 
+// Node's packages can be ticked one by one: its LM reports the 'packages' feature.
+function _osuCanPick(n, busy) { return _osuSelectable(n, busy) && (n.features || []).includes('packages'); }
+
+// The tenant group a node is listed under. Grouped by the tenant's key, never
+// its name: two tenants may share a name. Real keys are prefixed, so no tenant
+// id (any text is a valid id) can equal the "hub" or "none" keys and merge
+// into those groups.
+function _osuTenantKey(n) {
+    return n.kind === 'hub' ? 'hub' : (n.tenant_key ? `tenant-${n.tenant_key}` : 'none');
+}
+
 // Where a node sits on the page: its run item, the tenant group (a name, never
 // an id), the state group and the state badge. One place decides all of it, so
 // the row badge and the group it is listed under can never disagree.
@@ -707,10 +797,7 @@ function _osuClassify(n, run, busy) {
     // never as a node that is still patching.
     let st = item && item.status;
     if (!busy) st = { applying: 'interrupted', rebooting: 'interrupted', queued: 'skipped', snapshotting: 'skipped' }[st] || st;
-    // Group by the tenant's key, show its name: two tenants may share a name. Real
-    // keys are prefixed, so no tenant id (any text is a valid id) can equal the
-    // "hub" or "none" keys and merge into those groups.
-    const tenantKey = n.kind === 'hub' ? 'hub' : (n.tenant_key ? `tenant-${n.tenant_key}` : 'none');
+    const tenantKey = _osuTenantKey(n);
     const tenant = n.tenant || (n.kind === 'hub' ? 'Hub' : 'Unassigned');
     let group, badge;
     // While a run is going the cached inventory is stale: a node it just finished is shown
@@ -786,13 +873,17 @@ function _osuStateHtml(t, s, rows, open, busy) {
     </details>`;
 }
 
-// One tenant: a collapsible card whose header counts what needs doing, then its state groups.
-function _osuTenantHtml(t, sort, busy) {
+// One tenant: a collapsible card whose header counts what needs doing in the
+// whole tenant, then its state groups: only the picked state's, when one is
+// picked (`state`), so the header can count nodes that are not listed.
+function _osuTenantHtml(t, sort, busy, state) {
     const states = _OSU_STATES
         .map(s => ({ s, rows: _osuSortNodes(t.items.filter(c => c.group === s.id), sort) }))
         .filter(x => x.rows.length);
-    // Up to date is collapsed unless it is all there is.
-    const groups = states.map(({ s, rows }) => _osuStateHtml(t, s, rows, s.id !== 'current' || states.length === 1, busy));
+    const shown = states.filter(x => state === null || x.s.id === state);
+    // Up to date is collapsed unless it is all there is to show.
+    const groups = shown.map(({ s, rows }) => _osuStateHtml(t, s, rows, s.id !== 'current' || shown.length === 1, busy));
+    const listed = shown.reduce((sum, x) => sum + x.rows.length, 0);
     const badges = [
         t.attention ? _osuBadge(`${t.attention} need attention`, 'red') : '',
         t.packages ? _osuBadge(`${t.packages} package(s) pending`, 'amber') : '',
@@ -802,23 +893,85 @@ function _osuTenantHtml(t, sort, busy) {
     return safeHtml`<details id="osu-t-${encodeURIComponent(t.key)}" open class="border border-slate-200 rounded-md mb-3">
         <summary class="cursor-pointer px-3 py-2 flex flex-wrap items-center gap-2 bg-slate-50 rounded-md">
             <span class="text-sm font-bold text-slate-700">${t.name}</span>
-            <span class="text-xs text-slate-500">${t.items.length} node(s)</span>
+            <span class="text-xs text-slate-500">${listed === t.items.length ? '' : `${listed} of `}${t.items.length} node(s)</span>
             ${badges}
         </summary>
         <div class="px-3 pb-2">${groups}</div>
     </details>`;
 }
 
-// The Nodes card: nodes grouped by tenant, then by state.
+// The drill-down bar above the list: a Tenant row and a State row, each drawn
+// when it offers a real choice (2+ tenants or states) or holds a pick, and has
+// a chip to show. A row's chips are the groups that have a node under the other
+// row's pick, plus its own picked chip so a pick never hides itself; counts say
+// what a click would list. A state pick left with no node (a run moved them on)
+// therefore hides an unpicked Tenant row: no tenant has a node to list. Same
+// idiom as Setup → Module Management → Managed Devices (.sub-nav-item.active =
+// HPE-green underline).
+function _osuDrillHtml(tenants, nodes, offered) {
+    const pick = _osuUi.pick;
+    const chip = (action, value, active, label, count, title) => safeHtml`<button type="button" data-action="${action}" data-pick="${value}" title="${active ? 'Click again to clear this pick' : title}" class="sub-nav-item ${active ? 'active' : ''} px-2 py-1 text-xs tracking-normal select-none">${label}<span class="ml-1 text-xs text-slate-500 normal-case">${count}</span></button>`;
+    const row = (label, chips) => (chips.length ? safeHtml`<div class="flex flex-wrap items-center gap-1"><span class="text-xs font-bold text-slate-500 mr-1">${label}</span>${chips}</div>` : '');
+    const rows = [];
+    if (offered.tenant || pick.tenant !== null) {
+        // Tenants A–Z, then the hub, then nodes with no tenant.
+        const rank = t => (t.key === 'hub' ? 1 : t.key === 'none' ? 2 : 0);
+        const chips = [...tenants].sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name))
+            .map(t => ({ t, count: t.items.filter(c => pick.state === null || c.group === pick.state).length }))
+            .filter(x => x.count || x.t.key === pick.tenant)
+            .map(({ t, count }) => chip('pickTenant', t.key, t.key === pick.tenant, t.name, count, "List only this tenant's nodes"));
+        rows.push(row('Tenant', chips));
+    }
+    if (offered.state || pick.state !== null) {
+        const chips = _OSU_STATES
+            .map(s => ({ s, count: nodes.filter(c => c.group === s.id && (pick.tenant === null || c.tenantKey === pick.tenant)).length }))
+            .filter(x => x.count || x.s.id === pick.state)
+            .map(({ s, count }) => chip('pickState', s.id, s.id === pick.state, s.label, count, s.title));
+        rows.push(row('State', chips));
+    }
+    const drawn = rows.filter(Boolean);
+    return drawn.length ? safeHtml`<div class="space-y-1 border-b border-slate-100 pb-2 mb-3">${drawn}</div>` : '';
+}
+
+// Which drill-down rows offer a real choice: 2+ tenants, 2+ states.
+function _osuOffered(nodes) {
+    return { tenant: new Set(nodes.map(c => c.tenantKey)).size > 1, state: new Set(nodes.map(c => c.group)).size > 1 };
+}
+
+// The nodes the list shows under the current picks, from the classified
+// `nodes` (_osuClassify): null while it asks for a pick instead (a row offers a
+// choice and nothing is picked), else those in the picked tenant and state.
+// The list, the ticks, the failure banner and the CVE "Select fixes" all use
+// it, so none of them reaches a node the list hides.
+function _osuListed(nodes) {
+    const pick = _osuUi.pick;
+    const offered = _osuOffered(nodes);
+    if (pick.tenant === null && pick.state === null && (offered.tenant || offered.state)) return null;
+    return nodes.filter(c => (pick.tenant === null || c.tenantKey === pick.tenant) && (pick.state === null || c.group === pick.state));
+}
+
+// The Nodes card: the drill-down bar, then the picked nodes grouped by tenant,
+// then by state. While a row offers a choice and nothing is picked, it asks for
+// a pick instead of listing every node.
 function _osuBodyHtml({ data: d }) {
     const run = d.run;
     const busy = _osuBusy();
     const nodes = (d.nodes || []).map(n => _osuClassify(n, run, busy));
-    if (!nodes.length) return safeHtml`<p class="text-xs text-slate-500 italic">No nodes reporting.</p>`;
+    if (!nodes.length) return safeHtml`${_osuFailureGroups(run, nodes, [])}<p class="text-xs text-slate-500 italic">No nodes reporting.</p>`;
     const byTenant = new Map();
     nodes.forEach(c => byTenant.set(c.tenantKey, [...(byTenant.get(c.tenantKey) || []), c]));
-    const tenants = _osuSortTenants([...byTenant].map(([key, items]) => _osuTenantStats(key, items)), _osuUi.sort);
-    return safeHtml`${_osuFailureGroups(run)}${tenants.map(t => _osuTenantHtml(t, _osuUi.sort, busy))}`;
+    const tenants = [...byTenant].map(([key, items]) => _osuTenantStats(key, items));
+    const offered = _osuOffered(nodes);
+    const bar = _osuDrillHtml(tenants, nodes, offered);
+    const listed = _osuListed(nodes);
+    const failures = _osuFailureGroups(run, nodes, listed);
+    if (!listed) {
+        const what = [offered.tenant && 'a tenant', offered.state && 'a state'].filter(Boolean).join(' or ');
+        return safeHtml`${failures}${bar}<p class="text-xs text-slate-500 italic">${nodes.length} nodes. Pick ${what} above to list them.</p>`;
+    }
+    const shown = tenants.filter(t => listed.some(c => c.tenantKey === t.key));
+    if (!shown.length) return safeHtml`${failures}${bar}<p class="text-xs text-slate-500 italic">No nodes are in this state right now.</p>`;
+    return safeHtml`${failures}${bar}${_osuSortTenants(shown, _osuUi.sort).map(t => _osuTenantHtml(t, _osuUi.sort, busy, _osuUi.pick.state))}`;
 }
 
 // One node row: name, state badge, pending packages, reboot and auto-patch controls.
@@ -834,7 +987,7 @@ function _osuRowHtml(c, busy) {
     const nodeBox = selectable
         ? safeHtml`<input type="checkbox" class="w-4 h-4 rounded" ${_osuSel.nodes.has(key) ? 'checked' : ''} data-action="toggleNode" data-node="${key}" title="Upgrade everything pending on this node">`
         : '';
-    const canPick = selectable && feats.includes('packages');
+    const canPick = _osuCanPick(n, busy);
     const picked = _osuSel.pkgs[key] || new Set();
     const pkgs = (n.packages || []).map(p => {
         const label = safeHtml`${p.package} <span class="text-slate-500">${p.current}→${p.candidate}</span>`;

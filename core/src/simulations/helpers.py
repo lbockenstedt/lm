@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 import json
 # Regular expressions for vid:pid validation and delimiter splitting.
 import re
+# Tenant ids compare in any case (fleet rule 6.1).
+from access import same_tenant
 
 # Sim-Quota catalog cache. The catalog (Config → Sim Quotas) is derived from the
 # tenant's simulation.conf via a LIVE round-trip to the cs spoke (15s timeout) —
@@ -548,7 +550,7 @@ def _usb_provisioning_status_payload(cfg: Dict[str, Any],
         # Read the agent's client-simulation settings.
         cs = ac.get("client_simulation") or {}
         if isinstance(cs, dict) and cs.get("enabled") \
-                and str(cs.get("tenant_id") or "") == tid:
+                and same_tenant(cs.get("tenant_id"), tid):
             cs_enabled_agent_count += 1
     # Return the tenant toggle (default off), per-spoke rows and the agent count.
     return {"usb_auto_provision": (cfg or {}).get("usb_auto_provision", "off"),

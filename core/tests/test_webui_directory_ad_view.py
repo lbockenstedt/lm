@@ -139,11 +139,11 @@ def test_ad_connection_row_shows_its_own_tenant(hub_url_and_session):  # noqa: F
         context.add_cookies([{"name": "lm_session", "value": token, "url": base}])
         page = context.new_page()
         page.route("**/setup/tenants", lambda r: r.fulfill(content_type="application/json", body=json.dumps(
-            {"tenants": [{"id": "ssplm", "name": "SSPLM"}]})))
+            {"tenants": [{"id": "ssplm", "name": "SSPLM", "tenant_key": "ssplm"}]})))
         page.route("**/setup/ad-connections", lambda r: r.fulfill(
             content_type="application/json", body=json.dumps({"instances": [
-                {"id": "c1", "name": "Corp AD", "tenant_id": "ssplm", "spoke_id": "",
-                 "domain": "corp.example"}]})))
+                {"id": "c1", "name": "Corp AD", "tenant_id": "ssplm", "tenant_key": "ssplm",
+                 "spoke_id": "", "domain": "corp.example"}]})))
         page.goto(base + "/")
         page.wait_for_function("window._lmClickFeedbackInstalled === true")
         page.evaluate("""async () => {

@@ -50,7 +50,7 @@ import jwt
 from cryptography.hazmat.primitives import serialization
 
 # Helpers that turn Entra group membership into LM groups, tenants and permissions.
-from access import groups_and_tenants_for_membership, resolve_effective_permissions
+from access import granted_tenants, groups_and_tenants_for_membership, resolve_effective_permissions
 
 # Shared hub logger.
 logger = logging.getLogger("Hub")
@@ -964,9 +964,10 @@ def build_user_data(hub, user_record: dict, user_id: str) -> dict:
     same shape ``routes/auth.local_login`` builds for a local user). Entra
     users are never protected and never carry a tenant_id beyond their
     derived set."""
-    # Compute effective permissions and gather the fields the session needs.
+    # Compute effective permissions and gather the fields the session needs
+    # (blank grants name no tenant and are dropped).
     perms = resolve_effective_permissions(hub, user_record)
-    tenants = list(user_record.get("tenants", []) or [])
+    tenants = granted_tenants(user_record.get("tenants"))
     name = str(user_record.get("name") or "")
     email = str(user_record.get("email") or "")
     # Session data in the shape local logins use.

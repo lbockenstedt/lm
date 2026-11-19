@@ -286,6 +286,17 @@ def test_tenant_vms_are_its_own_plus_every_vm_on_a_host_pinned_to_it():
     assert sorted(vm["vmid"] for vm in _run(vm_snapshots.tenant_vms(hub, "t1"))) == [101, 102, 103]
 
 
+def test_a_host_pinned_to_a_legacy_twin_tenant_is_not_this_tenants(monkeypatch):
+    # With "T1" and "t1" both stored, the access checks compare them by exact
+    # spelling, so pve2 (pinned to "T1") adds nothing to "t1".
+    import access
+    monkeypatch.setattr(access, "_AMBIGUOUS_TENANT_IDS", frozenset({"t1"}))
+    hub = _Hub()
+    hub.state.system_state["agent_config"] = {"g2": {"client_simulation": {"tenant_id": "T1"}}}
+    hub.agent_info["g2"]["hostname"] = "pve2"
+    assert [vm["vmid"] for vm in _run(vm_snapshots.tenant_vms(hub, "t1"))] == [101]
+
+
 def test_a_schedule_only_snapshots_its_tenants_vms():
     hub = _Hub()
     s = vm_snapshots.save_schedule(hub, {"name": "all lab", "every_hours": 1, "keep": 1,
@@ -306,3 +317,22 @@ def test_schedules_are_per_tenant_in_the_api():
     assert c.post(f"/api/vm-snapshots/schedules/{sid}/run?tenant=t2").status_code == 404
     assert c.delete(f"/api/vm-snapshots/schedules/{sid}?tenant=t2").status_code == 404
     assert c.delete(f"/api/vm-snapshots/schedules/{sid}?tenant=t1").status_code == 200
+
+
+def test_a_schedule_is_its_tenants_in_any_case_but_never_a_legacy_twins(monkeypatch):
+    # The viewed tenant is compared as access compares ids: ACME owns a
+    # schedule saved under "acme", and an edit keeps that spelling. With legacy
+    # tenants "acme" and "ACME" both stored, neither sees nor changes the other's.
+    import access
+    c, hub = _client()
+    body = {"name": "Lab", "every_hours": 24, "keep": 3, "tags": ["lab"]}
+    sid = c.post("/api/vm-snapshots/schedules?tenant=acme", json=body).json()["id"]
+    listed = c.get("/api/vm-snapshots/schedules?tenant=ACME").json()["schedules"]
+    assert [s["id"] for s in listed] == [sid]
+    assert c.put(f"/api/vm-snapshots/schedules/{sid}?tenant=ACME", json=body).status_code == 200
+    assert [s["tenant"] for s in vm_snapshots.list_schedules(hub)] == ["acme"]
+    monkeypatch.setattr(access, "_AMBIGUOUS_TENANT_IDS", frozenset({"acme"}))
+    assert c.get("/api/vm-snapshots/schedules?tenant=ACME").json()["schedules"] == []
+    assert c.put(f"/api/vm-snapshots/schedules/{sid}?tenant=ACME", json=body).status_code == 404
+    assert c.delete(f"/api/vm-snapshots/schedules/{sid}?tenant=ACME").status_code == 404
+    assert c.delete(f"/api/vm-snapshots/schedules/{sid}?tenant=acme").status_code == 200

@@ -110,3 +110,12 @@ def test_persist_and_load(tmp_path):
     api_tokens.load(hub)
     assert api_tokens.bearer_session(_req(access)) is not None
     assert api_tokens.refresh(hub, refresh) is not None
+
+
+def test_a_token_minted_with_blank_grants_resolves_without_them(tmp_path):
+    # A token snapshot from before the routes refused blank grants.
+    hub = _fresh(tmp_path)
+    access, _r, _t = api_tokens.issue_pair(
+        hub, "gail", {"user_id": "gail", "tenants": [" ", "acme"], "tenant_id": " "}, "t")
+    user = api_tokens.bearer_session(_req(access))["user"]
+    assert (user["tenants"], user["tenant_id"]) == (["acme"], "acme")

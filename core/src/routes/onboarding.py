@@ -30,6 +30,8 @@ import secrets
 
 # Request/exception types and the shared logger from the main API module.
 from api import HTTPException, Request, logger
+# Tenant ids compare in any case (fleet rule 6.1).
+from access import raw_tenant_id, tenant_among
 
 
 def register(app, hub, ctx):
@@ -144,7 +146,8 @@ def register(app, hub, ctx):
         out = []
         for sid in known:
             # Tenant binding is the ownership signal — never a client claim.
-            if (hub.state.get_spoke_tenant(sid) or "") != tenant:
+            # Compared in any case (fleet rule 6.1); an unbound spoke is no one's.
+            if not tenant_among(hub.state.get_spoke_tenant(sid), [tenant]):
                 continue
             # Live data is keyed by the spoke's primary key, so resolve it once.
             pk = hub._primary_key(sid)
@@ -209,6 +212,8 @@ def register(app, hub, ctx):
         _require_owns_tenant(request, tenant)
         # The spoke the agent connects through must be bound to exactly this tenant; anything else
         # looks like "not found".
+        # Exact on purpose: the URL tenant becomes the agent's pin below, so it
+        # must be the spoke's stored spelling; any other spelling gets 404.
         bound = hub.state.get_spoke_tenant(spoke_id) or ""
         if bound != tenant:
             raise HTTPException(status_code=404, detail="Not found")
@@ -252,8 +257,8 @@ def register(app, hub, ctx):
         entry = dict(store.get(agent_pk, {}))
         cs_cfg = dict(entry.get("client_simulation") or {})
         # The agent must already be pinned to this tenant; otherwise pretend it does not exist.
-        bound = (cs_cfg.get("tenant_id") or "").strip()
-        if bound != tenant:
+        bound = raw_tenant_id(cs_cfg.get("tenant_id"))
+        if not tenant_among(bound, [tenant]):
             raise HTTPException(status_code=404, detail="Not found")
         # Flip only the enabled flag and write the config back, flagging state for saving.
         cs_cfg["enabled"] = enabled
@@ -290,7 +295,7 @@ def register(app, hub, ctx):
         # binding, so a shared spoke won't match a tenant-admin's own tenant).
         sess = _session_user(request)
         bound = hub.state.get_spoke_tenant(spoke_id) or ""
-        if bound != tenant and not _is_admin(sess):
+        if not tenant_among(bound, [tenant]) and not _is_admin(sess):
             raise HTTPException(status_code=404, detail="Not found")
         # Do the full teardown; any failure is logged with a traceback and surfaced as a 500.
         try:

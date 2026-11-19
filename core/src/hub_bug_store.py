@@ -65,7 +65,9 @@ class HubBugStoreMixin:
         # resolves this server-side (session tenant, else the header tenant
         # picker) and injects it — the browser payload is NOT trusted for it.
         # Untagged (legacy / no active tenant) reports stay Global-Admin-only.
-        tenant_id = str(payload.get("tenant_id") or "").strip()
+        # Kept as resolved (unstripped): " ACME " is a legacy twin of "ACME".
+        from access import raw_tenant_id
+        tenant_id = raw_tenant_id(payload.get("tenant_id"))
         # Optional Request-Assistant fields (absent on one-shot reports): a short
         # title (ab prefers it for the issue title), the structured spec and the
         # assistant session id. Older ab ignores them.

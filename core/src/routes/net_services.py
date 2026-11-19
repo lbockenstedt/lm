@@ -349,7 +349,8 @@ def register(app, hub, ctx):
             return spoke_or_503(hub.get_spoke_by_type("dns"), "DNS")
         # The tenant's own DNS instance, if its spoke is connected.
         instances = (hub.state.system_state.get("global_config", {}) or {}).get("dns_instances", []) or []
-        inst = next((i for i in instances if isinstance(i, dict) and i.get("tenant_id") == tid), None)
+        inst = next((i for i in instances
+                     if isinstance(i, dict) and access.tenant_among(i.get("tenant_id"), [tid])), None)
         spoke_id = (inst or {}).get("spoke_id") or ""
         if spoke_id and hub._primary_key(spoke_id) in hub.active_connections:
             return spoke_id
@@ -716,7 +717,8 @@ def register(app, hub, ctx):
                 return None
             # The tenant's instance, if any.
             insts = (hub.state.system_state.get("global_config", {}) or {}).get(f"{kind}_instances", []) or []
-            inst = next((i for i in insts if isinstance(i, dict) and i.get("tenant_id") == tid), None)
+            inst = next((i for i in insts
+                         if isinstance(i, dict) and access.tenant_among(i.get("tenant_id"), [tid])), None)
             return (inst or {}).get("spoke_id") or ""
 
         # Attach the hint for offline lookups.
@@ -1399,7 +1401,8 @@ def register(app, hub, ctx):
             return None
         # The tenant has its own resolver: show them.
         insts = (hub.state.system_state.get("global_config", {}) or {}).get("dns_instances", []) or []
-        inst = next((i for i in insts if isinstance(i, dict) and i.get("tenant_id") == tid), None)
+        inst = next((i for i in insts
+                     if isinstance(i, dict) and access.tenant_among(i.get("tenant_id"), [tid])), None)
         if ((inst or {}).get("spoke_id") or hub.get_dns_spoke_for_tenant(tid)
                 or access.tenant_has_own_spoke(hub, tid, "dns")):
             return "dedicated"
@@ -1893,7 +1896,11 @@ def register(app, hub, ctx):
         gc = hub.state.get_global_config() or {}
         henet_cfg = gc.get("henet") or {}
         if tenant_id:
-            ref = (henet_cfg.get("tenant_credentials") or {}).get(tenant_id)
+            # The slot spelt exactly like the tenant, else one access.same_tenant
+            # matches (never a legacy twin's).
+            creds = henet_cfg.get("tenant_credentials") or {}
+            key = access.tenant_key_in(creds, tenant_id)
+            ref = creds.get(key) if key is not None else None
         else:
             ref = henet_cfg.get("vault_credential")
         # Use it only if both bucket and name are set.
@@ -1912,7 +1919,8 @@ def register(app, hub, ctx):
         # Non-admins: their own tenant; admins: the given tenant or "" for global.
         if not _is_admin(sess):
             return (sess.get("user", {}) or {}).get("tenant_id") or "default"
-        return (explicit_tenant or "").strip()
+        # As given (unstripped): " ACME " is a legacy twin of "ACME".
+        return access.raw_tenant_id(explicit_tenant)
 
     async def _henet_find_record(hub, name, rtype):
         """The existing managed record matching (name, type), or None. Used to
@@ -1939,9 +1947,11 @@ def register(app, hub, ctx):
         existing = await _henet_find_record(hub, name, rtype)
         if existing is None:
             return None
-        # Another tenant's record looks missing to a non-admin.
+        # Another tenant's record looks missing to a non-admin. Same match as
+        # henet_list_records (any case; the non-admin scope is never blank), so
+        # a listed record is writable.
         owner = existing.get("tenant_id") or ""
-        if not _is_admin(sess) and owner != _henet_tenant_scope(sess):
+        if not _is_admin(sess) and not access.same_tenant(owner, _henet_tenant_scope(sess)):
             raise HTTPException(status_code=404, detail="record not found")
         return owner
 
@@ -2049,7 +2059,7 @@ def register(app, hub, ctx):
         assigned, 404 when the secret can't be read, and 422 when the assigned
         secret is only a bare DDNS key (no account login to scrape with)."""
         # The tenant's own credential, else the global one; none is a 400.
-        tid = (tenant_id or "").strip()
+        tid = access.raw_tenant_id(tenant_id)
         ref = _henet_get_assigned_cred(app.state.hub, tid) if tid else None
         if not isinstance(ref, dict):
             ref = _henet_get_assigned_cred(app.state.hub)
@@ -2104,7 +2114,7 @@ def register(app, hub, ctx):
         if _is_admin(sess):
             want_tenant = request.query_params.get("tenant")
             if want_tenant is not None:
-                tid = want_tenant.strip() or None
+                tid = access.raw_tenant_id(want_tenant) or None
                 return {"status": "SUCCESS", "credential": _henet_get_assigned_cred(hub, tid)}
             gc = hub.state.get_global_config() or {}
             tenant_creds = {
@@ -2135,7 +2145,7 @@ def register(app, hub, ctx):
         # Admins pick the slot; non-admins use their own tenant and a bucket they can reach.
         sess = _session_user(request) or {}
         if _is_admin(sess):
-            tenant_id = (body.get("tenant") or "").strip()
+            tenant_id = access.raw_tenant_id(body.get("tenant"))
         else:
             tenant_id = _henet_tenant_scope(sess)
             reach = set((sess.get("user", {}) or {}).get("tenants") or [])
@@ -2156,7 +2166,10 @@ def register(app, hub, ctx):
         if tenant_id:
             gc = hub.state.get_global_config() or {}
             tenant_creds = dict((gc.get("henet") or {}).get("tenant_credentials") or {})
-            tenant_creds[tenant_id] = {"bucket": bucket, "name": name}
+            # Replace the tenant's existing slot (as same_tenant matches it),
+            # else add one under the id as given.
+            key = access.tenant_key_in(tenant_creds, tenant_id) or tenant_id
+            tenant_creds[key] = {"bucket": bucket, "name": name}
             _henet_update_cfg(hub, tenant_credentials=tenant_creds)
         else:
             _henet_update_cfg(hub, vault_credential={"bucket": bucket, "name": name})
@@ -2176,14 +2189,16 @@ def register(app, hub, ctx):
         hub = app.state.hub
         # Admins pick the slot; non-admins use their own tenant.
         if _is_admin(sess):
-            tenant_id = (request.query_params.get("tenant") or "").strip()
+            tenant_id = access.raw_tenant_id(request.query_params.get("tenant"))
         else:
             tenant_id = _henet_tenant_scope(sess)
-        # Remove the tenant's slot, or clear the global one.
+        # Remove the tenant's slot (as same_tenant matches it), or clear the global one.
         if tenant_id:
             gc = hub.state.get_global_config() or {}
             tenant_creds = dict((gc.get("henet") or {}).get("tenant_credentials") or {})
-            tenant_creds.pop(tenant_id, None)
+            key = access.tenant_key_in(tenant_creds, tenant_id)
+            if key is not None:
+                tenant_creds.pop(key)
             _henet_update_cfg(hub, tenant_credentials=tenant_creds)
         else:
             _henet_update_cfg(hub, vault_credential=None)
@@ -2211,7 +2226,7 @@ def register(app, hub, ctx):
             return result
         # Non-admins see only their own tenant's records.
         scope = _henet_tenant_scope(sess)
-        records = [r for r in (result or {}).get("records") or [] if (r.get("tenant_id") or "") == scope]
+        records = [r for r in (result or {}).get("records") or [] if access.same_tenant(r.get("tenant_id"), scope)]
         out = dict(result or {})
         out["records"] = records
         return out
@@ -2783,7 +2798,7 @@ def register(app, hub, ctx):
             try:
                 ac = (hub.state.system_state.get("agent_config", {}) or {}).get(
                     hub._agent_primary_key(aid), {}) or {}
-                return str((ac.get("client_simulation") or {}).get("tenant_id") or "").strip()
+                return access.raw_tenant_id((ac.get("client_simulation") or {}).get("tenant_id"))
             except Exception:  # noqa: BLE001 — fail-open to spoke-tenant fallback
                 return ""
         # Resolve the owner using the hub's spoke, agent and pinned-tenant lookups.
@@ -2805,8 +2820,8 @@ def register(app, hub, ctx):
             return
         # Otherwise the target must belong to one of the caller's tenants.
         ttid = _le_target_tenant(module_type, identifier, spoke_id)
-        mine = set(_lca.user_tenants(sess)) | {_lca.current_tenant(sess)}
-        if not ttid or ttid not in mine:
+        mine = [*_lca.user_tenants(sess), _lca.current_tenant(sess)]
+        if not access.tenant_among(ttid, mine):
             raise HTTPException(
                 status_code=403,
                 detail="You can only deploy this certificate to targets in your "
@@ -2820,7 +2835,7 @@ def register(app, hub, ctx):
         gc = app.state.hub.state.system_state.get("global_config", {}) or {}
         for d in gc.get("nw_devices", []) or []:
             if isinstance(d, dict) and str(d.get("id")) == str(device_id):
-                return (d.get("tenant_id") or "").strip()
+                return access.raw_tenant_id(d.get("tenant_id"))
         return ""
 
     def _tenant_exists(tid):
@@ -3836,11 +3851,11 @@ def register(app, hub, ctx):
         # Non-admins see only targets in their own tenants.
         sess = _session_user(request)
         if sess and not _is_admin(sess):
-            mine = set(_lca.user_tenants(sess)) | {_lca.current_tenant(sess)}
+            mine = [*_lca.user_tenants(sess), _lca.current_tenant(sess)]
             targets = [t for t in targets
-                       if _le_target_tenant(t.get("module_type"),
-                                            t.get("identifier"),
-                                            t.get("spoke_id")) in mine]
+                       if access.tenant_among(_le_target_tenant(t.get("module_type"),
+                                                                t.get("identifier"),
+                                                                t.get("spoke_id")), mine)]
         return {"targets": targets}
 
     @app.get("/api/le/wildcard/eligibility")
@@ -4382,7 +4397,8 @@ def register(app, hub, ctx):
             return spoke_or_503(hub.get_spoke_by_type("dhcp"), "DHCP")
         # The tenant's own DHCP instance, if its spoke is connected.
         instances = (hub.state.system_state.get("global_config", {}) or {}).get("dhcp_instances", []) or []
-        inst = next((i for i in instances if isinstance(i, dict) and i.get("tenant_id") == tid), None)
+        inst = next((i for i in instances
+                     if isinstance(i, dict) and access.tenant_among(i.get("tenant_id"), [tid])), None)
         spoke_id = (inst or {}).get("spoke_id") or ""
         if spoke_id and hub._primary_key(spoke_id) in hub.active_connections:
             return spoke_id
@@ -4406,7 +4422,7 @@ def register(app, hub, ctx):
             return False
         # The tenant has its own instance or spoke: not shared.
         instances = (hub.state.system_state.get("global_config", {}) or {}).get("dhcp_instances", []) or []
-        if any(isinstance(i, dict) and i.get("tenant_id") == tid for i in instances):
+        if any(isinstance(i, dict) and access.tenant_among(i.get("tenant_id"), [tid]) for i in instances):
             return False
         return not (hub.get_dhcp_spoke_for_tenant(tid)
                     or access.tenant_shared_fallback_blocked(hub, tid, "dhcp"))
