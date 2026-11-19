@@ -965,6 +965,14 @@ def _mirror_shared_tenant(hub, registry: dict) -> bool:
         except Exception:  # noqa: BLE001
             logger.debug("[test-feed] shared-tenant cache refresh failed",
                          exc_info=True)
+        # A new shared tenant changes which ClearPass each tenant reads, so
+        # drop the cached NAC lists (as routes/tenants_users.py does).
+        try:
+            from routes.cppm import drop_nac_caches  # lazy: routes import the hub's api
+            drop_nac_caches(hub)
+        except Exception:  # noqa: BLE001
+            logger.warning("[test-feed] NAC caches not dropped after the shared "
+                           "tenant changed", exc_info=True)
         if failed:
             # At least one write in this pass raised, so "mirrored" may be a
             # lie -- e.g. the write that would have SET src_shared failed

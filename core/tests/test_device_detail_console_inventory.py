@@ -13,6 +13,7 @@ class MockHub:
     def __init__(self):
         self.state = MagicMock()
         self.get_spoke_by_type = MagicMock(return_value=None)
+        self.get_cppm_spoke_for_global = MagicMock(return_value=None)
         self.get_all_spokes_by_type = MagicMock(return_value=[])
         self.get_hypervisor_spoke = MagicMock(return_value=None)
         self.request_response = AsyncMock(return_value={"payload": {"data": {}}})

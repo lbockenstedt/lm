@@ -426,6 +426,22 @@ def test_cache_refresh_exact_vs_prefix():
     assert hub.warm_get("fw_rules", "fw-10") == "old"
 
 
+def test_cache_refresh_recovers_from_malformed_entry():
+    """A corrupt cache entry is treated as missing and refreshed."""
+    hub = _Hub()
+    fetch = _Fetch("recovered")
+
+    async def go():
+        hub.warm_cache["ns"] = {"k": "corrupt"}
+        hub._cache_remember("ns", "k", fetch, None, "", False)
+        count = hub.cache_refresh("ns", ("k",), exact=True)
+        await hub.cache_wait_idle(2)
+        return count
+
+    assert run(go()) == 1
+    assert hub.warm_get("ns", "k") == "recovered"
+
+
 def test_cache_wait_idle_times_out_on_a_slow_fetch():
     hub = _Hub()
 
@@ -553,3 +569,272 @@ def test_job_refresh_floor_slows_active_refresh():
     job = CacheJob("ns", "k", _Fetch(), ("tA",), refresh_s=300.0)
     assert hub._cache_interval(job, {"tA"}) == 300.0
     assert hub._cache_interval(job, set()) == wc.IDLE_INTERVAL_S
+    floor = CacheJob("ns", "k", _Fetch(), ("tA",), min_interval_s=300.0)
+    assert hub._cache_interval(floor, {"tA"}) == 300.0
+
+
+def test_login_kick_obeys_min_interval_floor():
+    hub = _Hub(active={"tA"})
+    job = CacheJob("ns", "k", _Fetch(), ("tA",), min_interval_s=300.0)
+    now = time.time()
+    hub.warm_cache["ns"] = {
+        "k": {"data": {"rows": []}, "fetched_at": now - 60, "tenants": ["tA"]},
+    }
+    hub._cache_read_jobs[("ns", "k")] = job
+    hub.cache_kick_tenant("tA")
+
+    assert not hub._cache_job_due(job, now, {"tA"})
+    assert hub._cache_job_due(job, now + 301, {"tA"})
+
+
+def test_refresh_cadence_does_not_delay_login_kick():
+    """``refresh_s`` is only the background cadence (Entra): a kick is due now."""
+    hub = _Hub(active={"tA"})
+    job = CacheJob("ns", "k", _Fetch(), ("tA",), refresh_s=900.0)
+    now = time.time()
+    hub.warm_cache["ns"] = {
+        "k": {"data": {"rows": []}, "fetched_at": now - 60, "tenants": ["tA"]},
+    }
+    hub._cache_read_jobs[("ns", "k")] = job
+    assert not hub._cache_job_due(job, now, {"tA"})
+    hub.cache_kick_tenant("tA")
+    assert hub._cache_job_due(job, now, {"tA"})
+
+
+def test_cache_refresh_obeys_min_interval_floor():
+    """Manual invalidation cannot bypass a slow source's minimum interval."""
+    hub = _Hub(active={"tA"})
+    fetch = _Fetch("new")
+    job = CacheJob("ns", "k", fetch, ("tA",), min_interval_s=300.0)
+    hub.cache_register_feed("slow", lambda _hub: [job])
+    entry = {"data": "old", "fetched_at": time.time() - 10, "tenants": ["tA"]}
+    hub.warm_cache["ns"] = {"k": entry}
+
+    async def refresh_twice():
+        """Skip a recent cache, then refresh it once its floor has elapsed."""
+        assert hub.cache_refresh("ns", ("k",), exact=True) == 0
+        assert entry["fetched_at"] > 0
+        entry["fetched_at"] = 0
+        entry["error_at"] = time.time() - 10
+        assert hub.cache_refresh("ns", ("k",), exact=True) == 0
+        entry["error_at"] = time.time() - 301
+        assert hub.cache_refresh("ns", ("k",), exact=True) == 1
+        await hub.cache_wait_idle()
+
+    run(refresh_twice())
+    assert fetch.calls == 1
+    assert hub.warm_get("ns", "k") == "new"
+
+
+def test_cache_refresh_after_write_ignores_refresh_cadence():
+    """A write's ``cache_refresh`` refreshes a ``refresh_s``-only job at once
+    (Entra group/user writes), and floor-free siblings in the same namespace
+    still refresh when a floored entry is held back."""
+    hub = _Hub(active={"tA"})
+    cadence, floored = _Fetch("cadence-new"), _Fetch("floored-new")
+    jobs = [CacheJob("ns", "a", cadence, ("tA",), refresh_s=900.0),
+            CacheJob("ns", "b", floored, ("tA",), min_interval_s=300.0)]
+    hub.cache_register_feed("mixed", lambda _hub: jobs)
+    recent = time.time() - 10
+    hub.warm_cache["ns"] = {
+        "a": {"data": "cadence-old", "fetched_at": recent, "tenants": ["tA"]},
+        "b": {"data": "floored-old", "fetched_at": recent, "tenants": ["tA"]},
+    }
+
+    async def refresh():
+        """Refresh the whole namespace and wait for the fetches."""
+        assert hub.cache_refresh("ns") == 1
+        await hub.cache_wait_idle()
+
+    run(refresh())
+    assert (cadence.calls, floored.calls) == (1, 0)
+    assert hub.warm_get("ns", "a") == "cadence-new"
+    assert hub.warm_cache["ns"]["b"]["fetched_at"] == recent
+
+
+def test_floor_holds_after_a_first_fetch_fails():
+    """A floored job whose first fetch failed has no entry to record it on:
+    neither the refresher nor a page read retries it inside the floor, the
+    read raises ``CacheFloorError``, and the first success clears the record."""
+    hub = _Hub(active={"tA"})
+    fetch = _Fetch("rows")
+    fetch.fail = RuntimeError("clearpass down")
+    job = CacheJob("ns", "k", fetch, ("tA",), min_interval_s=300.0)
+    hub.cache_register_feed("slow", lambda _hub: [job])
+
+    async def scenario():
+        """Fail once, then tick and read inside the floor, then succeed after it."""
+        assert await hub.cache_refresh_tick() == 1
+        await hub.cache_wait_idle()
+        assert await hub.cache_refresh_tick() == 0
+        with pytest.raises(wc.CacheFloorError) as held:
+            await hub.cache_read("ns", "k", fetch, tenants=("tA",), min_interval_s=300.0)
+        assert hub._cache_job_due(hub._cache_collect_jobs()[0], time.time() + 301, {"tA"})
+        # Once the floor has passed, the next read fetches and clears the failure.
+        hub._cache_failed[("ns", "k")] = (time.time() - 301, "clearpass down", ("tA",))
+        fetch.fail = None
+        return held.value, await hub.cache_read("ns", "k", fetch, tenants=("tA",),
+                                                min_interval_s=300.0)
+
+    held, data = run(scenario())
+    assert "clearpass down" in str(held) and 0 < held.retry_after <= 300
+    assert data == "rows" and fetch.calls == 2 and not hub._cache_failed
+
+
+def test_floor_holds_page_reads_after_a_failed_refresh():
+    """Old floored data whose background refresh failed: later reads inside
+    the floor serve the cached data and start no other fetch."""
+    hub = _Hub(active={"tA"})
+    fetch = _Fetch("new")
+    fetch.fail = RuntimeError("clearpass down")
+    hub.warm_cache["ns"] = {"k": {"data": "old", "fetched_at": time.time() - 400,
+                                  "tenants": ["tA"]}}
+
+    async def read_twice():
+        """Read, let the refresh fail, then read again."""
+        reads = []
+        for _ in range(2):
+            reads.append(await hub.cache_read("ns", "k", fetch, tenants=("tA",),
+                                              min_interval_s=300.0))
+            await hub.cache_wait_idle()
+        return reads
+
+    assert run(read_twice()) == ["old", "old"]
+    assert fetch.calls == 1
+
+
+def test_floor_holds_reads_of_an_invalidated_entry():
+    """An invalidated floored entry is not refetched within the floor of its
+    last fetch (kept in ``stale_from``) or of a failed refresh."""
+    hub = _Hub(active={"tA"})
+    fetch = _Fetch("new")
+    fetch.fail = RuntimeError("clearpass down")
+    entry = {"data": "old", "fetched_at": 0, "stale_from": time.time() - 10,
+             "tenants": ["tA"]}
+    hub.warm_cache["ns"] = {"k": entry}
+
+    async def read(n):
+        """Read the entry n times; return the last answer."""
+        for _ in range(n):
+            data = await hub.cache_read("ns", "k", fetch, tenants=("tA",),
+                                        min_interval_s=300.0)
+        return data
+
+    assert run(read(1)) == "old" and fetch.calls == 0
+    entry["stale_from"] = time.time() - 400
+    assert run(read(2)) == "old" and fetch.calls == 1
+
+
+def test_warm_drop_exact_keeps_keys_that_extend_a_dropped_key():
+    """``exact`` drops only the named keys, not keys that start with them."""
+    hub = _Hub()
+    hub.warm_cache["ns"] = {"a|x": {"data": 1}, "a|x,y": {"data": 2}}
+    assert hub.warm_drop("ns", ("a|x",), exact=True) == 1
+    assert list(hub.warm_cache["ns"]) == ["a|x,y"]
+
+
+async def _turns(cond):
+    """Yield to the loop until ``cond()`` holds, for at most 20 turns."""
+    for _ in range(20):
+        if cond():
+            return True
+        await asyncio.sleep(0)
+    return cond()
+
+
+def test_warm_drop_detaches_a_running_fetch():
+    """A fetch still running when its key is dropped (for example from a NAC
+    spoke that has just moved to another tenant) stores nothing when it
+    finishes. The read already waiting on it still gets its answer, and the
+    next read starts a fresh fetch instead of joining it."""
+    hub = _Hub(active={"tA"})
+    calls = []
+
+    async def scenario():
+        """Drop the key while the first fetch runs; the second fetch ends first."""
+        gates = [asyncio.Event(), asyncio.Event()]
+        answers = ["before the drop", "after the drop"]
+
+        async def fetch():
+            """The n-th call waits for its gate, then answers."""
+            n = len(calls)
+            calls.append(n)
+            await gates[n].wait()
+            return answers[n]
+
+        def read():
+            """Start a read of the key."""
+            return asyncio.ensure_future(hub.cache_read("ns", "k", fetch, tenants=("tA",)))
+
+        first = read()
+        assert await _turns(lambda: len(calls) == 1)
+        hub.warm_drop("ns", ("k",))
+        second = read()
+        assert await _turns(lambda: len(calls) == 2)
+        gates[1].set()
+        assert await second == "after the drop"
+        gates[0].set()
+        assert await first == "before the drop"
+        await hub.cache_wait_idle()
+
+    run(scenario())
+    assert hub.warm_get("ns", "k") == "after the drop"
+    assert not hub._cache_dropped
+
+
+def test_warm_drop_lifts_the_failure_floor():
+    """A dropped key starts over: neither a failure recorded before the drop
+    nor a fetch that fails after it holds back the next read."""
+    hub = _Hub(active={"tA"})
+    fetch = _Fetch("rows")
+    hub._cache_failed[("ns", "k")] = (time.time(), "clearpass down", ("tA",))
+
+    async def scenario():
+        """Drop a floored key, then drop it again while its fetch fails."""
+        hub.warm_drop("ns", ("k",))
+        assert await hub.cache_read("ns", "k", fetch, tenants=("tA",),
+                                    min_interval_s=300.0) == "rows"
+        hub.warm_drop("ns", ("k",))
+        gate = asyncio.Event()
+
+        async def failing():
+            """Fail once the gate opens."""
+            await gate.wait()
+            raise RuntimeError("old spoke gone")
+
+        first = asyncio.ensure_future(hub.cache_read("ns", "k", failing, tenants=("tA",),
+                                                     min_interval_s=300.0))
+        assert await _turns(lambda: ("ns", "k") in hub._cache_inflight)
+        hub.warm_drop("ns", ("k",))
+        gate.set()
+        with pytest.raises(RuntimeError):
+            await first
+        return await hub.cache_read("ns", "k", fetch, tenants=("tA",), min_interval_s=300.0)
+
+    assert run(scenario()) == "rows"
+    assert fetch.calls == 2 and not hub._cache_failed
+
+
+def test_cache_purge_lets_a_failed_first_fetch_retry():
+    """A purge starts over for a floored job whose first fetch failed, as it
+    does for a cached entry; another tenant's purge leaves the floor alone."""
+    hub = _Hub(active={"tA"})
+    fetch = _Fetch("rows")
+    fetch.fail = RuntimeError("clearpass down")
+
+    async def read():
+        """Read the floored entry for tenant tA."""
+        return await hub.cache_read("ns", "k", fetch, tenants=("tA",), min_interval_s=300.0)
+
+    async def scenario():
+        """Fail, purge another tenant (still held), purge tA, then read."""
+        with pytest.raises(RuntimeError):
+            await read()
+        hub.cache_purge("tB")
+        with pytest.raises(wc.CacheFloorError):
+            await read()
+        hub.cache_purge("tA")
+        fetch.fail = None
+        return await read()
+
+    assert run(scenario()) == "rows" and fetch.calls == 2
