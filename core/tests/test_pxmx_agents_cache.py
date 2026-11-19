@@ -64,6 +64,8 @@ class _FakeHub:
         self.state = _FakeState()
         self.heartbeat = _FakeHeartbeat()
         self.calls = []  # (spoke, t)
+        self.in_flight = 0
+        self.peak = 0
         self._delay = {}
         self._payload = {}
         self._fail = set()
@@ -77,7 +79,12 @@ class _FakeHub:
 
     async def request_response(self, spoke, cmd, data, timeout=5.0, **kw):
         self.calls.append((spoke, time.time()))
-        await asyncio.sleep(self._delay.get(spoke, 0))
+        self.in_flight += 1
+        self.peak = max(self.peak, self.in_flight)
+        try:
+            await asyncio.sleep(self._delay.get(spoke, 0))
+        finally:
+            self.in_flight -= 1
         if spoke in self._fail:
             raise asyncio.TimeoutError("simulated slow/unreachable spoke")
         return {"payload": {"data": {"agents": self._payload.get(spoke, []),
@@ -124,17 +131,14 @@ def test_repeat_read_within_fresh_window_hits_spokes_once():
 def test_forced_refresh_fans_out_concurrently_not_sequentially():
     _reset_cache()
     hub = _FakeHub()
-    hub._delay = {"pxmx-spoke-1": 0.2, "pxmx-spoke-2": 0.2}
+    hub._delay = {"pxmx-spoke-1": 0.05, "pxmx-spoke-2": 0.05}
     hub._payload["pxmx-spoke-1"] = [{"agent_id": "a1"}]
     hub._payload["pxmx-spoke-2"] = [{"agent_id": "a2"}]
-    t0 = time.time()
     r = asyncio.run(pxmx._maybe_refresh_agents(hub, SPOKES, force=True))
-    elapsed = time.time() - t0
-    starts = [t for _, t in hub.calls]
-    assert len(starts) == 2
-    spread = max(starts) - min(starts)
-    assert spread < 0.05, f"fan-out not concurrent (spread={spread:.3f}s)"
-    assert elapsed < 0.35, f"refresh took {elapsed:.3f}s (sequential?)"
+    assert len(hub.calls) == 2
+    # Counted, not timed, so a busy CI runner can't fail it (fleet rule
+    # 9.4). One spoke after the other would peak at 1.
+    assert hub.peak == 2, "fan-out not concurrent"
     assert {a["agent_id"] for a in r["agents"]} == {"a1", "a2"}
 
 
