@@ -7663,9 +7663,7 @@ async function csRenderSetupCentralApi() {
       <input id="${id}" ${type === 'password' ? 'type="password"' : 'type="text"'} value="${csEscape(v != null ? v : '')}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></label>`;
     // Render credential state without ever placing a stored secret in the DOM.
     const secretField = (id, label, isSet, clearId) => `<div>
-      <label class="text-xs text-slate-500">${csEscape(label)}
-        <input id="${id}" type="password" value="" autocomplete="new-password" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
-      </label>
+      ${f(id, label, '', 'password')}
       <div class="mt-1 flex items-center justify-between gap-2 text-xs text-slate-500">
         <span>${isSet ? 'Credential saved; leave blank to keep it.' : 'No hub credential saved; Clear also removes a stale spoke copy.'}</span>
         <label class="inline-flex items-center gap-1"><input id="${clearId}" type="checkbox"> Clear</label>
@@ -8027,9 +8025,7 @@ async function csRenderSetupCentralOnPremApi() {
       <input id="${id}" ${type === 'password' ? 'type="password"' : 'type="text"'} value="${csEscape(v != null ? v : '')}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></label>`;
     // Render credential state without ever placing a stored secret in the DOM.
     const secretField = (id, label, isSet, clearId) => `<div>
-      <label class="text-xs text-slate-500">${csEscape(label)}
-        <input id="${id}" type="password" value="" autocomplete="new-password" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
-      </label>
+      ${f(id, label, '', 'password')}
       <div class="mt-1 flex items-center justify-between gap-2 text-xs text-slate-500">
         <span>${isSet ? 'Credential saved; leave blank to keep it.' : 'No hub credential saved; Clear also removes a stale spoke copy.'}</span>
         <label class="inline-flex items-center gap-1"><input id="${clearId}" type="checkbox"> Clear</label>
