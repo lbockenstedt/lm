@@ -6,7 +6,6 @@ The route is lifted out of routes/cppm.py with ``ast``."""
 import ast
 import asyncio
 import os
-import time
 
 _SRC = os.path.join(os.path.dirname(__file__), "..", "src", "routes", "cppm.py")
 
@@ -15,6 +14,8 @@ class _Hub:
     def __init__(self, ep):
         self.ep = ep
         self.lease_calls = []
+        self.in_flight = 0
+        self.peak = 0
 
     def get_all_spokes_by_type(self, _t):
         return ["fw-1", "fw-2"]
@@ -23,7 +24,10 @@ class _Hub:
         if cmd == "GET_ENDPOINT_DETAIL":
             return {"payload": {"data": dict(self.ep)}}
         self.lease_calls.append((sid, timeout))
-        await asyncio.sleep(0.5)
+        self.in_flight += 1
+        self.peak = max(self.peak, self.in_flight)
+        await asyncio.sleep(0.05)
+        self.in_flight -= 1
         leases = [{"mac": "08:76:71:08:7d:81", "ip": "10.1.1.9", "hostname": "cam"}] if sid == "fw-2" else []
         return {"payload": {"data": leases}}
 
@@ -47,12 +51,10 @@ def _route(hub):
 
 def test_firewalls_are_queried_in_parallel_with_short_timeout():
     hub = _Hub({"mac": "087671087d81"})
-    # Parse/compile the route before starting the clock: on a busy CI runner
-    # that alone took >0.15s and made this test flaky.
-    route = _route(hub)
-    t0 = time.monotonic()
-    ep = asyncio.run(route(object(), "087671087d81"))
-    assert time.monotonic() - t0 < 0.7           # both firewalls at once (0.5s), not one after another (1.0s)
+    ep = asyncio.run(_route(hub)(object(), "087671087d81"))
+    # Counted, not timed: a wall-clock bound made this test flaky on a busy
+    # CI runner (fleet rule 9.4). One firewall after the other would peak at 1.
+    assert hub.peak == 2
     assert ep["ip"] == "10.1.1.9" and ep["sources"]["ip"] == "DHCP"
     assert all(t and t <= 10 for _, t in hub.lease_calls)
 

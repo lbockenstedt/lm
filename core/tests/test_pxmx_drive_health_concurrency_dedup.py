@@ -34,6 +34,8 @@ class _MultiSpokeHub(_MockHub):
         self._owner_sid = owner_sid
         self._other_sid = other_sid
         self._delay = delay
+        self.in_flight = 0
+        self.peak = 0
 
     def get_hypervisor_spokes_for_tenant(self, tid=None):
         return [self._other_sid, self._owner_sid]
@@ -43,7 +45,12 @@ class _MultiSpokeHub(_MockHub):
         if cmd != "PXMX_DRIVE_HEALTH":
             return {"payload": {"data": {}}}
         if self._delay:
-            await asyncio.sleep(self._delay)
+            self.in_flight += 1
+            self.peak = max(self.peak, self.in_flight)
+            try:
+                await asyncio.sleep(self._delay)
+            finally:
+                self.in_flight -= 1
         if sid == self._other_sid:
             # No "node" key, matching the real agent's reply for a node it
             # doesn't manage.
@@ -100,16 +107,15 @@ def test_node_with_only_error_replies_still_surfaces():
 
 
 def test_requests_fan_out_concurrently_not_sequentially():
-    hub = _MultiSpokeHub(delay=0.2)
+    hub = _MultiSpokeHub(delay=0.05)
     client = _build_client(hub, tenant="acme")
 
-    t0 = time.time()
     res = client.get("/api/pxmx/drive-health?tenant=acme&node=pve1")
-    elapsed = time.time() - t0
 
     assert res.status_code == 200
     dh_calls = [c for c in hub.calls if c["cmd"] == "PXMX_DRIVE_HEALTH"]
     assert len(dh_calls) == 2
-    spread = max(c["t"] for c in dh_calls) - min(c["t"] for c in dh_calls)
-    assert spread < 0.05, f"fan-out not concurrent (spread={spread:.3f}s)"
-    assert elapsed < 0.35, f"request took {elapsed:.3f}s (sequential?)"
+    # Counted, not timed: the clock also covered the TestClient's first
+    # request, so a busy CI runner could fail it (fleet rule 9.4). One spoke
+    # after the other would peak at 1.
+    assert hub.peak == 2, "fan-out not concurrent"

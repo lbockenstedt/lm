@@ -1,7 +1,6 @@
 """topup_cold_legs: per-leg timeouts, error rows kept, degraded reporting."""
 import asyncio
 import sys
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -81,14 +80,20 @@ async def test_empty_cold_and_non_list_result():
 
 
 async def test_legs_run_concurrently():
+    legs = {"now": 0, "max": 0}
+
     async def nap():
-        await asyncio.sleep(0.2)
+        legs["now"] += 1
+        legs["max"] = max(legs["max"], legs["now"])
+        await asyncio.sleep(0.05)
+        legs["now"] -= 1
         return [{"name": "x"}]
 
     call = _stub({"NETBOX_SEARCH": nap, "SEARCH_VMS": nap})
-    t0 = time.monotonic()
     rows, degraded = await topup_cold_legs([NB, VM], call, timeout=1.0)
-    assert time.monotonic() - t0 < 0.35
+    # Counted, not timed, so a busy CI runner can't fail it (fleet rule
+    # 9.4). One leg after the other would peak at 1.
+    assert legs["max"] == 2
     assert len(rows) == 2 and degraded == []
 
 
