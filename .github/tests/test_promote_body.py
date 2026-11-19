@@ -308,6 +308,30 @@ class PromotionBodyQuotesEveryUnit(unittest.TestCase):
                       "judge it by its changes, enumerated below._", intent)
         self.assertNotIn("only template", body)
 
+    def test_unclosed_comment_in_intent_section_is_unfilled(self):
+        """An Intent section holding only an unclosed comment is unfilled."""
+        self.pr_body(11, "## Intent & Problem Statement\n\n<!-- never closed\n")
+        _, body = self.run_step()
+        intent = intent_section(body)
+        self.assertIn("#11 has an Intent section but left it unfilled", intent)
+        self.assertNotIn("never closed", body)
+
+    def test_unclosed_comment_in_template_less_body_is_no_description(self):
+        """A template-less body holding only an unclosed comment has no description."""
+        self.pr_body(12, "<!-- never closed\n")
+        _, body = self.run_step()
+        intent = intent_section(body)
+        self.assertIn("#12 has no description", intent)
+        self.assertNotIn("never closed", body)
+
+    def test_unclosed_comment_keeps_visible_text_before_it(self):
+        """Text before an unclosed comment stays quoted."""
+        self.pr_body(12, "Visible words.\n<!-- never closed\n")
+        _, body = self.run_step()
+        intent = intent_section(body)
+        self.assertIn("> Visible words.", intent)
+        self.assertNotIn("never closed", body)
+
     def test_a_unit_already_in_the_target_adds_nothing(self):
         """A back-merge whose files already match the target is labelled as
         adding nothing and is not fetched, while a unit with a file of the
