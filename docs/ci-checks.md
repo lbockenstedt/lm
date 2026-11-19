@@ -141,8 +141,25 @@ A dev → qa promotion carries one unit of work (one merged PR or direct push).
 When later units change the same files, they travel with the oldest unit,
 because promoting a file version that a later unit already replaced would be
 rejected. A unit that conflicts on its own is likewise batched with the next
-unit. The PR is then titled after the oldest carried unit with "(+N more)", and
-its body lists every unit it carries.
+unit. The PR is then titled after the oldest carried unit with "(+N more)".
+
+Its body quotes every carried unit's own intent, oldest first: the merged PR's
+Intent & Problem Statement section (or its whole description, when the PR was
+written without the template, as an automated back-merge is), or the commit
+message of a direct push (without trailers). A PR named in a commit subject is
+quoted only when GitHub records it as merged as that very commit; otherwise,
+or when GitHub has no PR by that number (the subject may cite an issue), the
+unit is a direct push and its own message is quoted. The units are listed from
+git, so the list is complete whichever repo's `promote.sh` built the promotion.
+The quotes share a budget of about 16,000 characters fairly, and a quote cut to
+fit says so and points to its PR or commit; at most 40 units are quoted. A unit
+whose PR could not be read is marked UNKNOWN (with a `::warning::` in the run
+log) and its commit message is quoted for context, which is distinct from a PR
+with no description or an unfilled Intent section; a commit git could not read
+is UNKNOWN too. A unit that adds nothing is labelled and nothing is fetched for
+it: one that changes only `VERSION` files carries no code, and one whose files
+(`VERSION` aside) already match the target, such as a back-merge, adds nothing
+to the diff.
 
 ## Promoting several repos
 
