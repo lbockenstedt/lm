@@ -7665,7 +7665,7 @@ async function csRenderSetupCentralApi() {
     const secretField = (id, label, isSet, clearId) => `<div>
       ${f(id, label, '', 'password')}
       <div class="mt-1 flex items-center justify-between gap-2 text-xs text-slate-500">
-        <span>${isSet ? 'Credential saved; leave blank to keep it.' : 'No hub credential saved; Clear also removes a stale spoke copy.'}</span>
+        <span>${isSet ? 'Credential saved; leave blank to keep it.' : 'No credential saved; Clear also removes a stale spoke copy.'}</span>
         <label class="inline-flex items-center gap-1"><input id="${clearId}" type="checkbox"> Clear</label>
       </div>
     </div>`;
@@ -8027,7 +8027,7 @@ async function csRenderSetupCentralOnPremApi() {
     const secretField = (id, label, isSet, clearId) => `<div>
       ${f(id, label, '', 'password')}
       <div class="mt-1 flex items-center justify-between gap-2 text-xs text-slate-500">
-        <span>${isSet ? 'Credential saved; leave blank to keep it.' : 'No hub credential saved; Clear also removes a stale spoke copy.'}</span>
+        <span>${isSet ? 'Credential saved; leave blank to keep it.' : 'No credential saved; Clear also removes a stale spoke copy.'}</span>
         <label class="inline-flex items-center gap-1"><input id="${clearId}" type="checkbox"> Clear</label>
       </div>
     </div>`;

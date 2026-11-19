@@ -145,26 +145,31 @@ def test_existing_ref_from_form_is_kept(monkeypatch):
     assert vault.secrets == {}
 
 
-def test_clear_deletes_only_managed_vault_secret(monkeypatch):
+def test_clear_detaches_vault_reference_without_deleting_secret(monkeypatch):
     vault = _patch_vault(monkeypatch)
     hub = _hub(True)
     stored = asyncio.run(central_secrets.to_vault(
         hub, "central_config", "t1", {"client_secret": "secret"}))
-    ref = stored["client_secret"]
-    asyncio.run(central_secrets.delete_cleared_secrets(
-        hub, "central_config", "t1", stored, ["client_secret"]))
-    assert vault.secrets == {}
-    assert ref not in central_secrets._resolved
+    cleared, fields = central_secrets.merge_secret_updates(
+        {"client_secret_clear": True}, stored)
+    persisted = asyncio.run(central_secrets.to_vault(
+        hub, "central_config", "t1", cleared))
+    assert "client_secret" not in persisted
+    assert persisted["client_secret_clear"] is True
+    assert fields == ["client_secret"]
+    assert vault.secrets == {"sim-central-t1-client-secret": "secret"}
 
 
-def test_clear_requires_active_vault_for_managed_reference(monkeypatch):
-    _patch_vault(monkeypatch)
-    ref = "kv:" + central_secrets.secret_name(
-        "central_config", "t1", "client_secret")
-    with pytest.raises(RuntimeError, match="vault must be configured"):
-        asyncio.run(central_secrets.delete_cleared_secrets(
-            _hub(False), "central_config", "t1",
-            {"client_secret": ref}, ["client_secret"]))
+def test_clear_marker_survives_blank_resave_and_is_removed_by_rotation():
+    existing = {"client_secret_clear": True}
+    for update in ({}, {"client_secret": ""}, {"client_secret_clear": False}):
+        merged, cleared = central_secrets.merge_secret_updates(update, existing)
+        assert merged["client_secret_clear"] is True
+        assert cleared == ["client_secret"]
+    merged, cleared = central_secrets.merge_secret_updates(
+        {"client_secret": "replacement"}, existing)
+    assert merged == {"client_secret": "replacement"}
+    assert cleared == []
 
 
 def test_migrate_moves_inline_secrets(monkeypatch):

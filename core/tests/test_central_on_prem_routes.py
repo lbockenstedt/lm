@@ -288,10 +288,10 @@ def test_save_explicitly_clears_existing_secret(path, key, slot):
                                 "client_secret_clear": True}})
     assert r.status_code == 200, r.text
     assert "client_secret" not in configs["acme"]
-    assert "client_secret_clear" not in configs["acme"]
+    assert configs["acme"]["client_secret_clear"] is True
 
 
-def test_save_clear_deletes_managed_vault_value(monkeypatch):
+def test_save_clear_preserves_vault_object_and_reconnect_marker(monkeypatch):
     c, store, holder = _build_sim()
     holder.current = _cs_user("acme")
     name = central_secrets.secret_name(
@@ -308,26 +308,39 @@ def test_save_clear_deletes_managed_vault_value(monkeypatch):
     r = c.post("/sim/api/aggregate/central-on-prem",
                json={"hub_central_on_prem_config": {"client_secret_clear": True}})
     assert r.status_code == 200, r.text
-    assert deleted == [name]
+    assert deleted == []
     assert "client_secret" not in store.configs["acme"]
+    reconnect = asyncio.run(central_secrets.resolve(
+        None, store.configs["acme"]))
+    assert reconnect["client_secret_clear"] is True
 
 
-def test_save_clear_reports_vault_delete_failure_without_removing_reference(monkeypatch):
+def test_failed_save_after_clear_does_not_delete_any_vault_values(monkeypatch):
     c, store, holder = _build_sim()
     holder.current = _cs_user("acme")
     name = central_secrets.secret_name(
         "central_on_prem_config", "acme", "client_secret")
-    store.configs["acme"] = {"client_secret": "kv:" + name}
+    existing = {"client_secret": "kv:" + name,
+                "access_token": "kv:sim-central-on-prem-acme-access-token"}
+    store.configs["acme"] = dict(existing)
+    deleted = []
 
-    async def fail_delete(hub, secret_name):
-        return False
+    async def record_delete(hub, secret_name):
+        deleted.append(secret_name)
+        return True
+
+    async def fail_write(hub, secret_name, value):
+        raise RuntimeError("vault unavailable")
 
     monkeypatch.setattr(central_secrets, "_vault_on", lambda hub: True)
-    monkeypatch.setattr(central_secrets.cloud_vault, "delete_secret", fail_delete)
+    monkeypatch.setattr(central_secrets.cloud_vault, "delete_secret", record_delete)
+    monkeypatch.setattr(central_secrets.cloud_vault, "set_secret", fail_write)
     r = c.post("/sim/api/aggregate/central-on-prem",
-               json={"hub_central_on_prem_config": {"client_secret_clear": True}})
+               json={"hub_central_on_prem_config": {
+                   "client_secret_clear": True, "access_token": "rotation"}})
     assert r.status_code == 502
-    assert store.configs["acme"]["client_secret"] == "kv:" + name
+    assert store.configs["acme"] == existing
+    assert deleted == []
 
 
 def test_save_central_on_prem_coerces_poll_interval_floor():

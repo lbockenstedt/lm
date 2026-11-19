@@ -78,10 +78,12 @@ and `refresh_token_set` flags — never secret values or vault references. The
 Setup form keeps secret inputs blank: leaving one blank preserves its stored
 value, while **Clear** explicitly removes it and can remove a stale spoke copy
 even when the hub no longer has a credential. Saving requires full tenant
-write scope. If a managed vault deletion fails, the save fails and keeps the
-existing reference. Spokes must have the matching clear-handling update to
-remove an already stored secret; older spokes ignore the clear list and retain
-their local value until updated.
+write scope. Clear detaches the credential from the active config; it does not
+delete the vault object or revoke the credential at Central. This avoids
+destructive vault changes before a config save succeeds. Clear markers persist
+on the hub until a replacement is supplied, so reconnect pushes also remove
+stale spoke copies. Spokes must have the matching clear-handling update; older
+spokes ignore clears and retain their local value until updated.
 
 In **centralized** mode (default) the **hub** runs the on-prem poller + serves
 browse/available/test from the on-prem config directly — the spoke is not

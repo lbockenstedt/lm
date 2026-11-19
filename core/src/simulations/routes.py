@@ -3214,8 +3214,6 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # With a vault configured the secrets go there and only kv: references
         # are stored; spokes still get the real values.
         try:
-            await central_secrets.delete_cleared_secrets(
-                hub, "central_config", tenant_id, existing, cleared_secrets)
             stored = await central_secrets.to_vault(hub, "central_config", tenant_id, cfg)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502,
@@ -3584,8 +3582,6 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # With a vault configured the secrets go there and only kv: references
         # are stored; spokes still get the real values.
         try:
-            await central_secrets.delete_cleared_secrets(
-                hub, "central_on_prem_config", tenant_id, existing, cleared_secrets)
             stored = await central_secrets.to_vault(hub, "central_on_prem_config", tenant_id, cfg)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502,

@@ -58,10 +58,11 @@ def public_status_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def merge_secret_updates(cfg: Dict[str, Any], existing: Dict[str, Any]):
-    """Preserve omitted/blank secrets and return explicitly cleared field names."""
+    """Preserve blank secrets and durable clear markers for reconnect pushes."""
     out = dict(cfg or {})
     previous = existing if isinstance(existing, dict) else {}
     cleared = []
+    # Validate submitted rotations and clear requests before changing any config.
     for field in SECRET_FIELDS:
         clear_key = f"{field}_clear"
         clear = out.pop(clear_key, False)
@@ -73,37 +74,18 @@ def merge_secret_updates(cfg: Dict[str, Any], existing: Dict[str, Any]):
                     isinstance(value, str) and not value.strip()):
                 raise ValueError(f"{field} cannot be set while clearing it")
             out.pop(field, None)
+            out[clear_key] = True
             cleared.append(field)
         elif value is None or (isinstance(value, str) and not value.strip()):
             out.pop(field, None)
             if field in previous:
                 out[field] = previous[field]
+            elif previous.get(clear_key) is True:
+                out[clear_key] = True
+                cleared.append(field)
         elif not isinstance(value, str):
             raise ValueError(f"{field} must be a string")
     return out, cleared
-
-
-async def delete_cleared_secrets(hub, slot: str, tenant_id: str,
-                                 existing: Dict[str, Any], fields: list) -> None:
-    """Delete app-managed vault values for explicitly cleared credentials."""
-    previous = existing if isinstance(existing, dict) else {}
-    managed = []
-    for field in fields or []:
-        if field not in SECRET_FIELDS:
-            continue
-        expected = "kv:" + secret_name(slot, tenant_id, field)
-        if previous.get(field) == expected:
-            managed.append((field, expected[3:]))
-    if not managed:
-        return
-    if not _vault_on(hub):
-        raise RuntimeError("the vault must be configured to clear its stored credential")
-    for field, name in managed:
-        if not await cloud_vault.delete_secret(hub, name):
-            raise RuntimeError(f"could not delete the stored {field} from the vault")
-        ref = "kv:" + name
-        _resolved.pop(ref, None)
-        _fetched.pop(ref, None)
 
 
 def _vault_on(hub) -> bool:
