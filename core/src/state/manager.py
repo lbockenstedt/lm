@@ -17,13 +17,15 @@ fields appear without a migration. Sensitive values are encrypted at rest via
 ``docs/modules/core.md`` for the module-level overview.
 """
 
-# Standard-library imports: JSON, filesystem, logging, async, locking and time.
+# Standard-library imports: JSON, filesystem, logging, async, locking, time
+# and context managers.
 import json
 import os
 import logging
 import asyncio
 import threading
 import time
+from contextlib import contextmanager
 from typing import Dict, Any, List, Optional
 # Encrypts state files at rest.
 from security.encryption import hub_encryption
@@ -77,6 +79,10 @@ class StateManager:
         # (previous/legacy) Fernet key; load_state re-saves to migrate it to the
         # current key so a rotated LM_FERNET_KEY can't strand it later.
         self._needs_rekey = False
+
+        # Open batch_tenant_writes blocks; while above 0, update_tenant leaves
+        # the tenant-cache refresh to the outermost block's end.
+        self._tenant_batch_depth = 0
 
         # System-level state: Hardware, Global Config, Modules, Auth
         self.system_state: Dict[str, Any] = {
@@ -784,7 +790,8 @@ class StateManager:
 
         Every write refreshes access's tenant caches (refresh_tenant_caches),
         so a new twin is told apart from its sibling at once, whichever route
-        or loop wrote it."""
+        or loop wrote it. Inside batch_tenant_writes, the block refreshes them
+        once at its end instead."""
         tenants = self.tenant_state.setdefault("tenants", {})
         if tenant_id not in tenants and (tenant_id is None or not str(tenant_id).strip()):
             raise ValueError("tenant id is blank")
@@ -792,9 +799,35 @@ class StateManager:
         key = self.tenant_key(tenant_id)
         tenants.setdefault(tenant_id if key is None else key, {}).update(data)
         self._mark_dirty()
-        # Lazy import: access is a leaf module, state stays importable alone.
-        from access import refresh_tenant_caches
-        refresh_tenant_caches(self.tenant_state)
+        # Refresh the caches now, unless a batch refreshes them at its end.
+        if not self._tenant_batch_depth:
+            # Lazy import: access is a leaf module, state stays importable alone.
+            from access import refresh_tenant_caches
+            refresh_tenant_caches(self.tenant_state)
+
+    @contextmanager
+    def batch_tenant_writes(self):
+        """Refresh access's tenant caches once for every update_tenant in the
+        block, at its end, instead of once per call.
+
+        A loop that writes every tenant (the 5-minute NetBox tenant and
+        tenant-group sync, POST /setup/sync-tenants, the test feed's tenant
+        shells) otherwise rebuilds the caches once per tenant, about 1.1 s a
+        cycle at 500 tenants. Until the block ends, the caches miss its
+        writes, so the block must not await: with no await, no other request
+        runs in between to read them. The refresh runs even when the block
+        raises, so a write made before the error still reaches the caches.
+        Blocks may nest; only the outermost one refreshes."""
+        self._tenant_batch_depth += 1
+        try:
+            yield
+        finally:
+            self._tenant_batch_depth -= 1
+            # Leaving the outermost block: one refresh covers all its writes.
+            if not self._tenant_batch_depth:
+                # Lazy import: access is a leaf module, state stays importable alone.
+                from access import refresh_tenant_caches
+                refresh_tenant_caches(self.tenant_state)
 
     def delete_tenant(self, tenant_id: str) -> Optional[List[str]]:
         """Remove a tenant's registry record and detach it from every user and

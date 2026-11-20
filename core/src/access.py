@@ -1281,8 +1281,9 @@ def refresh_tenant_caches(tenant_state) -> Optional[str]:
     the single shared-tenant id, the tenant-group members and the ids only case
     or spaces tell apart (_AMBIGUOUS_TENANT_IDS). Returns the shared id (or
     None). StateManager calls it whenever its tenant records change (load,
-    update_tenant, delete_tenant): a write path that skipped a refresh, such
-    as the tenant sync, left a new twin matching its sibling's records."""
+    update_tenant or the end of a batch_tenant_writes block around it,
+    delete_tenant): a write path that skipped a refresh, such as the tenant
+    sync, left a new twin matching its sibling's records."""
     global _SHARED_TENANT_ID, _GROUP_MEMBERS, _AMBIGUOUS_TENANT_IDS
     try:
         # Tenant records, the ids that only case or spaces tell apart (first,

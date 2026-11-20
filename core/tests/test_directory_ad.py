@@ -290,10 +290,13 @@ def test_connections_are_read_side_by_side(monkeypatch):
     reads = {"now": 0, "max": 0}
 
     async def slow_read(ns, key, fetch, tenants=None, lane=None):
+        """Count the cache reads in flight, nap, then read through."""
         reads["now"] += 1
         reads["max"] = max(reads["max"], reads["now"])
-        await asyncio.sleep(0.05)
-        reads["now"] -= 1
+        try:
+            await asyncio.sleep(0.05)
+        finally:
+            reads["now"] -= 1
         return await fetch()
     hub.cache_read = slow_read
     client = _client(monkeypatch, hub)

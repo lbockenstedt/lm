@@ -77,7 +77,7 @@ function openExternalDns(id) {
 // Manages A/AAAA records at dns.he.net over HE's dynamic-DNS update API. The HE
 // DDNS key is NEVER sent from the browser — the operator picks a Credential
 // Vault secret of type 'henet' (a {bucket,name} reference) and the hub resolves
-// it unattended (net_services._henet_resolve_vault_cred). Each record carries
+// it unattended (net_services._henet_resolve_account_login). Each record carries
 // an explicit tenant_id (global "" for Global-Admin-managed, or the owning
 // tenant's) — a Global Admin sees + manages everything; a tenant-admin (or
 // DNS-view user, read-only) sees only their own tenant's records. Record/
@@ -316,6 +316,15 @@ async function loadHenet() {
                         ? `daily at ${escapeHtml(String(cfg.daily_time || '02:00'))}`
                         : `every ${_henetFmtInterval(cfg.interval_seconds)}`;
                     scheduleHtml = ` · <span class="text-slate-600" title="Automatic HE.NET re-sync is on">⏱ auto-sync ${when}</span>`;
+                    // The last run's reason (counts and failure kinds only, so
+                    // it names no tenant; see henet_sync._run_reason). Escaped
+                    // by the browser: textContent, then outerHTML.
+                    const run = sc.data.last_run || {};
+                    if (run.reason) {
+                        const cls = run.status === 'error' ? 'text-red-600' : 'text-slate-500';
+                        scheduleHtml += ' · ' + Object.assign(document.createElement('span'),
+                            { className: cls, textContent: `last run: ${run.reason}` }).outerHTML;
+                    }
                 }
             }
         } catch (e) { /* best-effort */ }
@@ -493,6 +502,7 @@ async function showHenetCredModal() {
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
 }
 
+// Credential dialog's Save: assign the picked vault secret to the current scope's slot.
 async function _henetSaveCred() {
     const sel = document.getElementById('henet-assign-cred')?.value || '';
     const [bucket, name] = String(sel).split('|');
@@ -514,6 +524,7 @@ async function _henetSaveCred() {
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
+// Credential dialog's Clear: remove the current scope's credential assignment.
 async function _henetClearCred() {
     try {
         const scope = _henetScope();
@@ -613,6 +624,7 @@ async function _henetSaveSchedule() {
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
+// Record dialog's Save: write the record at HE.NET, or only move it when an admin changes just its tenant.
 async function saveHenetRecord() {
     const modal = document.getElementById('henet-record-modal');
     const editing = modal && modal.dataset.editName;
@@ -669,6 +681,7 @@ async function saveHenetRecord() {
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
+// Row's trash icon: after a confirm, stop managing the record (its dns.he.net entry is left as is).
 async function deleteHenetRecord(name, type) {
     if (!await showConfirmToast(`Remove ${name} (${type}) from HE.NET management? (The zone entry at dns.he.net is left unchanged — delete it there if you want it gone.)`)) return;
     try {
@@ -766,6 +779,7 @@ async function _henetMoveAll() {
     await viewAsTenant(tgt || 'default');
 }
 
+// Import existing: after a confirm, bring the HE.NET zones' unmanaged A/AAAA records under management.
 async function importHenet() {
     if (!window._henetAssignedCred) { showToast(_henetNoCredMsg('Assign an HE.NET credential first'), 'error'); return showHenetCredModal(); }
     if (!await showConfirmToast('Read the existing records in your HE.NET zone(s) and bring any A/AAAA records not already managed under management? (Reads the dns.he.net web panel with the assigned account login — nothing is pushed or changed at HE.)')) return;
@@ -787,6 +801,7 @@ async function importHenet() {
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
+// Sync all: after a confirm, re-apply the managed A/AAAA records in view at HE.NET with the account login.
 async function syncHenet() {
     const records = (window._henetRecords || []).filter(r => r.type === 'A' || r.type === 'AAAA')
         .map(r => ({ name: r.name, type: r.type, value: r.value, ttl: r.ttl }));

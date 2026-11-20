@@ -4,11 +4,19 @@
 Measures the hub's real capacity (msg/s, CPU, mem, backlog) under a controlled
 number of connected spokes each sending signed CS_TELEMETRY at a chosen rate.
 
-It REUSES the real client (``BaseControlPlane``) so auth, mutual-auth, session-key
-rotation, signing, and keepalive are byte-for-byte what a real spoke does — a
-hand-rolled client would risk signature mismatches and measure the wrong thing.
-The dangerous side-effects are neutralised: no ``.env`` writes, no healthy-marker
-files, and SPOKE_UPDATE is a NO-OP (a synthetic spoke must never git-pull /opt/lm).
+It REUSES the real client (``BaseControlPlane``, through ``SyntheticSpoke``) so
+auth, mutual-auth, session-key rotation, signing, and keepalive are byte-for-byte
+what a real spoke does — a hand-rolled client would risk signature mismatches and
+measure the wrong thing. ``SyntheticSpoke`` keeps it off the box it runs on: no
+``.env`` writes, no healthy-marker files, no host cert files, host commands (OS
+updates, reboot, Remote Console) refused, and hub pushes such as SPOKE_UPDATE
+skipped (a synthetic spoke must never git-pull /opt/lm). It also marks itself
+synthetic so the hub does not target it with host actions.
+
+Against a hub that enforces mTLS, a load test run from another box holds no
+client cert: each spoke waits through the enrollment attempts before it gets
+degraded cert-less access, and never connects in strict mode. Run it from the
+hub itself (loopback is exempt) or against a hub that is not enforcing mTLS.
 
 WHERE TO RUN: on a lab box that can reach the hub AND has the lm core on disk
 (any spoke host, or the hub itself). It imports from /opt/lm/core/src.
@@ -38,6 +46,8 @@ import json
 import os
 # random: vary synthetic client fields so payloads look realistic.
 import random
+# signal: turn SIGTERM into a clean exit.
+import signal
 # socket: this box's hostname, folded into spoke ids to keep them unique.
 import socket
 # ssl: talk to the hub's self-signed /status endpoint without verification.
@@ -46,7 +56,7 @@ import sys
 # time: timestamps and rate pacing; urllib.request: fetch hub status.
 import time
 import urllib.request
-# uuid: message ids and throwaway install ids.
+# uuid: message ids.
 import uuid
 
 # ── locate the lm core + spoke venv (turnkey on an existing spoke) ───────────
@@ -101,24 +111,24 @@ def _load_env_file(path):
     except Exception:
         pass
     return out
-# Import the real spoke client class, trying both package layouts.
-BaseControlPlane = None
+# Import the synthetic spoke client class, trying both package layouts.
+SyntheticSpoke = None
 _imp_err = None
-for _mod in ("core.src.messaging.control_plane", "messaging.control_plane"):
+for _mod in ("core.src.messaging.synthetic_spoke", "messaging.synthetic_spoke"):
     try:
-        BaseControlPlane = __import__(_mod, fromlist=["BaseControlPlane"]).BaseControlPlane
+        SyntheticSpoke = __import__(_mod, fromlist=["SyntheticSpoke"]).SyntheticSpoke
         break
     except Exception as e:  # pragma: no cover
         _imp_err = e
 # Neither layout worked: this box lacks the lm core, so stop with a hint.
-if BaseControlPlane is None:
-    sys.exit("Cannot import BaseControlPlane — run on a box with /opt/lm/core "
+if SyntheticSpoke is None:
+    sys.exit("Cannot import SyntheticSpoke — run on a box with /opt/lm/core "
              f"(e.g. PYTHONPATH=/opt/lm/core/src). Last error: {_imp_err}")
 
 
-class LoadSpoke(BaseControlPlane):
-    """A real spoke client with side-effects neutralised + a synthetic telemetry
-    sender. One asyncio task per instance; hundreds run concurrently in-process."""
+class LoadSpoke(SyntheticSpoke):
+    """A real spoke client kept off the host (``SyntheticSpoke``) + a synthetic
+    telemetry sender. One asyncio task per instance; hundreds run concurrently in-process."""
 
     # Pools of values used to generate plausible synthetic client records.
     _PLATFORMS = ("linux", "windows", "macos")
@@ -227,36 +237,6 @@ class LoadSpoke(BaseControlPlane):
         if self._pad:
             data["_pad"] = self._pad
         return data
-
-    # ── neutralise side-effects (no disk writes for a throwaway spoke) ────────
-    def _ensure_install_uuid(self):
-        """Return a random in-memory install id instead of reading/writing .env."""
-        return uuid.uuid4().hex           # in-memory only; never touch .env
-
-    def _persist_session_secret(self, new_secret):  # no-op
-        """Do not persist rotated session secrets (throwaway spoke)."""
-        pass
-
-    def _persist_hub_secret(self, new_secret):       # no-op
-        """Do not persist the hub secret (throwaway spoke)."""
-        pass
-
-    def _touch_healthy_marker(self):                 # no-op (no marker files)
-        """Do not create the healthy marker file."""
-        pass
-
-    def _clear_healthy_marker(self):                 # no-op
-        """Do not remove a healthy marker file (none exists)."""
-        pass
-
-    async def handle_system_command(self, cmd_type, data):
-        """Handle a hub system command, ignoring SPOKE_UPDATE so nothing is pulled or restarted."""
-        # NEVER let a synthetic spoke act on SPOKE_UPDATE (it would git-pull
-        # /opt/lm and restart). Everything else — crucially SPOKE_UPDATE_SESSION_KEY,
-        # which rotates the signing key — flows to the real handler.
-        if cmd_type == "SPOKE_UPDATE":
-            return {"status": "SUCCESS", "message": "loadtest: SPOKE_UPDATE ignored"}
-        return await super().handle_system_command(cmd_type, data)
 
     # ── honor the hub's slow-down signal by doing the merge work HERE ─────────
     def apply_backpressure(self, level, coalesce=False, min_interval_s=0.0):
@@ -550,6 +530,9 @@ async def _monitor(status_url, stop_evt, interval, stats, total,
 
 async def main():
     """Parse arguments, start the synthetic spokes and monitor, run for the duration, then stop."""
+    # SIGTERM's default action exits without running atexit, leaving the spokes'
+    # scratch dir behind. Cancel this task instead, as Ctrl-C does.
+    asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, asyncio.current_task().cancel)
     # Command-line options (see each help text).
     ap = argparse.ArgumentParser(description="Hub load test — N synthetic spokes.")
     ap.add_argument("--hub", default="", help="wss://HOST:PORT (default: from --env-file HUB_URL)")
@@ -677,9 +660,10 @@ async def main():
           f"curl -sk -X DELETE https://HOST/setup/spokes/{args.prefix}$(printf %05d $i); done")
 
 
-# Run main(); Ctrl-C exits quietly.
+# Run main(); Ctrl-C or SIGTERM exits quietly (SIGTERM cancels main, so
+# CancelledError reaches here).
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         pass

@@ -655,6 +655,28 @@ def test_setup_oidc_config_admin_only_and_persists(tmp_path):
     # as a secret): confirm no surprise secret fields appear.
     assert "client_secret" not in hub.state.system_state["global_config"]["oidc"]
 
+
+def test_generate_cert_unwritable_dir_names_the_key_path(tmp_path, monkeypatch):
+    """A hub that can't write its OIDC dir gets a 500 naming the key path it
+    tried, not an unhandled error from the PermissionError handler."""
+    import routes.oidc as roidc
+    monkeypatch.setenv("LM_OIDC_DIR", str(tmp_path / "oidc"))
+
+    def _deny(**_kw):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(roidc, "generate_client_cert", _deny)
+    admin = {"admin": {"auth_type": "local",
+                       "password_hash": api_mod._hash_password("pass1234"),
+                       "permissions": {"role": "admin", "admin": True},
+                       "tenants": [], "protected": False}}
+    client, _hub = _build({"users": admin})
+    ck = client.post("/auth/login", json={"username": "admin", "password": "pass1234"}
+                     ).cookies.get("lm_session")
+    r = client.post("/setup/oidc-config/generate-cert", cookies={"lm_session": ck}, json={})
+    assert r.status_code == 500
+    assert str(tmp_path / "oidc" / "client-key.pem") in r.json()["detail"]
+
 def test_default_oidc_dir_uses_hub_data_dir(monkeypatch, tmp_path):
     """Default cert dir derives from the hub's WRITABLE state data_dir (not the
     non-writable /etc/lm), with LM_OIDC_DIR overriding."""

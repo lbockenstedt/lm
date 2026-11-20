@@ -1936,9 +1936,11 @@ class NwDiscoverySyncMixin:
                 env = self.nw_cache_get_device(d["id"], "lldp")
                 rows = env.get("data") if isinstance(env, dict) else None
                 lldp_by_device[d["id"]] = rows if isinstance(rows, list) else []
-            # Build the same topology the UI map shows (LLDP only, no MAC inference).
-            graph = build_topology(fleet=devs, lldp_by_device=lldp_by_device,
-                                   macs_by_device={}, infer_from_macs=False)
+            # Build the same topology the UI map shows (LLDP only, no MAC
+            # inference), off the event loop like the map route: it is CPU work.
+            graph = await asyncio.to_thread(
+                build_topology, fleet=devs, lldp_by_device=lldp_by_device,
+                macs_by_device={}, infer_from_macs=False)
             # Turn the graph into NetBox cable links; nothing to send means skip the tenant.
             links = netbox_lldp_links(graph)
             if not links:

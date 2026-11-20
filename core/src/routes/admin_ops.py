@@ -1524,6 +1524,11 @@ def register(app, hub, ctx):
         # Otherwise the target is a spoke id, which must be connected.
         if hub._primary_key(target) not in conns:
             raise HTTPException(status_code=404, detail=f"spoke '{target}' not connected")
+        # A synthetic (Test Data Feed / load-test) spoke would only refuse it.
+        if hub._primary_key(target) in getattr(hub, "synthetic_spokes", ()):
+            raise HTTPException(status_code=400,
+                                detail=f"'{target}' is a synthetic test-feed / load-test "
+                                       "spoke — it has no host to run commands on")
         # Relay RUN_COMMAND to the spoke (extra 10 s for transport) and unwrap its result.
         resp = await hub.request_response(
             target, "RUN_COMMAND",

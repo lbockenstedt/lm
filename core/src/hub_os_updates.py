@@ -349,18 +349,22 @@ class HubOsUpdatesMixin:
         """Every node we could update: connected spokes, their agents, + the hub.
 
         Returns ``[{kind, id, spoke_id, label, module_type}]``. Ineligible-by-type
-        nodes are included so the panel can show them as unmanaged.
+        nodes are included so the panel can show them as unmanaged. Synthetic
+        (Test Data Feed / load-test) spokes are left out: they carry production
+        names but have no OS of their own, and refuse the OS_* commands.
         """
-        # Result list, connected spokes, and their metadata.
+        # Result list, connected real (non-synthetic) spokes, and their metadata.
         out: List[Dict[str, str]] = []
-        conns = getattr(self, "active_connections", {}) or {}
+        synthetic = getattr(self, "synthetic_spokes", ())
+        conns = [sid for sid in (getattr(self, "active_connections", {}) or {})
+                 if sid not in synthetic]
         meta = {}
         try:
             meta = (self.state.system_state.get("module_metadata", {}) or {})
         except Exception:  # noqa: BLE001
             meta = {}
         # Each connected spoke, unless it is an appliance type.
-        for sid in list(conns.keys()):
+        for sid in conns:
             md = meta.get(sid, {}) or {}
             mtype = str(md.get("module_type") or md.get("type") or "").strip()
             if mtype.lower() in _NEVER_PROBE_TYPES:
@@ -371,7 +375,8 @@ class HubOsUpdatesMixin:
         def _host(name):
             """Short lower-case hostname (first DNS label)."""
             return str(name or "").split(".")[0].strip().lower()
-        # Hostnames of connected spokes, to skip agents on the same machine.
+        # Hostnames of connected real spokes, to skip agents on the same machine
+        # (a synthetic spoke's production hostname must not hide a real agent).
         spoke_hosts = set()
         for sid in conns:
             md = meta.get(sid, {}) or {}

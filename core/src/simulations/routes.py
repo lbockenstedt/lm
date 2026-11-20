@@ -58,7 +58,7 @@ from . import github_config_client
 # Decrypts/resolves stored Central credentials.
 from . import central_secrets
 # SSRF guards and edit-permission checks.
-from access import safe_external_url, host_resolves_external, has_edit_access, same_tenant, tenant_among
+from access import safe_external_url, host_resolves_external, has_edit_access, same_tenant, tenant_among, write_scope
 # URL parsing for host validation.
 from urllib.parse import urlsplit
 
@@ -260,6 +260,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if inspect.isawaitable(tid):
             tid = await tid
         return tid
+
+    def _require_central_config_write(request, tenant_id):
+        """Require full write scope before replacing a tenant's Central credentials."""
+        if not tenant_id or write_scope(session_user_fn(request), tenant_id) != "full":
+            raise HTTPException(
+                status_code=403,
+                detail="Full write access to this tenant's Central configuration is required",
+            )
 
     # ── Auth adapters ───────────────────────────────────────────────────
     # LM owns authentication via the lm_session cookie. These endpoints map the
@@ -1979,6 +1987,49 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                        tenant_id, reason, n, ", force_live" if force_live else "")
         return True
 
+    async def _propose_unchecked_known_goods(tid, known_good, now, changed=False):
+        """Queue a global learned-value proposal for each of ``tid``'s known-good
+        snapshots not yet checked for one, then save ``known_good`` when any
+        was marked or ``changed`` says the caller changed it.
+
+        A new snapshot has no proposal_checked mark, and nor does one saved
+        while the queue write was broken (Aug 6 until this fix), whose proposal
+        was lost. Each is proposed once, whatever its quota does now (learning
+        off, not stable, disabled or deleted), as it would have been when it
+        was saved; propose_global_learned drops one that approving would add
+        nothing to. The proposal's floor is the one saved with the snapshot,
+        so count and floor come from the same stable state. A snapshot saved
+        before snapshots kept their floor has none: its floor is unknown, and
+        the stable path gives it one when its quota is next stable. The mark
+        goes on a copy, never on the stored record, and is saved after the
+        proposal is queued: if the queue write fails, the next pass proposes
+        again."""
+        # Mark each unchecked snapshot with a usable count, and build its proposal.
+        proposals = {}
+        for ak, kg in list(known_good.items()):
+            if not isinstance(kg, dict) or kg.get("proposal_checked"):
+                continue
+            try:
+                count = int(kg["count"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            # The floor saved with the count; none, or one that doesn't parse,
+            # is unknown.
+            try:
+                floor = int(kg["floor"])
+            except (KeyError, TypeError, ValueError):
+                floor = None
+            known_good[ak] = dict(kg, proposal_checked=True)
+            proposals[ak] = {"count": count, "floor": floor,
+                             "knobs": kg.get("knobs") or {},
+                             "time_to_stable_s": kg.get("time_to_stable_s"),
+                             "source_tenant": tid, "proposed_at": now}
+        # Queue the proposals, then save the known-goods that mark them.
+        if proposals:
+            await store.propose_global_learned(proposals)
+        if proposals or changed:
+            await store.set_known_good(tid, known_good)
+
     async def _run_adaptive_controller() -> None:
         """One controller pass over every tenant's adaptive quotas — advance the
         target and re-push when it moves. Small (per-quota state).
@@ -2037,8 +2088,11 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                             tid, len(all_q), len(adaptive),
                             [f"{q.get('alert_id')}@{q.get('site')} min={q.get('min')} "
                              f"max={q.get('max')} learn={q.get('learning')}" for q in adaptive])
-                # Nothing adaptive for this tenant.
+                # Nothing adaptive for this tenant; the known-goods it saved
+                # earlier are still checked for a proposal.
                 if not adaptive:
+                    await _propose_unchecked_known_goods(
+                        tid, await store.get_known_good(tid), now)
                     continue
                 # Only fetched when there's adaptive work this tenant this tick
                 # — an extra CS_GET_SIM_QUOTA_STATE round-trip skipped for every
@@ -2093,15 +2147,17 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 changed = False
                 live = set()
                 # Known-good capture: the learned simulation.conf knobs live in
-                # the knob-learner state (same _adaptive_key), and the per-alert
-                # known-good snapshot + the global pending-approval queue are read
-                # once per sweep and written back if they change.
+                # the knob-learner state (same _adaptive_key). The per-alert
+                # known-good snapshot is read once per sweep and written back if
+                # it changes; proposals for the global pending-approval queue
+                # are merged in at the end, so an approve or reject made during
+                # the sweep is kept.
                 knob_state = await store.get_knob_learn_state(tid)
                 known_good = await store.get_known_good(tid)
-                pending = await store.get_global_learned_pending()
-                # Track whether the known-good snapshot or pending queue changed.
+                # Track whether the known-good snapshot changed, and the best
+                # candidate snapshot per alert this pass.
                 kg_changed = False
-                pending_changed = False
+                best_kg: dict = {}
                 # Step each adaptive quota's controller.
                 for q in adaptive:
                     # Mark the key live and read the alert's firing state.
@@ -2116,35 +2172,62 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     # Record any change.
                     if after != before:
                         state[k] = after; changed = True
-                    # Record the known-good when a learning-ON quota is stable —
-                    # count + the knobs it took + how long. Per ALERT (shared
-                    # across sites); the higher learned count wins. Only when the
-                    # snapshot actually changes, and only propose to the global
-                    # pending queue when it differs from the approved global value
-                    # (admin still has to approve before it seeds every tenant).
+                    # A learning-ON quota that is stable is a known-good candidate
+                    # — count + the knobs it took + how long. The snapshot is
+                    # per ALERT (shared across sites), so only the best
+                    # candidate per alert is compared and saved, after the loop.
                     if (q.get("learning") and after.get("phase") == "stable"
                             and after.get("learned_op") is not None):
                         # Knob values the learner found for this quota.
                         _knobs = (knob_state.get(k) or {}).get("values") or {}
                         kg = sim_quota.known_good_from_state(q, after, _knobs)
                         if kg:
-                            # Compare with the previous known-good for this alert.
+                            # The snapshot keeps the floor learned with its count,
+                            # so its proposal has it even when the quota is no
+                            # longer stable (the shared builder records none).
+                            kg["floor"] = after.get("floor")
+                            # A Reset-to-known-good seeds the floor from the
+                            # count and leaves stable_since unset until the
+                            # controller next learns one, so only a floor with
+                            # stable_since set counts as learned.
+                            learned = kg["floor"] is not None and bool(after.get("stable_since"))
+                            # Rank: the higher count, then a learned floor, then
+                            # the higher floor; the site name breaks a tie, so
+                            # the pick doesn't depend on the order of the rows.
+                            rank = (kg["count"], learned,
+                                    -1 if kg["floor"] is None else int(kg["floor"]),
+                                    str(kg.get("site") or ""))
                             ak = _alert_key(q)
-                            prev = known_good.get(ak) or {}
-                            if (int(kg["count"]) != int(prev.get("count", 0))
-                                    or (kg.get("knobs") or {}) != (prev.get("knobs") or {})):
-                                # Save the new snapshot.
-                                known_good[ak] = kg
-                                kg_changed = True
-                                # Propose it for approval when it differs from the global value.
-                                _gap = (global_lv or {}).get(ak) or {}
-                                if int(_gap.get("op", -1)) != int(kg["count"]):
-                                    pending[ak] = {
-                                        "count": kg["count"], "floor": after.get("floor"),
-                                        "knobs": kg.get("knobs") or {},
-                                        "time_to_stable_s": kg.get("time_to_stable_s"),
-                                        "source_tenant": tid, "proposed_at": now}
-                                    pending_changed = True
+                            if ak not in best_kg or rank > best_kg[ak][0]:
+                                best_kg[ak] = (rank, kg, learned)
+                # Save each alert's best snapshot when it differs from the saved
+                # one; each saved snapshot is proposed to the global pending
+                # queue once, at the end of the pass (admin still has to
+                # approve before it seeds every tenant). Compared one row at a
+                # time, sites that share an alert would replace each other's
+                # snapshot on every pass, and each replacement is proposed again.
+                for ak, (_rank, kg, learned) in best_kg.items():
+                    # A saved snapshot that is not a dict or has a count that
+                    # doesn't parse counts as different, so the new snapshot
+                    # replaces it instead of the error ending this tenant's pass
+                    # (and its proposals) every time.
+                    prev = known_good.get(ak)
+                    prev = prev if isinstance(prev, dict) else {}
+                    try:
+                        same_count = int(kg["count"]) == int(prev.get("count", 0))
+                    except (TypeError, ValueError):
+                        same_count = False
+                    # One saved with no floor (as every snapshot was before they
+                    # kept one) is replaced by this one when the controller
+                    # learned its floor, and so proposed again with it. A
+                    # candidate with no learned floor never replaces for its
+                    # floor, so it can't re-propose each pass.
+                    gains_floor = learned and prev.get("floor") is None
+                    if (not same_count or gains_floor
+                            or (kg.get("knobs") or {}) != (prev.get("knobs") or {})):
+                        # Save the new snapshot (unchecked, so it is proposed).
+                        known_good[ak] = kg
+                        kg_changed = True
                 # (C) Max-ceiling alert: a quota that ramped its target to `max`
                 # and STILL isn't firing — AND actually filled to that max from the
                 # online pool — means the alert should have fired before we hit the
@@ -2210,12 +2293,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 if changed:
                     await store.set_adaptive_state(tid, state)
                     await _push_sim_quotas(tid)
-                # Persist the known-good snapshot if it changed.
-                if kg_changed:
-                    await store.set_known_good(tid, known_good)
-                # Persist the pending queue if it changed.
-                if pending_changed:
-                    await store.set_global_learned_values(published)
+                # Queue a proposal for each known-good not checked yet, then
+                # save the known-goods.
+                await _propose_unchecked_known_goods(tid, known_good, now, kg_changed)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("adaptive controller (%s): %s", tid, exc)
 
@@ -2232,9 +2312,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             await asyncio.sleep(45)
 
     # Expose the loop so the Hub's startup can schedule it (a running event loop
-    # isn't guaranteed at route-registration time).
+    # isn't guaranteed at route-registration time), and one pass as a test seam.
     try:
         hub._adaptive_controller_loop = _adaptive_controller_loop
+        hub._run_adaptive_controller = _run_adaptive_controller
     except Exception:  # noqa: BLE001
         pass
 
@@ -3051,8 +3132,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # the Central tab's form populates.
         # Add the stored config (without mode) and its mode.
         cc = await store.get_central_config(tenant_id)
+        data["hub_central_config"] = central_secrets.public_status_config(cc)
         if isinstance(cc, dict):
-            data["hub_central_config"] = {k: v for k, v in cc.items() if k != "mode"}
             if cc.get("mode"):
                 data["mode"] = cc["mode"]
         # Return the merged view.
@@ -3125,6 +3206,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.post("/sim/api/aggregate/central")
     async def save_central(request: Request, tenant_id: str = Depends(get_tenant_id)):
         """Save the tenant's Central API config (SSRF-checked) and push it to the spokes."""
+        _require_central_config_write(request, tenant_id)
         # Parse the body and fold the mode into the config.
         body = await request.json()
         mode = body.get("mode")
@@ -3132,10 +3214,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         cfg = dict(hub_cc)
         if mode:
             cfg["mode"] = mode
+        existing = await store.get_central_config(tenant_id)
+        try:
+            cfg, cleared_secrets = central_secrets.merge_secret_updates(cfg, existing)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         # SSRF guard: ``cluster_url`` is the host the hub POSTs the Aruba
         # ``client_id``/``client_secret`` to (classic mode) and GETs monitoring
-        # data from. This route is reachable by any cs-righted tenant user (NOT
-        # just admins), so without a guard a tenant user can point the hub's
+        # data from. A tenant full-write user can point the hub's
         # outbound HTTP at an internal host / cloud-metadata endpoint and have
         # the hub exfiltrate the stored Central creds there. Confine it to a
         # public HTTPS host, and DNS-resolve it to block rebinding to an
@@ -3204,7 +3290,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             stored = await central_secrets.to_vault(hub, "central_config", tenant_id, cfg)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502,
-                                detail=f"Could not store the Central secret in the vault: {exc}")
+                                detail=f"Could not update the Central vault credentials: {exc}")
         # Save the stored form; resolve real values for the push.
         await store.set_central_config(tenant_id, stored)
         cfg = await central_secrets.resolve(hub, stored)
@@ -3212,7 +3298,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # cluster creds, and the spoke's poller (_build_config) needs ``mode`` to
         # pick classic vs new_central. Pushing hub_cc dropped mode, so the spoke
         # defaulted to classic regardless of the operator's choice.
-        pushed = await _push_config(tenant_id, {"central_config": cfg})
+        push_config = {"central_config": cfg}
+        if cleared_secrets:
+            push_config["central_config_clear_secrets"] = cleared_secrets
+        pushed = await _push_config(tenant_id, push_config)
         # Report the push result.
         return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
@@ -3449,8 +3538,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # Merge hub-owned on-prem config (mode + cluster creds) from the store so
         # the Central On-Prem tab's form populates (mirror of central-status).
         cc = await store.get_central_on_prem_config(tenant_id)
+        data["hub_central_on_prem_config"] = central_secrets.public_status_config(cc)
         if isinstance(cc, dict):
-            data["hub_central_on_prem_config"] = {k: v for k, v in cc.items() if k != "mode"}
             if cc.get("mode"):
                 data["mode"] = cc["mode"]
         # Return the merged view.
@@ -3490,6 +3579,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     async def save_central_on_prem(request: Request,
                                    tenant_id: str = Depends(get_tenant_id)):
         """Save the tenant's Central On-Prem config (SSRF-checked) and push it to spokes."""
+        _require_central_config_write(request, tenant_id)
         # Parse the body and fold the mode into the config.
         body = await request.json()
         mode = body.get("mode")
@@ -3497,15 +3587,20 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         cfg = dict(hub_cc)
         if mode:
             cfg["mode"] = mode
+        existing = await store.get_central_on_prem_config(tenant_id)
+        try:
+            cfg, cleared_secrets = central_secrets.merge_secret_updates(cfg, existing)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         # Optional SSO token URL for a cluster outside the public list. The hub
         # POSTs the client secret there, so it gets the same guard.
         await _check_token_url(cfg)
         # SSRF guard: same as cloud Central — on-prem cluster_url is still an
         # outbound hub target (the hub POSTs the Aruba client_id/secret to it in
-        # classic mode and GETs monitoring data from it). This route is reachable
-        # by any cs-righted tenant user, so confine cluster_url to a public HTTPS
-        # host and DNS-resolve it to block rebinding to an internal IP. Only
-        # validate when present (new_central mode uses a fixed token URL).
+        # classic mode and GETs monitoring data from it). Only full-write users
+        # can save this config. Confine cluster_url to a public HTTPS host and
+        # DNS-resolve it to block rebinding to an internal IP. Only validate
+        # when present (new_central mode uses a fixed token URL).
         cluster_url = (cfg.get("cluster_url") or "").strip()
         # Validate the cluster URL when present.
         if cluster_url:
@@ -3563,14 +3658,17 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             stored = await central_secrets.to_vault(hub, "central_on_prem_config", tenant_id, cfg)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502,
-                                detail=f"Could not store the Central secret in the vault: {exc}")
+                                detail=f"Could not update the Central vault credentials: {exc}")
         # Save the stored form; resolve real values for the push.
         await store.set_central_on_prem_config(tenant_id, stored)
         cfg = await central_secrets.resolve(hub, stored)
         # Push ``cfg`` (carries ``mode`` on top of the cluster creds) — mirror of
         # cloud Central's save; the spoke's on-prem poller needs ``mode`` to pick
         # classic vs new_central (Phase 5).
-        pushed = await _push_config(tenant_id, {"central_on_prem_config": cfg})
+        push_config = {"central_on_prem_config": cfg}
+        if cleared_secrets:
+            push_config["central_on_prem_config_clear_secrets"] = cleared_secrets
+        pushed = await _push_config(tenant_id, push_config)
         # Report the push result.
         return {"saved": True, "pushed_to_spokes": pushed,
                 "queued": bool(getattr(pushed, "queued", False))}
@@ -7283,35 +7381,12 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         keys = [str(k) for k in keys if k]
         if not keys:
             raise HTTPException(status_code=400, detail="alert_key(s) required")
-        # Pending and published registries.
-        pending = await store.get_global_learned_pending()
-        published = await store.get_global_learned_values()
-        # Timestamp and approved keys.
-        now = _t.time()
-        approved = []
-        # Promote each valid pending entry to published.
-        for ak in keys:
-            p = pending.get(ak)
-            # Skip missing or count-less entries.
-            if not isinstance(p, dict) or p.get("count") is None:
-                continue
-            published[ak] = {
-                "op": int(p["count"]),
-                "floor": int(p["floor"]) if p.get("floor") is not None else None,
-                "knobs": dict(p.get("knobs") or {}),
-                "time_to_stable_s": p.get("time_to_stable_s"),
-                "source_tenant": str(p.get("source_tenant") or ""),
-                "published_at": now,
-            }
-            # Remove it from pending.
-            pending.pop(ak, None)
-            approved.append(ak)
+        # Move the valid proposals into the published values in one step.
+        approved = await store.approve_global_learned(keys, _t.time())
         # None matched: 404.
         if not approved:
             raise HTTPException(status_code=404, detail="no matching pending entries")
-        # Save, re-push all tenants, and report.
-        await store.set_global_learned_values(published)
-        await store.set_global_learned_values(published)
+        # Re-push all tenants and report.
         pushed = await _push_sim_quotas_all_tenants()
         return {"status": "approved", "approved": approved, "pushed_to_spokes": pushed}
 
@@ -7329,12 +7404,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         ak = str((body or {}).get("alert_key") or "")
         if not ak:
             raise HTTPException(status_code=400, detail="alert_key required")
-        # Remove it from pending.
-        pending = await store.get_global_learned_pending()
-        existed = pending.pop(ak, None) is not None
-        # Save when something was removed.
-        if existed:
-            await store.set_global_learned_values(published)
+        # Remove it from pending (saved only when it was queued).
+        existed = await store.reject_global_learned(ak)
         # Report the outcome.
         return {"status": "rejected" if existed else "not_found", "alert_key": ak}
 

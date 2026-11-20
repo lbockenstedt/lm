@@ -10,7 +10,6 @@ actually owns it, and a node that gets ONLY error replies must still
 surface instead of silently vanishing.
 """
 import asyncio
-import time
 
 from routes import pxmx
 
@@ -41,7 +40,7 @@ class _MultiSpokeHub(_MockHub):
         return [self._other_sid, self._owner_sid]
 
     async def request_response(self, sid, cmd, payload, timeout=30.0, signing_secret=None):
-        self.calls.append({"sid": sid, "cmd": cmd, "payload": payload, "timeout": timeout, "t": time.time()})
+        self.calls.append({"sid": sid, "cmd": cmd, "payload": payload, "timeout": timeout})
         if cmd != "PXMX_DRIVE_HEALTH":
             return {"payload": {"data": {}}}
         if self._delay:

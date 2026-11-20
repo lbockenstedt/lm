@@ -369,6 +369,88 @@ def test_a_tenant_created_beside_a_deleted_twin_is_told_apart_at_once(monkeypatc
     assert not access.same_tenant("ACME", "acme")
 
 
+def _count_rebuilds(monkeypatch):
+    """Count each access.refresh_tenant_caches rebuild; every one still runs."""
+    rebuilds = []
+    real = access.refresh_tenant_caches
+
+    def _refresh(tenant_state):
+        """Record one rebuild, then rebuild."""
+        rebuilds.append(1)
+        return real(tenant_state)
+    monkeypatch.setattr(access, "refresh_tenant_caches", _refresh)
+    return rebuilds
+
+
+def test_a_batch_of_tenant_writes_refreshes_the_tenant_caches_once_at_its_end(monkeypatch):
+    """Writes inside batch_tenant_writes leave the refresh to the outermost
+    block, which rebuilds the caches once at its end, even when it raised;
+    a write outside a batch still refreshes at once."""
+    _keep_tenant_cache(monkeypatch)
+    rebuilds = _count_rebuilds(monkeypatch)
+    s = _state({})
+    s.tenant_state["retired_twin_ids"] = ["ACME"]
+    access.refresh_tenant_caches(s.tenant_state)
+    rebuilds.clear()
+    with pytest.raises(RuntimeError):
+        with s.batch_tenant_writes():
+            with s.batch_tenant_writes():
+                s.update_tenant("shr", {"shared": True})
+            s.update_tenant("acme", {})
+            assert rebuilds == []
+            raise RuntimeError("a loop failing part-way")
+    # One rebuild holds both writes made before the error.
+    assert len(rebuilds) == 1
+    assert access.shared_tenant_id() == "shr"
+    assert not access.same_tenant("ACME", "acme")
+    s.update_tenant("shr", {"shared": False})
+    assert len(rebuilds) == 2 and access.shared_tenant_id() is None
+
+
+def test_a_tenant_sync_cycle_rebuilds_the_tenant_caches_once_per_loop(monkeypatch):
+    """The 5-minute NetBox sync writes every tenant, then every tenant group.
+    Each loop rebuilds the tenant caches once, not once per tenant (about
+    1.1 s a cycle at 500 tenants), and they hold every write afterwards."""
+    import main
+    _keep_tenant_cache(monkeypatch)
+    rebuilds = _count_rebuilds(monkeypatch)
+    # 300 NetBox tenants, "acme" among them beside a deleted twin "ACME";
+    # group "emea" lists t1, and t7 names the group itself.
+    s = _state({})
+    s.tenant_state["retired_twin_ids"] = ["ACME"]
+    tenants = [{"slug": f"t{i}", "name": f"T{i}", "id": i} for i in range(299)]
+    tenants[7]["group_slug"] = "emea"
+    tenants.append({"slug": "acme", "name": "Acme", "id": 999})
+    replies = {"NETBOX_GET_TENANTS": {"status": "SUCCESS", "tenants": tenants},
+               "NETBOX_GET_TENANT_GROUPS": {"status": "SUCCESS", "groups": [
+                   {"slug": "emea", "name": "EMEA", "tenant_slugs": ["t1"], "id": 1}]}}
+
+    async def _reply(spoke_id, command, payload, timeout=None):
+        """The NetBox spoke's answer to each sync command."""
+        return {"payload": {"data": replies[command]}}
+
+    async def _sleep(seconds):
+        """Skip the start-up wait; stop the loop at its 5-minute wait."""
+        if seconds == 300:
+            raise asyncio.CancelledError
+
+    hub = SimpleNamespace(state=s, request_response=_reply,
+                          get_spoke_by_type=lambda module_type: "nb-1")
+    hub._sync_tenant_groups = lambda spoke_id: main.LabManagerHub._sync_tenant_groups(hub, spoke_id)
+    access.refresh_tenant_caches(s.tenant_state)
+    assert access.same_tenant("ACME", "acme")
+    rebuilds.clear()
+    monkeypatch.setattr(asyncio, "sleep", _sleep)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(main.LabManagerHub.run_tenant_sync_loop(hub))
+    # One rebuild per loop, plus the group sync's closing refresh_shared_tenant.
+    assert len(rebuilds) == 3
+    assert len(s.tenant_state["tenants"]) == 301
+    assert not access.same_tenant("ACME", "acme")
+    assert access.tenant_in("t1", "group:emea") and access.tenant_in("t7", "group:emea")
+    assert not access.tenant_in("t2", "group:emea")
+
+
 def test_loading_the_tenants_rebuilds_the_tenant_caches(tmp_path, monkeypatch):
     from state.manager import StateManager
     _keep_tenant_cache(monkeypatch)
