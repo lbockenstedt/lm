@@ -25,6 +25,12 @@ credential is skipped (not an error). A tenant that several credential slots
 name (saved before slots were matched in any case) is an error, so the run
 reports ``error`` rather than ``ok``, and none of its records are written.
 
+The last-run status carries a short ``reason`` built only from counts and the
+failure classes in ``_FAILURE_LABELS``: ``GET /api/henet/sync-config`` returns
+it to every user with HE.NET or DNS access, tenant users included, so it never
+names a tenant, record, HE username or vault path, nor quotes an HE.NET, vault
+or spoke error. Those details go to the hub log only.
+
 This module is a **leaf**: it imports only stdlib + sibling leaves and must NOT
 import ``main`` or ``api`` (dependency direction is ``main → henet_sync`` only).
 
@@ -55,6 +61,40 @@ logger = logging.getLogger("Hub")
 _CFG_KEY = "henet_sync"
 _DEFAULT_INTERVAL = 3600  # seconds (1h)
 _MIN_INTERVAL = 300       # never re-scrape HE more often than every 5 min
+
+# Why a scope wrote nothing, as the tenant-neutral run reason names it (see
+# the module docstring). In this order in the reason.
+_FAILURE_LABELS = {
+    "he_write_failed": "HE.NET login or connection failure",
+    "credential_conflict": "credential conflict",
+    "vault_read_failed": "vault read failure",
+}
+# Reason for a run whose record list could not be read from the spoke.
+_LIST_FAILED_REASON = "the HE.NET spoke did not return its record list"
+
+
+def _plural(n: int, noun: str) -> str:
+    """``n`` and ``noun``, with an ``s`` unless ``n`` is 1 ("2 records")."""
+    return f"{n} {noun}{'' if n == 1 else 's'}"
+
+
+def _run_reason(scopes: int, failures: Dict[str, int], rejected: int) -> str:
+    """The tenant-neutral reason for a run with errors, e.g. "2 of 5 scopes
+    failed (1 HE.NET login or connection failure, 1 credential conflict);
+    3 records rejected by HE.NET". ``failures`` counts the scopes that wrote
+    nothing, by class; ``rejected`` counts records HE.NET refused in the scopes
+    that did write."""
+    parts = []
+    # Scopes that wrote nothing, with how many failed each way.
+    failed = sum(failures.values())
+    if failed:
+        kinds = ", ".join(_plural(failures[k], label)
+                          for k, label in _FAILURE_LABELS.items() if failures.get(k))
+        parts.append(f"{failed} of {_plural(scopes, 'scope')} failed ({kinds})")
+    # Records HE.NET refused one by one.
+    if rejected:
+        parts.append(f"{_plural(rejected, 'record')} rejected by HE.NET")
+    return "; ".join(parts)
 
 
 def _valid_ref(ref: Any) -> bool:
@@ -158,14 +198,17 @@ class HenetSyncMixin:
         return entry
 
     async def _henet_write_scope(self, spoke_id: str, tenant_id: str,
-                                 records: List[Dict[str, Any]]) -> Dict[str, int]:
+                                 records: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Write one tenant scope's managed records to HE via the account login,
         then relay the accepted ones to the spoke as ``HENET_WEB_RECORD``.
 
-        Returns ``{applied, errors, skipped}``: every record skipped, with no
-        write, when the scope has no assignable credential or account login;
-        every record an error when several credential slots name the tenant
-        or the vault read fails."""
+        Returns ``{applied, errors, skipped, failure}``: every record skipped,
+        with no write, when the scope has no assignable credential or account
+        login; every record an error, with ``failure`` naming the class in
+        ``_FAILURE_LABELS``, when several credential slots name the tenant, the
+        vault read fails, or HE.NET could not be logged in to or reached.
+        Otherwise ``failure`` is None and ``errors`` counts the records HE.NET
+        rejected."""
         # Which vault credential applies to this scope? Several slots for the
         # tenant are refused as errors, not skips, so the run reports "error"
         # rather than "ok" until the credential is assigned again.
@@ -174,12 +217,13 @@ class HenetSyncMixin:
         except ValueError as e:
             logger.warning("henet scheduled sync: scope %r not synced: %s; assign its "
                            "credential again to keep one", tenant_id or "global", e)
-            return {"applied": 0, "errors": len(records), "skipped": 0}
+            return {"applied": 0, "errors": len(records), "skipped": 0,
+                    "failure": "credential_conflict"}
         # No credential: skip this scope's records (not an error).
         if not ref:
             logger.debug("henet scheduled sync: scope %r has no credential — skipped",
                          tenant_id or "global")
-            return {"applied": 0, "errors": 0, "skipped": len(records)}
+            return {"applied": 0, "errors": 0, "skipped": len(records), "failure": None}
         # Imported lazily to avoid a circular import at module load.
         import cred_vault as _cv
         # Fetch the secret; a vault/network failure counts every record as an error.
@@ -188,20 +232,32 @@ class HenetSyncMixin:
         except Exception as e:  # noqa: BLE001 — vault/network
             logger.warning("henet scheduled sync: scope %r credential resolve failed: %s",
                            tenant_id or "global", e)
-            return {"applied": 0, "errors": len(records), "skipped": 0}
+            return {"applied": 0, "errors": len(records), "skipped": 0,
+                    "failure": "vault_read_failed"}
         # Extract username/password from the secret.
         username, password = extract_account_login(val)
         # Secret lacks an account login: skip this scope.
         if not username or not password:
             logger.warning("henet scheduled sync: scope %r credential has no account login — skipped",
                            tenant_id or "global")
-            return {"applied": 0, "errors": 0, "skipped": len(records)}
+            return {"applied": 0, "errors": 0, "skipped": len(records), "failure": None}
 
         # Imported lazily; the scraper is only needed when actually writing.
         import henet_scrape
         # Log in to dns.he.net and write the records on a worker thread (blocking HTTP).
         scraper = henet_scrape.HENetScraper()
-        result = await asyncio.to_thread(scraper.set_records, username, password, records)
+        try:
+            result = await asyncio.to_thread(scraper.set_records, username, password, records)
+        except Exception as e:  # noqa: BLE001 — the loop must never raise
+            result = {"status": "ERROR", "message": f"web write raised: {e}"}
+        # ERROR with no per-record results: login failed, dns.he.net was not
+        # reached, or the account has no zones, so no record was attempted.
+        # Every record is an error (the manual Sync all answers 502 here).
+        if result.get("status") == "ERROR" and not result.get("results"):
+            logger.warning("henet scheduled sync: scope %r not written: %s",
+                           tenant_id or "global", result.get("message") or "no reason given")
+            return {"applied": 0, "errors": len(records), "skipped": 0,
+                    "failure": "he_write_failed"}
         # Index the requested records by (name, type) to look up their values afterwards.
         by_key = {(str(r.get("name", "")).strip().rstrip("."),
                    str(r.get("type", "A")).upper()): r for r in records}
@@ -229,13 +285,14 @@ class HenetSyncMixin:
         # Count records HE rejected.
         errors = sum(1 for r in result.get("results", []) if not r.get("ok"))
         # Summary for this scope.
-        return {"applied": len(local), "errors": errors, "skipped": 0}
+        return {"applied": len(local), "errors": errors, "skipped": 0, "failure": None}
 
     async def sync_henet_scheduled(self) -> Dict[str, Any]:
         """One scheduled reconcile: re-apply every managed A/AAAA HE.NET record
         to Hurricane Electric, grouped + written per tenant scope. Returns a
         status dict (``status`` ``ok`` / ``skipped`` when the spoke is offline /
-        ``error``). Never raises — the loop depends on it."""
+        ``error``, with a tenant-neutral ``reason`` when it is not ``ok``; see
+        the module docstring). Never raises — the loop depends on it."""
         # Find the connected henet spoke; without it there is no record list to sync.
         spoke_id = self.get_spoke_by_type("henet")
         if not spoke_id:
@@ -244,13 +301,16 @@ class HenetSyncMixin:
         # Ask the spoke for every managed record.
         try:
             listed = unwrap_spoke(await self.request_response(spoke_id, "HENET_LIST", {}, timeout=30.0))
-        # Spoke did not answer: record an error status.
         except Exception as e:  # noqa: BLE001
-            logger.warning("henet scheduled sync: HENET_LIST failed: %s", e)
-            return self._record_henet_status(status="error", error=str(e))
+            listed = {"status": "ERROR", "message": str(e)}
+        # A raise, or an ERROR reply (the hub answers a timeout with one), is
+        # an error. Its details go to the log only.
+        if not isinstance(listed, dict) or listed.get("status") == "ERROR":
+            logger.warning("henet scheduled sync: HENET_LIST failed: %s", listed)
+            return self._record_henet_status(status="error", reason=_LIST_FAILED_REASON)
 
         # The managed records list (empty if missing).
-        records = (listed or {}).get("records") or []
+        records = listed.get("records") or []
         # Match the manual "Sync all" scope: A/AAAA managed records only.
         by_scope: Dict[str, List[Dict[str, Any]]] = {}
         # Inspect each record.
@@ -282,17 +342,28 @@ class HenetSyncMixin:
             return self._record_henet_status(status="ok", applied=0, errors=0,
                                              scopes=0, reason="no managed records")
 
-        # Running totals across all scopes.
+        # Running totals across all scopes, the scopes that wrote nothing (by
+        # class) and the records HE.NET rejected in the scopes that did write.
         totals = {"applied": 0, "errors": 0, "skipped": 0}
+        failures: Dict[str, int] = {}
+        rejected = 0
         # Write each scope and add up its results.
         for scope, recs in by_scope.items():
             res = await self._henet_write_scope(spoke_id, scope, recs)
             for k in totals:
                 totals[k] += res.get(k, 0)
+            # A scope that wrote nothing counts once, by class; otherwise its
+            # errors are records HE.NET rejected.
+            if res.get("failure"):
+                failures[res["failure"]] = failures.get(res["failure"], 0) + 1
+            else:
+                rejected += res.get("errors", 0)
 
-        # Any errors make the whole run "error"; otherwise "ok".
-        status = "error" if totals["errors"] else "ok"
-        return self._record_henet_status(status=status, scopes=len(by_scope), **totals)
+        # Any errors make the whole run "error", with a reason; otherwise "ok".
+        if not totals["errors"]:
+            return self._record_henet_status(status="ok", scopes=len(by_scope), **totals)
+        return self._record_henet_status(status="error", scopes=len(by_scope), **totals,
+                                         reason=_run_reason(len(by_scope), failures, rejected))
 
     async def run_henet_sync_loop(self):
         """Background loop: re-apply managed HE.NET records on the configured

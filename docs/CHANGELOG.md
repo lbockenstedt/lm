@@ -90,6 +90,27 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 - **Learned-value approvals are saved again.** Since Aug 6 a stable Learning-lab row's proposal never reached Setup → Simulations → Learned Values, approving one left it in the queue, and rejecting one failed with a server error. All three work again. The first pass after the update proposes each known-good whose proposal was lost, including those whose row no longer learns; one rejected before Aug 6 may be proposed once more, and rejecting it again is final. A proposal now carries the floor learned with its count. When several sites learn the same alert, the tenant keeps the best of them (the highest count, then a learned floor) and proposes it once. See [cs.md](cs.md).
 
+### External DNS
+
+- **The HE.NET re-sync's last run says why it failed.** A scheduled re-sync
+  that hit an error was recorded only as `error`. Its status now carries a
+  short reason, such as `2 of 5 scopes failed (1 HE.NET login or connection
+  failure, 1 credential conflict); 3 records rejected by HE.NET`, shown in
+  red after the schedule on a Global Admin's HE.NET status line. Every user
+  with HE.NET or DNS access can read that status, so the reason holds only
+  counts and failure kinds: it never names a tenant, record, login or vault
+  secret, nor quotes an error. The details are in the hub log. See
+  [henet.md](henet.md#webui).
+- **A re-sync that wrote nothing is no longer recorded `ok`.** When
+  dns.he.net refused the login or couldn't be reached, the scheduled re-sync
+  counted nothing and recorded the run `ok`; each of that scope's records
+  now counts as an error. An exception from the web write used to end the
+  run, leaving the other scopes unwritten and the previous run's status in
+  place; that scope now fails the same way and the others are still
+  written. A record list the spoke failed to return, for example on a
+  timeout, was recorded `ok` as if there were no managed records; it is now
+  an error.
+
 ### WebUI
 
 - **History selectors match on Firewalls and Storage.** On both Firewalls →

@@ -1851,11 +1851,12 @@ def register(app, hub, ctx):
     # ─── Hurricane Electric (HE.NET) public-DNS API ───────────────────────────
     # The public-address-space analogue of the DNS (Unbound) routes above:
     # relays HENET_* commands to the ``henet`` spoke via _relay_spoke (same
-    # SUCCESS/ERROR + 502-on-spoke-error contract). The HE DDNS key is a secret
-    # and is NEVER held on the spoke — it lives in the hub Credential Vault; the
-    # write routes resolve a ``henet_vault_credential`` {bucket,name} reference
-    # unattended via cred_vault.automation_get and inject ``ddns_key`` into the
-    # relayed command, mirroring LE's _le_resolve_vault_dns_cred.
+    # SUCCESS/ERROR + 502-on-spoke-error contract). The HE credential is a
+    # secret and is NEVER held on the spoke — it lives in the hub Credential
+    # Vault; record add/update and Sync all resolve the assigned account login
+    # unattended (_henet_resolve_account_login, via cred_vault.automation_get)
+    # and write through the dns.he.net web panel from the hub
+    # (_henet_web_write); Import reads the panel with the same login.
     #
     # Per-tenant model: each record now carries an explicit ``tenant_id`` —
     # "" for a Global-Admin-managed (shared/global) record, or the owning
@@ -1984,72 +1985,6 @@ def register(app, hub, ctx):
             if isinstance(v, str) and v.strip():
                 return v.strip()
         return None
-
-    async def _henet_resolve_vault_cred(request: Request, body: dict, tenant_id=""):
-        """Resolve the HE DDNS key into ``body['ddns_key']`` unattended.
-
-        Precedence: an explicit ``henet_vault_credential`` {bucket,name} in the
-        request wins; otherwise the credential assigned for ``tenant_id``
-        (:func:`_henet_get_assigned_cred` — that tenant's own slot, or the
-        global slot when ``tenant_id`` is falsy) is used. NO cross-fallback: a
-        tenant with no credential of its own does not silently borrow the
-        global one. The secret VALUE is read via :func:`cred_vault.automation_get`
-        and injected as ``ddns_key`` — it is never returned to the browser.
-        Reach is enforced on an EXPLICIT override: a tenant-admin may only
-        reference buckets for their own tenants; a Global Admin, any bucket
-        (including the ``__admin__`` infra slot where the HE account key
-        belongs). Raises 400 when neither an explicit nor an assigned
-        credential exists.
-
-        The stored secret may be an ``henet`` DDNS key OR a shared LE DNS-01
-        "Hurricane Electric" secret — :func:`_henet_extract_ddns_key` reformats
-        either shape into the single dyndns push password::
-
-            {"ddns_key": "..."}   # henet secret
-            {"provider": "he-login", "he_username": "...", "he_password": "..."}
-        """
-        # An explicit reference in the request, else the assigned one.
-        ref = body.pop("henet_vault_credential", None)
-        explicit = isinstance(ref, dict)
-        if not explicit:
-            ref = _henet_get_assigned_cred(app.state.hub, tenant_id or None)
-        # No credential at all: 400.
-        if not isinstance(ref, dict):
-            raise HTTPException(
-                status_code=400,
-                detail="No HE.NET DDNS credential assigned. Assign one under "
-                       "DNS → External DNS → HE.NET (a Credential Vault secret "
-                       "of type 'HE.NET DDNS key', or a shared Let's Encrypt "
-                       "'Hurricane Electric' DNS-01 secret).")
-        # The reference needs both a bucket and a name.
-        bucket = (ref.get("bucket") or "").strip()
-        name = (ref.get("name") or "").strip()
-        if not bucket or not name:
-            raise HTTPException(status_code=400,
-                                detail="henet_vault_credential requires bucket + name")
-        # An explicit reference from a non-admin must be in a bucket they can reach.
-        sess = _session_user(request) or {}
-        if explicit and not _is_admin(sess):
-            reach = set((sess.get("user", {}) or {}).get("tenants") or [])
-            if bucket not in reach:
-                # Indistinguishable from missing so bucket existence never leaks.
-                raise HTTPException(status_code=404, detail="vault credential not found")
-        # Read the secret from the vault.
-        import cred_vault as _cv
-        try:
-            val = await _cv.automation_get(app.state.hub, bucket, name)
-        except Exception as e:  # noqa: BLE001 — vault/network
-            logger.warning("henet: vault credential resolve failed: %s", e)
-            raise HTTPException(status_code=502,
-                                detail=f"could not resolve vault credential: {e}")
-        # Pull out the key; none is a 404.
-        key = _henet_extract_ddns_key(val)
-        if not key:
-            raise HTTPException(status_code=404,
-                                detail="vault credential not found, not automation-readable, "
-                                       "or missing a usable HE DDNS key / password")
-        # Put the key in the relayed command.
-        body["ddns_key"] = key
 
     async def _henet_resolve_account_login(request: Request, tenant_id: str = ""):
         """Resolve the HE **account** login (email + password) for reading/writing
@@ -2529,10 +2464,11 @@ def register(app, hub, ctx):
 
     @app.post("/api/henet/sync-config")
     async def henet_sync_config_set(request: Request):
-        """Update the scheduled HE.NET re-sync config. Global-Admin-only (the
-        whole /api/henet/ write surface is admin-gated in api.py). Partial: only
-        the provided fields are changed. ``interval_seconds`` is clamped to the
-        5-minute floor so a bad value can't hammer HE."""
+        """Update the scheduled HE.NET re-sync config. Global-Admin-only (api.py
+        _ADMIN_INFRA_WRITE_PREFIXES lists /api/henet/sync, a prefix of this
+        path). Partial: only the provided fields are changed.
+        ``interval_seconds`` is clamped to the 5-minute floor so a bad value
+        can't hammer HE."""
         # Read the body and the current settings.
         import re as _re
         body = await request.json()

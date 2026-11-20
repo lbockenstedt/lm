@@ -13,7 +13,7 @@ moment it is pushed to the bound spoke**, so:
 * it is never returned to the browser by the ``list`` endpoints.
 
 This mirrors the LE / HE.NET vault pattern
-(``net_services._henet_resolve_vault_cred``): a module stores a reference and
+(``net_services._henet_resolve_account_login``): a module stores a reference and
 resolves the value on demand. The spoke still receives the resolved secret (it
 must, to authenticate to ClearPass / the device) — the vault simply keeps the
 plaintext out of the hub's on-disk config.
