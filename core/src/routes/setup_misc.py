@@ -4,7 +4,7 @@ import re
 
 # The common-VRF setting (lm#1992): its global_config key, the check both
 # write routes apply, and the card's data.
-from access import COMMON_VRF_KEY, common_vrf_settings, normalize_common_vrf_ids
+from access import COMMON_VRF_SETTING, common_vrf_settings, normalize_common_vrf_ids
 # Request/error types, subnet-filter settings helpers, session revocation, asyncio for
 # subprocesses/background tasks, and the shared logger, all re-exported by the api module.
 from api import (
@@ -164,7 +164,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=400, detail=f"vrf_ids {e}")
         # Store it with the hub settings and mark state for saving.
         hub = app.state.hub
-        hub.state.system_state.setdefault("global_config", {})[COMMON_VRF_KEY] = vrf_ids
+        hub.state.system_state.setdefault("global_config", {})[COMMON_VRF_SETTING] = vrf_ids
         hub.state._mark_dirty()
         logger.info("API: common VRFs set to %s by %s",
                     ", ".join(vrf_ids) or "inferred", sess.get("user_id") or "?")
@@ -342,11 +342,12 @@ def register(app, hub, ctx):
             _validate_update_config(config)
             # The common VRFs (lm#1992) pass the same check as on their own
             # route, so this merge cannot store a value the slicer ignores.
-            if isinstance(config, dict) and COMMON_VRF_KEY in config:
+            if isinstance(config, dict) and COMMON_VRF_SETTING in config:
                 try:
-                    config[COMMON_VRF_KEY] = normalize_common_vrf_ids(config[COMMON_VRF_KEY])
+                    config[COMMON_VRF_SETTING] = normalize_common_vrf_ids(
+                        config[COMMON_VRF_SETTING])
                 except ValueError as e:
-                    raise _ConfigValidationError(f"{COMMON_VRF_KEY} {e}")
+                    raise _ConfigValidationError(f"{COMMON_VRF_SETTING} {e}")
             if config.keys() & {"llm_cloud_profiles", "llm_task_models", "llm_ab_pr_repos",
                                 "llm_qualification_candidates"}:
                 from routes.llm import validate_cloud_profiles, validate_pool_config

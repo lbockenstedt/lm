@@ -2557,11 +2557,11 @@ def _scope_vrfs(hub, key) -> set:
 # global_config key where a Global Admin names the common VRFs (System →
 # Common VRFs, ``/admin/common-vrfs``): NetBox VRF ids as strings, the form
 # ``_scope_vrfs`` compares. Empty or unset: ``_shared_vrfs`` infers them (lm#1992).
-COMMON_VRF_KEY = "common_vrf_ids"
+COMMON_VRF_SETTING = "common_vrf_ids"
 
 
 def normalize_common_vrf_ids(value) -> List[str]:
-    """``value`` as it is stored under ``COMMON_VRF_KEY``: a list of NetBox VRF
+    """``value`` as it is stored under ``COMMON_VRF_SETTING``: a list of NetBox VRF
     ids (whole numbers from 1, as numbers or digit strings), as strings,
     without duplicates, in numeric order. An empty list means "infer them".
     Raises ValueError on anything else, so a typo is refused rather than
@@ -2580,14 +2580,14 @@ def normalize_common_vrf_ids(value) -> List[str]:
 
 
 def configured_common_vrfs(hub) -> set:
-    """The common VRF ids a Global Admin named (``COMMON_VRF_KEY``), or an
+    """The common VRF ids a Global Admin named (``COMMON_VRF_SETTING``), or an
     empty set when none are named, which leaves ``_shared_vrfs`` to infer
     them. Read on every call, so a change applies at the next slice without a
     restart. Both routes that write the key store only
     ``normalize_common_vrf_ids`` output, so a value that fails it was edited
     by hand: it is ignored (the VRFs are inferred) rather than half-applied."""
     gc = _dict_attr(getattr(hub, "state", None), "system_state").get("global_config")
-    value = gc.get(COMMON_VRF_KEY) if isinstance(gc, dict) else None
+    value = gc.get(COMMON_VRF_SETTING) if isinstance(gc, dict) else None
     try:
         return set(normalize_common_vrf_ids(value or []))
     except ValueError:

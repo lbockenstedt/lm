@@ -1105,7 +1105,7 @@ def test_prefix_reads_ignore_the_pre_unified_hub_cache_copies():
 
 def _name_common_vrfs(hub, value):
     """Store ``value`` as the hub's named common VRFs, where the routes do."""
-    hub.state.system_state.setdefault("global_config", {})[_access.COMMON_VRF_KEY] = value
+    hub.state.system_state.setdefault("global_config", {})[_access.COMMON_VRF_SETTING] = value
 
 
 def test_named_common_vrfs_replace_the_inferred_ones():
