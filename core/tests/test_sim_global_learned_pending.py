@@ -203,6 +203,54 @@ def test_a_rejected_proposal_is_not_proposed_again(tmp_path, monkeypatch, floor)
     assert _saved_pending(tmp_path) == {}
 
 
+def test_reject_wins_over_a_stale_first_recovery_snapshot(tmp_path, monkeypatch):
+    """Reject the same key after recovery reads its unchecked known-good."""
+    _app, hub, store = _build(tmp_path)
+    _seed_known_good(store)
+    _run(store.propose_global_learned(dict(_PENDING)))
+    propose = store.propose_global_learned
+    seen = []
+
+    async def _reject_then_propose(proposals):
+        """Interleave a real rejection at the recovery queue-write boundary."""
+        assert proposals[_AK]["count"] == 7
+        assert await store.reject_global_learned(_AK)
+        seen.append(_AK)
+        await propose(proposals)
+
+    monkeypatch.setattr(store, "propose_global_learned", _reject_then_propose)
+    _run(hub._run_adaptive_controller())
+    assert seen == [_AK]
+    assert _saved_pending(tmp_path) == {}
+    saved = _run(SimulationsStore(str(tmp_path)).get_known_good(_TID))
+    assert saved[_AK]["proposal_checked"] is True
+
+
+def test_rejected_pairs_survive_restart_without_blocking_other_values(tmp_path):
+    """Remember every rejected count, not just the most recent one per alert."""
+    store = SimulationsStore(str(tmp_path))
+    for count in (7, 8):
+        _run(store.propose_global_learned({_AK: dict(_PENDING[_AK], count=count)}))
+        assert _run(store.reject_global_learned(_AK))
+        store = SimulationsStore(str(tmp_path))
+
+    # Neither older rejected count may return, including a string-form count.
+    for count in ("7", 8):
+        _run(store.propose_global_learned({_AK: dict(_PENDING[_AK], count=count)}))
+        assert _saved_pending(tmp_path) == {}
+
+    # Rejection is scoped to the alert/count pair, not all proposals.
+    _run(store.propose_global_learned({
+        _AK: dict(_PENDING[_AK], count=9),
+        "alert:other": dict(_PENDING[_AK]),
+    }))
+    saved = _saved_pending(tmp_path)
+    assert saved[_AK]["count"] == 9
+    assert saved["alert:other"]["count"] == 7
+    assert not _run(store.reject_global_learned("alert:missing"))
+    assert _saved_pending(tmp_path) == saved
+
+
 def test_a_failed_queue_write_is_retried_on_the_next_pass(tmp_path, monkeypatch):
     _app, hub, store = _build(tmp_path)
     _seed_stable_quota(store)

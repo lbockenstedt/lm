@@ -1243,7 +1243,12 @@ class SimulationsStore:
             published = await self.get_global_learned_values()
             before = await self.get_global_learned_pending()
             pending = dict(before)
+            # Read rejection markers under the same lock as queue updates: a
+            # recovery pass may carry a snapshot taken before the admin rejected it.
+            rejected = self._global().get("global_learned_rejected") or {}
             for ak, p in proposals.items():
+                if any(_same_count(p, count) for count in rejected.get(ak, [])):
+                    continue
                 q = pending.get(ak)
                 if (p.get("floor") is None and isinstance(q, dict)
                         and q.get("floor") is not None and _same_count(p, q.get("count"))):
@@ -1288,12 +1293,19 @@ class SimulationsStore:
             return approved
 
     async def reject_global_learned(self, key: str) -> bool:
-        """Drop one proposal from the approval queue; True when it was queued."""
-        # Remove it under the lock and save only when it was there.
+        """Drop and remember an alert/count pair; True when it was queued."""
+        # Save the rejection and removal together so stale recovery snapshots
+        # cannot resurrect this pair, even after a restart.
         async with self._lock:
             pending = await self.get_global_learned_pending()
-            if pending.pop(key, None) is None:
+            proposal = pending.pop(key, None)
+            if proposal is None:
                 return False
+            if isinstance(proposal, dict) and proposal.get("count") is not None:
+                rejected = self._global().setdefault("global_learned_rejected", {})
+                counts = rejected.setdefault(key, [])
+                if not any(_same_count(proposal, count) for count in counts):
+                    counts.append(proposal["count"])
             self._global()["global_learned_pending"] = pending
             await self._asave()
             return True
