@@ -478,8 +478,8 @@ const _NW_SCHED_INTERVALS = [['0', 'Off'], ['3600', 'Every hour'],
 //   manual — solid green   (a human declared it)
 //   netbox — solid blue    (from NetBox's cable inventory)
 //   mac    — dashed amber  (inferred: exactly one MAC learned on that port)
-// Layout is a small deterministic force simulation — no library, no build step
-// (the WebUI is dependency-free vanilla JS by design).
+// Layout is a deterministic tidy tree rooted at the gateways — no library, no
+// build step (the WebUI is dependency-free vanilla JS by design).
 const _NW_TOPO_EDGE_STYLE = {
     lldp:   { stroke: '#64748b', dash: '',     label: 'LLDP' },
     manual: { stroke: '#01A982', dash: '',     label: 'Declared' },
@@ -487,100 +487,135 @@ const _NW_TOPO_EDGE_STYLE = {
     mac:    { stroke: '#d97706', dash: '5 4',  label: 'Inferred (MAC)' },
 };
 
-function _nwTopoLayout(nodes, edges, colW, rowH, collapsed) {
-    // Layered left-to-right tree (Aruba Central style): the best-connected
-    // device of each component is the root column, and every hop away from it
-    // is one column further right. Rows are ordered by neighbour barycentre to
-    // keep links from crossing needlessly. Deterministic: no randomness.
-    // `collapsed` node ids keep their place but hide every BFS-tree descendant,
-    // so collapsing never re-roots or reshuffles the rest of the map.
-    const ids = new Set(nodes.map(n => n.id));
-    const adj = {};
-    nodes.forEach(n => { adj[n.id] = new Set(); });
+// Link sources that are facts (advertised, declared or cabled). The drawn tree
+// is built from these first; a MAC-table guess only places a device no fact
+// reaches, so an inferred link can never re-parent a device LLDP placed.
+const _NW_TOPO_STRONG = new Set(['lldp', 'manual', 'netbox']);
+
+// Pixel geometry per orientation. tb = top-down, the New Central default (one
+// row per hop); lr = left to right (one column per hop). `at(slot, depth)`
+// turns a tree slot and hop count into a point; `label` is the name length
+// that fits between neighbours.
+const _NW_TOPO_GEOM = {
+    tb: { at: (s, d) => ({ x: 96 + s * 150, y: 56 + d * 110 }), label: 22 },
+    lr: { at: (s, d) => ({ x: 70 + d * 240, y: 76 + s * 64 }), label: 34 },
+};
+
+// Lay the map out as a tidy tree per connected component, like New Central.
+// Roots: the device the operator pinned ("Start map here"), else the
+// component's gateways, else the switch with the most fact links. The tree is
+// breadth-first over fact links, then MAC links only for devices still
+// unplaced. Leaves take consecutive slots depth-first and each parent sits
+// over the middle of its children. `opts.collapsed` ids keep their place but
+// hide their tree descendants. Deterministic, so a refresh doesn't reshuffle.
+function _nwTopoLayout(nodes, edges, opts) {
+    opts = opts || {};
+    const collapsed = opts.collapsed || new Set();
+    const geo = _NW_TOPO_GEOM[opts.orient === 'lr' ? 'lr' : 'tb'];
+    // 1. Adjacency over every link, and over fact links only.
+    const byId = {}, all = {}, strong = {};
+    nodes.forEach(n => { byId[n.id] = n; all[n.id] = new Set(); strong[n.id] = new Set(); });
     edges.forEach(e => {
-        if (ids.has(e.a) && ids.has(e.b) && e.a !== e.b) { adj[e.a].add(e.b); adj[e.b].add(e.a); }
+        if (!byId[e.a] || !byId[e.b] || e.a === e.b) return;
+        all[e.a].add(e.b); all[e.b].add(e.a);
+        if (_NW_TOPO_STRONG.has(e.source)) { strong[e.a].add(e.b); strong[e.b].add(e.a); }
     });
-    const linked = nodes.filter(n => adj[n.id].size);
-    const loose = nodes.filter(n => !adj[n.id].size);
-    const rank = n => (n.kind === 'switch' ? 1 : 0) * 1000 + adj[n.id].size;
-    const depth = {};
-    const parent = {};
-    const children = {};
-    const comps = [];
-    linked.slice().sort((x, y) => rank(y) - rank(x) || String(x.name).localeCompare(String(y.name)))
-        .forEach(root => {
-            if (depth[root.id] !== undefined) return;
-            const comp = [root.id];
-            depth[root.id] = 0;
-            children[root.id] = [];
-            for (let i = 0; i < comp.length; i++) {
-                [...adj[comp[i]]].sort().forEach(nb => {
-                    if (depth[nb] === undefined) {
-                        depth[nb] = depth[comp[i]] + 1;
-                        parent[nb] = comp[i];
-                        children[comp[i]].push(nb);
-                        children[nb] = [];
-                        comp.push(nb);
-                    }
-                });
-            }
-            comps.push(comp);
-        });
-    const hidden = new Set();
-    const hiddenCount = {};
-    if (collapsed) {
-        collapsed.forEach(id => {
-            if (!children[id]) return;
-            const visited = new Set();
-            hiddenCount[id] = 0;
-            const queue = [id];
-            while (queue.length) {
-                const nodeId = queue.shift();
-                if (visited.has(nodeId)) continue;
-                visited.add(nodeId);
-                if (nodeId !== id) hidden.add(nodeId);
-                children[nodeId].forEach(child => {
-                    if (!visited.has(child)) {
-                        queue.push(child);
-                        hiddenCount[id]++;
-                    }
-                });
-            }
-        });
-    }
-    const pos = {};
-    let yCursor = 44, maxX = 0;
-    comps.forEach(comp => {
-        const filteredComp = comp.filter(id => !hidden.has(id));
-        const layers = [];
-        filteredComp.forEach(id => { (layers[depth[id]] = layers[depth[id]] || []).push(id); });
-        const nameOf = {};
-        nodes.forEach(n => { nameOf[n.id] = String(n.name || n.id); });
-        layers.forEach(l => l.sort((x, y) => nameOf[x].localeCompare(nameOf[y])));
-        const row = {};
-        layers.forEach(l => l.forEach((id, i) => { row[id] = i; }));
-        for (let sweep = 0; sweep < 4; sweep++) {
-            for (let d = 1; d < layers.length; d++) {
-                const bc = id => {
-                    const prev = [...adj[id]].filter(n => depth[n] === d - 1 && !hidden.has(n));
-                    return prev.length ? prev.reduce((t, n) => t + row[n], 0) / prev.length : row[id];
-                };
-                layers[d].sort((x, y) => bc(x) - bc(y) || nameOf[x].localeCompare(nameOf[y]));
-                layers[d].forEach((id, i) => { row[id] = i; });
-            }
+    const nameOf = id => String(byId[id].name || id);
+    const byName = (x, y) => nameOf(x).localeCompare(nameOf(y)) || (x < y ? -1 : x > y ? 1 : 0);
+    const loose = nodes.filter(n => !all[n.id].size);
+    // 2. Connected components, largest first.
+    const comps = [], seen = new Set();
+    nodes.map(n => n.id).filter(id => all[id].size).sort(byName).forEach(start => {
+        if (seen.has(start)) return;
+        const comp = [start];
+        seen.add(start);
+        for (let i = 0; i < comp.length; i++) {
+            all[comp[i]].forEach(nb => { if (!seen.has(nb)) { seen.add(nb); comp.push(nb); } });
         }
-        const tallest = Math.max(...layers.map(l => l.length));
-        const height = Math.max(1, tallest) * rowH;
-        layers.forEach((l, d) => {
-            const off = (height - l.length * rowH) / 2;
-            l.forEach((id, i) => {
-                pos[id] = { x: 70 + d * colW, y: yCursor + off + i * rowH + rowH / 2 };
-                maxX = Math.max(maxX, pos[id].x);
-            });
-        });
-        yCursor += height + rowH * 0.6;
+        comps.push(comp);
     });
-    return { pos, loose, width: maxX + 120, height: yCursor, depth, children, hiddenCount, hidden };
+    comps.sort((p, q) => q.length - p.length || byName(p[0], q[0]));
+    // 3. Roots, then the fact-links-first breadth-first tree.
+    const depth = {}, parent = {}, children = {}, rootsOf = [];
+    const rank = id => (byId[id].kind === 'switch' ? 1e6 : 0) + strong[id].size * 1000 + all[id].size;
+    comps.forEach(comp => {
+        let roots = comp.filter(id => id === opts.root);
+        if (!roots.length) roots = comp.filter(id => byId[id].kind === 'gateway').sort(byName);
+        if (!roots.length) roots = [comp.slice().sort((x, y) => rank(y) - rank(x) || byName(x, y))[0]];
+        const order = [];
+        const reach = (id, from) => {
+            depth[id] = from === null ? 0 : depth[from] + 1;
+            children[id] = [];
+            if (from !== null) { parent[id] = from; children[from].push(id); }
+            order.push(id);
+        };
+        const grow = start => {
+            for (let i = start; i < order.length; i++) {
+                [...strong[order[i]]].sort(byName).forEach(nb => {
+                    if (depth[nb] === undefined) reach(nb, order[i]);
+                });
+            }
+        };
+        roots.forEach(id => reach(id, null));
+        grow(0);
+        // A MAC link places what no fact reaches, from the shallowest device.
+        while (order.length < comp.length) {
+            const before = order.length;
+            order.slice().sort((x, y) => depth[x] - depth[y]).forEach(id => {
+                [...all[id]].sort(byName).forEach(nb => { if (depth[nb] === undefined) reach(nb, id); });
+            });
+            if (order.length === before) break;
+            grow(before);
+        }
+        rootsOf.push(roots);
+    });
+    // 4. A collapsed device hides every tree descendant.
+    const hidden = new Set(), hiddenCount = {};
+    collapsed.forEach(id => {
+        if (!children[id]) return;
+        const stack = children[id].slice();
+        hiddenCount[id] = 0;
+        while (stack.length) {
+            const k = stack.pop();
+            hidden.add(k);
+            hiddenCount[id]++;
+            stack.push(...children[k]);
+        }
+    });
+    // 5. Tidy tree: a leaf takes the next slot, a parent centres over its children.
+    const slot = {};
+    let cursor = 0;
+    const place = id => {
+        const kids = collapsed.has(id) ? [] : children[id].slice().sort(byName);
+        if (!kids.length) { slot[id] = cursor++; return; }
+        kids.forEach(place);
+        slot[id] = (slot[kids[0]] + slot[kids[kids.length - 1]]) / 2;
+    };
+    comps.forEach((comp, ci) => {
+        const roots = rootsOf[ci];
+        const lone = roots.length > 1 ? roots.filter(r => !children[r].length) : [];
+        roots.filter(r => !lone.includes(r)).forEach(place);
+        // A gateway with nothing of its own sits over the device it links to
+        // (VPNC2 next to VPNC1, both over the core).
+        lone.forEach(r => {
+            const nbs = [...all[r]].filter(nb => slot[nb] !== undefined);
+            slot[r] = nbs.length ? nbs.reduce((t, nb) => t + slot[nb], 0) / nbs.length : cursor++;
+        });
+        const top = roots.slice().sort((x, y) => slot[x] - slot[y] || byName(x, y));
+        for (let i = 1; i < top.length; i++) slot[top[i]] = Math.max(slot[top[i]], slot[top[i - 1]] + 1);
+        cursor = Math.max(cursor, ...top.map(r => slot[r] + 1)) + 0.6;
+    });
+    // 6. Slots and hops to pixels; levels that have children get a header.
+    const pos = {}, levels = {};
+    let maxX = 0, maxY = 0;
+    Object.keys(slot).forEach(id => {
+        pos[id] = geo.at(slot[id], depth[id]);
+        maxX = Math.max(maxX, pos[id].x);
+        maxY = Math.max(maxY, pos[id].y);
+        if (children[id].length) (levels[depth[id]] = levels[depth[id]] || []).push(id);
+    });
+    return { pos, loose, width: maxX + 100, height: maxY + 50, depth, parent, children,
+             hiddenCount, hidden, levels, roots: [].concat(...rootsOf) };
 }
 
 function _nwTopoNodeColor(node) {
@@ -655,217 +690,584 @@ function _nwTopoPort(e, side) {
     return port ? short + ' ' + port : short;
 }
 
-function _nwTopoSvg(graph, view) {
-    const showEndpoints = !!(view && view.showEndpoints);
-    const collapsed = (view && view.collapsed) || new Set();
-    const allNodes = graph.nodes || [];
-    let nodes = showEndpoints ? allNodes : allNodes.filter(nd => nd.infra !== false);
+// The devices and links the map draws for this view: infrastructure only
+// unless endpoints are shown, and then folded into per-switch groups.
+function _nwTopoDrawable(graph, view) {
+    let nodes = graph.nodes || [];
+    if (!view.showEndpoints) nodes = nodes.filter(nd => nd.infra !== false);
     const keep = new Set(nodes.map(n => n.id));
     let edges = (graph.edges || []).filter(e => keep.has(e.a) && keep.has(e.b));
-    if (showEndpoints) {
-        ({ nodes, edges } = _nwTopoGroupEndpoints(nodes, edges, view.epOpen));
+    if (view.showEndpoints) ({ nodes, edges } = _nwTopoGroupEndpoints(nodes, edges, view.epOpen));
+    return { nodes, edges };
+}
+
+// A link's curve: vertical S-bends top-down, horizontal ones left to right;
+// a link between two devices on the same level bows away from the tree.
+function _nwTopoCurve(a, b, tb) {
+    const f = v => v.toFixed(1);
+    if (tb) {
+        if (Math.abs(a.y - b.y) < 1) {
+            return `M${f(a.x)} ${f(a.y)}C${f(a.x)} ${f(a.y + 48)} ${f(b.x)} ${f(b.y + 48)} ${f(b.x)} ${f(b.y)}`;
+        }
+        const [t, u] = a.y <= b.y ? [a, b] : [b, a];
+        const my = (t.y + u.y) / 2;
+        return `M${f(t.x)} ${f(t.y)}C${f(t.x)} ${f(my)} ${f(u.x)} ${f(my)} ${f(u.x)} ${f(u.y)}`;
     }
-    if (!allNodes.length) {
-        return `<div class="py-12 text-center text-slate-500 italic">No devices in this tenant's topology yet.</div>`;
+    const [l, r] = a.x <= b.x ? [a, b] : [b, a];
+    if (Math.abs(l.x - r.x) < 1) {
+        return `M${f(l.x)} ${f(l.y)}C${f(l.x + 60)} ${f(l.y)} ${f(r.x + 60)} ${f(r.y)} ${f(r.x)} ${f(r.y)}`;
     }
-    if (!nodes.length) {
-        return `<div class="py-12 text-center text-slate-500 italic">No infrastructure devices found. Tick “Show endpoints” to see everything.</div>`;
-    }
-    const colW = 240, rowH = 64, W0 = 900;
-    const lay = _nwTopoLayout(nodes, edges, colW, rowH, collapsed);
-    const pos = lay.pos;
+    const mx = (l.x + r.x) / 2;
+    return `M${f(l.x)} ${f(l.y)}C${f(mx)} ${f(l.y)} ${f(mx)} ${f(r.y)} ${f(r.x)} ${f(r.y)}`;
+}
+
+// Build the map's SVG at zoom `z`. Returns { html, lay, pos, W, H } so the
+// caller can zoom (resize the SVG) and scroll to devices without a redraw.
+// A selected device keeps its links and neighbours bright; the rest dims.
+function _nwTopoSvg(graph, view, z) {
+    // 1. What to draw, and the empty states.
+    const collapsed = view.collapsed || new Set();
+    const empty = msg => ({ html: `<div class="py-12 text-center text-slate-500 italic">${msg}</div>`,
+                            lay: null, pos: {}, W: 0, H: 0 });
+    if (!(graph.nodes || []).length) return empty("No devices in this tenant's topology yet.");
+    const { nodes, edges } = _nwTopoDrawable(graph, view);
+    if (!nodes.length) return empty('No infrastructure devices found. Tick “Show endpoints” to see everything.');
+    // 2. Layout; unlinked devices go in a wrapped grid under the tree.
+    const tb = view.orient !== 'lr';
+    const geo = _NW_TOPO_GEOM[tb ? 'tb' : 'lr'];
+    const lay = _nwTopoLayout(nodes, edges, { collapsed, root: view.root, orient: view.orient });
+    const pos = Object.assign({}, lay.pos);
+    const W = Math.max(900, lay.width);
+    const perRow = Math.max(1, Math.floor((W - 40) / 150));
+    const looseTop = lay.height + 10;
+    lay.loose.forEach((nd, i) => {
+        pos[nd.id] = { x: 95 + (i % perRow) * 150, y: looseTop + 40 + Math.floor(i / perRow) * 76 };
+    });
+    const H = lay.loose.length ? looseTop + 40 + Math.ceil(lay.loose.length / perRow) * 76 + 10 : lay.height;
+    // 3. Selection: the device, its links and its neighbours stay bright.
+    const sel = view.selected && pos[view.selected] ? view.selected : '';
+    const near = new Set([sel]);
+    if (sel) edges.forEach(e => { if (e.a === sel) near.add(e.b); if (e.b === sel) near.add(e.a); });
     const byId = {};
     nodes.forEach(nd => { byId[nd.id] = nd; });
+    // 4. Links. An inferred link that didn't place a device in the tree only
+    // shows while either end is selected: drawn always, the core's MAC links
+    // to devices elsewhere in the tree would cross the whole map.
+    const inTree = e => lay.parent[e.a] === e.b || lay.parent[e.b] === e.a;
+    const lines = edges.map(e => {
+        const a = pos[e.a], b = pos[e.b];
+        if (!a || !b) return '';
+        if (!_NW_TOPO_STRONG.has(e.source) && !inTree(e) && e.a !== sel && e.b !== sel) return '';
+        const st = _NW_TOPO_EDGE_STYLE[e.source] || _NW_TOPO_EDGE_STYLE.mac;
+        const ap = _nwTopoPort(e, 'a'), bp = _nwTopoPort(e, 'b');
+        const tip = `${(byId[e.a] || {}).name || ''} ${ap ? '(' + ap + ')' : ''} — ` +
+                    `${(byId[e.b] || {}).name || ''} ${bp ? '(' + bp + ')' : ''}` +
+                    `\n${st.label}${e.detail ? ' — ' + e.detail : ''}`;
+        const on = sel && (e.a === sel || e.b === sel);
+        return `<path d="${_nwTopoCurve(a, b, tb)}" fill="none" stroke="${st.stroke}"
+            stroke-width="${on ? 3 : 1.5}" ${st.dash ? `stroke-dasharray="${st.dash}"` : ''}
+            opacity="${sel ? (on ? 1 : 0.12) : 0.85}"><title>${escapeHtml(tip)}</title></path>`;
+    }).join('');
+    // 5. Devices: icon, name, and a −/+N badge on anything with children.
     const tipOf = nd => [nd.name, nd.object_type || nd.kind,
                      (nd.addresses || []).join(', '), (nd.macs || []).join(', '),
                      nd.unit === 'vsx' ? 'VSX pair: ' + (nd.members || []).map(m => m.name).join(' + ') : '',
                      (nd.stack_members || []).length ? 'Stack members: ' + nd.stack_members.join(', ') : '',
                      nd.lldp_capable ? 'LLDP' : '', nd.manual ? 'Declared' : '',
                      'via ' + (nd.sources || []).join('+')].filter(Boolean).join('\n');
-    const lines = edges.map(e => {
-        const a = pos[e.a], b = pos[e.b];
-        if (!a || !b) return '';
-        const st = _NW_TOPO_EDGE_STYLE[e.source] || _NW_TOPO_EDGE_STYLE.mac;
-        const ap = _nwTopoPort(e, 'a'), bp = _nwTopoPort(e, 'b');
-        const tip = `${(byId[e.a] || {}).name || ''} ${ap ? '(' + ap + ')' : ''} — ` +
-                    `${(byId[e.b] || {}).name || ''} ${bp ? '(' + bp + ')' : ''}` +
-                    `\n${st.label}${e.detail ? ' — ' + e.detail : ''}`;
-        const [l, r] = a.x <= b.x ? [a, b] : [b, a];
-        const mx = (l.x + r.x) / 2;
-        const same = Math.abs(l.x - r.x) < 1;
-        const d = same
-            ? `M${l.x.toFixed(1)} ${l.y.toFixed(1)}C${(l.x + 60).toFixed(1)} ${l.y.toFixed(1)} ${(r.x + 60).toFixed(1)} ${r.y.toFixed(1)} ${r.x.toFixed(1)} ${r.y.toFixed(1)}`
-            : `M${l.x.toFixed(1)} ${l.y.toFixed(1)}C${mx.toFixed(1)} ${l.y.toFixed(1)} ${mx.toFixed(1)} ${r.y.toFixed(1)} ${r.x.toFixed(1)} ${r.y.toFixed(1)}`;
-        return `<path d="${d}" fill="none" stroke="${st.stroke}" stroke-width="1.5"
-            ${st.dash ? `stroke-dasharray="${st.dash}"` : ''} opacity="0.85"><title>${escapeHtml(tip)}</title></path>`;
-    }).join('');
-    window._nwTopoLevels = {};
-    Object.keys(lay.pos).forEach(id => {
-        if (lay.children[id] && lay.children[id].length > 0) {
-            const depth = lay.depth[id];
-            if (!window._nwTopoLevels[depth]) window._nwTopoLevels[depth] = [];
-            window._nwTopoLevels[depth].push(id);
-        }
-    });
+    const short = (t, n) => (t.length > n ? t.slice(0, n - 1) + '…' : t);
     const drawNode = (nd, p) => {
         const isGroup = nd.kind === 'epgroup';
         const groupOpen = isGroup && view.epOpen && view.epOpen.has(nd.id);
         const kids = isGroup ? 1 : (lay.children[nd.id] || []).length;
-        let tooltipLines = isGroup ? [nd.name] : tipOf(nd).split('\n');
-        if (isGroup) {
-            tooltipLines.push(groupOpen ? 'Click to hide these endpoints' : 'Click to show these endpoints');
-        } else if (kids > 0) {
-            tooltipLines.push(collapsed.has(nd.id) ? 'Click to expand' : 'Click to collapse');
-        }
-        const tip = tooltipLines.join('\n');
-        const badgeText = isGroup ? (groupOpen ? '−' : '+' + nd.group_size)
+        const tip = isGroup ? nd.name + '\n' + (groupOpen ? 'Click to hide these endpoints' : 'Click to show these endpoints')
+            : tipOf(nd) + '\nClick for details';
+        const badge = isGroup ? (groupOpen ? '−' : '+' + nd.group_size)
             : collapsed.has(nd.id) ? '+' + (lay.hiddenCount[nd.id] || 0) : '−';
-        return `<g data-topo-node="${escapeHtml(nd.id)}" style="cursor:${kids ? 'pointer' : 'default'}">
-            <title>${escapeHtml(tip)}</title>
+        const bw = Math.max(16, 6 + 6.5 * badge.length);
+        const halo = nd.id === sel
+            ? `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="24" fill="none" stroke="#01A982" stroke-width="4" opacity="0.35"/>` : '';
+        return `<g data-topo-node="${escapeHtml(nd.id)}" style="cursor:pointer" opacity="${sel && !near.has(nd.id) ? 0.25 : 1}">
+            <title>${escapeHtml(tip)}</title>${halo}
             ${_nwTopoIcon(nd, p.x, p.y, _nwTopoNodeColor(nd))}
             <text x="${p.x.toFixed(1)}" y="${(p.y + 32).toFixed(1)}" text-anchor="middle"
-              style="font-size:10px" fill="#334155">${escapeHtml(String(nd.name || nd.id).slice(0, 34))}</text>
-            ${kids > 0 ? `<circle cx="${(p.x + 15).toFixed(1)}" cy="${(p.y - 15).toFixed(1)}" r="8" fill="#0f172a"/>
+              style="font-size:11px" fill="#334155">${escapeHtml(short(String(nd.name || nd.id), geo.label))}</text>
+            ${kids > 0 ? `<g data-topo-toggle><title>${isGroup ? '' : collapsed.has(nd.id) ? 'Click to expand' : 'Click to collapse'}</title>
+                <rect x="${(p.x + 15 - bw / 2).toFixed(1)}" y="${(p.y - 23).toFixed(1)}"
+                  width="${bw.toFixed(1)}" height="16" rx="8" fill="#0f172a"/>
                 <text x="${(p.x + 15).toFixed(1)}" y="${(p.y - 11.5).toFixed(1)}" text-anchor="middle"
-                  style="font-size:10px; font-weight:700; fill:#fff">${badgeText}</text>` : ''}
+                  style="font-size:10px; font-weight:700; fill:#fff">${badge}</text></g>` : ''}
         </g>`;
     };
     const dots = nodes.filter(nd => pos[nd.id]).map(nd => drawNode(nd, pos[nd.id])).join('');
-    // Level headers
-    let levelHeaders = '';
-    Object.keys(window._nwTopoLevels).forEach(d => {
-        const depth = parseInt(d);
-        const allCollapsed = window._nwTopoLevels[d].every(id => collapsed.has(id));
-        const textContent = (allCollapsed ? '▸ ' : '▾ ') + 'Level ' + (depth + 1);
-        levelHeaders += `<text data-topo-level="${d}" x="${(70 + depth * colW).toFixed(1)}" y="18" text-anchor="middle"
-            style="font-size:11px;font-weight:600;cursor:pointer" fill="#475569">
-            <title>Collapse/expand every device at this level</title>${escapeHtml(textContent)}</text>`;
-    });
-    // Devices with no known link: a compact wrapped grid instead of a hairball.
-    const W = Math.max(W0, lay.width);
-    const perRow = Math.max(1, Math.floor((W - 40) / 150));
-    let H = lay.height, looseSvg = '';
-    if (lay.loose.length) {
-        const top = H + 10;
-        const rows = Math.ceil(lay.loose.length / perRow);
-        looseSvg = `<text x="20" y="${top + 4}" style="font-size:11px;font-weight:600" fill="#64748b">Unlinked devices (${lay.loose.length})</text>` +
-            lay.loose.map((nd, i) => drawNode(nd, {
-                x: 20 + 75 + (i % perRow) * 150, y: top + 40 + Math.floor(i / perRow) * 76 })).join('');
-        H = top + 40 + rows * 76 + 10;
-    }
-    return `<svg viewBox="0 0 ${W} ${H}" class="w-full" style="max-height:75vh">${lines}${levelHeaders}${dots}${looseSvg}</svg>`;
+    // 6. Level headers (click to fold a whole level) and the unlinked caption.
+    const headers = Object.keys(lay.levels).map(d => {
+        const allCollapsed = lay.levels[d].every(id => collapsed.has(id));
+        const p = geo.at(0, Number(d));
+        const at = tb ? `x="10" y="${(p.y + 4).toFixed(1)}"` : `x="${p.x.toFixed(1)}" y="18" text-anchor="middle"`;
+        return `<text data-topo-level="${d}" ${at} style="font-size:11px;font-weight:600;cursor:pointer" fill="#475569">
+            <title>Collapse/expand every device at this level</title>${allCollapsed ? '▸' : '▾'} Level ${Number(d) + 1}</text>`;
+    }).join('');
+    const looseCap = lay.loose.length
+        ? `<text x="20" y="${looseTop + 4}" style="font-size:11px;font-weight:600" fill="#64748b">Unlinked devices (${lay.loose.length})</text>` : '';
+    const html = `<svg width="${(W * z).toFixed(0)}" height="${(H * z).toFixed(0)}" viewBox="0 0 ${W} ${H}"
+        style="display:block;margin:0 auto">${lines}${headers}${dots}${looseCap}</svg>`;
+    return { html, lay, pos, W, H };
 }
 
-// Default view is infrastructure only (node.infra); endpoints are opt-in.
-// Collapse state is per tenant and survives refreshes (node ids are stable).
-function _nwTopoView() {
-    if (window._nwTopoCollapsedTenant !== currentTenant) {
-        window._nwTopoCollapsed = new Set();
-        window._nwTopoCollapsedTenant = currentTenant;
-    }
-    if (!(window._nwTopoCollapsed instanceof Set)) {
-        window._nwTopoCollapsed = new Set();
-    }
-    if (!(window._nwTopoEpOpen instanceof Set) || window._nwTopoEpOpenTenant !== currentTenant) {
-        window._nwTopoEpOpen = new Set();
-        window._nwTopoEpOpenTenant = currentTenant;
-    }
-    return { showEndpoints: !!window._nwTopoShowEndpoints, collapsed: window._nwTopoCollapsed,
-             epOpen: window._nwTopoEpOpen };
+// Map state for the Topology tab, kept in this module rather than window
+// globals. Collapse and open groups are per tenant and survive refreshes (node
+// ids are stable); zoom, scroll and selection reset on each full render.
+const _nwTopoState = {
+    graph: null, tenant: null, collapsed: new Set(), epOpen: new Set(), showEndpoints: false,
+    infer: true, zoom: 1, selected: '', drawn: null, seq: 0, drag: null, dragged: false,
+    // The tenant's fold state is settled: auto-folded once, or folded /
+    // expanded by the user, so a refresh never refolds what they opened.
+    // Reset with the collapse state when the tenant changes.
+    foldSettled: false,
+};
+
+// Read (value undefined) or write a saved map preference. Storage can be
+// unavailable (private mode, full quota); the map must still work then.
+function _nwTopoPref(key, value) {
+    try {
+        if (value === undefined) return localStorage.getItem(key) || '';
+        if (value) localStorage.setItem(key, value); else localStorage.removeItem(key);
+    } catch (e) { /* the preference lasts for this page only */ }
+    return value || '';
 }
 
+// Each tenant pins its own start device.
+function _nwTopoRootKey() {
+    return 'lm_nw_topo_root_' + (currentTenant || 'default');
+}
+
+// The current view settings; collapse and selection reset on a tenant change.
+// fresh (a full render) also drops the selection, so the new SVG is not
+// drawn dimmed around a node the details panel no longer shows.
+function _nwTopoView(fresh) {
+    const s = _nwTopoState;
+    if (fresh) s.selected = '';
+    if (s.tenant !== currentTenant) {
+        s.tenant = currentTenant;
+        s.collapsed = new Set();
+        s.epOpen = new Set();
+        s.foldSettled = false;
+        s.selected = '';
+    }
+    return { showEndpoints: s.showEndpoints, collapsed: s.collapsed, epOpen: s.epOpen,
+             orient: _nwTopoPref('lm_nw_topo_orient') === 'lr' ? 'lr' : 'tb',
+             root: _nwTopoPref(_nwTopoRootKey()), selected: s.selected };
+}
+
+// Redraw the map in place, keeping the zoom and scroll position.
 function _nwTopoRedraw() {
     const host = document.getElementById('nw-topo-svg');
-    if (!host || !window._nwTopo) return;
-    host.innerHTML = _nwTopoSvg(window._nwTopo, _nwTopoView());
+    const s = _nwTopoState;
+    if (!host || !s.graph) return;
+    const left = host.scrollLeft, top = host.scrollTop;
+    s.drawn = _nwTopoSvg(s.graph, _nwTopoView(), s.zoom);
+    host.innerHTML = s.drawn.html;
+    host.scrollLeft = left;
+    host.scrollTop = top;
+    _nwTopoDetails();
+    _nwTopoFindList();
 }
 
+// Left gap of a map narrower than the frame: the SVG is centred with
+// `margin:0 auto`, so map x 0 sits this far in from the frame's edge.
+function _nwTopoInset(host, z) {
+    const d = _nwTopoState.drawn;
+    return Math.max(0, (host.clientWidth - d.W * z) / 2);
+}
+
+// Zoom to `z` (10%–300%) keeping frame point (px, py) still; with no point,
+// zoom around the middle of the frame. Only the SVG's size changes.
+function _nwTopoZoom(z, px, py) {
+    const host = document.getElementById('nw-topo-svg');
+    const svg = host && host.querySelector('svg');
+    const s = _nwTopoState;
+    if (!svg || !s.drawn || !s.drawn.lay) return;
+    z = Math.min(3, Math.max(0.1, z));
+    if (px === undefined) { px = host.clientWidth / 2; py = host.clientHeight / 2; }
+    // Map point under (px, py), allowing for the centring gap at the old zoom.
+    const cx = (host.scrollLeft + px - _nwTopoInset(host, s.zoom)) / s.zoom;
+    const cy = (host.scrollTop + py) / s.zoom;
+    s.zoom = z;
+    svg.setAttribute('width', (s.drawn.W * z).toFixed(0));
+    svg.setAttribute('height', (s.drawn.H * z).toFixed(0));
+    host.scrollLeft = cx * z + _nwTopoInset(host, z) - px;
+    host.scrollTop = cy * z - py;
+    const pct = document.getElementById('nw-topo-zoom-pct');
+    if (pct) pct.textContent = Math.round(z * 100) + '%';
+}
+
+// The zoom that shows the whole map in the frame, never above 100%.
+function _nwTopoFitZoom() {
+    const host = document.getElementById('nw-topo-svg');
+    const d = _nwTopoState.drawn;
+    if (!host || !d || !d.W) return 1;
+    return Math.min(1, (host.clientWidth - 16) / d.W, (host.clientHeight - 16) / d.H);
+}
+
+// Scroll so map point p (unzoomed) is in the middle of the frame.
+function _nwTopoScrollTo(p) {
+    const host = document.getElementById('nw-topo-svg');
+    if (!host || !p) return;
+    const z = _nwTopoState.zoom;
+    host.scrollLeft = p.x * z + _nwTopoInset(host, z) - host.clientWidth / 2;
+    host.scrollTop = p.y * z - host.clientHeight / 2;
+}
+
+// First view of a freshly rendered map: the whole map when its names are
+// still legible (70% or more), else 80% scrolled to the top of the tree.
+function _nwTopoInitialView() {
+    const host = document.getElementById('nw-topo-svg');
+    const d = _nwTopoState.drawn;
+    if (!host || !d || !d.lay) return;
+    const fit = _nwTopoFitZoom();
+    _nwTopoZoom(fit >= 0.7 ? fit : 0.8);
+    const roots = d.lay.roots.map(r => d.pos[r]).filter(Boolean);
+    if (fit >= 0.7 || !roots.length) { host.scrollLeft = 0; host.scrollTop = 0; return; }
+    _nwTopoScrollTo({ x: roots.reduce((t, p) => t + p.x, 0) / roots.length,
+                      y: roots.reduce((t, p) => t + p.y, 0) / roots.length });
+    if (_nwTopoView().orient === 'lr') host.scrollLeft = 0; else host.scrollTop = 0;
+}
+
+// The first time a tenant's map is too big to read whole (under 50%), fold
+// the deepest levels one at a time until it fits, but never above Level 4,
+// so gateway → core → aggregation → access always shows. The badges and
+// "Expand all" undo it. A map that fits is checked again on the next render
+// (a refresh can grow it); once folded, or once the user folds or expands
+// anything, the tenant is settled until the tenant changes (which also
+// drops its collapse state). Returns true when it folded anything.
+function _nwTopoAutoFold() {
+    const s = _nwTopoState;
+    const host = document.getElementById('nw-topo-svg');
+    if (!host || !s.graph || s.foldSettled || s.collapsed.size) return false;
+    const view = _nwTopoView();
+    const { nodes, edges } = _nwTopoDrawable(s.graph, view);
+    const fits = lay => Math.min((host.clientWidth - 16) / Math.max(900, lay.width),
+                                 (host.clientHeight - 16) / lay.height) >= 0.5;
+    const full = _nwTopoLayout(nodes, edges, view);
+    if (fits(full)) return false;
+    const levels = Object.keys(full.levels).map(Number).filter(d => d >= 3).sort((a, b) => b - a);
+    for (const d of levels) {
+        full.levels[d].forEach(id => s.collapsed.add(id));
+        if (fits(_nwTopoLayout(nodes, edges, Object.assign({}, view, { collapsed: s.collapsed })))) break;
+    }
+    s.foldSettled = true;
+    return s.collapsed.size > 0;
+}
+
+// Select a device: expand whatever hides it, highlight its links, open its
+// details and scroll it into view. An endpoint turns endpoints on and opens
+// its group.
+function _nwTopoFocus(id) {
+    const s = _nwTopoState;
+    const node = (s.graph && s.graph.nodes || []).find(n => n.id === id);
+    if (!node) return;
+    if (node.infra === false) {
+        s.showEndpoints = true;
+        const box = document.getElementById('nw-topo-endpoints');
+        if (box) box.checked = true;
+        (s.graph.edges || []).forEach(e => {
+            if (e.a === id) s.epOpen.add('eg:' + e.b);
+            if (e.b === id) s.epOpen.add('eg:' + e.a);
+        });
+    }
+    s.selected = id;
+    // Two passes: opening a group can put the device under a collapsed branch.
+    for (let pass = 0; pass < 2; pass++) {
+        const par = (s.drawn && s.drawn.lay && s.drawn.lay.parent) || {};
+        for (let p = par[id]; p; p = par[p]) s.collapsed.delete(p);
+        _nwTopoRedraw();
+        if (s.drawn.pos[id]) break;
+    }
+    _nwTopoScrollTo(s.drawn.pos[id]);
+}
+
+// Fill the search box's suggestions with the names currently on the map.
+function _nwTopoFindList() {
+    const list = document.getElementById('nw-topo-find-list');
+    const s = _nwTopoState;
+    if (!list || !s.graph) return;
+    const names = [...new Set(_nwTopoDrawable(s.graph, _nwTopoView()).nodes
+        .filter(n => n.kind !== 'epgroup').map(n => String(n.name || n.id)))].sort();
+    list.replaceChildren(...names.map(n => { const o = document.createElement('option'); o.value = n; return o; }));
+}
+
+// Find a device by name (exact, else the first partial match) and focus it.
+function _nwTopoFind(text) {
+    const q = String(text || '').trim().toLowerCase();
+    const nodes = (_nwTopoState.graph && _nwTopoState.graph.nodes) || [];
+    if (!q) return;
+    const hit = nodes.find(n => String(n.name || '').toLowerCase() === q)
+        || nodes.find(n => String(n.name || '').toLowerCase().includes(q)
+            || (n.addresses || []).some(a => String(a).toLowerCase() === q));
+    if (hit) _nwTopoFocus(hit.id);
+    else showToast(`No device matches “${text}”`, 'error');
+}
+
+// The details panel for the selected device: what it is, and every link with
+// its ports and source. Built from DOM text nodes so names and port strings
+// from devices are never parsed as markup.
+function _nwTopoDetails() {
+    const panel = document.getElementById('nw-topo-details');
+    const s = _nwTopoState;
+    if (!panel) return;
+    const nodes = (s.graph && s.graph.nodes) || [];
+    const node = s.selected ? nodes.find(n => n.id === s.selected) : null;
+    panel.replaceChildren();
+    panel.style.display = node ? 'block' : 'none';
+    if (!node) return;
+    const el = (tag, cls, text) => {
+        const x = document.createElement(tag);
+        if (cls) x.className = cls;
+        if (text !== undefined) x.textContent = text;
+        return x;
+    };
+    // 1. Name and close.
+    const head = el('div', 'flex items-start justify-between gap-2 mb-2');
+    head.append(el('div', 'text-sm font-bold text-slate-800 break-all', node.name || node.id));
+    const close = el('button', 'text-slate-500 hover:text-slate-800 text-lg leading-none', '×');
+    close.title = 'Close';
+    close.dataset.topoAct = 'close';
+    head.append(close);
+    panel.append(head);
+    // 2. Facts.
+    [['Type', node.object_type || node.kind],
+     ['Addresses', (node.addresses || []).join(', ')],
+     ['MACs', (node.macs || []).join(', ')],
+     ['VSX pair', node.unit === 'vsx' ? (node.members || []).map(m => m.name).join(' + ') : ''],
+     ['Stack', (node.stack_members || []).join(', ')],
+     ['Seen via', (node.sources || []).join(', ')]].forEach(([k, v]) => {
+        if (!v) return;
+        const row = el('div', 'mb-1');
+        row.append(el('span', 'text-slate-500', k + ': '), el('span', 'text-slate-700 break-all', v));
+        panel.append(row);
+    });
+    // 3. Where the map starts. An unlinked device has no tree to start, so
+    // it is offered only "Use default start" (if it was pinned earlier).
+    const pinned = _nwTopoPref(_nwTopoRootKey());
+    const lay = s.drawn && s.drawn.lay;
+    const loose = !!lay && lay.loose.some(n => n.id === node.id);
+    const act = el('button', 'mt-3 px-3 py-1 text-xs font-semibold rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50',
+        pinned === node.id ? 'Use default start' : 'Start map here');
+    act.dataset.topoAct = pinned === node.id ? 'unroot' : 'root';
+    act.title = pinned === node.id
+        ? 'Root the map at the gateways again (or the best-connected switch)'
+        : 'Draw the map with this device at the top (saved in this browser)';
+    if (!loose || pinned === node.id) panel.append(act);
+    // 4. Links, facts first, each neighbour clickable.
+    const byId = {};
+    nodes.forEach(n => { byId[n.id] = n; });
+    const links = (s.graph.edges || []).filter(e => e.a === node.id || e.b === node.id)
+        .map(e => {
+            const mine = e.a === node.id ? 'a' : 'b', other = mine === 'a' ? 'b' : 'a';
+            return { e, mine, other, nb: byId[e[other]] || { id: e[other], name: e[other] } };
+        })
+        .sort((p, q) => Number(_NW_TOPO_STRONG.has(q.e.source)) - Number(_NW_TOPO_STRONG.has(p.e.source))
+            || String(p.nb.name).localeCompare(String(q.nb.name)));
+    panel.append(el('div', 'text-xs font-bold text-slate-500 mt-3 mb-1', `Links (${links.length})`));
+    links.forEach(({ e, mine, other, nb }) => {
+        const st = _NW_TOPO_EDGE_STYLE[e.source] || _NW_TOPO_EDGE_STYLE.mac;
+        const row = el('div', 'py-1 border-t border-slate-100');
+        const jump = el('button', 'text-primary-text font-semibold hover:underline text-left break-all', nb.name || nb.id);
+        jump.dataset.topoJump = nb.id;
+        jump.title = 'Show this device';
+        const lp = _nwTopoPort(e, mine), rp = _nwTopoPort(e, other);
+        const ports = (lp || '?') + ' → ' + (rp || '?');
+        row.append(jump, el('div', 'text-slate-500 font-mono', ports + ' · ' + st.label));
+        panel.append(row);
+    });
+}
+
+// Fullscreen the map frame, or leave fullscreen.
+function _nwTopoFullscreen() {
+    const frame = document.getElementById('nw-topo-frame');
+    if (!frame) return;
+    if (document.fullscreenElement) { document.exitFullscreen().catch(() => {}); return; }
+    if (frame.requestFullscreen) frame.requestFullscreen().catch(() => {});
+}
+
+// The scroll area fills the screen while the map is fullscreen.
+function _nwTopoOnFullscreen() {
+    const frame = document.getElementById('nw-topo-frame');
+    const host = document.getElementById('nw-topo-svg');
+    if (!frame || !host) return;
+    host.style.height = document.fullscreenElement === frame ? '100vh' : '70vh';
+}
+document.addEventListener('fullscreenchange', _nwTopoOnFullscreen);
+
+// Wire the map: click to select / fold, wheel to zoom, drag to pan, keys,
+// the zoom controls, the details panel and the toolbar.
 function _nwTopoBindView() {
-    const svg = document.getElementById('nw-topo-svg');
-    if (svg) {
-        svg.onclick = ev => {
-            const lvl = ev.target.closest('[data-topo-level]');
-            if (lvl) {
-                const ids = (window._nwTopoLevels || {})[lvl.getAttribute('data-topo-level')] || [];
-                const set = _nwTopoView().collapsed;
-                const allInSet = ids.every(id => set.has(id));
-                if (allInSet) {
-                    ids.forEach(id => set.delete(id));
-                } else {
-                    ids.forEach(id => set.add(id));
-                }
-                _nwTopoRedraw();
-                return;
+    const s = _nwTopoState;
+    const host = document.getElementById('nw-topo-svg');
+    if (!host) return;
+    // 1. Clicks: level header, badge, endpoint group, device, background.
+    host.onclick = ev => {
+        if (s.dragged) { s.dragged = false; return; }
+        const lvl = ev.target.closest('[data-topo-level]');
+        const node = ev.target.closest('[data-topo-node]');
+        if (lvl) {
+            const ids = ((s.drawn && s.drawn.lay && s.drawn.lay.levels) || {})[lvl.getAttribute('data-topo-level')] || [];
+            const fold = !ids.every(id => s.collapsed.has(id));
+            ids.forEach(id => (fold ? s.collapsed.add(id) : s.collapsed.delete(id)));
+            s.foldSettled = true;
+        } else if (node) {
+            const id = node.getAttribute('data-topo-node');
+            const toggle = ev.target.closest('[data-topo-toggle]');
+            if (id.startsWith('eg:') || toggle) {
+                const set = id.startsWith('eg:') ? s.epOpen : s.collapsed;
+                if (set.has(id)) set.delete(id); else set.add(id);
+                if (set === s.collapsed) s.foldSettled = true;
+            } else {
+                s.selected = s.selected === id ? '' : id;
             }
-            const node = ev.target.closest('[data-topo-node]');
-            if (node && node.style.cursor === 'pointer') {
-                const nodeId = node.getAttribute('data-topo-node');
-                const set = nodeId.startsWith('eg:') ? _nwTopoView().epOpen : _nwTopoView().collapsed;
-                if (set.has(nodeId)) {
-                    set.delete(nodeId);
-                } else {
-                    set.add(nodeId);
-                }
-                _nwTopoRedraw();
-            }
+        } else {
+            s.selected = '';
+        }
+        _nwTopoRedraw();
+    };
+    // 2. Wheel zooms around the pointer, like New Central.
+    host.addEventListener('wheel', ev => {
+        ev.preventDefault();
+        const dy = ev.deltaMode === 1 ? ev.deltaY * 16 : ev.deltaY;
+        const r = host.getBoundingClientRect();
+        _nwTopoZoom(s.zoom * Math.exp(-Math.max(-100, Math.min(100, dy)) * 0.0025),
+                    ev.clientX - r.left, ev.clientY - r.top);
+    }, { passive: false });
+    // 3. Dragging the background pans; the click that ends a drag is ignored.
+    host.onpointerdown = ev => {
+        if (ev.button !== 0 || ev.target.closest('[data-topo-node],[data-topo-level]')) return;
+        s.drag = { x: ev.clientX, y: ev.clientY, l: host.scrollLeft, t: host.scrollTop };
+        s.dragged = false;
+        host.setPointerCapture(ev.pointerId);
+        host.style.cursor = 'grabbing';
+    };
+    host.onpointermove = ev => {
+        if (!s.drag) return;
+        const dx = ev.clientX - s.drag.x, dy = ev.clientY - s.drag.y;
+        if (Math.abs(dx) + Math.abs(dy) > 4) s.dragged = true;
+        host.scrollLeft = s.drag.l - dx;
+        host.scrollTop = s.drag.t - dy;
+    };
+    host.onpointerup = host.onpointercancel = () => { s.drag = null; host.style.cursor = 'grab'; };
+    // 4. Keys while the map has focus: + / − zoom, 0 fits.
+    host.onkeydown = ev => {
+        if (ev.key === '+' || ev.key === '=') _nwTopoZoom(s.zoom * 1.25);
+        else if (ev.key === '-' || ev.key === '_') _nwTopoZoom(s.zoom / 1.25);
+        else if (ev.key === '0') _nwTopoZoom(_nwTopoFitZoom());
+        else return;
+        ev.preventDefault();
+    };
+    // 5. Zoom controls in the corner.
+    const controls = document.getElementById('nw-topo-controls');
+    if (controls) controls.onclick = ev => {
+        const b = ev.target.closest('[data-topo-zoom]');
+        const what = b && b.getAttribute('data-topo-zoom');
+        if (what === 'in') _nwTopoZoom(s.zoom * 1.25);
+        else if (what === 'out') _nwTopoZoom(s.zoom / 1.25);
+        else if (what === 'fit') { _nwTopoZoom(_nwTopoFitZoom()); host.scrollLeft = 0; host.scrollTop = 0; }
+        else if (what === 'one') _nwTopoZoom(1);
+        else if (what === 'full') _nwTopoFullscreen();
+    };
+    // 6. Details panel: close, jump to a neighbour, pin or unpin the start.
+    const panel = document.getElementById('nw-topo-details');
+    if (panel) panel.onclick = ev => {
+        const jump = ev.target.closest('[data-topo-jump]');
+        const act = ev.target.closest('[data-topo-act]');
+        if (jump) { _nwTopoFocus(jump.dataset.topoJump); return; }
+        if (!act) return;
+        const what = act.dataset.topoAct;
+        if (what === 'close') s.selected = '';
+        if (what === 'root' || what === 'unroot') {
+            _nwTopoPref(_nwTopoRootKey(), what === 'root' ? s.selected : '');
+            _nwTopoRedraw();
+            _nwTopoScrollTo(s.drawn.pos[s.selected]);
+            return;
+        }
+        _nwTopoRedraw();
+    };
+    // 7. Toolbar: search, orientation, endpoints, expand / collapse all.
+    const find = document.getElementById('nw-topo-find');
+    if (find) {
+        // Enter also fires `change` on an edited box; run that search once.
+        let searched = null;
+        find.oninput = () => { searched = null; };
+        find.onchange = () => { if (find.value !== searched) _nwTopoFind(find.value); searched = null; };
+        find.onkeydown = ev => {
+            if (ev.key !== 'Enter') return;
+            ev.preventDefault();
+            searched = find.value;
+            _nwTopoFind(find.value);
         };
     }
-
+    const orient = document.getElementById('nw-topo-orient');
+    if (orient) {
+        orient.value = _nwTopoView().orient;
+        orient.onchange = () => {
+            _nwTopoPref('lm_nw_topo_orient', orient.value === 'lr' ? 'lr' : 'tb');
+            _nwTopoRedraw();
+            _nwTopoInitialView();
+        };
+    }
     const endpointsCheckbox = document.getElementById('nw-topo-endpoints');
     if (endpointsCheckbox) {
-        endpointsCheckbox.checked = !!window._nwTopoShowEndpoints;
+        endpointsCheckbox.checked = s.showEndpoints;
         endpointsCheckbox.onchange = () => {
-            window._nwTopoShowEndpoints = endpointsCheckbox.checked;
+            s.showEndpoints = endpointsCheckbox.checked;
             _nwTopoRedraw();
         };
     }
-
     const expandBtn = document.getElementById('nw-topo-expand');
-    if (expandBtn) {
-        expandBtn.onclick = () => {
-            const v = _nwTopoView();
-            v.collapsed.clear();
-            if (v.showEndpoints) {
-                _nwTopoGroupEndpoints((window._nwTopo.nodes || []), (window._nwTopo.edges || []), null)
-                    .nodes.filter(n => n.kind === 'epgroup').forEach(n => v.epOpen.add(n.id));
-            }
-            _nwTopoRedraw();
-        };
-    }
-
+    if (expandBtn) expandBtn.onclick = () => {
+        s.collapsed.clear();
+        s.foldSettled = true;
+        if (s.showEndpoints) {
+            _nwTopoGroupEndpoints(s.graph.nodes || [], s.graph.edges || [], null)
+                .nodes.filter(n => n.kind === 'epgroup').forEach(n => s.epOpen.add(n.id));
+        }
+        _nwTopoRedraw();
+    };
     const collapseBtn = document.getElementById('nw-topo-collapse');
-    if (collapseBtn) {
-        collapseBtn.onclick = () => {
-            const level0Ids = (window._nwTopoLevels || {})[0] || [];
-            const set = _nwTopoView().collapsed;
-            level0Ids.forEach(id => set.add(id));
-            _nwTopoView().epOpen.clear();
-            _nwTopoRedraw();
-        };
-    }
+    if (collapseBtn) collapseBtn.onclick = () => {
+        (((s.drawn && s.drawn.lay && s.drawn.lay.levels) || {})[0] || []).forEach(id => s.collapsed.add(id));
+        s.foldSettled = true;
+        s.epOpen.clear();
+        _nwTopoRedraw();
+    };
 }
 
 async function _renderNwTopologyTab(opts) {
     const c = document.getElementById('nw-table-container');
     if (!c) return;
     opts = opts || {};
-    const infer = window._nwTopoInfer !== false;
-    c.innerHTML = `<div class="py-12 text-center text-slate-500 animate-pulse">${
+    const s = _nwTopoState;
+    // A newer render, or another tab drawing into the container while this
+    // fetch runs, makes this render stale: it must not overwrite that page.
+    const seq = ++s.seq;
+    const stale = () => seq !== s.seq || !c.isConnected || !c.querySelector(`[data-nw-topo-loading="${seq}"]`);
+    c.innerHTML = `<div data-nw-topo-loading="${seq}" class="py-12 text-center text-slate-500 animate-pulse">${
         opts.refresh ? 'Gathering LLDP and MAC tables from every device…' : 'Building topology…'}</div>`;
 
     const qs = new URLSearchParams();
     if (currentTenant) qs.set('tenant', currentTenant);
     if (opts.refresh) qs.set('refresh', '1');
-    if (!infer) qs.set('infer', '0');
+    if (!s.infer) qs.set('infer', '0');
     let graph;
     try {
         const r = await fetch(`/api/nw/topology?${qs.toString()}`);
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         graph = await r.json();
     } catch (e) {
+        if (stale()) return;
         c.innerHTML = `<div class="py-12 text-center text-amber-600 italic">Could not build topology: ${escapeHtml(e.message)}</div>`;
         return;
     }
+    if (stale()) return;
     if (graph.select_tenant) {
         c.innerHTML = `<div class="py-12 text-center space-y-3">
             <p class="text-slate-600 text-sm font-semibold">Select a tenant to view its network topology</p>
@@ -873,15 +1275,18 @@ async function _renderNwTopologyTab(opts) {
         </div>`;
         return;
     }
-    window._nwTopo = graph;
+    const view = _nwTopoView(true);
+    s.graph = graph;
+    s.zoom = 1;
+    s.drawn = _nwTopoSvg(graph, view, 1);
 
     const st = graph.stats || {};
     const bySrc = st.edges_by_source || {};
     const legend = Object.keys(_NW_TOPO_EDGE_STYLE).map(k => {
-        const s = _NW_TOPO_EDGE_STYLE[k];
+        const ls = _NW_TOPO_EDGE_STYLE[k];
         return `<span class="flex items-center gap-1.5 text-xs text-slate-500">
-            <svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" stroke="${s.stroke}" stroke-width="2" ${s.dash ? `stroke-dasharray="${s.dash}"` : ''}/></svg>
-            ${s.label} <b class="text-slate-700">${bySrc[k] || 0}</b></span>`;
+            <svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" stroke="${ls.stroke}" stroke-width="2" ${ls.dash ? `stroke-dasharray="${ls.dash}"` : ''}/></svg>
+            ${ls.label} <b class="text-slate-700">${bySrc[k] || 0}</b></span>`;
     }).join('');
 
     const trunks = (graph.trunks || []).map(t => `<tr class="border-t border-slate-100">
@@ -889,19 +1294,29 @@ async function _renderNwTopologyTab(opts) {
         <td class="py-1 pr-3 font-mono text-xs">${escapeHtml(t.port)}</td>
         <td class="py-1 text-xs text-slate-500">${t.mac_count} MACs</td></tr>`).join('');
 
+    const btn = 'px-2 py-1.5 text-xs font-semibold rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50';
+    const zbtn = 'px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50 rounded';
     const canEditTopo = isAdmin() || isTenantAdmin();
     c.innerHTML = `<div class="space-y-4">
+  <div class="flex flex-wrap items-center gap-4">${legend}</div>
   <div class="flex flex-wrap items-center justify-between gap-3">
-    <div class="flex flex-wrap items-center gap-4">${legend}</div>
-    <div class="flex items-center gap-3">
+    <div class="flex flex-wrap items-center gap-3">
+      <input id="nw-topo-find" list="nw-topo-find-list" class="px-2 py-1 text-xs border border-slate-300 rounded w-48"
+        placeholder="Find a device…" title="Type a device name or IP and press Enter to show it on the map">
+      <datalist id="nw-topo-find-list"></datalist>
+      <select id="nw-topo-orient" class="px-2 py-1 text-xs border border-slate-300 rounded" title="Draw the map top-down (gateways at the top, like Aruba Central) or left to right">
+        <option value="tb">Top-down</option><option value="lr">Left to right</option>
+      </select>
       <label class="flex items-center gap-1.5 text-xs text-slate-500" title="Draw a link for a switch port that has learned exactly one MAC belonging to a known device. A guess, not an advertised adjacency.">
-        <input type="checkbox" id="nw-topo-infer" ${infer ? 'checked' : ''}> Infer links from MAC tables
+        <input type="checkbox" id="nw-topo-infer" ${s.infer ? 'checked' : ''}> Infer links from MAC tables
       </label>
       <label class="flex items-center gap-1.5 text-xs text-slate-500" title="Include devices known only by a MAC address (hosts, VMs, phones). Off by default: the map shows infrastructure only.">
         <input type="checkbox" id="nw-topo-endpoints"> Show endpoints
       </label>
-      <button id="nw-topo-expand" class="px-2 py-1.5 text-xs font-semibold rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50">Expand all</button>
-      <button id="nw-topo-collapse" class="px-2 py-1.5 text-xs font-semibold rounded-full border border-slate-300 text-slate-600 hover:bg-slate-50">Collapse all</button>
+    </div>
+    <div class="flex items-center gap-3">
+      <button id="nw-topo-expand" class="${btn}">Expand all</button>
+      <button id="nw-topo-collapse" class="${btn}">Collapse all</button>
       <button id="nw-topo-refresh" class="px-3 py-1.5 text-xs font-semibold rounded-full bg-primary text-white hover:bg-[#018f6f]">Refresh from devices</button>
     </div>
   </div>
@@ -912,7 +1327,20 @@ async function _renderNwTopologyTab(opts) {
     <span><b class="text-slate-700">${st.trunk_ports || 0}</b> trunk/uplink ports</span>
     <span>NetBox inventory: <b class="text-slate-700">${graph.netbox ? 'included' : 'unavailable'}</b></span>
   </div>
-  <div id="nw-topo-svg" class="border border-slate-200 rounded bg-white overflow-hidden">${_nwTopoSvg(graph, _nwTopoView())}</div>
+  <div id="nw-topo-frame" class="relative border border-slate-200 rounded bg-white">
+    <div id="nw-topo-svg" tabindex="0" style="height:70vh;overflow:auto;cursor:grab;outline:none;touch-action:none">${s.drawn.html}</div>
+    <div id="nw-topo-details" class="absolute bg-white border border-slate-200 rounded shadow-lg p-3 text-xs"
+      style="display:none;top:8px;right:8px;width:300px;max-height:calc(100% - 64px);overflow:auto"></div>
+    <div id="nw-topo-controls" class="absolute flex items-center gap-1 bg-white border border-slate-200 rounded shadow" style="right:8px;bottom:8px;padding:2px">
+      <button data-topo-zoom="out" class="${zbtn}" title="Zoom out (−)">−</button>
+      <span id="nw-topo-zoom-pct" class="text-xs text-slate-500 font-mono" style="min-width:3em;text-align:center">100%</span>
+      <button data-topo-zoom="in" class="${zbtn}" title="Zoom in (+)">+</button>
+      <button data-topo-zoom="fit" class="${zbtn}" title="Fit the whole map (0)">Fit</button>
+      <button data-topo-zoom="one" class="${zbtn}" title="Actual size">1:1</button>
+      <button data-topo-zoom="full" class="${zbtn}" title="Full screen">⛶</button>
+    </div>
+  </div>
+  <p class="text-xs text-slate-500">Scroll to zoom, drag to pan, click a device for its links. The −/+ badge folds a branch. An inferred link that doesn't place a device shows when either end is selected.</p>
   ${trunks ? `<div>
     <h4 class="text-xs font-bold text-slate-500 mb-1">Trunk / uplink ports</h4>
     <p class="text-xs text-slate-500 mb-2">These ports carry a whole downstream segment, so what is <em>directly</em> attached can't be inferred. Declare the link below if you know it.</p>
@@ -928,10 +1356,13 @@ async function _renderNwTopologyTab(opts) {
     if (refreshBtn) refreshBtn.onclick = () => _renderNwTopologyTab({ refresh: true });
     const inferBox = document.getElementById('nw-topo-infer');
     if (inferBox) inferBox.onchange = () => {
-        window._nwTopoInfer = inferBox.checked;
+        s.infer = inferBox.checked;
         _renderNwTopologyTab();
     };
     _nwTopoBindView();
+    if (_nwTopoAutoFold()) _nwTopoRedraw();
+    _nwTopoFindList();
+    _nwTopoInitialView();
     if (canEditTopo) _renderNwTopologyManual();
 }
 
@@ -945,9 +1376,8 @@ async function _renderNwTopologyManual() {
         const r = await fetch(`/api/nw/topology/manual${tenantQs}`);
         if (r.ok) cfg = await r.json();
     } catch (e) { /* keep the empty editor rather than blanking the map */ }
-    window._nwTopoManual = cfg;
 
-    const names = ((window._nwTopo || {}).nodes || [])
+    const names = ((_nwTopoState.graph || {}).nodes || [])
         .map(n => n.name).filter(Boolean).sort();
     const options = names.map(n => `<option value="${escapeHtml(n)}"></option>`).join('');
 

@@ -17,12 +17,12 @@ def _count(pattern, flags=0):
 
 
 def test_escape_html_calls_only_go_down():
-    assert _count(r"\bescapeHtml\(") <= 1116
+    assert _count(r"\bescapeHtml\(") <= 1111
 
 
 def test_inline_event_handlers_only_go_down():
-    assert _count(r"\son[a-z]+=[\"']") <= 994
+    assert _count(r"\son[a-z]+=[\"']") <= 989
 
 
 def test_window_globals_only_go_down():
-    assert _count(r"^\s*window\.\w+\s*=[^=]", re.M) <= 530
+    assert _count(r"^\s*window\.\w+\s*=[^=]", re.M) <= 520

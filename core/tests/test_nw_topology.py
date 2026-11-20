@@ -794,3 +794,68 @@ def test_an_lldp_port_id_mac_ties_the_lag_to_the_host():
     g = build_topology(fleet=_CX, lldp_by_device=lldp, macs_by_device=macs)
     assert _edge_between(g, "pxmx03", "bc:24:11:e7:ce:99")
     assert not _edge_between(g, "CRSW1", "bc:24:11:e7:ce:99")
+
+
+# ── LLDP wins over NetBox cables; inference only fills gaps ─────────────────
+# Mirrors live SSPLM: the core uplinks to TOR-AGG and every TOR hangs off
+# TOR-AGG over LLDP, but NetBox still held cables written long ago that put a
+# TOR on another site's core port. One of them joined both sites into one map
+# rooted at that core.
+
+_SITE_FLEET = [
+    {"id": "core", "name": "N31-CORE", "object_type": "cx_switch", "address": "172.21.0.11"},
+    {"id": "agg", "name": "N31-TOR-AGG", "object_type": "aos_switch", "address": "172.21.0.26"},
+    {"id": "tor", "name": "T36-TOR", "object_type": "aos_switch", "address": "172.21.0.30"},
+    {"id": "lab", "name": "RSVBE-S1-1", "object_type": "cx_switch", "address": "172.16.101.1"},
+]
+_SITE_LLDP = {
+    "core": [_lldp("1/1/51", "", "22", "N31-TOR-AGG", "172.21.0.26")],
+    "agg": [_lldp("22", "", "1/1/51", "N31-CORE", "172.21.0.11"),
+            _lldp("3", "", "27", "T36-TOR", "172.21.0.30")],
+    "tor": [_lldp("27", "", "3", "N31-TOR-AGG", "172.21.0.26"),
+            _lldp("2", "", "1/1/1", "T36-AGG2", "10.21.0.23")],
+    "lab": [_lldp("1/1/3", "", "50", "RSVBE-TOR-3", "172.20.100.17")],
+}
+
+
+def test_a_stale_netbox_cable_on_an_lldp_port_is_ignored():
+    g = build_topology(
+        fleet=_SITE_FLEET, lldp_by_device=_SITE_LLDP,
+        netbox_devices=[{"name": "N31-PDU", "primary_ip": "172.21.0.90/24"}],
+        netbox_cables=[
+            # The lab core's 1/1/3 is RSVBE-TOR-3 per its own LLDP table.
+            {"a_device": "RSVBE-S1-1", "a_port": "1/1/3", "b_device": "T36-TOR", "b_port": "50"},
+            # T36-TOR's port 2 is T36-AGG2 per LLDP; the cable's far end is wrong.
+            {"a_device": "N31-CORE", "a_port": "1/1/9", "b_device": "T36-TOR", "b_port": "2"},
+            # No LLDP on either port: the cable is the only evidence and stays.
+            {"a_device": "T36-TOR", "a_port": "40", "b_device": "N31-PDU", "b_port": "1"}])
+    assert _edge_between(g, "RSVBE-S1-1", "T36-TOR") is None
+    assert _edge_between(g, "N31-CORE", "T36-TOR") is None
+    assert _edge_between(g, "T36-TOR", "N31-TOR-AGG")["source"] == "lldp"
+    assert _edge_between(g, "N31-TOR-AGG", "N31-CORE")["source"] == "lldp"
+    assert _edge_between(g, "T36-TOR", "N31-PDU")["source"] == "netbox"
+
+
+def test_a_netbox_cable_lldp_already_drew_is_not_drawn_twice():
+    # NetBox names the far port differently ("Uplink-52" vs LLDP's "1/1/52").
+    g = build_topology(
+        fleet=FLEET + [{"id": "sw2", "name": "OLKS-EDGE-1",
+                        "object_type": "aos_switch", "address": "172.16.1.91"}],
+        lldp_by_device={"sw1": [_lldp("1", "", "1/1/52", "OLKS-EDGE-1", "172.16.1.91")]},
+        netbox_cables=[{"a_device": "OLKS-MGMTSW", "a_port": "1",
+                        "b_device": "OLKS-EDGE-1", "b_port": "Uplink-52"}])
+    assert [e["source"] for e in g["edges"]] == ["lldp"]
+
+
+def test_macs_placed_after_the_switch_is_re_rooted_still_land_on_it():
+    # Live V36-Access: its own SVI MAC (ARP IP = the switch's address) is
+    # placed first and merges into the switch under a new id; the MACs placed
+    # after it must not hang off the switch's old, now-gone id.
+    fleet = [{"id": "acc", "name": "V36-ACCESS", "object_type": "aos_switch",
+              "address": "10.36.0.5", "mac": "5c:a4:7d:e0:ec:40"}]
+    macs = {"acc": [{"mac": "5c:a4:7d:e0:ec:41", "interface": "1/1/1", "ip": "10.36.0.5"},
+                    {"mac": "e4:5f:01:86:65:11", "interface": "1/1/16"}]}
+    g = build_topology(fleet=fleet, macs_by_device=macs)
+    ids = {n["id"] for n in g["nodes"]}
+    assert all(e["a"] in ids and e["b"] in ids for e in g["edges"])
+    assert _edge_between(g, "V36-ACCESS", "e4:5f:01:86:65:11")
