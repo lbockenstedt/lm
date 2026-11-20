@@ -94,6 +94,15 @@ function csEscape(s) {
     }[c]));
 }
 
+// Quote a value as a JS string argument inside an inline on*="..." handler.
+// csEscape alone is not enough there: the browser decodes &#39; back to '
+// before it runs the handler, so a hostname like x');alert(1);// would end
+// the string. JSON.stringify makes a JS string literal, and csEscape then
+// keeps its quotes from ending the HTML attribute.
+function csJsArg(s) {
+    return csEscape(JSON.stringify(s === null || s === undefined ? '' : String(s)));
+}
+
 function csTenantRaw() {
     return (typeof currentTenant !== 'undefined' && currentTenant && currentTenant !== '')
         ? currentTenant : 'default';
@@ -1727,7 +1736,7 @@ function csRenderClientsFaceted() {
     const opt = (v, label, count, cur) =>
         `<option value="${csEscape(v)}"${v === cur ? ' selected' : ''}>${csEscape(label)}${count != null ? ` (${count})` : ''}</option>`;
     const dropdown = (dim, allLabel, opts, cur) =>
-        `<select onchange="csFacetSelect('${dim}', this.value)" class="${selCls}"><option value="">${csEscape(allLabel)}</option>${opts.join('')}</select>`;
+        `<select onchange="csFacetSelect(${csJsArg(dim)}, this.value)" class="${selCls}"><option value="">${csEscape(allLabel)}</option>${opts.join('')}</select>`;
 
     const simOpts = CS_CONTROL_FLAGS.filter(f => simCounts[f] > 0 || csFacet.sim === f)
         .map(f => opt(f, f, simCounts[f], csFacet.sim));
@@ -2100,7 +2109,7 @@ function csRenderClientRows(rows, targetId) {
           <td colspan="${CS_CLIENT_COLS}" class="px-4 pb-3 pt-0">
             <div class="flex flex-wrap items-center justify-between gap-2">
               ${csClientSimBar(c, host)}
-              <button onclick="csRemoveClient('${csEscape(host)}', this)" class="text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap bg-white hover:bg-red-50 text-red-500 border border-red-200 flex-shrink-0" title="Remove this client's registry record — for a stale/unrecognized entry (a renamed VM's old hostname, a one-off test client). Does NOT affect any actual VM; a client that's still alive just re-registers on its next check-in.">🗑 Remove</button>
+              <button onclick="csRemoveClient(${csJsArg(host)}, this)" class="text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap bg-white hover:bg-red-50 text-red-500 border border-red-200 flex-shrink-0" title="Remove this client's registry record — for a stale/unrecognized entry (a renamed VM's old hostname, a one-off test client). Does NOT affect any actual VM; a client that's still alive just re-registers on its next check-in.">🗑 Remove</button>
             </div>
           </td>
         </tr>` : '';
@@ -2623,7 +2632,7 @@ function _csCentralTableBuild(id) {
         const active = sort && sort.col === i;
         const arrow = active ? (sort.dir === 'desc' ? ' ▼' : ' ▲') : '';
         const w = c.width ? ` style="width:${csEscape(String(c.width))}"` : '';
-        return `<th${w} class="px-3 py-2 text-left font-semibold cursor-pointer select-none hover:text-slate-700" onclick="csCentralSort('${csEscape(id)}', ${i})" title="Sort by ${csEscape(c.label)}">${csEscape(c.label)}${active ? `<span class="text-slate-500">${arrow}</span>` : ''}</th>`;
+        return `<th${w} class="px-3 py-2 text-left font-semibold cursor-pointer select-none hover:text-slate-700" onclick="csCentralSort(${csJsArg(id)}, ${i})" title="Sort by ${csEscape(c.label)}">${csEscape(c.label)}${active ? `<span class="text-slate-500">${arrow}</span>` : ''}</th>`;
     }).join('');
     const body = view.length
         ? view.map(r => `<tr>${columns.map(c => `<td class="px-3 py-2">${c.render(r)}</td>`).join('')}</tr>`).join('')
@@ -2631,7 +2640,7 @@ function _csCentralTableBuild(id) {
     let bar = '';
     if (monOf) {
         const nMon = rows.filter(r => monOf(r)).length;
-        const mk = (val, label) => `<button onclick="csCentralFilter('${csEscape(id)}','${val}')" class="px-2.5 py-1 rounded-full text-xs font-bold border ${filter === val ? 'bg-navy/10 text-navy border-navy' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${label}</button>`;
+        const mk = (val, label) => `<button onclick="csCentralFilter(${csJsArg(id)},${csJsArg(val)})" class="px-2.5 py-1 rounded-full text-xs font-bold border ${filter === val ? 'bg-navy/10 text-navy border-navy' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${label}</button>`;
         bar = `<div class="flex items-center gap-2 mb-3">
             <span class="text-xs text-slate-500 font-semibold">Monitored:</span>
             ${mk('all', `All (${rows.length})`)}${mk('mon', `On (${nMon})`)}${mk('unmon', `Off (${rows.length - nMon})`)}
@@ -3143,7 +3152,7 @@ function _csCentralOnPremTableBuild(id) {
         const active = sort && sort.col === i;
         const arrow = active ? (sort.dir === 'desc' ? ' ▼' : ' ▲') : '';
         const w = c.width ? ` style="width:${csEscape(String(c.width))}"` : '';
-        return `<th${w} class="px-3 py-2 text-left font-semibold cursor-pointer select-none hover:text-slate-700" onclick="csCentralOnPremSort('${csEscape(id)}', ${i})" title="Sort by ${csEscape(c.label)}">${csEscape(c.label)}${active ? `<span class="text-slate-500">${arrow}</span>` : ''}</th>`;
+        return `<th${w} class="px-3 py-2 text-left font-semibold cursor-pointer select-none hover:text-slate-700" onclick="csCentralOnPremSort(${csJsArg(id)}, ${i})" title="Sort by ${csEscape(c.label)}">${csEscape(c.label)}${active ? `<span class="text-slate-500">${arrow}</span>` : ''}</th>`;
     }).join('');
     const body = view.length
         ? view.map(r => `<tr>${columns.map(c => `<td class="px-3 py-2">${c.render(r)}</td>`).join('')}</tr>`).join('')
@@ -3151,7 +3160,7 @@ function _csCentralOnPremTableBuild(id) {
     let bar = '';
     if (monOf) {
         const nMon = rows.filter(r => monOf(r)).length;
-        const mk = (val, label) => `<button onclick="csCentralOnPremFilter('${csEscape(id)}','${val}')" class="px-2.5 py-1 rounded-full text-xs font-bold border ${filter === val ? 'bg-navy/10 text-navy border-navy' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${label}</button>`;
+        const mk = (val, label) => `<button onclick="csCentralOnPremFilter(${csJsArg(id)},${csJsArg(val)})" class="px-2.5 py-1 rounded-full text-xs font-bold border ${filter === val ? 'bg-navy/10 text-navy border-navy' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${label}</button>`;
         bar = `<div class="flex items-center gap-2 mb-3">
             <span class="text-xs text-slate-500 font-semibold">Monitored:</span>
             ${mk('all', `All (${rows.length})`)}${mk('mon', `On (${nMon})`)}${mk('unmon', `Off (${rows.length - nMon})`)}
@@ -3796,7 +3805,7 @@ function _csMistTableBuild(id) {
         const active = sort && sort.col === i;
         const arrow = active ? (sort.dir === 'desc' ? ' ▼' : ' ▲') : '';
         const w = c.width ? ` style="width:${csEscape(String(c.width))}"` : '';
-        return `<th${w} class="px-3 py-2 text-left font-semibold cursor-pointer select-none hover:text-slate-700" onclick="csMistSort('${csEscape(id)}', ${i})" title="Sort by ${csEscape(c.label)}">${csEscape(c.label)}${active ? `<span class="text-slate-500">${arrow}</span>` : ''}</th>`;
+        return `<th${w} class="px-3 py-2 text-left font-semibold cursor-pointer select-none hover:text-slate-700" onclick="csMistSort(${csJsArg(id)}, ${i})" title="Sort by ${csEscape(c.label)}">${csEscape(c.label)}${active ? `<span class="text-slate-500">${arrow}</span>` : ''}</th>`;
     }).join('');
     const body = view.length
         ? view.map(r => `<tr>${columns.map(c => `<td class="px-3 py-2">${c.render(r)}</td>`).join('')}</tr>`).join('')
@@ -3804,7 +3813,7 @@ function _csMistTableBuild(id) {
     let bar = '';
     if (monOf) {
         const nMon = rows.filter(r => monOf(r)).length;
-        const mk = (val, label) => `<button onclick="csMistFilter('${csEscape(id)}','${val}')" class="px-2.5 py-1 rounded-full text-xs font-bold border ${filter === val ? 'bg-navy/10 text-navy border-navy' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${label}</button>`;
+        const mk = (val, label) => `<button onclick="csMistFilter(${csJsArg(id)},${csJsArg(val)})" class="px-2.5 py-1 rounded-full text-xs font-bold border ${filter === val ? 'bg-navy/10 text-navy border-navy' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${label}</button>`;
         bar = `<div class="flex items-center gap-2 mb-3">
             <span class="text-xs text-slate-500 font-semibold">Monitored:</span>
             ${mk('all', `All (${rows.length})`)}${mk('mon', `On (${nMon})`)}${mk('unmon', `Off (${rows.length - nMon})`)}
@@ -5014,7 +5023,7 @@ function csRenderSimQuotaEditor() {
         <details class="text-xs text-slate-500 mt-2">
           <summary class="cursor-pointer">Suggested alert → sim linkage</summary>
           <ul class="mt-1 list-disc list-inside space-y-0.5">
-            ${Object.entries(suggested).map(([a, s]) => `<li><span class="font-mono">${csEscape(a)}</span> → <span class="font-mono">${csEscape(s)}</span> <button onclick="csSimQuotaAddSuggested('${csEscape(a)}','${csEscape(s)}')" class="text-primary-text hover:underline ml-1">add</button></li>`).join('')}
+            ${Object.entries(suggested).map(([a, s]) => `<li><span class="font-mono">${csEscape(a)}</span> → <span class="font-mono">${csEscape(s)}</span> <button onclick="csSimQuotaAddSuggested(${csJsArg(a)},${csJsArg(s)})" class="text-primary-text hover:underline ml-1">add</button></li>`).join('')}
           </ul>
         </details>` : '';
     csSet(`<div class="space-y-4">
@@ -6591,8 +6600,8 @@ function csRenderPxmxSiteMapEditor() {
           <label class="text-xs text-slate-600 font-mono">${csEscape(r.host)} ${badge}</label>
           <select data-cs-px="site" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm">${siteOpts(sel)}</select>
           <div class="flex gap-3 justify-self-end">
-            <button onclick="csPxmxSiteClear('${csEscape(r.host)}')" class="text-red-600 hover:text-red-800 text-xs font-bold py-1">Clear</button>
-            ${r.connected ? '' : `<button onclick="csPxmxSiteDelete('${csEscape(r.host)}')" title="Remove this stale server record (e.g. a server moved to another tenant)" class="text-red-700 hover:text-red-900 text-xs font-bold py-1">Delete</button>`}
+            <button onclick="csPxmxSiteClear(${csJsArg(r.host)})" class="text-red-600 hover:text-red-800 text-xs font-bold py-1">Clear</button>
+            ${r.connected ? '' : `<button onclick="csPxmxSiteDelete(${csJsArg(r.host)})" title="Remove this stale server record (e.g. a server moved to another tenant)" class="text-red-700 hover:text-red-900 text-xs font-bold py-1">Delete</button>`}
           </div>
         </div>`;
     }).join('');
@@ -6741,7 +6750,7 @@ function csConfigSourceCard(source, cfg) {
     const repo = cfg.repo_url || '';
     const branch = cfg.repo_branch || 'main';
     const btn = (val, label, active) =>
-        `<button onclick="csSetConfigSource('${val}')" class="px-3 py-1.5 rounded-full text-sm font-bold border transition-colors ${active ? 'bg-brand/10 text-primary-text border-brand' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'}">${label}</button>`;
+        `<button onclick="csSetConfigSource(${csJsArg(val)})" class="px-3 py-1.5 rounded-full text-sm font-bold border transition-colors ${active ? 'bg-brand/10 text-primary-text border-brand' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'}">${label}</button>`;
     let status;
     if (isHub) {
         status = '<span class="text-emerald-700">Hub-owned — the GitHub sync is ignored; your edits are authoritative and are never reverted by a repo pull.</span>';
@@ -8878,7 +8887,7 @@ function csVmHostBanner(opts) {
         return `<label data-cs-host-name="${csEscape(_hname(h).toLowerCase())}"
              class="flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer hover:bg-slate-50 ${on ? 'bg-green-50' : ''}">
              <input type="${single ? 'radio" name="cs-host-pick' : 'checkbox'}" ${on ? 'checked' : ''}
-                    onchange="${single ? `csVmHostPick('${csEscape(id)}')` : `csVmHostToggle('${csEscape(id)}')`}"/>
+                    onchange="${single ? `csVmHostPick(${csJsArg(id)})` : `csVmHostToggle(${csJsArg(id)})`}"/>
              ${csOnlineDot(h.spoke_online)}<span class="flex-1">${csEscape(_hname(h))}</span>
              <span class="text-slate-500">${csHostVms(h).length} VM</span></label>`;
     }).join('');
@@ -9088,7 +9097,7 @@ async function csRenderVmServer() {
         const qtList = (px.quarantine || []).filter(q => q && q.bus_path);
         const qtPill = qtList.length ? `<span class="ml-1 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-red-100 text-red-700 text-xs font-bold" title="${csEscape(qtList.map(q => q.bus_path + ': ' + (q.reason || '')).join('; '))}">🚫 ${qtList.length} QT</span>` : '';
         const selCls = csVmHostId(h) === sel ? 'bg-green-50 ring-1 ring-green-300' : 'hover:bg-slate-50';
-        return `<tr class="border-b border-slate-100 cursor-pointer ${selCls}" onclick="csVmSelectHost('${csEscape(csVmHostId(h))}','VMs')">
+        return `<tr class="border-b border-slate-100 cursor-pointer ${selCls}" onclick="csVmSelectHost(${csJsArg(csVmHostId(h))},'VMs')">
           <td class="px-4 py-2 text-center" onclick="event.stopPropagation()"><input type="checkbox" class="cs-host-sel" data-host="${csEscape((px.node && px.node.hostname) || csVmHostId(h))}" data-spoke="${csEscape(h.spoke_id || '')}" data-name="${csEscape(h.spoke_name || h.spoke_hostname || h.spoke_id || '')}"></td>
           <td class="px-4 py-2"><span class="font-medium text-slate-700">${csEscape(String(h.spoke_name || h.spoke_hostname || h.spoke_id || '').toUpperCase())}</span>${csClusterBadge(csHostClustered(h))}</td>
           <td class="px-4 py-2 text-center">${csHostStateBadge(h)}</td>
@@ -10080,7 +10089,7 @@ async function csRenderVmServerVms() {
     const cats = ['Simulation Clients', 'Other', 'Containers', 'Templates'];
     const grouped = {};
     cats.forEach(c => grouped[c] = vms.filter(v => csVmCategory(v) === c));
-    const tabs = cats.map((c, i) => `<button onclick="csVmVmsTab('${c}')" id="cs-vmtab-${csEscape(c)}" class="px-3 py-1.5 rounded-full text-xs font-bold ${i === 0 ? 'bg-brand/10 text-primary-text border border-brand' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'}">${csEscape(c)} <span class="opacity-60">(${grouped[c].length})</span></button>`).join('');
+    const tabs = cats.map((c, i) => `<button onclick="csVmVmsTab(${csJsArg(c)})" id="cs-vmtab-${csEscape(c)}" class="px-3 py-1.5 rounded-full text-xs font-bold ${i === 0 ? 'bg-brand/10 text-primary-text border border-brand' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'}">${csEscape(c)} <span class="opacity-60">(${grouped[c].length})</span></button>`).join('');
     csVmPage = 1;
     const _initList = grouped['Simulation Clients'] || [];
     const rows = csVmRenderRows(_initList);
@@ -10537,7 +10546,7 @@ window.csToggleVmActionMenu = function (evt, key) {
     if (wasOpenForThisRow) return;
     const specs = CS_VM_ACTIONS.filter(s => s.action !== 'delete_vm');
     menu.innerHTML = specs.map(s =>
-        `<button onclick="event.stopPropagation(); document.getElementById('cs-vm-action-menu').classList.add('hidden'); csVmAction('${key}','${s.action}')" class="w-full text-left px-3 py-1.5 hover:bg-slate-50 font-medium text-slate-700 flex items-center gap-1.5">${s.label}</button>`
+        `<button onclick="event.stopPropagation(); document.getElementById('cs-vm-action-menu').classList.add('hidden'); csVmAction(${csJsArg(key)},${csJsArg(s.action)})" class="w-full text-left px-3 py-1.5 hover:bg-slate-50 font-medium text-slate-700 flex items-center gap-1.5">${s.label}</button>`
     ).join('');
     const r = evt.currentTarget.getBoundingClientRect();
     menu.style.top = (r.bottom + 4) + 'px';
@@ -10548,7 +10557,9 @@ window.csToggleVmActionMenu = function (evt, key) {
 
 function csVmRow(v) {
     const vid = csEscape(v.vmid);
-    const key = csEscape(v._key != null ? v._key : csVmKey(v));
+    // rawKey goes to the handlers through csJsArg; key is for HTML attributes.
+    const rawKey = v._key != null ? v._key : csVmKey(v);
+    const key = csEscape(rawKey);
     // Auto-prov placeholder — a VM the run is provisioning that hasn't appeared in
     // telemetry yet. No real VM to act on, and no checkbox (bulk must skip it).
     const isPlaceholder = v._placeholder === true;
@@ -10557,7 +10568,7 @@ function csVmRow(v) {
     // Route by composite key (spoke|host|vmid) — VMIDs can collide across hosts.
     const act = (label, action, cls) => busy
         ? `<button disabled title="VM is being deleted" class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-500 cursor-not-allowed">${label}</button>`
-        : `<button onclick="csVmAction('${key}','${action}')" class="px-2 py-0.5 rounded-full text-xs font-bold ${cls}">${label}</button>`;
+        : `<button onclick="csVmAction(${csJsArg(rawKey)},${csJsArg(action)})" class="px-2 py-0.5 rounded-full text-xs font-bold ${cls}">${label}</button>`;
     // VNC console (mirrors the pxmx VM table's 🖥 Console button). qemu VMs
     // only — lxc containers have no VNC display, and templates aren't runnable.
     // Disabled while tearing_down. The opener resolves the VM's owning cs
@@ -10565,15 +10576,15 @@ function csVmRow(v) {
     const isLxc = String(v.type || '').toLowerCase() === 'lxc';
     const consoleBtn = (busy || isLxc || v.is_template)
         ? `<button disabled title="${isLxc ? 'Containers have no VNC console' : (v.is_template ? 'Templates have no console' : 'VM is being deleted')}" class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-500 cursor-not-allowed">🖥 Console</button>`
-        : `<button onclick="csOpenVmConsole('${key}')" class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-800 text-slate-100" title="Open a noVNC console to this VM">🖥 Console</button>`;
+        : `<button onclick="csOpenVmConsole(${csJsArg(rawKey)})" class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-800 text-slate-100" title="Open a noVNC console to this VM">🖥 Console</button>`;
     const menuBtn = busy
         ? `<button disabled class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-500 cursor-not-allowed">⋯ Actions ▾</button>`
-        : `<button onclick="event.stopPropagation(); csToggleVmActionMenu(event, '${key}')" class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-700 hover:bg-slate-200">⋯ Actions ▾</button>`;
+        : `<button onclick="event.stopPropagation(); csToggleVmActionMenu(event, ${csJsArg(rawKey)})" class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-700 hover:bg-slate-200">⋯ Actions ▾</button>`;
     // Tenant-admin/admin: back a TEMPLATE VM up to the hub Template Repo. This is
     // the in-module equivalent of the Global-Admin "⬆ Back up to Hub" — the only
     // path a tenant admin (no Setup/Hypervisors nav) has to seed a template.
     const backupBtn = (!busy && v.is_template && csCanManageTemplates())
-        ? `<button onclick="csBackupTemplateToHub('${key}')" title="vzdump this template and store a copy in the hub Template Repo (My Templates). The archive is deleted from the chosen storage after streaming." class="px-2 py-0.5 rounded-full text-xs font-bold bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-300">⬆ Back up to Hub</button>`
+        ? `<button onclick="csBackupTemplateToHub(${csJsArg(rawKey)})" title="vzdump this template and store a copy in the hub Template Repo (My Templates). The archive is deleted from the chosen storage after streaming." class="px-2 py-0.5 rounded-full text-xs font-bold bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-300">⬆ Back up to Hub</button>`
         : '';
     const selCell = isPlaceholder
         ? `<span class="inline-block w-3.5"></span> ${vid}`
@@ -11072,7 +11083,7 @@ async function csRenderVmServerUsb() {
         return `<tr>
       <td class="px-3 py-2 text-sm">${csEscape(g.name || '—')}</td>
       <td class="px-3 py-2 font-mono text-xs">${csEscape(g.vid)}:${csEscape(g.pid)}</td>
-      <td class="px-3 py-2"><select onchange="csUsbVidpid('${csEscape(g.vid)}','${csEscape(g.pid)}','certify', this.value)" class="text-xs border border-slate-200 rounded px-1 py-0.5 bg-white">${typeOpts(g.type)}</select></td>
+      <td class="px-3 py-2"><select onchange="csUsbVidpid(${csJsArg(g.vid)},${csJsArg(g.pid)},'certify', this.value)" class="text-xs border border-slate-200 rounded px-1 py-0.5 bg-white">${typeOpts(g.type)}</select></td>
       <td class="px-3 py-2">${scopeBadge(g.scope)}</td>
       <td class="px-3 py-2 text-center text-sm font-bold text-slate-700">${g.items.length}</td>
       <td class="px-3 py-2 text-slate-500">${csEscape(vms.join(', ') || '—')}</td>
@@ -11085,8 +11096,8 @@ async function csRenderVmServerUsb() {
       <td class="px-3 py-2 text-center text-sm font-bold text-slate-700">${g.items.length}</td>
       <td class="px-3 py-2"><div class="flex gap-1 items-center">
         <select class="cs-usb-row-type text-xs border border-slate-200 rounded px-1 py-0.5 bg-white"><option value="">—</option><option value="wireless">wireless</option><option value="wired">wired</option></select>
-        <button onclick="csUsbCertifyRow(this, '${csEscape(g.vid)}','${csEscape(g.pid)}')" class="bg-green-100 text-green-700 px-2 py-0.5 rounded-full text-xs font-bold">Certify</button>
-        <button onclick="csUsbVidpid('${csEscape(g.vid)}','${csEscape(g.pid)}','ignore')" class="bg-slate-200 text-slate-600 px-2 py-0.5 rounded-full text-xs font-bold">Ignore</button>
+        <button onclick="csUsbCertifyRow(this, ${csJsArg(g.vid)},${csJsArg(g.pid)})" class="bg-green-100 text-green-700 px-2 py-0.5 rounded-full text-xs font-bold">Certify</button>
+        <button onclick="csUsbVidpid(${csJsArg(g.vid)},${csJsArg(g.pid)},'ignore')" class="bg-slate-200 text-slate-600 px-2 py-0.5 rounded-full text-xs font-bold">Ignore</button>
       </div></td>
     </tr>`; }).join('');
     // Ignored (this tenant) — un-ignore restores the adapter to service. Uses the
@@ -11099,7 +11110,7 @@ async function csRenderVmServerUsb() {
         return `<tr>
       <td class="px-3 py-2 text-sm">${csEscape(nm || '—')}</td>
       <td class="px-3 py-2 font-mono text-xs">${csEscape(vid)}:${csEscape(pid)}</td>
-      <td class="px-3 py-2"><button onclick="csUsbVidpid('${csEscape(vid)}','${csEscape(pid)}','remove')" class="bg-slate-200 text-slate-600 hover:bg-green-100 hover:text-green-700 px-2 py-0.5 rounded-full text-xs font-bold">Un-ignore</button></td>
+      <td class="px-3 py-2"><button onclick="csUsbVidpid(${csJsArg(vid)},${csJsArg(pid)},'remove')" class="bg-slate-200 text-slate-600 hover:bg-green-100 hover:text-green-700 px-2 py-0.5 rounded-full text-xs font-bold">Un-ignore</button></td>
     </tr>`;
     }).join('');
     // Diagnostic: when no dongles are present, show where the cs spoke put
@@ -11118,11 +11129,12 @@ async function csRenderVmServerUsb() {
     // Two release actions (the USB page is the dongle-management surface). Both
     // ALSO force-unbind driver-bound dongles from the host driver (no reboot); they
     // differ only in which state store they clear, so the operator can keep one.
-    const _usbSid = csEscape(String((h && h.spoke_id) || ''));
-    const _usbHost = csEscape(String((h && (h.hostname || h.spoke_hostname || h.spoke_id)) || ''));
+    // Raw values: csJsArg escapes them for the handler attribute.
+    const _usbSid = String((h && h.spoke_id) || '');
+    const _usbHost = String((h && (h.hostname || h.spoke_hostname || h.spoke_id)) || '');
     const _btnCls = 'text-xs font-bold px-3 py-1.5 rounded-full border border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100 whitespace-nowrap';
-    const _clearQtBtn = `<button onclick="csClearUsbQuarantine('${_usbSid}','${_usbHost}')" title="Clear the dmesg quarantine list (incl. the 5-strike permanent flag) + force-release driver-bound dongles on this host. Leaves the exclusion list intact." class="${_btnCls}">Clear Quarantine</button>`;
-    const _clearExclBtn = `<button onclick="csClearUsbExclusions('${_usbSid}','${_usbHost}')" title="Clear the destroy-fail bus exclusions (repeated spin-up/down trips these) + force-release driver-bound dongles on this host. Leaves the quarantine list intact." class="${_btnCls}">Clear Exclusion List</button>`;
+    const _clearQtBtn = `<button onclick="csClearUsbQuarantine(${csJsArg(_usbSid)},${csJsArg(_usbHost)})" title="Clear the dmesg quarantine list (incl. the 5-strike permanent flag) + force-release driver-bound dongles on this host. Leaves the exclusion list intact." class="${_btnCls}">Clear Quarantine</button>`;
+    const _clearExclBtn = `<button onclick="csClearUsbExclusions(${csJsArg(_usbSid)},${csJsArg(_usbHost)})" title="Clear the destroy-fail bus exclusions (repeated spin-up/down trips these) + force-release driver-bound dongles on this host. Leaves the quarantine list intact." class="${_btnCls}">Clear Exclusion List</button>`;
     csSet(`<div>${csVmHostBanner({ single: true })}
       ${dbgBox}
       <div class="flex items-center justify-between gap-3 mb-4">
@@ -11907,7 +11919,7 @@ function csFmtKnownObj(k, v) {
               <div class="text-slate-600">${esc(o.reason || (qt ? 'quarantined' : 'excluded'))}</div>
               <div class="text-xs text-slate-500">${back} · ${flags}</div>
               <div class="text-xs text-slate-500">since ${since}</div>
-              ${o.bus_path ? `<button onclick="csReplaceDongle('${esc(o.bus_path)}')"
+              ${o.bus_path ? `<button onclick="csReplaceDongle(${csJsArg(o.bus_path)})"
                 class="mt-1 px-2 py-0.5 rounded-full border border-slate-300 bg-white hover:bg-slate-50 text-xs font-bold text-slate-600"
                 title="Watch this port live while you pull the dongle — confirms you removed the RIGHT one without touching the CLI.">⟳ Replace Dongle</button>` : ''}
             </div>`;
@@ -12261,7 +12273,7 @@ async function csRenderVmServerDetails() {
           title="Download EVERYTHING the hub holds for this host as JSON — the complete raw telemetry record, including USB dongle state, PCI slots/ports, VM list and agent internals that are deliberately NOT rendered on screen. Built from the source record, so anything removed from this page is still in the download.">
           ⤓ Show Tech
         </button>
-        <button onclick="csDeleteHost('${csEscape(String(_delId).replace(/'/g, "\\'"))}')"
+        <button onclick="csDeleteHost(${csJsArg(String(_delId))})"
           class="bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded-full text-xs font-bold"
           title="Remove this host from the VM Server view and clear its cached/stored data. Use for a host that has been intentionally shut down. If the host comes back online it will re-appear.">
           Delete host + clear cache
@@ -13290,22 +13302,22 @@ async function csRenderSpokeManagement() {
     window._csSpokeRowHtml = function (s) {
         const isPending = !s.approved;
         const assignBtn = admin
-            ? `<button onclick="openSpokeAssignModal('${csEscape(s.spoke_id)}','${csEscape(s.tenant_id || '')}')" class="text-xs text-primary-text font-bold hover:underline whitespace-nowrap">${!s.tenant_id ? 'Assign' : 'Rebind'}</button>`
+            ? `<button onclick="openSpokeAssignModal(${csJsArg(s.spoke_id)},${csJsArg(s.tenant_id || '')})" class="text-xs text-primary-text font-bold hover:underline whitespace-nowrap">${!s.tenant_id ? 'Assign' : 'Rebind'}</button>`
             : '';
         const approveBtn = admin
-            ? `<button onclick="csSpokeApprove('${csEscape(s.spoke_id)}',${isPending ? 'true' : 'false'})" class="text-xs ${isPending ? 'text-green-600 font-bold' : 'text-amber-600'} hover:underline whitespace-nowrap">${isPending ? 'Approve' : 'Revoke'}</button>`
+            ? `<button onclick="csSpokeApprove(${csJsArg(s.spoke_id)},${isPending ? 'true' : 'false'})" class="text-xs ${isPending ? 'text-green-600 font-bold' : 'text-amber-600'} hover:underline whitespace-nowrap">${isPending ? 'Approve' : 'Revoke'}</button>`
             : '';
         const labelBtn = admin
-            ? `<button onclick="csSpokeEditLabel('${csEscape(s.spoke_id)}','${csEscape((s.display_name || s.spoke_id || '').replace(/'/g, "\\'"))}')" class="text-xs text-slate-500 hover:underline whitespace-nowrap">Label</button>`
+            ? `<button onclick="csSpokeEditLabel(${csJsArg(s.spoke_id)},${csJsArg((s.display_name || s.spoke_id || ''))})" class="text-xs text-slate-500 hover:underline whitespace-nowrap">Label</button>`
             : '';
         const cfgBtn = admin
-            ? `<button onclick="csSpokePatchConfig('${csEscape(s.spoke_id)}')" class="text-xs text-slate-500 hover:underline whitespace-nowrap">Config</button>`
+            ? `<button onclick="csSpokePatchConfig(${csJsArg(s.spoke_id)})" class="text-xs text-slate-500 hover:underline whitespace-nowrap">Config</button>`
             : '';
         const diagBtn = admin
-            ? `<button onclick="csSpokeDiag('${csEscape(s.spoke_id)}')" class="text-xs text-slate-500 hover:underline whitespace-nowrap">Diag</button>`
+            ? `<button onclick="csSpokeDiag(${csJsArg(s.spoke_id)})" class="text-xs text-slate-500 hover:underline whitespace-nowrap">Diag</button>`
             : '';
         const delBtn = admin
-            ? `<button onclick="csSpokeDelete('${csEscape(s.spoke_id)}')" class="text-xs text-red-500 hover:underline whitespace-nowrap" title="Remove this spoke and its registration from the hub">Delete</button>`
+            ? `<button onclick="csSpokeDelete(${csJsArg(s.spoke_id)})" class="text-xs text-red-500 hover:underline whitespace-nowrap" title="Remove this spoke and its registration from the hub">Delete</button>`
             : '';
         const actions = admin
             ? `<div class="flex flex-wrap items-center gap-4">${assignBtn}${approveBtn}${labelBtn}${cfgBtn}${diagBtn}${delBtn}</div>`
@@ -13429,7 +13441,7 @@ async function csSpokeMgmtPskCard() {
     const tenant = csTenantRaw();
     const rows = psks.map(p => `<tr>
       <td class="px-3 py-2 font-mono text-xs">${csEscape(p)}</td>
-      <td class="px-3 py-2 text-right"><button onclick="csSpokeMgmtRevokePsk('${csEscape(p)}')" class="text-xs text-red-500 hover:underline" title="Revoke this pre-shared key — agents using it will be disconnected">Revoke</button></td>
+      <td class="px-3 py-2 text-right"><button onclick="csSpokeMgmtRevokePsk(${csJsArg(p)})" class="text-xs text-red-500 hover:underline" title="Revoke this pre-shared key — agents using it will be disconnected">Revoke</button></td>
     </tr>`).join('');
     const deploy = psks.length
         ? `<div class="mt-3 text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-md p-3">
