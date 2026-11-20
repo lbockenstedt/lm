@@ -306,7 +306,8 @@ const CRUD_ROUTES = {
     restoreAgent:          { m: 'POST', p: '/api/pxmx/agents/{agentId}/restore',             api: 'restore_pxmx_agent' },
 
     // ── Tenants / users / sessions ──
-    setTenant:              { m: 'POST', p: '/setup/tenant',                                 api: 'update_tenant' },
+    setTenant:              { m: 'POST', p: '/setup/tenant',                                 api: 'update_tenant',
+                              m2: 'POST', p2: '/setup/tenant/switch-ticket',                 api2: 'tenant_switch_ticket' },
     editTenant:             { m: 'GET',  p: '/setup/tenants/{tenantId}',                     api: 'get_tenant_details' }, // (modal) form-save via saveTenantConfig
     saveUser:               { m: 'POST', p: '/setup/users',                                  api: 'update_user' },
     editUser:               { m: 'GET',  p: '/setup/users',                                  api: 'get_users',
@@ -1374,16 +1375,39 @@ function installClickFeedback() {
     }, true);
 }
 
+// True while a tenant switch has the page locked (_lmPageInert): from the
+// moment the switch starts until the page is redrawn for the new tenant or,
+// when the hub cannot confirm any tenant, until a later switch lands.
+function _lmPageLocked() {
+    return !!document.getElementById('page-content')?.hasAttribute('inert');
+}
+
+// What showConfirmToast and showPromptToast do while the page is locked:
+// answer `cancelValue` (what their Cancel answers) without asking. Only an
+// action the old tenant's page started before the switch (one that was still
+// waiting on the hub) or one started from the header in the middle of the
+// switch can ask then, and its Confirm would act while the header already
+// names another tenant. The toast says so, so the action is not a silent
+// no-op; the user can start it again once the page is redrawn.
+function _lmCancelWhileLocked(cancelValue) {
+    showToast('Cancelled: the page is switching tenant. Try again once it is no longer dimmed.', 'info');
+    return Promise.resolve(cancelValue);
+}
+
 // Interactive confirm toast — a non-blocking replacement for window.confirm()
 // on destructive actions (e.g. delete spoke/agent). Renders a toast carrying
 // Cancel + Confirm buttons and returns a Promise<boolean>: true on Confirm,
 // false on Cancel, dismiss, or timeout (a confirm prompt must default to the
 // safe no-op choice if ignored). Stacks under existing toasts like showToast.
+// The toast sits on <body>, outside the page a tenant switch locks, so a
+// switch answers Cancel for it (the `lm-prompt` class, _lmCloseOldPage), and
+// one asked while the page is locked answers Cancel at once.
 function showConfirmToast(message, opts = {}) {
     const { confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger = true } = opts;
+    if (_lmPageLocked()) return _lmCancelWhileLocked(false);
     return new Promise((resolve) => {
         const toast = document.createElement('div');
-        toast.className = 'lm-toast';
+        toast.className = 'lm-toast lm-prompt';
         toast.style.cssText = `
             display:flex;flex-direction:column;gap:.6rem;
             background:#263040;color:#fff;
@@ -1407,6 +1431,9 @@ function showConfirmToast(message, opts = {}) {
             toast.addEventListener('transitionend', () => toast.remove());
             resolve(val);
         };
+        // A tenant switch started: answer Cancel and take the toast away at
+        // once, not after the fade, so its Confirm cannot be pressed.
+        toast.addEventListener('lm-cancel', () => { close(false); toast.remove(); });
         const cancelBtn = document.createElement('button');
         cancelBtn.textContent = cancelLabel;
         cancelBtn.style.cssText = 'background:rgba(255,255,255,.15);border:none;color:#fff;' +
@@ -1430,12 +1457,13 @@ function showConfirmToast(message, opts = {}) {
 
 // Like showConfirmToast but with a text/password input. Resolves the entered
 // string on confirm, or null on cancel/timeout. Used for the NetBox admin
-// password reset knob.
+// password reset knob. A tenant switch cancels it as it does a confirm.
 function showPromptToast(message, opts = {}) {
     const { confirmLabel = 'OK', cancelLabel = 'Cancel', type = 'text', placeholder = '' } = opts;
+    if (_lmPageLocked()) return _lmCancelWhileLocked(null);
     return new Promise((resolve) => {
         const toast = document.createElement('div');
-        toast.className = 'lm-toast';
+        toast.className = 'lm-toast lm-prompt';
         toast.style.cssText = `
             display:flex;flex-direction:column;gap:.6rem;
             background:#263040;color:#fff;
@@ -1466,6 +1494,8 @@ function showPromptToast(message, opts = {}) {
             toast.addEventListener('transitionend', () => toast.remove());
             resolve(val);
         };
+        // A tenant switch started: answer Cancel and take the toast away now.
+        toast.addEventListener('lm-cancel', () => { close(null); toast.remove(); });
         const cancelBtn = document.createElement('button');
         cancelBtn.textContent = cancelLabel;
         cancelBtn.style.cssText = 'background:rgba(255,255,255,.15);border:none;color:#fff;' +
@@ -2150,23 +2180,35 @@ function itemInTenantPrefixes(item, ipFields) {
     return !hasConcreteIP;  // no concrete IPs found → show (can't filter)
 }
 
+// The number of the latest loadTenantPrefixes call.
+let _tenantPrefixesSeq = 0;
+
 async function loadTenantPrefixes() {
+    // Only the latest call sets the prefixes. After quick tenant switches an
+    // older reply can land last; it must not leave the previous tenant's
+    // prefixes filtering the tenant now picked.
+    const seq = ++_tenantPrefixesSeq;
     if (isAdmin()) { _tenantPrefixes = []; return; }
+    let prefixes = [];
     try {
         // ?tenant=currentTenant scopes prefixes to the selected tenant so the
         // client-side filter (NAT/DHCP/DNS/Interfaces) tracks the switcher for
         // multi-tenant users; without it, switching tenant would leave the
         // client filtering on the stale session-tenant prefixes. Admins early-
         // return above (they don't client-filter; the server filters by ?tenant=).
+        // Bounded, as setTenant waits for it with the page locked; a reply
+        // that does not come in time filters nothing, as a failed one does.
         const qs = currentTenant ? `?tenant=${encodeURIComponent(currentTenant)}` : '';
-        const r = await fetch(`/auth/prefixes${qs}`, { credentials: 'same-origin', _keepOnNavigate: true });
-        if (!r.ok) { _tenantPrefixes = []; return; }
-        const d = await r.json();
-        _tenantPrefixes = d.prefixes || [];
-        if (_tenantPrefixes.length) {
-            console.log(`[Tenant] Prefix filter active: ${_tenantPrefixes.join(', ')}`);
-        }
-    } catch { _tenantPrefixes = []; }
+        const r = await _lmFetchJsonWithin(`/auth/prefixes${qs}`, { credentials: 'same-origin' }, _lmTenantSwitchMs);
+        if (r.ok) prefixes = r.data?.prefixes || [];
+        else console.error(`Could not load the tenant prefixes: HTTP ${r.status}`);
+    } catch (err) {
+        // Prefixes unknown: filter nothing, as after a failed reply.
+        console.error('Could not load the tenant prefixes', err);
+    }
+    if (seq !== _tenantPrefixesSeq) return;
+    _tenantPrefixes = prefixes;
+    if (prefixes.length) console.log(`[Tenant] Prefix filter active: ${prefixes.join(', ')}`);
 }
 
 // NOTE: firewall-rule subnet filtering is enforced server-side (the hub's
@@ -2383,30 +2425,311 @@ async function loadFirewalls() {
     }
 }
 
-async function setTenant(tenant) {
-    currentTenant = tenant;
-    localStorage.setItem('lm_tenant', tenant);
+// The number of the latest tenant switch. A switch that a newer one overtook
+// while it waited on the hub stops there, so only the latest switch unlocks
+// and redraws the page.
+let _setTenantSeq = 0;
 
+// A Global Admin's switches reach the hub one at a time, in the order they
+// were picked: each POST /setup/tenant waits for the answer to the one before.
+// The hub records the active tenant in the order the POSTs arrive, so two in
+// flight at once could land out of order and leave the hub on the older pick
+// while the page shows the newer one. A POST that got no answer may still be
+// on its way; its switch ticket (_lmSwitchTicket) keeps it from moving the
+// hub once a newer ticket has been issued.
+let _lmTenantPosts = Promise.resolve();
+
+// How long a switch waits for each answer from the hub, in milliseconds. A
+// `let` so the browser tests can shorten it.
+let _lmTenantSwitchMs = 15000;
+
+// fetch() `url` and read its JSON body, giving up after `ms` milliseconds.
+// Resolves to {ok, status, data} (data is {} for a body that is not JSON);
+// rejects on a network error or when the time runs out. _keepOnNavigate:
+// lmFetch drops a page read that started before a navigation and its promise
+// then never settles, which would leave a tenant switch waiting for good.
+async function _lmFetchJsonWithin(url, init, ms) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), ms);
     try {
-        const response = await setupFetch('/setup/tenant', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ tenant_id: tenant, config: { active: true } })
-        });
-        if (response.ok) console.log(`Switched to tenant: ${tenant}`);
+        const r = await fetch(url, { ...init, signal: ctrl.signal, _keepOnNavigate: true });
+        const data = await r.json().catch(() => ({}));
+        if (!ctrl.signal.aborted) return { ok: r.ok, status: r.status, data };
     } catch (err) {
-        console.error('Failed to set tenant', err);
+        if (!ctrl.signal.aborted) throw err;
+    } finally {
+        clearTimeout(timer);
     }
-    // Recording the hub-wide active tenant is Global-Admin-only (403 for every
-    // other user), but the page must follow the picker either way -- otherwise
-    // the previous tenant's data stays on screen under the new tenant's name.
+    throw new Error(`no answer from the hub within ${Math.round(ms / 1000)} seconds`);
+}
+
+// True when `a` and `b` are the same tenant id, spelt exactly alike. Both
+// sides hold the hub's stored ids: the picker lists /setup/tenants as
+// stored, and the hub makes active the stored id a switch names (POST
+// /setup/tenant looks it up by its exact spelling first, tenant_key) and
+// names that id with each switch ticket (POST /setup/tenant/switch-ticket).
+// Ids that differ only by case or spaces can be two tenants: legacy twins
+// such as "ACME" and "acme", which the hub tells apart by exact spelling
+// (access._AMBIGUOUS_TENANT_IDS), so a case fold would take a refused switch
+// to "ACME" for landed while the hub stays on "acme".
+function _lmSameTenant(a, b) {
+    return typeof a === 'string' && a !== '' && a === b;
+}
+
+// The tenant picker's entry whose id is exactly `tenant`, or undefined when
+// the picker does not list it (such as a tenant created since the page
+// loaded). Never another spelling of it: that can be a legacy twin, whose
+// name would label the page as the other tenant.
+function _lmPickerEntry(tenant) {
+    return (window._lmTenantPicker || []).find(t => _lmSameTenant(t.id, tenant));
+}
+
+// The name the header's tenant picker shows for `tenant`, else the id itself.
+function _lmTenantLabel(tenant) {
+    const pick = _lmPickerEntry(tenant);
+    return (pick && pick.name) || tenant;
+}
+
+// Get a tenant-switch ticket from the hub (POST /setup/tenant/switch-ticket).
+// The hub applies a switch only under the latest ticket it issued, so a new
+// ticket voids every earlier one: a switch POST sent under an older ticket
+// can no longer move the hub, even if it is still on its way. Resolves to
+// {ticket, onHub}: onHub is the tenant the hub was on when it issued the
+// ticket, as the hub spells it, and no switch sent before can change it any
+// more. Rejects when the hub refuses, does not answer in time, or answers
+// without both.
+async function _lmSwitchTicket() {
+    const r = await _lmFetchJsonWithin('/setup/tenant/switch-ticket', { method: 'POST' }, _lmTenantSwitchMs);
+    const ticket = r.data?.ticket;
+    const onHub = r.data?.active_tenant;
+    if (r.ok && typeof ticket === 'string' && ticket && typeof onHub === 'string' && onHub) {
+        return { ticket, onHub };
+    }
+    throw new Error((typeof r.data?.detail === 'string' && r.data.detail) || `HTTP ${r.status}`);
+}
+
+// Make `tenant` the hub-wide active tenant (POST /setup/tenant) once every
+// switch picked before it has had its answer. `seq` is the switch's number
+// (_setTenantSeq). The POST carries a ticket the hub issued just before it
+// (_lmSwitchTicket); with no ticket, no POST is sent. Resolves to {} when the
+// hub took it, {skipped: true} when a newer pick came first (its own POST
+// decides the hub's tenant, so this one is not sent), or {error, onHub} when
+// the hub refused it, did not answer in time, or gave no ticket. onHub is the
+// tenant the hub names with a fresh ticket asked for after that, or null when
+// that call fails (or a newer pick waits). Nothing keeps an earlier answer: a
+// POST that got no answer may have moved the hub before the fresh ticket, and
+// another admin may have moved it since.
+// Never rejects, so one failed switch cannot stall the queue.
+function _lmQueueTenantPost(tenant, seq) {
+    const turn = _lmTenantPosts.then(async () => {
+        if (seq !== _setTenantSeq) return { skipped: true };
+        let error;
+        try {
+            const { ticket } = await _lmSwitchTicket();
+            const r = await _lmFetchJsonWithin('/setup/tenant', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ tenant_id: tenant, config: { active: true }, switch_ticket: ticket }),
+            }, _lmTenantSwitchMs);
+            if (r.ok) {
+                console.log(`Switched to tenant: ${tenant}`);
+                return {};
+            }
+            error = (typeof r.data?.detail === 'string' && r.data.detail) || `HTTP ${r.status}`;
+        } catch (err) {
+            error = (err && err.message) || String(err);
+        }
+        console.error(`The hub did not switch to tenant ${tenant}: ${error}`);
+        // A newer pick waits behind this turn. Its own ticket voids this one's
+        // and its POST decides the hub's tenant, so asking here would only
+        // hold it up.
+        if (seq !== _setTenantSeq) return { error, onHub: null };
+        // The fresh ticket voids the one this POST carried, so the POST cannot
+        // move the hub any more even if it is still on its way, and the tenant
+        // the hub names with it is final. Asked inside this turn, so no later
+        // switch of this page runs in between. Taken as the hub spells it:
+        // that is the id the hub scopes by, and folding it onto a picker entry
+        // could pick a legacy twin.
+        try {
+            return { error, onHub: (await _lmSwitchTicket()).onHub };
+        } catch (err) {
+            console.error("Could not read the hub's active tenant", err);
+            return { error, onHub: null };
+        }
+    });
+    _lmTenantPosts = turn;
+    return turn;
+}
+
+// Elements on <body>, outside the page, that a tenant switch keeps open:
+// the console docks and their footer pills (live sessions on the device they
+// were opened for), the USB dongle watch (one port), Help (documentation),
+// the bug report (filed against the hub) and the impersonation banner (the
+// session's own state). A switch must not cut them off, but like the page
+// they take no input while it is locked (_lmPageInert). The one part of them
+// that is the header tenant's data is each dock's list of consoles that can
+// be opened, besides the open sessions: setTenant drops the old tenant's list
+// before it unlocks the page. Every other element the old page put on
+// <body>, a dialog or a menu, is closed when a switch starts (_lmCloseOldPage).
+const _LM_KEPT_ON_SWITCH = [
+    'pxmx-vnc-modal', 'pxmx-vnc-dock-pill', 'serial-console-modal', 'serial-console-dock-pill',
+    'cs-dongle-watch', 'lm-help-backdrop', 'lm-help-drawer', 'file-bug-modal', 'impersonation-banner',
+];
+
+// Lock (true) or unlock (false) the page. During a tenant switch the page
+// still shows the old tenant's data until it is redrawn, so it must not take
+// clicks (#2028 item 24). `inert` blocks clicks, focus and typing at once.
+// It goes on <main>, not just #viewport: the view's tabs and its action
+// buttons (#top-nav-actions, such as DNS "+ Add Record", whose form writes)
+// sit above #viewport and are rebuilt on every navigation, so only their
+// parent keeps the lock. The header stays usable, so the user can pick
+// another tenant, and so do the side menu and the footer. What a switch
+// keeps open on <body> (_LM_KEPT_ON_SWITCH) is locked with the page, so
+// nothing outside the header, the side menu and the footer acts while the
+// header names a tenant the page is not drawn for. Before setTenant unlocks
+// the page, it drops the old tenant's consoles from the console docks; open
+// sessions stay.
+function _lmPageInert(on) {
+    const main = document.getElementById('page-content');
+    if (main) main.toggleAttribute('inert', on);
+    _LM_KEPT_ON_SWITCH.forEach(id => document.getElementById(id)?.toggleAttribute('inert', on));
+}
+
+// Close what the old tenant's page left open outside the locked page when a
+// tenant switch starts. A confirm or prompt it asked answers Cancel and goes
+// away (the `lm-prompt` toasts), so its action never runs: a DELETE it would
+// send is not something _lmNavigated drops. Its dialogs and menus on <body>
+// are removed, as their own Close does, so none can save what it was opened
+// on while the header names another tenant; each is built again when next
+// opened. Kept: the page frame (header, side menu and page, cache bar,
+// footer, sign-in screen), the toast regions, error banners (role="alert"),
+// scripts and styles, frames (a bug report's screenshot), and
+// _LM_KEPT_ON_SWITCH.
+function _lmCloseOldPage() {
+    document.querySelectorAll('.lm-prompt').forEach(t => t.dispatchEvent(new Event('lm-cancel')));
+    const keep = new Set(['login-overlay', 'cache-status-bar', 'lm-toast-region', 'lm-loading-toast-region',
+        ..._LM_KEPT_ON_SWITCH]);
+    const main = document.getElementById('page-content');
+    [...document.body.children].forEach(el => {
+        if (keep.has(el.id) || el.getAttribute('role') === 'alert' || (main && el.contains(main))
+                || /^(SCRIPT|STYLE|LINK|TEMPLATE|NOSCRIPT|IFRAME|HEADER|FOOTER)$/.test(el.tagName)) return;
+        el.remove();
+    });
+}
+
+// Show `tenant` in the header as the picked tenant: the chip's label and the
+// bold item in the tenant picker.
+function _lmShowTenantInHeader(tenant) {
+    const labelEl = document.getElementById('user-chip-tenant');
+    if (labelEl) labelEl.textContent = _lmTenantLabel(tenant);
+    document.querySelectorAll('#tenant-picker-menu button[data-tid]').forEach(b => {
+        const on = b.dataset.tid === tenant;
+        b.classList.toggle('font-bold', on);
+        b.classList.toggle('text-primary-text', on);
+    });
+}
+
+// Switch the page to `tenant`. Returns true when the switch landed and is
+// still the latest one once it finishes. Returns false when a newer switch
+// overtook it (the newer one then does the rest), or when the hub refused it
+// (the page then goes back to the tenant the hub names after that refusal,
+// or stays locked when the hub does not say which tenant it is on).
+async function setTenant(tenant) {
+    // The header shows the new tenant straight away, as currentTenant does,
+    // so the latest pick always names the page, whichever switch lands last.
+    // The page is locked (and dimmed) until this switch has redrawn it.
+    const seq = ++_setTenantSeq;
+    let landed = true;
+    // True when nothing confirms any tenant (see below): the page then stays
+    // locked instead of being redrawn for a tenant the hub may not be on.
+    let unconfirmed = false;
+    // A switch moves the page to another tenant's data, so it drops the old
+    // page's reads still in flight, as a navigation does. An action started on
+    // the old page that waits on one, such as editing a rack (it reads the
+    // sites list, then opens its dialog on <body>, outside the locked page,
+    // and Save writes the rack it was opened on), then never goes on under the
+    // new tenant. Writes already sent still finish, as on a navigation. What
+    // the old page already opened on <body> (a confirm, a dialog, a menu) is
+    // closed, since locking the page does not reach it (_lmCloseOldPage).
+    // Before the first view render (the sign-in switch of a freshly loaded
+    // page) there is no old page, and lmFetch never drops boot reads
+    // (_lmNavSeq 0).
+    if (_lmNavSeq !== 0) {
+        _lmNavigated();
+        _lmCloseOldPage();
+    }
+    currentTenant = tenant;
+    _lmShowTenantInHeader(tenant);
+    _lmPageInert(true);
     try {
+        // A Global Admin's switch also moves the hub-wide active tenant, which
+        // scopes their requests that name no tenant, so the page waits for
+        // it. Every other user switches in the page only: the hub refuses
+        // POST /setup/tenant from anyone but a Global Admin, and every write
+        // from a read-only account (api.py access_control_middleware).
+        if (isAdmin() && !currentUser?.permissions?.read_only) {
+            const post = await _lmQueueTenantPost(tenant, seq);
+            // A newer switch started while this one waited; it does the rest.
+            if (seq !== _setTenantSeq) return false;
+            // The hub refused the switch or did not answer in time. Unless it
+            // names the pick itself all the same (the exact id: a legacy twin
+            // is another tenant, see _lmSameTenant), the page goes back to the
+            // tenant the hub named with a fresh ticket after this POST, as the
+            // hub spells it, so the hub never scopes the page's reads by one
+            // tenant while the page shows another.
+            if (post.error && !_lmSameTenant(post.onHub, tenant)) {
+                landed = false;
+                const back = post.onHub;
+                // The hub did not name its tenant with a fresh ticket once this
+                // POST was done, so nothing confirms any tenant. The tenant it
+                // named with this switch's own ticket proves nothing either: the
+                // POST may have moved the hub all the same, and another admin
+                // may have moved it since. Showing any tenant would let the hub
+                // scope the page's reads by another one under its name, so the
+                // page stays locked and the pick is not remembered for the next
+                // visit. The header stays usable: picking a tenant again
+                // retries, and reloading the page starts over. During an update
+                // the page reloads by itself once the hub is back.
+                if (!back) {
+                    unconfirmed = true;
+                    if (currentUser && !window.__lmUpdateInProgress) {
+                        showToast(`Could not switch to ${_lmTenantLabel(tenant)} (${post.error}), and the hub`
+                            + ' did not say which tenant it is on, so the page stays dimmed. Pick a tenant'
+                            + (_statusDownToast ? ' again once the hub is back.' : ' again.'),
+                            _statusDownToast ? 'info' : 'error');
+                    }
+                    return false;
+                }
+                // While the hub is down for an update or restart, its own
+                // "Hub unavailable" notice already says why, as the sign-in
+                // screen does once the session has ended (currentUser null).
+                if (currentUser && !_statusDownToast && !window.__lmUpdateInProgress) {
+                    showToast(`Could not switch to ${_lmTenantLabel(tenant)}`
+                        + (_lmSameTenant(back, tenant) ? '' : `; the page is back on ${_lmTenantLabel(back)}`)
+                        + ` (${post.error})`, 'error');
+                }
+                tenant = back;
+                currentTenant = back;
+                _lmShowTenantInHeader(back);
+            }
+        }
+        // Remembering the tenant for the next visit is best effort: storage
+        // that is full or blocked must not stop the switch.
+        try {
+            localStorage.setItem('lm_tenant', tenant);
+        } catch (err) {
+            console.error('Could not remember the tenant', err);
+        }
         // Reload tenant prefixes for the newly-selected tenant BEFORE the
         // view re-renders, so the client-side subnet filter (NAT/DHCP/DNS/
         // Interfaces) and the server-side ?tenant= filter on the firewall
         // fetch agree on the same tenant. Without this, a multi-tenant user
         // switching tenant would filter on stale session-tenant prefixes.
         await loadTenantPrefixes();
+        // A newer switch started while the prefixes loaded; it does the rest.
+        // A load from here would become the latest one, so the newer
+        // switch's own load would be discarded.
+        if (seq !== _setTenantSeq) return false;
         // Managed Devices / My Devices: the re-render below is a tenant
         // switch, not a new visit, so the device picks are kept and a tenant
         // pick moves to the tenant just switched to. The device fetch is not
@@ -2415,30 +2738,67 @@ async function setTenant(tenant) {
         // the old tenant kept listing its devices under the new tenant's name,
         // which read as "My Devices does not refresh" (lm#486).
         if (typeof _mdFollowTenant === 'function') _mdFollowTenant(tenant);
-        // The serial console dock floats over every view and lists the
-        // consoles of the tenant it was opened under; re-list for this one.
-        if (document.getElementById('serial-console-modal') && typeof serialRefreshAvailablePorts === 'function') {
-            serialRefreshAvailablePorts();
-        }
-        // Preserve the active sub-view across a tenant switch. setView()
-        // re-renders the whole view and resets currentSubView to the first
-        // sub-menu (Overview/Devices), so a user on Prefixes who switches
-        // tenant would be bounced back to the default tab. Instead, just
-        // reload the current sub-view's data for the new tenant — the view
-        // layout (nav/header) is unchanged, only the tenant filter moved.
-        // Fall back to setView() only if the recorded sub-view isn't valid
-        // for the current view (e.g. view changed mid-flight).
-        const subs = VIEW_SUBMENUS[currentView] || [];
-        if (subs.includes(currentSubView) && VIEW_LOADERS[currentView]) {
-            setSubView(currentSubView);
-        } else {
-            // No loader for this view: setSubView would no-op and leave the
-            // OLD tenant's data on screen, so do a full re-render instead.
-            setView(currentView);
-        }
     } catch (err) {
         console.error('Failed to refresh after tenant switch', err);
+    } finally {
+        // The latest switch unlocks and redraws the page even when a step
+        // above failed. Otherwise the old tenant's page stayed on screen, or
+        // a page that was loading stayed on "Loading…" (#2028 item 30). The
+        // one exception is a switch that no tenant is confirmed for (above):
+        // the page stays locked until a switch lands.
+        if (seq === _setTenantSeq && !unconfirmed) {
+            // The console docks float over every view. Besides their open
+            // sessions, which stay, each lists consoles that can be opened,
+            // and those are still the old tenant's. Each refresh below drops
+            // that list at once, before its first await, so it is gone before
+            // the unlock just below. It is here, not in the try, so a step
+            // above that failed cannot skip it, and it cannot stop the unlock:
+            // both refreshes are async, so an error ends only their promise.
+            // The new tenant's consoles are listed when their read returns,
+            // and the list stays empty if it fails. The VNC dock lists VMs
+            // only while a search is typed (there are too many to list by
+            // default), so it is read again only then; with no search, the
+            // next keystroke drops and reads it.
+            if (document.getElementById('serial-console-modal') && typeof serialRefreshAvailablePorts === 'function') {
+                serialRefreshAvailablePorts();
+            }
+            if (document.getElementById('pxmx-vnc-modal') && window._pxmxConsoleFilter
+                && typeof pxmxRefreshConsoleDir === 'function') {
+                pxmxRefreshConsoleDir(false);
+            }
+            // The VM table's cache is the old tenant's too, and a unique_id
+            // names no agent, so a console or VM action looked up in it could
+            // reach the old tenant's VM. The node list (the node table and the
+            // create-VM node picker) is the old tenant's as well. Drop both:
+            // the Hypervisors page reads them again when the redraw below
+            // runs its loader, and every other reader takes a missing cache
+            // as empty.
+            window._pxmxVms = window._pxmxNodes = null;
+            _lmPageInert(false);
+            // Preserve the active sub-view across a tenant switch. setView()
+            // resets currentSubView to the first sub-menu (Overview/Devices),
+            // so a user on Prefixes who switches tenant would be bounced back
+            // to the default tab. Instead the view is redrawn as setView does
+            // it, but the current sub-view's loader runs instead of initView.
+            // renderView rebuilds the page from its template first: a loader
+            // keeps what it last drew until its new data arrives, so without
+            // it the old tenant's rows stayed on screen, clickable once the
+            // page unlocked, under the new tenant's name. Fall back to
+            // setView() only if the recorded sub-view isn't valid for the
+            // current view (e.g. view changed mid-flight).
+            const subs = VIEW_SUBMENUS[currentView] || [];
+            if (subs.includes(currentSubView) && VIEW_LOADERS[currentView]) {
+                renderTopNav(currentView);
+                renderView(currentView);
+                setSubView(currentSubView);
+            } else {
+                // No loader for this view: setSubView would no-op and leave the
+                // OLD tenant's data on screen, so do a full re-render instead.
+                setView(currentView);
+            }
+        }
     }
+    return seq === _setTenantSeq && landed;
 }
 
 
@@ -2999,26 +3359,10 @@ async function viewAsTenant(tenantId) {
         console.warn(`Tenant switch to '${tenantId}' blocked — not in user's allowed list`);
         return;
     }
-    await setTenant(tenantId);
-    await loadTenantConfig();
-    // Refresh the header chip label to the newly active tenant.
-    const labelEl = document.getElementById('user-chip-tenant');
-    if (labelEl) {
-        const pick = (window._lmTenantPicker || []).find(t => t.id === tenantId);
-        labelEl.textContent = (pick && pick.name) || tenantId;
-    }
-    // Re-mark the active item in the picker (bold/green) and close the menu.
-    document.querySelectorAll('#tenant-picker-menu button[data-tid]').forEach(b => {
-        const on = b.dataset.tid === tenantId;
-        b.classList.toggle('font-bold', on);
-        b.classList.toggle('text-primary-text', on);
-    });
     closeTenantPicker();
-    // Reload any open spoke data views so they reflect the tenant filter
-    const activeMain = document.querySelector('[data-active-main]')?.dataset?.activeMain;
-    if (activeMain) {
-        showSection(activeMain);
-    }
+    // setTenant marks the header. Only the latest pick refreshes the Setup
+    // tenant list; a pick that a newer one overtook has nothing left to do.
+    if (await setTenant(tenantId)) await loadTenantConfig();
 }
 
 // ── Tenant picker dropdown (click-toggled, not hover) ───────────────────────
@@ -4524,7 +4868,7 @@ const VIEW_LOADERS = {
         loadInfraStatus();
     },
     opnsense: () => loadOpnsenseManagement(),
-    cppm:     (subMenu) => loadCPPMData(subMenu),
+    cppm:     (subMenu) => loadCPPMNACStatus(subMenu),
     pxmx:     (subMenu) => loadPxmxData(subMenu),
     ldap:     (subMenu) => loadLDAPData(subMenu),
     netbox:   (subMenu) => loadNetboxData(subMenu),

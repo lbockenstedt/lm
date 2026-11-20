@@ -7,7 +7,7 @@ import os
 
 import pytest
 
-from test_webui_browser_smoke import hub_url_and_session  # noqa: F401 (fixture)
+from test_webui_browser_smoke import APP_READY, hub_url_and_session  # noqa: F401 (fixture)
 
 if os.environ.get("CI"):
     from playwright import sync_api
@@ -52,7 +52,7 @@ def test_directory_ou_tree_filters_and_moves(hub_url_and_session):  # noqa: F811
             page.route("**/api/ldap/ous?*", json_route(OUS))
             page.route("**/api/ldap/users/move", move)
             page.goto(base + "/")
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
             page.evaluate("setView('ldap')")
 
             # The tree: All users (3), Top level (1), Eng (1), Lab (1).
@@ -109,7 +109,7 @@ def test_late_reply_from_previous_tenant_is_dropped(hub_url_and_session):  # noq
             page.route("**/api/ldap/ous?*", json_route({"ous": [], "root_user_count": 1}))
             page.route("**/api/ldap/users?*", users)
             page.goto(base + "/")
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
             page.evaluate("setView('ldap')")
             page.wait_for_function("document.getElementById('ldap-tenant-select')?.value === 'a'")
             while not held:
@@ -167,7 +167,7 @@ def test_late_ou_reply_from_previous_tenant_is_dropped(hub_url_and_session):  # 
             page.route("**/api/ldap/users?*", users)
             page.route("**/api/ldap/ous?*", ous)
             page.goto(base + "/")
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
             page.evaluate("setView('ldap')")
             while not held_ous:
                 page.wait_for_timeout(50)
@@ -211,7 +211,7 @@ def test_returning_to_the_page_resets_the_picked_ou(hub_url_and_session):  # noq
             page.route("**/api/ldap/users?*", json_route(USERS))
             page.route("**/api/ldap/ous?*", json_route(OUS))
             page.goto(base + "/")
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
             page.evaluate("setView('ldap')")
             panel = page.locator("#ldap-ou-panel")
             panel.locator("button[title='Eng']").click()
@@ -254,7 +254,7 @@ def test_tenant_switch_hides_the_old_tenants_ous(hub_url_and_session):  # noqa: 
             page.route("**/api/ldap/users?*", users)
             page.route("**/api/ldap/ous?*", json_route(OUS))
             page.goto(base + "/")
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
             page.evaluate("setView('ldap')")
             page.locator("#ldap-ou-panel button[title='Eng']").click()
             assert page.evaluate("lmViews.directoryOuPath()") == ["Eng"]
@@ -302,7 +302,7 @@ def test_delete_ou_asks_first_and_only_for_an_empty_leaf(hub_url_and_session):  
             page.route("**/api/ldap/users?*", json_route([]))
             page.route("**/api/ldap/ous*", ous_route)
             page.goto(base + "/")
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
             page.evaluate("setView('ldap')")
             panel = page.locator("#ldap-ou-panel")
             delete = panel.locator("button[data-action='deleteOu']")

@@ -1349,18 +1349,21 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Minimum seconds between replay warnings for one spoke.
         self._REPLAY_WARN_INTERVAL_S = 10.0
         # VNC console sessions (agent-terminates-WSS): session_id →
-        # {queue, expires, ws_token, spoke_id, tenant_id, vmid, node, unique_id}.
+        # {queue, expires, ws_token, spoke_id, agent_id, tenant_id, vmid, node,
+        # unique_id}.
         # The browser WS reads Proxmox→browser frames off ``queue`` (bytes) or
         # control tuples ("ready"/"error"/"disconnect"); VNC_FRAME_DOWN sends
         # the other way via send_to_spoke_command (fire-and-forget). 60s TTL.
         self.vnc_sessions: Dict[str, Dict[str, Any]] = {}
-        # VNC write-lock: unique_id → the session_id currently allowed to send
-        # VNC_FRAME_DOWN (keyboard/mouse). Every viewer still gets their own
-        # vnc_sessions entry/queue (QEMU multiplexes the screen to everyone);
-        # this is a purely hub-side gate layered on top so only one viewer's
-        # input reaches the VM at a time, with an explicit force-takeover to
-        # hand it to someone else. First connecting viewer becomes the writer.
-        self._vnc_writers: Dict[str, str] = {}
+        # VNC write-lock: (agent_id, unique_id) → the session_id currently
+        # allowed to send VNC_FRAME_DOWN (keyboard/mouse). Keyed by the agent
+        # too because a unique_id names no agent (_vnc_lock_key). Every viewer
+        # still gets their own vnc_sessions entry/queue (QEMU multiplexes the
+        # screen to everyone); this is a purely hub-side gate layered on top so
+        # only one viewer's input reaches the VM at a time, with an explicit
+        # force-takeover to hand it to someone else. First connecting viewer
+        # becomes the writer.
+        self._vnc_writers: Dict[Tuple[str, str], str] = {}
         # Host-shell (xterm terminal) sessions: session_id → {queue, expires,
         # connected, ws_token, spoke_id, agent_id, tenant_id}. Fed by SHELL_OUT
         # via _handle_agent_relay_up; browser keystrokes go down as SHELL_IN.

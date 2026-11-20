@@ -11,7 +11,7 @@ import os
 
 import pytest
 
-from test_webui_browser_smoke import hub_url_and_session  # noqa: F401 (fixture)
+from test_webui_browser_smoke import APP_READY, hub_url_and_session  # noqa: F401 (fixture)
 
 if os.environ.get("CI"):
     from playwright import sync_api
@@ -67,7 +67,7 @@ def test_maintenance_switch_and_reboot(hub_url_and_session):  # noqa: F811
             page.route("**/api/pxmx/server/maintenance*", maint)
             page.route("**/api/pxmx/server/reboot*", reboot)
             page.goto(base + "/")
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
             # Render the Nodes table into a host element from a known node list.
             page.evaluate("""nodes => {
                 const w = document.createElement('div'); w.id = 'pxmx-nodes-wrap';
