@@ -882,14 +882,21 @@ def _attach_endpoints(builder, macs_by_device, fleet_ids, duplicate_of, trunk_th
     hypervisor) means the MAC lives behind that neighbour, so it hangs off it.
     Nodes that already have a trusted link are left alone.
     """
-    # Canonical nodes of the switches whose MAC tables were polled.
+    # Canonical nodes of the switches whose MAC tables were polled. A non-switch
+    # fleet device (an iLO/BMC, a server) answers the MAC-table poll with an
+    # empty table; counting it as a polled switch would drop its own sighting
+    # on the TOR access port, so it stays an endpoint. A switch's empty table
+    # is more likely a poll gap, so switches keep blocking uplink sightings.
     polled = set()
     for d, rows in macs_by_device.items():
         if d in duplicate_of:
             continue
         current = builder.current(fleet_ids.get(d, ""))
-        if current:
-            polled.add(current)
+        if not current:
+            continue
+        if not rows and builder._nodes[current]["kind"] not in ("switch", "gateway"):
+            continue
+        polled.add(current)
     
     # (node, port) -> neighbour from trusted (non-MAC) links, and the nodes they touch.
     trusted = {}
