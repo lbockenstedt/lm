@@ -281,9 +281,16 @@ let _henetPage = null;
 // Delete finishes (certificates.js:3417) runs loadDNSData
 // (dns-dhcp-cluster.js:1020), which leaves currentSubView alone. Hence the root
 // clause.
+// Tenant ids match as the hub's same_tenant()/tenant_slug_matches() match them:
+// trimmed and case-folded, never by raw equality.
+function _henetSameTenant(a, b) {
+    const k = t => String(t == null ? '' : t).trim().toLowerCase();
+    return k(a) === k(b);
+}
+
 function _henetShown(seq, tenant, root) {
     return seq === _henetLoadSeq && currentView === 'dns'
-        && currentSubView === 'External DNS' && currentTenant === tenant
+        && currentSubView === 'External DNS' && _henetSameTenant(currentTenant, tenant)
         && !!document.getElementById('dns-content')?.contains(root);
 }
 

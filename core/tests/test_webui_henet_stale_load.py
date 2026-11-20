@@ -524,6 +524,26 @@ def test_a_dialog_does_not_open_for_a_page_no_longer_on_screen(opener, when, how
     assert _refused(out)
 
 
+_SAME_TENANT_OTHER_CASE = """
+ctx.currentTenant = 'tenant-a';
+await finish(start());
+ctx.currentTenant = ' Tenant-A ';
+const from = parked.length;
+ctx.deleteHenetRecord('a.example.com', 'A');
+await tick();
+out = { toasts, confirms: confirms.length,
+        sent: parked.slice(from).map(p => [p.method, p.url, p.body]) };
+"""
+
+
+def test_an_equivalent_tenant_id_in_another_case_keeps_the_page_live():
+    """Tenant ids compare trimmed and case-folded, as the hub's tenant checks do."""
+    out = _run(_SAME_TENANT_OTHER_CASE)
+    assert out["toasts"] == []
+    assert out["confirms"] == 1
+    assert out["sent"] == [["DELETE", "/api/henet/record", _A_REC]]
+
+
 @pytest.mark.parametrize("how", [None, "leave", "repaint"])
 @pytest.mark.parametrize("name", ["Deconfigure", "Remove row", "Import existing", "Sync all"])
 def test_a_switch_or_move_while_the_confirm_is_open_sends_nothing(name, how):
