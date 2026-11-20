@@ -3706,8 +3706,9 @@ function _useInSimQuota(btn) {
 // get_setup_config, routes/admin_cache.py admin_cache_status, get_appearance). When invoked from the
 // System view (currentView === 'settings'), also renders the Tenant Subnet
 // Filtering toggle card — a system-wide enforcement posture setting that lives
-// here rather than under Setup → Simulations. The same renderer serves Setup →
-// General, where the toggle is intentionally hidden.
+// here rather than under Setup → Simulations — and, for a Global Admin, the
+// Common VRFs card (js/views/common-vrfs.js, GET/PUT /admin/common-vrfs). The
+// same renderer serves Setup → General, where both are intentionally hidden.
 function _renderSetupGeneralTile(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
     const subnetFilterCard = currentView === 'settings' ? `
@@ -3716,6 +3717,8 @@ function _renderSetupGeneralTile(content) {
             <p class="text-xs text-slate-500 mb-3">Filter each module's data by the tenant's NetBox prefixes, enforced server-side (a tenant cannot see another tenant's subnet data even via the API). Disable for modules that are scoped by tenant ID instead of subnet (e.g. Simulations).</p>
             <div id="subnet-filter-toggles" class="grid grid-cols-1 md:grid-cols-2 gap-x-10"><p class="text-xs text-slate-500 italic animate-pulse">Loading…</p></div>
         </div>` : '';
+    const commonVrfsCard = (currentView === 'settings' && isAdmin()) ? `
+        <div id="common-vrfs-card" class="${card}"><p class="text-xs text-slate-500 italic animate-pulse">Loading…</p></div>` : '';
     const certMonCard = (currentView === 'settings' && isAdmin()) ? `
         <div class="${card}">
             <h3 class="text-sm font-bold text-slate-500">Cert Expiry Monitor</h3>
@@ -3737,6 +3740,7 @@ function _renderSetupGeneralTile(content) {
     content.innerHTML = `
         <div class="space-y-4">
         ${subnetFilterCard}
+        ${commonVrfsCard}
         <div class="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
             ${monitoringCard}
             ${certMonCard}
@@ -3830,6 +3834,7 @@ function _renderSetupGeneralTile(content) {
     loadRelayTimeoutsForm();
     loadRepoSyncConfig();
     if (currentView === 'settings') loadSubnetFilterToggles();
+    if (commonVrfsCard) lmViews.commonVrfs?.('common-vrfs-card');
     if (certMonCard) loadCertMonToggle();
     if (monitoringCard) loadMonitoringServerField();
     // Auto-save on change (no per-card Save buttons). The Data Cache card is
