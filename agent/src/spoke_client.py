@@ -430,9 +430,13 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
             msg = json.loads(body)
         except Exception:  # noqa: BLE001
             return
-        # Drop frames whose signature does not verify.
-        if sig and not self.signer.verify_bytes(body.encode(), sig):
-            logger.warning("invalid signature — dropping")
+        # Every post-auth frame must be signed with our secret. The spoke
+        # (agent_hosting.send_to_agent) always sends <sig>.<body>, so an
+        # unsigned frame here is an injection: it would otherwise reach
+        # RUN_COMMAND / WRITE_FILE, which run as root. This mirrors the
+        # spoke's own rule (BaseControlPlane drops unsigned non-heartbeats).
+        if not sig or not self.secret or not self.signer.verify_bytes(body.encode(), sig):
+            logger.warning("unsigned or invalid signature — dropping")
             return
         # Pull the command type, data and correlation id.
         payload = msg.get("payload", {})
