@@ -145,6 +145,29 @@ CI/tooling changes are omitted unless they change what an operator sees.
 - **The header search no longer covers Help on a narrow window.** Below
   1280px the search box shrinks to fit, and below 1024px Help and Updates
   show only their icons.
+- **The HE.NET page no longer shows, or acts for, a tenant you just left.** A
+  slow DNS → External DNS → HE.NET load that finished after a tenant switch,
+  or after you moved to another DNS tab or back to the provider tiles, drew its
+  records, credential, schedule and credential-conflict note over the current
+  page, and the page's buttons then acted on them. Such a late load is now
+  dropped, including one that finishes while the tenant switch is still
+  saving. The old tenant's page also stayed clickable for a moment after a
+  switch, as did an open dialog or confirm, and a confirm still ran after you
+  moved to another DNS tab: Sync all could then send the old tenant's records
+  as the new tenant's, and Deconfigure named the new tenant while it removed
+  the old tenant's records. Every button that changes HE.NET records or the
+  credential, on the page or in a dialog opened from it, now checks that you
+  are still on its HE.NET page and that the page is for the selected tenant
+  when you click it and again after its confirm. If not, the button changes
+  nothing, says so, and closes the dialog. The same holds when another DNS
+  page is drawn over the HE.NET page while External DNS stays selected, as the
+  DNS Records list is when a record delete you started there finishes after
+  you moved to External DNS: a load still running draws nothing over it, and
+  an HE.NET dialog or confirm left open changes nothing. When the records
+  can't be read, Deconfigure, Move all and Sync all on the error page now say
+  the records could not be loaded and change nothing. Before, they acted on
+  the previous tenant's records, or reported that there were none. See
+  [henet.md](henet.md).
 
 ## Week of 2026-11-09
 
