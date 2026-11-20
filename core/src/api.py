@@ -43,6 +43,7 @@ reader encounters them in roughly this order:
   * Auth routes (``/auth/login``, ``/auth/me``, ``/auth/logout``, ``/auth/setup``,
     ``/auth/prefixes``) — defined LATE, near the end of ``create_app``.
   * Admin subnet-filter toggle (``/admin/subnet-filter-config``).
+  * Admin common-VRF setting (``/admin/common-vrfs``).
   * Generic Agent API (``/api/agent/*``, ``/api/generic/provision``).
   * DNS relay (``/api/dns/*``).
   * DHCP relay (``/api/dhcp/*``).

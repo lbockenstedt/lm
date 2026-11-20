@@ -11,6 +11,8 @@ merged with the defaults). The actual prefix-matching lives in
 
 import itertools
 
+import pytest
+
 from access import (
     filter_config,
     filter_enabled,
@@ -1094,6 +1096,81 @@ def test_prefix_reads_ignore_the_pre_unified_hub_cache_copies():
     _feed(warm, "lab1", _COMMON_VRF_ROWS["lab1"])
     assert _reread(hub, "lab1", {"status": "ERROR", "message": "NetBox timed out"}) == [
         "172.16.0.0/23", "172.31.200.0/22"]
+
+
+# ── A Global Admin can name the common VRFs (lm#1992) ───────────────────────
+# The inference counts any VRF two tenants use, even one shared infrastructure
+# does not serve. VRFs named under System → General → Common VRFs replace it;
+# an empty list, no list, or a hand-edited bad value leaves the inference.
+
+def _name_common_vrfs(hub, value):
+    """Store ``value`` as the hub's named common VRFs, where the routes do."""
+    hub.state.system_state.setdefault("global_config", {})[_access.COMMON_VRF_SETTING] = value
+
+
+def test_named_common_vrfs_replace_the_inferred_ones():
+    # VRF 2 is dxp's alone and VRF 3 is lab1's and lab2's. With VRF 2 named,
+    # dxp keeps it and lab1 and lab2 lose VRF 3; the global table stays common.
+    hub, dxp = _common_vrf_hub(), ["10.0.0.0/8", "192.168.5.0/24"]
+    _reread(hub, "dxp", {"status": "SUCCESS", "prefixes": [
+        {"prefix": "10.0.0.0/8", "vrf_id": 2}, {"prefix": "192.168.5.0/24", "vrf_id": None}]})
+    _name_common_vrfs(hub, ["2"])
+    assert _access.shared_slice_prefixes(hub, "dxp", dxp) == dxp
+    assert _access.shared_slice_prefixes(hub, "lab2", ["172.21.0.0/24"]) == []
+    assert _access.shared_slice_prefixes(hub, "lab1", ["172.16.0.0/23", "172.31.200.0/22"]) == []
+    _name_common_vrfs(hub, ["3"])
+    assert _access.shared_slice_prefixes(hub, "dxp", dxp) == ["192.168.5.0/24"]
+    assert _access.shared_slice_prefixes(hub, "lab2", ["172.21.0.0/24"]) == ["172.21.0.0/24"]
+
+
+def test_a_change_to_the_named_vrfs_applies_at_the_next_slice():
+    # Read on every slice: no restart, and clearing the list infers again.
+    hub, lab2 = _common_vrf_hub(), ["172.21.0.0/24"]
+    assert _access.shared_slice_prefixes(hub, "lab2", lab2) == lab2
+    _name_common_vrfs(hub, ["2"])
+    assert _access.shared_slice_prefixes(hub, "lab2", lab2) == []
+    _name_common_vrfs(hub, [])
+    assert _access.shared_slice_prefixes(hub, "lab2", lab2) == lab2
+
+
+@pytest.mark.parametrize("value", [[], None, "2", ["x"], [True], ["2", "x"], {"2": True}])
+def test_no_named_vrfs_or_a_hand_edited_bad_value_keeps_the_inference(value):
+    hub = _common_vrf_hub()
+    _name_common_vrfs(hub, value)
+    assert _access.shared_slice_prefixes(hub, "lab2", ["172.21.0.0/24"]) == ["172.21.0.0/24"]
+    assert _access.shared_slice_prefixes(hub, "dxp", ["10.0.0.0/8"]) == []
+
+
+def test_named_vrf_ids_are_stored_as_unique_strings_in_numeric_order():
+    assert _access.normalize_common_vrf_ids([3, "7", " 2 ", "007", 3, "10"]) == ["2", "3", "7", "10"]
+    assert _access.normalize_common_vrf_ids([]) == []
+
+
+@pytest.mark.parametrize("value", ["3", None, {"3": True}, [None], [True], [1.5], [""], ["abc"],
+                                   ["0"], [0], ["-1"], ["\u0661"], [[1]], ["1" * 19]])
+def test_a_bad_named_vrf_value_is_refused(value):
+    with pytest.raises(ValueError):
+        _access.normalize_common_vrf_ids(value)
+
+
+def test_common_vrf_card_shows_cached_vrf_names_and_the_mode():
+    # Names come from the NetBox cache feed's copies of the tenants' prefixes.
+    # A named VRF no cached row names is still listed, with no name, so it can
+    # be unticked; the global table is not a VRF to pick.
+    warm = {}
+    _feed(warm, "lab1", [{"prefix": "172.16.0.0/23", "vrf_id": 1, "vrf": "LAB1-OWN"},
+                         {"prefix": "172.31.200.0/22", "vrf_id": 3, "vrf": "Shared"}])
+    _feed(warm, "lab2", [{"prefix": "172.21.0.0/24", "vrf_id": 3, "vrf": "Shared"},
+                         {"prefix": "192.168.5.0/24", "vrf_id": None, "vrf": ""}])
+    _feed(warm, "dxp", [{"prefix": "10.0.0.0/8", "vrf_id": 2, "vrf": "dxp"}])
+    hub = _common_vrf_hub(warm, fetch=False)
+    vrfs = [{"id": "2", "name": "dxp"}, {"id": "1", "name": "LAB1-OWN"}, {"id": "3", "name": "Shared"}]
+    assert _access.common_vrf_settings(hub) == {
+        "vrf_ids": [], "mode": "automatic", "common": ["3"], "vrfs": vrfs}
+    _name_common_vrfs(hub, ["12", "2"])
+    assert _access.common_vrf_settings(hub) == {
+        "vrf_ids": ["2", "12"], "mode": "configured", "common": ["2", "12"],
+        "vrfs": vrfs + [{"id": "12", "name": ""}]}
 
 
 # ── Shared-source ownership: nested common prefixes ─────────────────────────
