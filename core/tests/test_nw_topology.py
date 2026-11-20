@@ -298,6 +298,27 @@ def test_trunk_threshold_is_tunable():
                           trunk_threshold=2)["stats"]["trunk_ports"] == 1
 
 
+def test_a_bmc_with_an_empty_mac_table_still_links_to_its_tor_port():
+    """Live SSPLM: each iLO is polled too and answers with an empty MAC table.
+    It must still be placed on the TOR access port that learned its MAC (the
+    sighting carries the iLO's IP), not skipped as a polled switch. A switch
+    with an empty table keeps being treated as polled (likely a poll gap)."""
+    fleet = FLEET + [
+        {"id": "ilo1", "name": "SRV1-ILO", "object_type": "ipmi",
+         "address": "172.16.1.50", "tenant_id": "lrb"},
+        {"id": "sw2", "name": "AGG", "object_type": "cx_switch",
+         "address": "172.16.1.91", "tenant_id": "lrb"},
+    ]
+    g = build_topology(fleet=fleet, macs_by_device={
+        "sw1": [{"mac": "aa:bb:cc:dd:ee:50", "ip": "172.16.1.50", "interface": "14"},
+                {"mac": "aa:bb:cc:dd:ee:91", "ip": "172.16.1.91", "interface": "49"}],
+        "ilo1": [], "sw2": []})
+    edge = _edge_between(g, "OLKS-MGMTSW", "SRV1-ILO")
+    assert edge and edge["source"] == "mac"
+    assert "14" in (edge["a_port"], edge["b_port"])
+    assert _edge_between(g, "OLKS-MGMTSW", "AGG") is None
+
+
 # ── Operator-declared devices and links (the no-LLDP case) ──────────────────
 
 def test_a_declared_device_appears_even_with_no_lldp_and_no_macs():
