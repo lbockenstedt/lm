@@ -11,6 +11,7 @@ from api import (
 from access import (
     ENFORCED_RIGHTS, SHARED_ACCESS_MODES, _norm_tenant_id, resolve_effective_permissions, refresh_shared_tenant,
     goes_with_deleted_tenant, granted_tenants, match_tenant_id, retired_twin_ids, tenant_among,
+    session_effective_tenant,
     valid_display_name as _valid_display_name,
     valid_hostname as _valid_hostname,
     valid_identifier as _valid_identifier,
@@ -419,11 +420,40 @@ def register(app, hub, ctx):
         return {"tenant_id": tenant_id, "config": tenant}
 
     @app.get("/api/tenant/scoping")
-    async def get_current_tenant_scoping(tenant: str = None):
-        """Returns the active tenant's spoke-scoping config (netbox slug, proxmox tag, ldap base DN)."""
+    async def get_current_tenant_scoping(request: Request, tenant: str = None):
+        """Return a tenant's spoke scoping (NetBox slug, Proxmox tag, LDAP base DN).
+
+        Scoped to the caller (fleet rule 6.1). A Global Admin may name any
+        tenant, and with no ``?tenant=`` gets the hub's active tenant. Anyone
+        else gets only a tenant they hold: a ``?tenant=`` they do not hold
+        falls back to their own tenant, as every scoped read does
+        (session_effective_tenant). A user with no tenant, or whose tenant
+        has no record of its own, gets empty scoping: never the hub's active
+        tenant (the one a Global Admin last marked active, POST
+        /setup/tenant), nor a legacy twin's record.
+        """
         hub = app.state.hub
-        # Look up the scoping config for the given (or active) tenant.
-        return get_tenant_scoping(hub, tenant)
+        # The middleware refuses unauthenticated calls; this keeps the route
+        # closed if it is ever mounted without it.
+        sess = ctx._session_user(request)
+        if not sess:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        if ctx._is_admin(sess):
+            return get_tenant_scoping(hub, tenant)
+        own = session_effective_tenant(sess, tenant)
+        # Read the caller's tenant under its stored spelling (a grant may
+        # differ from it in case or surrounding spaces), and by that exact key
+        # only. get_tenant also ignores surrounding spaces, so it would hand
+        # over a legacy twin's record: for a grant that names no one tenant
+        # ("ACME" beside " ACME ", where tenant_key raises ValueError), or for
+        # the built-in "default", which has no record, beside a " default ".
+        try:
+            key = hub.state.tenant_key(own) if own else None
+        except ValueError:
+            key = None
+        if key is None or key not in (hub.state.tenant_state.get("tenants") or {}):
+            return {"netbox_tenant_slug": "", "proxmox_tag": "", "ldap_base_dn": "", "tenant_id": own}
+        return get_tenant_scoping(hub, key)
 
     @app.post("/setup/tenants")
     async def create_tenant(request: Request):
