@@ -1504,8 +1504,11 @@ def register(app, hub, ctx):
         cfg_tid = acting_tenant or _nw_caller_tenant(sess, None)
         manual = _nw_topology_cfg(hub, cfg_tid)
 
-        # Build the map from every source.
-        graph = build_topology(
+        # Build the map from every source, off the event loop: a big tenant's
+        # MAC tables take a noticeable time to fold, and every other request
+        # waits while the loop is busy.
+        graph = await asyncio.to_thread(
+            build_topology,
             fleet=fleet,
             lldp_by_device=lldp_by_device,
             macs_by_device=macs_by_device,

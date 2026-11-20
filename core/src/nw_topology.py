@@ -721,9 +721,9 @@ def _collapse_half_edges(builder) -> None:
             builder._edges.pop(key, None)
 
 
-def _lldp_ports(builder, lldp_seen) -> set:
-    """The ``(node id, port)`` pairs a device's OWN LLDP table reports a
-    neighbour on.
+def _lldp_ports(builder, lldp_seen) -> Dict[str, set]:
+    """``{node id: {port names}}``: the local ports a device's OWN LLDP table
+    reports a neighbour on (names casefolded).
 
     LLDP is a fact the switch reports about its own port, so it outranks a
     cable record: NetBox keeps cables that were right once (or were written
@@ -731,28 +731,79 @@ def _lldp_ports(builder, lldp_seen) -> set:
     polled device's local ports count; the remote port is the neighbour's
     word and counts when that neighbour is polled itself.
     """
-    ports = set()
+    ports: Dict[str, set] = {}
     for _device_id, local_id, rows in lldp_seen:
         node = builder.current(local_id)
         for local_port, _remote_id, _remote_port, _row in rows:
             if node and _s(local_port):
-                ports.add((node, _s(local_port).casefold()))
+                ports.setdefault(node, set()).add(_s(local_port).casefold())
     return ports
 
 
-def _cable_superseded_by_lldp(lldp_ports: set, a_id: str, a_port: Any,
+# An interface name split into an optional type word and its number:
+# "GigabitEthernet1/0/1" -> ("gigabitethernet", "1/0/1"), "1/1/1" -> ("", "1/1/1"),
+# "lag 1" -> ("lag", "1"). Names with letters inside the number ("enp3s0") don't
+# match and are only ever compared exactly.
+_PORT_RE = re.compile(r"^([a-z][a-z-]*?)?[\s-]*(\d+(?:[/:.]\d+)*)$")
+
+
+def _is_ethernet_word(word: str) -> bool:
+    """Whether an interface type word names a physical Ethernet port
+    ("ethernet", "gigabitethernet", "hundredgige", ...), the IEEE naming
+    every vendor's long form uses."""
+    return word.endswith("ethernet") or word.endswith("gige")
+
+
+def _same_port(a: Any, b: Any) -> bool:
+    """Whether two names for a port on the SAME device mean the same port.
+
+    NetBox and a switch's own LLDP often spell one port differently:
+    "Ethernet1/1/1" vs "1/1/1", "Gi1/0/1" vs "GigabitEthernet1/0/1". The
+    numbers must be identical, and the type words equal, or one a 2+ letter
+    abbreviation (prefix) of an Ethernet type word, so "Gi1/0/1" never
+    matches "Te1/0/1". A bare number matches only an Ethernet type word,
+    and only in slot/port form ("1/1/1"); a bare "1" is never "eth1".
+
+    A miss only leaves a NetBox cable drawn (the old behaviour), while a false
+    match hides a real cable, so anything else matches only exactly: LAGs,
+    port-channels, trunks and SVIs ("Po 1", "PortChannel1", "Eth-Trunk1")
+    are never taken for a physical port ("Port1", "Eth1"), whatever their
+    spelling, with no vendor vocabulary to keep current.
+    """
+    # Exact match (ignoring case and spaces at the ends).
+    a, b = _s(a).casefold(), _s(b).casefold()
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    # Split both into type word and number; the numbers must agree.
+    ma, mb = _PORT_RE.match(a), _PORT_RE.match(b)
+    if not ma or not mb or ma.group(2) != mb.group(2):
+        return False
+    pa, pb = ma.group(1) or "", mb.group(1) or ""
+    # One side has no type word: only an Ethernet slot/port is distinctive enough.
+    if not pa or not pb:
+        return "/" in ma.group(2) and _is_ethernet_word(pa or pb)
+    # Both typed: equal words, or an abbreviation of an Ethernet type word.
+    if pa == pb:
+        return True
+    short, long_ = sorted((pa, pb), key=len)
+    return len(short) >= 2 and _is_ethernet_word(long_) and long_.startswith(short)
+
+
+def _cable_superseded_by_lldp(lldp_ports: Dict[str, set], a_id: str, a_port: Any,
                               b_id: str, b_port: Any) -> bool:
     """Whether LLDP already describes the cable's port at either end.
 
     A different neighbour there means the cable is stale (the port was
     re-patched, or the cable was written against the wrong device); the same
     neighbour means LLDP already drew the link, often with the far port named
-    differently, which would otherwise draw it twice. A port LLDP doesn't
-    cover (no LLDP on that link, or a port name that doesn't match) leaves
-    the cable standing.
+    differently, which would otherwise draw it twice. Port names are compared
+    with :func:`_same_port`, so "Ethernet1/1/1" in NetBox matches "1/1/1" in
+    LLDP. A port LLDP doesn't cover leaves the cable standing.
     """
-    return ((a_id, _s(a_port).casefold()) in lldp_ports
-            or (b_id, _s(b_port).casefold()) in lldp_ports)
+    return (any(_same_port(a_port, p) for p in lldp_ports.get(a_id, ()))
+            or any(_same_port(b_port, p) for p in lldp_ports.get(b_id, ())))
 
 
 def _lag_aliases(builder, macs_by_device, fleet_ids, duplicate_of, trusted):

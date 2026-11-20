@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 
 import pytest  # noqa: E402
 
-from nw_topology import build_topology  # noqa: E402
+from nw_topology import _same_port, build_topology  # noqa: E402
 
 
 FLEET = [
@@ -845,6 +845,40 @@ def test_a_netbox_cable_lldp_already_drew_is_not_drawn_twice():
         netbox_cables=[{"a_device": "OLKS-MGMTSW", "a_port": "1",
                         "b_device": "OLKS-EDGE-1", "b_port": "Uplink-52"}])
     assert [e["source"] for e in g["edges"]] == ["lldp"]
+
+
+@pytest.mark.parametrize("a,b,same", [
+    ("1/1/1", "Ethernet1/1/1", True),
+    ("Gi1/0/1", "GigabitEthernet1/0/1", True),
+    ("Ethernet1/1", "Eth1/1", True),
+    ("lag 1", "LAG1", True),
+    ("MGMT", "mgmt", True),
+    ("Gi1/0/1", "Te1/0/1", False),   # different port types, same number
+    ("1/1/1", "1/1/10", False),
+    ("1", "eth1", False),            # a bare number is too weak on its own
+    ("mgmt", "1", False),
+    ("Hu1/0/1", "HundredGigE1/0/1", True),
+    ("Port1", "Port-channel1", False),  # physical vs aggregate, any spelling
+    ("Port1", "PortChannel1", False),
+    ("Po 1", "Port1", False),
+    ("Eth1", "Eth-Trunk1", False),
+    ("Eth1", "EthTrunk1", False),
+    ("1/0/1", "Gi1/0/1", False),         # a bare number needs the long Ethernet word
+    ("1/1/1", "lag1/1/1", False),
+    ("e1/1", "ethernet1/1", False),      # one letter is no abbreviation
+    ("", "", False),
+])
+def test_port_names_match_across_spellings(a, b, same):
+    assert _same_port(a, b) is same
+
+
+def test_a_stale_netbox_cable_is_ignored_when_netbox_spells_the_port_differently():
+    # NetBox says "Ethernet1/1/3"; the lab core's own LLDP says "1/1/3" is RSVBE-TOR-3.
+    g = build_topology(
+        fleet=_SITE_FLEET, lldp_by_device=_SITE_LLDP,
+        netbox_cables=[{"a_device": "RSVBE-S1-1", "a_port": "Ethernet1/1/3",
+                        "b_device": "T36-TOR", "b_port": "Port50x"}])
+    assert _edge_between(g, "RSVBE-S1-1", "T36-TOR") is None
 
 
 def test_macs_placed_after_the_switch_is_re_rooted_still_land_on_it():
