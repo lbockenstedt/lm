@@ -369,6 +369,9 @@ class _CentralStore:
     def __init__(self):
         self.configs = {}
 
+    async def get_central_config(self, tenant_id):
+        return dict(self.configs.get(tenant_id, {}))
+
     async def set_central_config(self, tenant_id, cfg):
         self.configs[tenant_id] = dict(cfg or {})
 
@@ -396,7 +399,7 @@ class _Holder:
 
 def _cs_user(tenant):
     return {"user": {"user_id": "u", "auth_type": "local",
-                     "permissions": {"cs": True}, "tenants": [tenant],
+                     "permissions": {"cs": True, "edit": True}, "tenants": [tenant],
                      "tenant_id": tenant, "protected": False}}
 
 
@@ -419,7 +422,7 @@ def _build_sim():
 
 
 def test_save_central_rejects_internal_cluster_url():
-    """The genuine non-admin SSRF vector: a cs-righted tenant user points the
+    """The genuine non-admin SSRF vector: a tenant write user points the
     hub's outbound Aruba token exchange at an internal host / cloud-metadata
     endpoint. Must be rejected at the gate, not stored and later POSTed to."""
     c, store, holder = _build_sim()
