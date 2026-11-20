@@ -637,6 +637,19 @@ def _feed_args(**over):
     return types.SimpleNamespace(**base)
 
 
+class _FakeSpokeBase:
+    """Base for the fake FeedSpokes below, which stand in for the lm core class."""
+
+    @staticmethod
+    async def stop_all(tasks, stop_evt):
+        """End the fake spokes as _run's finally expects (the real one is in synthetic_spoke)."""
+        import asyncio
+        stop_evt.set()
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 def test_empty_first_snapshot_waits_then_feeds_when_data_appears(monkeypatch):
     """A source that is momentarily empty at feed start (e.g. no active
     simulations yet) must NOT kill the feeder — it waits and goes live the
@@ -652,7 +665,7 @@ def test_empty_first_snapshot_waits_then_feeds_when_data_appears(monkeypatch):
 
     started = {"ids": []}
 
-    class _Spoke:
+    class _Spoke(_FakeSpokeBase):
         def __init__(self, *a, **kw):
             started["ids"].append(kw.get("spoke_id"))
 
@@ -689,7 +702,7 @@ def test_new_spokes_appearing_mid_run_are_picked_up_on_repoll(monkeypatch):
 
     started = {"ids": []}
 
-    class _Spoke:
+    class _Spoke(_FakeSpokeBase):
         def __init__(self, *a, **kw):
             started["ids"].append(kw.get("spoke_id"))
 
@@ -725,7 +738,7 @@ def test_vanished_spokes_are_not_removed_on_repoll(monkeypatch):
 
     started = {"ids": []}
 
-    class _Spoke:
+    class _Spoke(_FakeSpokeBase):
         def __init__(self, *a, **kw):
             started["ids"].append(kw.get("spoke_id"))
 
@@ -770,7 +783,7 @@ def test_no_token_refresh_starts_after_sigterm_while_the_spokes_close(monkeypatc
     monkeypatch.setattr(src.opener, "open", lambda req, *a, **kw: posts.append(req.full_url))
     monkeypatch.setattr(src, "snapshot", lambda: {"clients": [{"spoke_id": "s1", "hostname": "h1"}]})
 
-    class _Spoke:
+    class _Spoke(_FakeSpokeBase):
         def __init__(self, *a, **kw):
             pass
 

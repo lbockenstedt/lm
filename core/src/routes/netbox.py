@@ -103,8 +103,11 @@ def nb_cache_feed(hub):
     """Feed: every tenant's (and the admin view's) four NetBox lists."""
     # (namespace, key) pairs already yielded, so shared entries are produced once.
     seen = set()
-    # None stands for the admin (all tenants) view, then every tenant.
-    for tid in [None] + all_tenant_ids(hub):
+    # None is the admin view (it resolves to the hub's active tenant), then the
+    # built-in Admin tenant, then every stored tenant. The Admin tenant often
+    # has no stored record, so all_tenant_ids misses it, yet the Common VRFs
+    # card and the common-VRF inference read its prefixes from this feed.
+    for tid in [None, ADMIN_TENANT_ID] + all_tenant_ids(hub):
         # Resolve the tenant's NetBox scope; a tenant that cannot be resolved is skipped.
         try:
             scope = netbox_tenant_scope(hub, tid)
