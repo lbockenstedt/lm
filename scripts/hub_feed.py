@@ -694,13 +694,12 @@ async def _run(args, source, salt):
         spokes[sid] = s
         tasks.append(asyncio.create_task(s.run_forever(stop_evt)))
 
-    # Start every spoke, spread over the --ramp period.
-    for sid, payload in payloads.items():
-        _spawn(sid, payload)
-        await asyncio.sleep(args.ramp / max(1, len(payloads)))
-
-    # Main loop: re-poll the source every interval until stopped or the deadline passes.
     try:
+        # Start every spoke, spread over the --ramp period.
+        for sid, payload in payloads.items():
+            _spawn(sid, payload)
+            await asyncio.sleep(args.ramp / max(1, len(payloads)))
+        # Main loop: re-poll the source every interval until stopped or the deadline passes.
         while not stop_evt.is_set():
             await asyncio.sleep(args.interval)
             if deadline and time.time() >= deadline:
@@ -733,15 +732,12 @@ async def _run(args, source, salt):
             except Exception as e:  # noqa: BLE001
                 print(f"  ! re-poll failed: {e} — keeping the previous snapshot",
                       file=sys.stderr)
-    # Ctrl-C or cancellation ends the loop quietly.
+    # Ctrl-C or cancellation (SIGTERM) ends the ramp or the loop quietly.
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
-    # Always stop and wait for every spoke task.
+    # Always stop every spoke task; one cancel each can be lost (see stop_all).
     finally:
-        stop_evt.set()
-        for t in tasks:
-            t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await FeedSpoke.stop_all(tasks, stop_evt)
     # Final counters.
     print(f"Done. polls={stats['polls']} sent={stats['sent']} "
           f"send_err={stats['send_err']} conn_err={stats['conn_err']}")
@@ -862,8 +858,9 @@ def main():
         source.close()
 
 
-# Run main(); Ctrl-C or SIGTERM exits quietly. A SIGTERM during the first poll or
-# the ramp cancels _run outside its main loop, so CancelledError reaches here.
+# Run main(); Ctrl-C or SIGTERM exits quietly. A SIGTERM before the first spoke
+# starts (the first poll, or the wait for the source to have data) cancels _run
+# before its main try, so CancelledError reaches here.
 if __name__ == "__main__":
     try:
         main()

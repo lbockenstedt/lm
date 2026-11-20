@@ -263,15 +263,50 @@ def test_remote_console_neither_lists_nor_runs_on_a_synthetic_spoke():
 _SCRIPTS = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
 _ONE_SPOKE = {"cs-01": {"module_type": "simulation", "name": "cs-01",
                         "clients": [{"hostname": "h"}]}}
+# Runs the script named in argv[1] with every spoke losing its first cancel, as
+# Python 3.11's asyncio.wait_for can make it (see SyntheticSpoke.stop_all). The
+# spoke makes the scratch dir, then serves until it is cancelled again. The
+# import order is the scripts' own, so they get this patched module.
+_LOSE_FIRST_CANCEL = textwrap.dedent("""
+    import asyncio, importlib, os, runpy, sys
+    script = sys.argv[1]
+    repo = os.path.dirname(os.path.dirname(script))
+    sys.path[:0] = [os.path.join(repo, "core", "src"), repo]
+    for name in ("core.src.messaging.synthetic_spoke", "messaging.synthetic_spoke"):
+        try:
+            ss = importlib.import_module(name)
+            break
+        except Exception:
+            pass
+    ss._RECANCEL_S = 0.2
+
+    async def _serve(self):
+        self._mtls_material_dir()
+        lost = False
+        while True:
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                if lost:
+                    raise
+                lost = True
+
+    ss.SyntheticSpoke._connect_and_serve = _serve
+    sys.argv = sys.argv[1:]
+    runpy.run_path(script, run_name="__main__")
+""")
 
 
-def _spawn(script, argv, tmp_path):
-    """Start a script with its own TMPDIR; returns (process, that TMPDIR, log path)."""
+def _spawn(script, argv, tmp_path, driver=None):
+    """Start a script with its own TMPDIR; returns (process, that TMPDIR, log path).
+
+    With ``driver``, runs ``python -c driver <script> <argv>`` instead."""
     tmp = tmp_path / "tmp"
     tmp.mkdir()
     log = tmp_path / "out.log"
+    pre = ["-c", driver] if driver else []
     with open(log, "w") as out:
-        proc = subprocess.Popen([sys.executable, os.path.join(_SCRIPTS, script), *argv],
+        proc = subprocess.Popen([sys.executable, *pre, os.path.join(_SCRIPTS, script), *argv],
                                 cwd=tmp_path, env={**os.environ, "TMPDIR": str(tmp)},
                                 stdout=out, stderr=subprocess.STDOUT)
     return proc, tmp, log
@@ -313,13 +348,15 @@ def source():
     srv.server_close()
 
 
+@pytest.mark.parametrize("driver", [None, _LOSE_FIRST_CANCEL], ids=["as-is", "first-cancel-lost"])
 @pytest.mark.parametrize("script, ramp", [("hub_feed.py", "0"), ("hub_feed.py", "3600"),
                                           ("loadtest_spokes.py", "0")],
                          ids=["feed", "feed-in-ramp", "loadtest"])
-def test_sigterm_exits_cleanly_and_removes_the_scratch_dir(script, ramp, source, tmp_path):
+def test_sigterm_exits_cleanly_and_removes_the_scratch_dir(script, ramp, driver, source, tmp_path):
     # SIGTERM's default action skips atexit, so every Stop left the dir behind.
-    # A long ramp holds the feeder before its main loop, which has a catch of its own.
+    # A long ramp holds the feeder in its ramp, before the main loop.
     # Nothing listens on port 1, so the spokes retry until stopped.
+    # first-cancel-lost: with one cancel per spoke, every variant waited forever.
     if script == "hub_feed.py":
         argv = ["--source", source, "--token", "t", "--target", "wss://127.0.0.1:1",
                 "--ramp", ramp, "--interval", "3600"]
@@ -327,7 +364,7 @@ def test_sigterm_exits_cleanly_and_removes_the_scratch_dir(script, ramp, source,
         argv = ["--hub", "wss://127.0.0.1:1", "--env-file", os.devnull, "--count", "1",
                 "--ramp", ramp, "--duration", "3600", "--status-url", "http://127.0.0.1:1/status",
                 "--sample-interval", "3600"]
-    proc, tmp, log = _spawn(script, argv, tmp_path)
+    proc, tmp, log = _spawn(script, argv, tmp_path, driver)
     try:
         # The first spoke makes the dir, after the script has set its SIGTERM handler.
         assert _wait_for(lambda: list(tmp.glob("lm-synthetic-spoke-*")), proc), log.read_text()

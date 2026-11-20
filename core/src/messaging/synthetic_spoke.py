@@ -44,6 +44,8 @@ hub URL, watchdog and TLS-verify pushes (listed as ``skipped`` on save), and
 code updates. The marker only removes hub actions; it never exempts a spoke
 from mTLS.
 """
+# asyncio: stopping the scripts' spoke tasks (stop_all).
+import asyncio
 # atexit/shutil/tempfile: the private scratch dir and its cleanup.
 import atexit
 import functools
@@ -80,6 +82,9 @@ REFUSED = frozenset({
     "OS_REBOOT", "OS_FIX_ACCESS", "RUN_COMMAND", "SPOKE_SET_HOSTNAME",
     "SPOKE_MTLS_CSR", "SPOKE_GET_MTLS_STATUS",
 })
+# Seconds stop_all waits for the spoke tasks before it cancels the rest again.
+# websockets' default close_timeout, so a close the hub answers is not cut short.
+_RECANCEL_S = 10
 
 
 @functools.cache
@@ -96,8 +101,32 @@ def _scratch_dir() -> str:
 class SyntheticSpoke(BaseControlPlane):
     """A spoke client with no host of its own (test feed, load test).
 
-    Subclasses run ``_connect_and_serve`` from their own reconnect loop;
-    ``run()`` raises (see ``run``)."""
+    Subclasses run ``_connect_and_serve`` from their own reconnect loop, and
+    the scripts end those loops with ``stop_all``; ``run()`` raises (see
+    ``run``)."""
+
+    @staticmethod
+    async def stop_all(tasks, stop_evt):
+        """Stop a script's spoke tasks: set stop_evt, then cancel them until all have ended.
+
+        A single cancel can be lost. On Python 3.11 ``asyncio.wait_for`` drops
+        a cancel that arrives after the call it waits on has finished, and
+        returns that call's result instead. The TLS probe in
+        ``_connect_and_serve`` connects through ``wait_for``, and a hub that
+        is not listening refuses at once, inside that window. The spoke's
+        reconnect loop then ran on, and ``asyncio.run`` waited for it forever.
+        Setting stop_evt ends such a loop at its next check. Cancelling again
+        every ``_RECANCEL_S`` seconds ends a task that lost its cancel inside
+        a session, where the loop does not check stop_evt."""
+        stop_evt.set()
+        pending = set(tasks)
+        while pending:
+            for t in pending:
+                t.cancel()
+            _done, pending = await asyncio.wait(pending, timeout=_RECANCEL_S)
+        # All have ended. Collect their results, as the scripts' gather did, so
+        # an error a spoke ended with is not logged as never retrieved at exit.
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def run(self):
         """Refuse to start the base main loop.

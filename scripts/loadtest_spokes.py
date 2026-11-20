@@ -635,23 +635,23 @@ async def main():
               f"(~{args.count * args.rate:.0f} msg/s aggregate), {args.duration}s, "
               f"ramp {args.ramp}s. Status: {status_url}")
 
-    # Start the spokes, spaced "per" seconds apart so the ramp lasts --ramp seconds.
     tasks = []
     per = args.ramp / max(1, args.count)
-    for s in spokes:
-        tasks.append(asyncio.create_task(s.run_forever(stop_evt)))
-        if per > 0:
-            await asyncio.sleep(per)
-
-    # Start the monitor, run for the requested time, then stop everything.
-    mon = asyncio.create_task(_monitor(status_url, stop_evt, args.sample_interval, stats, args.count,
-                                       our_ids={s.spoke_id for s in spokes}, offender_ids=offender_ids))
-    await asyncio.sleep(args.duration)
-    stop_evt.set()
-    # Cancel the spoke tasks and wait for them, ignoring their cancellation errors.
-    for t in tasks:
-        t.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
+    try:
+        # Start the spokes, spaced "per" seconds apart so the ramp lasts --ramp seconds.
+        for s in spokes:
+            tasks.append(asyncio.create_task(s.run_forever(stop_evt)))
+            if per > 0:
+                await asyncio.sleep(per)
+        # Start the monitor and run for the requested time.
+        mon = asyncio.create_task(_monitor(
+            status_url, stop_evt, args.sample_interval, stats, args.count,
+            our_ids={s.spoke_id for s in spokes}, offender_ids=offender_ids))
+        await asyncio.sleep(args.duration)
+    # Stop the spokes on every way out. SIGTERM and Ctrl-C cancel this task, and
+    # the one cancel asyncio.run then gives each spoke can be lost (see stop_all).
+    finally:
+        await SyntheticSpoke.stop_all(tasks, stop_evt)
     # Wait for the monitor to print its final verification.
     await mon
     # Print cleanup instructions for the synthetic spokes left in hub state.
