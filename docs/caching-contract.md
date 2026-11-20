@@ -99,13 +99,79 @@ envelope and revalidated in the background past 30s (never blocking the page);
 any non-read relayed command drops that spoke's entries so writes show on the
 next read.
 
+The NW topology map (`routes/nw.py`) uses `warm_cache` in two namespaces.
+`nw_topo_netbox` holds the NetBox device and cable lists for the whole hub, with
+`refresh_s` and `min_interval_s` 3600 (owner-set: the network changes little,
+so NetBox is asked at most hourly). A background map build reads them with
+`cache_read_fresh`, which waits for a list refresh that is due or already
+running instead of returning the copy it replaces (else the map would keep the
+hour-old list for another hour). Inside the floor it fetches nothing, and a
+failed refresh serves the cached copy. Page reads never use it. With no
+NetBox spoke connected (right after a hub restart, before it reconnects) the
+fetch raises `CacheSkipped`: NetBox was never asked, so no floor starts and
+the next tick tries again. A map built from a list that was missing,
+invalidated or past its hourly refresh (the restart case: none held yet, or
+the copy persisted before the restart) records the fetch time of each list it
+read (`_nb_behind`). Once the hub holds a newer list, the next page read
+builds live and rebuilds that map, instead of serving it without its NetBox
+gear, or with the old list, for another hour. A map built from current lists
+records nothing, so the lists' own hourly refresh rebuilds no map.
+A NetBox device or IP write made from LM's NetBox pages (the routes that
+pass `topology=True` to `routes/netbox.py` `_refresh_after_write`; a prefix
+write, or the device-type catalog seed, refreshes the same cache keys but
+changes no device row) calls
+`nw_topology_netbox_changed`: one task per hub waits until 330 s after the
+latest such write (the netbox spoke caches each list for 300 s, and a list
+read racing the write can cache the old rows), then drops both lists, their
+floor included, and rebuilds every tenant's map. A burst of writes costs one
+re-read. Changes made in NetBox itself, or by the discovery syncs (which
+refresh through `hub.refresh_module_cache` on every cycle, changed or not),
+reach the map at the hourly refresh.
+`nw_topology` holds one pre-built map per tenant, keyed by tenant id, with
+`refresh_s` 3600 (passed to `cache_read` and `cache_fetch_now` too, so a page
+read of a younger map starts no rebuild); the
+view without MAC inference is kept in `nw_topology_off`, under the same
+key, and is cached only once read (its own namespace, because tenant ids are
+free text and a key suffix could equal another tenant's id).
+Each map stores a digest of every input that decides what the tenant may see. A
+read recomputes the digest; on a mismatch it builds the map live and
+refreshes the entry, so a map restored from disk or built before an access
+change is never served.
+Background builds never use a stored request or session (an expired session
+would turn the filter off). They filter with `access.filter_nw_for_tenant`,
+which returns the same rows `filter_nw` gives a reader acting as that tenant.
+After **Refresh from devices** or a manual edit, the affected maps' keys are
+dropped (`warm_drop`) before `cache_refresh`, because `cache_refresh` alone
+would join a build already running on the old rows, and that build would store
+them. A refresh rebuilds every tenant's map that shows a refreshed device
+(a shared switch is on many). An infer-off map that was cached is rebuilt in
+the background too (it is not in the feed, so `cache_refresh` alone would not
+find it after the drop), through `cache_fetch_later`, which queues it in the
+map lane like any refresh: a shared switch's refresh builds at most two maps
+at a time. A page load checks the digest against the tenant prefixes the hub already
+holds (`access.known_tenant_prefixes`: the last answer within its 300 s TTL,
+else the NetBox cache feed's copy, which the feed re-reads every 300 s, unless
+the expired answer is a newer live read (a failed feed refresh keeps its old
+copy), else the expired answer), so it never waits on NetBox. There are two
+exceptions. After a prefix write through LM, the feed's copy is invalidated
+but keeps its old rows until the re-read lands, so the first load asks NetBox
+once instead of passing the old prefixes through the digest. The other is
+right after a restart: the VRFs every live read saves
+(`tenant_prefix_vrfs`) show when NetBox last answered, and when that is newer
+than the feed's copy, the first load asks NetBox once instead of serving the
+older copy. If that ask fails, its fallback is served until the next one. A changed prefix list fails
+the digest, so it reaches the map within about one feed interval, not one
+hourly build.
+
 A `warm_cache.CacheJob`'s `refresh_s` sets only how often the background
 refresher re-reads it: a login kick, or `cache_refresh()` after a write, still
 refreshes it at once. A source that must not be queried more often than a fixed
 rate also sets `min_interval_s`, a hard floor that the background refresher,
 page reads, login kicks and `cache_refresh()` all honor (the NAC Access
 Tracker's 24-hour history uses 300 s). The floor counts from the last attempt,
-failed ones included. Inside it a page read serves what is cached, even when
+failed ones included. A fetch that could not ask its source at all (its spoke
+is not connected) raises `warm_cache.CacheSkipped`: the read fails, but no
+error is recorded and no floor starts. Inside it a page read serves what is cached, even when
 it is old or invalidated; with nothing cached the read raises
 `CacheFloorError`, which a route answers with 503 and a `Retry-After` header.
 Non-admins see the hub's generic 503 text, because 5xx details are scrubbed
