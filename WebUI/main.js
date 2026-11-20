@@ -183,6 +183,7 @@ const ROUTES = {
     refreshCacheNamespace:  { m: 'POST', p: '/admin/cache/refresh',       api: 'admin_cache_refresh' },
     purgeAllCaches:         { m: 'POST', p: '/admin/cache/purge',         api: 'admin_purge_cache' },
     loadSubnetFilterToggles:{ m: 'GET',  p: '/admin/subnet-filter-config',api: 'get_subnet_filter_config' },
+    renderCommonVrfs:       { m: 'GET',  p: '/admin/common-vrfs',         api: 'get_common_vrfs' }, // js/views/common-vrfs.js
     loadSpokesAndAgents:    { m: 'GET',  p: '/setup/pending_spokes + /api/pxmx/agents + /setup/diagnostics', api: 'get_pending_spokes / get_pxmx_agents / get_diagnostics' },
     ensureSpokeEventsLoaded:{ m: 'GET',  p: '/setup/diagnostics/{spoke_id}', api: 'get_diagnostics_detail' },
     loadModuleLogs:         { m: 'GET',  p: '/setup/logs/{module}',       api: 'get_module_logs' },
@@ -327,6 +328,7 @@ const CRUD_ROUTES = {
     toggleDebugLogging:     { m: 'GET',  p: '/setup/debug-mode',                             api: 'get_debug_mode',
                               m2: 'POST', p2: '/setup/debug-mode',                           api2: 'toggle_debug_mode' },
     toggleSubnetFilter:     { m: 'PUT',  p: '/admin/subnet-filter-config',                   api: 'set_subnet_filter_config' },
+    saveCommonVrfs:         { m: 'PUT',  p: '/admin/common-vrfs',                            api: 'set_common_vrfs' }, // js/views/common-vrfs.js
     refreshModuleCache:     { m: 'POST', p: '/auth/cache/refresh?module={key}',              api: 'refresh_my_cache' },
     refreshOpnsenseCache:   { m: 'GET',  p: '/api/firewall/{fwId}/refresh',                  api: 'refresh_firewall_cache' },
 
