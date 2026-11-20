@@ -44,6 +44,9 @@ function _extDnsBackBar(name) {
 // straight into it (no needless tile hop). Multiple → a tile per provider,
 // each opening that provider's record management.
 async function loadExternalDNS() {
+    // This replaces the HE.NET page ("← External DNS"), so an HE.NET load still
+    // in flight must not paint over it when it finishes.
+    _henetLoadSeq++;
     const container = document.getElementById('dns-content');
     if (!container) return;
     const providers = _externalDnsConnected();
@@ -257,10 +260,95 @@ function _henetPushBadge(r) {
     return `<span class="px-2 py-0.5 rounded-full text-xs font-medium ${cls}"${detail}>${ok ? 'pushed' : 'error'}</span>`;
 }
 
+// Bumped by every loadHenet() and by loadExternalDNS(). A load that is no longer
+// the latest, or that finishes after the operator left DNS → External DNS, drops
+// its results: after a tenant switch the old tenant's records, credential and
+// conflict were otherwise drawn, and acted on, under the new tenant (lm #2028).
+let _henetLoadSeq = 0;
+
+// The HE.NET page on screen, set by the load that drew it: that load's seq,
+// tenant and root (the element it drew into), and the records it shows (null
+// when the read failed).
+let _henetPage = null;
+
+// True while load `seq` is the newest HE.NET load, the operator is still on
+// DNS → External DNS, `tenant` is still the selected tenant, and `root`, the
+// element that load drew into, is still in #dns-content: the one test for "on
+// screen", used by a load before each write and by a button for the page it
+// acts on. Moving to another tab does not bump _henetLoadSeq, hence the view
+// clause. Other DNS renderers repaint #dns-content without bumping the seq or
+// changing the view: the Records tab's reload when an internal DNS record's
+// Delete finishes (certificates.js:3417) runs loadDNSData
+// (dns-dhcp-cluster.js:1020), which leaves currentSubView alone. Hence the root
+// clause.
+function _henetShown(seq, tenant, root) {
+    return seq === _henetLoadSeq && currentView === 'dns'
+        && currentSubView === 'External DNS' && currentTenant === tenant
+        && !!document.getElementById('dns-content')?.contains(root);
+}
+
+// `page` while it is still the HE.NET page on screen for the selected tenant,
+// else null after an error toast. setTenant() switches currentTenant before it
+// reloads the view, so the old tenant's page stays clickable for a moment, and
+// a confirm toast stays up while the operator switches tenant or moves to
+// another tab. An action that took its records from that page but its tenant
+// from the picker mixed two tenants: "Sync all" retagged tenant A's records as
+// tenant B's and wrote them with B's HE.NET login. So every button that acts on
+// a tenant's records or credential checks this when clicked and again after
+// each confirm, dialog or read it waits on; once it has sent its first request,
+// it finishes on the records it confirmed. The schedule is fleet-wide, so its
+// buttons are not checked. A dialog or confirm also stays up while another DNS
+// renderer draws over the page with the tab and tenant unchanged, and
+// confirming it then still sent the credential or Deconfigure request for a
+// page no longer shown, hence the root clause in _henetShown.
+function _henetLivePage(page) {
+    if (page && _henetShown(page.seq, page.tenant, page.root)) return page;
+    showToast('The HE.NET page was left, reloaded or switched to another tenant, so nothing was changed. Try again from the HE.NET page.', 'error');
+    return null;
+}
+
+// The live page for the bulk buttons (Deconfigure, Move all, Sync all), when
+// its records were read. A failed read is not an empty list, so this shows an
+// error toast and returns null instead of letting Deconfigure report "no
+// records" for a spoke that is offline.
+function _henetLoadedPage() {
+    const page = _henetLivePage(_henetPage);
+    if (!page || Array.isArray(page.records)) return page;
+    showToast('The HE.NET records could not be loaded, so nothing was changed. Reload the page and try again.', 'error');
+    return null;
+}
+
+// The live page the open dialog `id` was opened from, else null after the
+// error toast. A dialog whose page is gone is closed, as it no longer matches
+// the page on screen.
+function _henetDialogPage(id) {
+    const modal = document.getElementById(id);
+    const page = _henetLivePage(modal?._henetPage);
+    if (!page) modal?.remove();
+    return page;
+}
+
+// DNS → External DNS → HE.NET: the status line, action bar and records table in
+// #dns-content, plus the _henet* state the page's buttons read.
 async function loadHenet() {
+    const seq = ++_henetLoadSeq;
+    const loadTenant = currentTenant;
     const container = document.getElementById('dns-content');
-    if (!container) return;
-    container.innerHTML = '<p class="text-sm text-slate-500 italic p-4">Loading…</p>';
+    // Draw nothing, not even "Loading…", over the tab the operator moved to
+    // (an action's reload that runs after they left DNS → External DNS).
+    if (!container || currentView !== 'dns' || currentSubView !== 'External DNS') return;
+    // Everything this load draws goes into its own element, so whatever
+    // repaints #dns-content next removes it, and with it this load and the
+    // page it publishes (_henetShown).
+    const root = document.createElement('div');
+    root.innerHTML = '<p class="text-sm text-slate-500 italic p-4">Loading…</p>';
+    container.replaceChildren(root);
+    // True while this load's page would still be on screen (_henetShown), for
+    // the tenant it started under: setTenant() switches currentTenant, then
+    // awaits two hub calls before it reloads the view, and answers landing in
+    // that gap belong to the old tenant. Checked after every await, before any
+    // write.
+    const isCurrent = () => _henetShown(seq, loadTenant, root);
     const th = tableHead, tw = tableWrap;
     const admin = isAdmin();
     // Record/credential writes need tenant-admin tier (or admin) — a plain
@@ -287,6 +375,9 @@ async function loadHenet() {
     const schedReq = admin ? _spokeFetch('/api/henet/sync-config').catch(() => null) : null;
     const credReq = _spokeFetch(credUrl).catch(() => null);
     const recordsReq = _spokeFetch('/api/henet/records');
+    // A load that turns stale returns before it awaits the records, so mark a
+    // failure handled here; the current load still gets it at the await below.
+    recordsReq.catch(() => {});
 
     // Status line (HE dyndns reachability + record count — fleet-wide, not
     // per-tenant data).
@@ -300,6 +391,7 @@ async function loadHenet() {
             statusHtml = `<span class="${dot} font-medium">● HE DNS ${s.data.reachable ? 'reachable' : 'unreachable'}</span>${why} · ${s.data.record_count} managed record(s)`;
         }
     } catch (e) { /* status is best-effort */ }
+    if (!isCurrent()) return;
 
     // Scheduled-sync badge (admin only) — shows the current schedule so it's
     // discoverable without opening the modal. Best-effort; config route is
@@ -308,6 +400,7 @@ async function loadHenet() {
     if (admin) {
         try {
             const sc = await schedReq;
+            if (!isCurrent()) return;
             if (sc.ok && sc.data && sc.data.config) {
                 window._henetScheduleCfg = sc.data.config;
                 const cfg = sc.data.config;
@@ -337,7 +430,7 @@ async function loadHenet() {
     // Stored as a non-secret {bucket,name} reference (GET /api/henet/credential).
     let assignedCred = null;
     let tenantCreds = {};
-    _henetCredConflict = '';
+    let credConflict = '';
     try {
         const c = await credReq;
         if (c.ok && c.data) {
@@ -345,14 +438,18 @@ async function loadHenet() {
             tenantCreds = c.data.tenants || {};
         } else if (c.status === 409) {
             // Several slots name this tenant, so the server uses none of them.
-            _henetCredConflict = c.detail || 'Several HE.NET credential slots name this tenant';
+            credConflict = c.detail || 'Several HE.NET credential slots name this tenant';
         }
     } catch (e) { /* best-effort */ }
+    if (!isCurrent()) return;
+    // Published only by the current load, so a stale one can neither clear nor
+    // replace the conflict this page shows.
+    _henetCredConflict = credConflict;
     window._henetAssignedCred = assignedCred;
     // Label the scope: "Admin" for the global slot, nothing for a tenant slot
     // (the record list already makes the selected tenant obvious).
     const credScope = (admin && !adminScope) ? 'Admin ' : '';
-    const credInfo = _henetCredConflict
+    const credInfo = credConflict
         ? ' · <span id="henet-cred-conflict" class="text-red-600 font-medium"></span>'
         : canWrite
         ? (assignedCred
@@ -380,10 +477,15 @@ async function loadHenet() {
         </div>
       </div>`;
 
+    // This load's records: null until the read succeeds, so the bulk buttons on
+    // an error page (Deconfigure, Move all, Sync all) neither act on the list of
+    // the scope shown before nor take the failure for an empty list.
+    let records = null;
     try {
         const { ok, data: d, detail } = await recordsReq;
+        if (!isCurrent()) return;
         if (!ok) {
-            container.innerHTML = backBar + actionBar + `${_spokeErrorBanner(detail, 'HE.NET spoke not connected')}${_isSpokeUpdating(detail) ? '' : '<p class="px-4 pb-4 text-xs text-slate-500">Load the “HE.NET” role on an agent and store an HE DDNS key in the Credential Vault (secret type “HE.NET DDNS key”).</p>'}`;
+            root.innerHTML = backBar + actionBar + `${_spokeErrorBanner(detail, 'HE.NET spoke not connected')}${_isSpokeUpdating(detail) ? '' : '<p class="px-4 pb-4 text-xs text-slate-500">Load the “HE.NET” role on an agent and store an HE DDNS key in the Credential Vault (secret type “HE.NET DDNS key”).</p>'}`;
             return;
         }
         // A non-admin only ever gets their own tenant's records back (the
@@ -391,13 +493,9 @@ async function loadHenet() {
         // everything (global + every tenant's), each tagged with tenant_id, and
         // we scope it here to the tenant picked in the top selector.
         const allRecords = d.records || [];
-        const records = admin
+        records = admin
             ? allRecords.filter(r => (r.tenant_id || '') === adminScope)
             : allRecords;
-        window._henetRecords = records;
-        // Keep the record modal's tenant default + push-free re-home target in
-        // step with the selector (the modal reads _henetActiveTab).
-        if (admin) window._henetActiveTab = adminScope;
         const cols = ['Name', 'Type', 'Value', 'TTL', 'Last Push'].concat(canWrite ? [''] : []);
         const rowHtml = (r) => {
             const eName = String(r.name).replace(/'/g, "\\'");
@@ -415,23 +513,39 @@ async function loadHenet() {
             </tr>`;
         };
         const bodyHtml = tw(th(cols) + `<tbody>${records.map(rowHtml).join('')}</tbody>`);
-        container.innerHTML = backBar + actionBar + (records.length === 0
+        root.innerHTML = backBar + actionBar + (records.length === 0
             ? '<p class="p-4 text-slate-500 italic text-sm">No HE.NET records under management yet.' + (canWrite ? ' Use “+ Add Record”.' : '') + '</p>'
             : bodyHtml);
     } catch (err) {
-        container.innerHTML = backBar + actionBar + `<p class="p-4 text-red-500 text-sm">Error: ${err.message}</p>`;
+        if (!isCurrent()) return;
+        root.innerHTML = backBar + actionBar + `<p class="p-4 text-red-500 text-sm">Error: ${err.message}</p>`;
     } finally {
-        // Every branch above repaints the action bar, so fill the conflict in after it.
-        _henetShowCredConflict();
+        // Only the current load publishes, and only after its paint: every
+        // branch above repaints the action bar, so the conflict is filled in
+        // after it. A stale load painted nothing, so it publishes nothing.
+        if (isCurrent()) {
+            _henetPage = { seq, tenant: loadTenant, records, root };
+            // Keep the record modal's tenant default + push-free re-home target
+            // in step with the selector (the modal reads _henetActiveTab).
+            if (admin) window._henetActiveTab = adminScope;
+            _henetShowCredConflict();
+        }
     }
 }
 
+// A row's edit icon: open the record dialog on that row of the page.
 function editHenetRecord(name, type) {
-    const rec = (window._henetRecords || []).find(r => r.name === name && r.type === type);
+    const page = _henetLivePage(_henetPage);
+    if (!page) return;
+    const rec = (page.records || []).find(r => r.name === name && r.type === type);
     showHenetRecordModal(rec || { name, type });
 }
 
+// The Add / Edit record dialog (`editItem` is the row being edited). Save acts
+// on the page the dialog was opened from (see _henetLivePage).
 async function showHenetRecordModal(editItem) {
+    const page = _henetLivePage(_henetPage);
+    if (!page) return;
     const editing = !!(editItem && editItem.value != null);
     const val = v => (v == null ? '' : String(v).replace(/"/g, '&quot;'));
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
@@ -444,6 +558,7 @@ async function showHenetRecordModal(editItem) {
     let tenantField = '';
     if (isAdmin()) {
         await ensureTenants();
+        if (!_henetLivePage(page)) return;
         const tenants = window._allTenants || [];
         const cur = (editItem && editItem.tenant_id != null)
             ? String(editItem.tenant_id) : String(window._henetActiveTab || '');
@@ -466,6 +581,7 @@ async function showHenetRecordModal(editItem) {
             <button onclick="saveHenetRecord()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold" title="${editing ? 'Save changes to this HE.NET record' : 'Add record to HE.NET management'}">${editing ? 'Save Changes' : 'Add Record'}</button>
             <button onclick="document.getElementById('henet-record-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm" title="Cancel and close dialog">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
+    modal._henetPage = page;
     if (editing) { modal.dataset.editName = editItem.name; modal.dataset.editType = editItem.type; modal.dataset.editTenant = String(editItem.tenant_id || ''); modal.dataset.editValue = String(editItem.value || ''); }
 }
 
@@ -476,7 +592,10 @@ async function showHenetRecordModal(editItem) {
 // slot; a tenant-admin always gets their own tenant's slot — never
 // client-choosable, so this same modal/save path works unmodified for both.
 async function showHenetCredModal() {
+    const page = _henetLivePage(_henetPage);
+    if (!page) return;
     const creds = await _henetVaultCredOptions();
+    if (!_henetLivePage(page)) return;
     const assigned = window._henetAssignedCred;
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     const opts = creds.length
@@ -486,7 +605,7 @@ async function showHenetCredModal() {
             return `<option value="${escapeHtml(v)}"${sel}>${escapeHtml(c.label)}</option>`;
           }).join('')
         : '';
-    openModal('henet-cred-modal', `
+    const modal = openModal('henet-cred-modal', `
         <h3 class="text-lg font-bold text-navy">Assign HE.NET DDNS credential</h3>
         <p class="text-sm text-slate-500">The HE.NET module uses this Credential Vault secret to push records — assign it once and you won't be asked per record. Use the SAME Hurricane Electric credential as certificates: add it under <b>Credential Vault → + Add secret → DNS → Hurricane Electric (account login)</b> (automation mode), or reuse an existing one — the same HE credential works for both certs and DNS.</p>
         ${_henetCredConflict ? '<p class="text-sm text-red-600">Several credential slots name this tenant, so none of them is used. Save assigns the credential you pick and replaces them all; Clear removes them all.</p>' : ''}
@@ -500,10 +619,12 @@ async function showHenetCredModal() {
             ${creds.length ? `<button onclick="_henetSaveCred()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold" title="Save assigned HE.NET credential">Save</button>` : ''}
             <button onclick="document.getElementById('henet-cred-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm" title="Cancel and close dialog">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
+    modal._henetPage = page;
 }
 
 // Credential dialog's Save: assign the picked vault secret to the current scope's slot.
 async function _henetSaveCred() {
+    if (!_henetDialogPage('henet-cred-modal')) return;
     const sel = document.getElementById('henet-assign-cred')?.value || '';
     const [bucket, name] = String(sel).split('|');
     if (!bucket || !name) { showToast('Add a Hurricane Electric credential to the Credential Vault first', 'error'); return; }
@@ -526,6 +647,7 @@ async function _henetSaveCred() {
 
 // Credential dialog's Clear: remove the current scope's credential assignment.
 async function _henetClearCred() {
+    if (!_henetDialogPage('henet-cred-modal')) return;
     try {
         const scope = _henetScope();
         const url = scope
@@ -626,6 +748,7 @@ async function _henetSaveSchedule() {
 
 // Record dialog's Save: write the record at HE.NET, or only move it when an admin changes just its tenant.
 async function saveHenetRecord() {
+    if (!_henetDialogPage('henet-record-modal')) return;
     const modal = document.getElementById('henet-record-modal');
     const editing = modal && modal.dataset.editName;
     const get = id => document.getElementById(id)?.value?.trim() || '';
@@ -683,7 +806,10 @@ async function saveHenetRecord() {
 
 // Row's trash icon: after a confirm, stop managing the record (its dns.he.net entry is left as is).
 async function deleteHenetRecord(name, type) {
+    const page = _henetLivePage(_henetPage);
+    if (!page) return;
     if (!await showConfirmToast(`Remove ${name} (${type}) from HE.NET management? (The zone entry at dns.he.net is left unchanged — delete it there if you want it gone.)`)) return;
+    if (!_henetLivePage(page)) return;
     try {
         const { ok, data: d, detail } = await _spokeFetch('/api/henet/record', {
             method: 'DELETE',
@@ -711,10 +837,13 @@ function _henetCurrentScopeLabel() {
 // (looping the same DELETE the per-row trash icon uses). The HE.NET zone at
 // dns.he.net is never touched; this only drops LM's management records.
 async function deconfigureHenetScope() {
-    const recs = (window._henetRecords || []).slice();
+    const page = _henetLoadedPage();
+    if (!page) return;
+    const recs = page.records;
     const scope = _henetCurrentScopeLabel();
     if (!recs.length) { showToast(`No HE.NET records under management for ${scope}.`, 'success'); return; }
     if (!await showConfirmToast(`Deconfigure HE.NET for ${scope}?\n\nThis removes all ${recs.length} managed record(s) from management. The zone entries at dns.he.net are left unchanged — delete them there if you want them gone.`)) return;
+    if (!_henetLivePage(page)) return;
     let okN = 0, failN = 0;
     for (const r of recs) {
         try {
@@ -736,15 +865,18 @@ async function deconfigureHenetScope() {
 // operator on the destination tenant so they see the moved records. Admin only.
 async function showHenetMoveAllModal() {
     if (!isAdmin()) { showToast('Admin only', 'error'); return; }
-    const recs = (window._henetRecords || []);
+    const page = _henetLoadedPage();
+    if (!page) return;
+    const recs = page.records;
     if (!recs.length) { showToast('No records in the current view to move.', 'success'); return; }
     await ensureTenants();
+    if (!_henetLivePage(page)) return;
     const tenants = window._allTenants || [];
     const curScope = (currentTenant && currentTenant !== 'default') ? currentTenant : '';
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     const opts = [`<option value=""${curScope === '' ? ' disabled' : ''}>Admin (admin-managed / shared)</option>`]
         .concat(tenants.map(t => `<option value="${escapeHtml(t.id)}"${t.id === curScope ? ' disabled' : ''}>${escapeHtml(t.name || t.id)}</option>`)).join('');
-    openModal('henet-moveall-modal', `
+    const modal = openModal('henet-moveall-modal', `
         <h3 class="text-lg font-bold text-navy">Move all records → tenant</h3>
         <p class="text-xs text-slate-500">Re-home all ${recs.length} record(s) currently shown (<span class="font-medium">${escapeHtml(_henetCurrentScopeLabel())}</span>) to another tenant. Metadata only — the HE.NET zone at dns.he.net is untouched.</p>
         <div class="space-y-1"><label class="text-xs text-slate-500 font-bold">Destination</label><select id="henet-moveall-target" class="${inputCls}" title="Select destination tenant to re-home these records to">${opts}</select></div>
@@ -752,16 +884,17 @@ async function showHenetMoveAllModal() {
             <button onclick="_henetMoveAll()" class="bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand px-6 py-2 rounded-full text-sm font-bold" title="Move all records in current view to selected destination tenant">Move all</button>
             <button onclick="document.getElementById('henet-moveall-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-full text-sm" title="Cancel and close dialog">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
+    modal._henetPage = page;
 }
 
+// The Move all dialog's button: re-home the records of the page the dialog was
+// opened from (never empty: the dialog does not open for an empty page).
 async function _henetMoveAll() {
-    const sel = document.getElementById('henet-moveall-target');
-    if (!sel) return;
-    const tgt = sel.value;
-    const recs = (window._henetRecords || []).slice();
-    if (!recs.length) { showToast('Nothing to move.', 'success'); return; }
+    const page = _henetDialogPage('henet-moveall-modal');
+    if (!page) return;
+    const tgt = document.getElementById('henet-moveall-target').value;
     let okN = 0, failN = 0;
-    for (const r of recs) {
+    for (const r of page.records) {
         try {
             const { ok, data: d } = await _spokeFetch('/api/henet/record/tenant', {
                 method: 'POST',
@@ -781,8 +914,11 @@ async function _henetMoveAll() {
 
 // Import existing: after a confirm, bring the HE.NET zones' unmanaged A/AAAA records under management.
 async function importHenet() {
+    const page = _henetLivePage(_henetPage);
+    if (!page) return;
     if (!window._henetAssignedCred) { showToast(_henetNoCredMsg('Assign an HE.NET credential first'), 'error'); return showHenetCredModal(); }
     if (!await showConfirmToast('Read the existing records in your HE.NET zone(s) and bring any A/AAAA records not already managed under management? (Reads the dns.he.net web panel with the assigned account login — nothing is pushed or changed at HE.)')) return;
+    if (!_henetLivePage(page)) return;
     try {
         const scope = _henetScope();
         const { ok, data: d, detail } = await _spokeFetch('/api/henet/import', {
@@ -803,11 +939,14 @@ async function importHenet() {
 
 // Sync all: after a confirm, re-apply the managed A/AAAA records in view at HE.NET with the account login.
 async function syncHenet() {
-    const records = (window._henetRecords || []).filter(r => r.type === 'A' || r.type === 'AAAA')
+    const page = _henetLoadedPage();
+    if (!page) return;
+    const records = page.records.filter(r => r.type === 'A' || r.type === 'AAAA')
         .map(r => ({ name: r.name, type: r.type, value: r.value, ttl: r.ttl }));
     if (!records.length) { showToast('No A/AAAA records under management yet — use “⇩ Import existing” to pull in the records already in your HE.NET zone.', 'error'); return; }
     if (!window._henetAssignedCred) { showToast(_henetNoCredMsg('Assign an HE.NET account credential first'), 'error'); return showHenetCredModal(); }
     if (!await showConfirmToast(`Re-apply all ${records.length} managed A/AAAA record(s) at HE.NET using your account login?\n\nEach record is create/updated in the dns.he.net control panel — no per-record DDNS key needed.`)) return;
+    if (!_henetLivePage(page)) return;
     try {
         const scope = _henetScope();
         const { ok, data: d, detail } = await _spokeFetch('/api/henet/sync', {
