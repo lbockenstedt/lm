@@ -202,16 +202,26 @@ class _FakeHub:
     global_config dict, an empty module-type map (so module_key is None → the
     agent path, which is exactly where the hub-URL push is inserted), and a
     recording send_to_spoke. ``state.get_global_config()`` returns the gc dict
-    passed to the constructor (bound per-instance in ``_make_fake_hub``)."""
+    passed to the constructor (bound per-instance in ``_make_fake_hub``).
+    ``spoke_id_alias`` and ``synthetic_spokes`` start empty, as on a hub with
+    no migrated or synthetic spokes."""
+
+    _primary_key = LabManagerHub._primary_key
 
     def __init__(self, gc):
         self.key_manager = type("KM", (), {"hub_secrets": ["hubsecret"]})()
         self._gc = gc
         self.spoke_module_types = {}  # agent-1 has no module_key → early return AFTER hub-url push
+        self.spoke_id_alias = {}
+        self.synthetic_spokes = set()
         self.sent = []
         self.state = type("S", (), {
             "get_global_config": lambda self, _g=gc: _g,
         })()
+
+    def _is_role_subspoke(self, spoke_id):
+        """No role sub-spokes here."""
+        return False
 
     async def send_to_spoke(self, msg):
         self.sent.append(msg)
@@ -248,13 +258,36 @@ async def test_push_config_omits_hub_url_when_unset():
     assert "SPOKE_SET_HUB_SECRET" in types
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("synthetic", [False, True], ids=["real", "synthetic"])
+async def test_push_config_host_re_pushes_skip_synthetic_spokes(synthetic):
+    """On connect a synthetic (Test Data Feed) spoke is not re-sent the hub URL,
+    watchdog or TLS-verify config, which it has no host to apply; a real spoke
+    still gets all three. The marker is keyed by primary key, so the connect id
+    must be resolved through the alias map before the lookup."""
+    hub = _make_fake_hub({"hub": {"url": "wss://hub.example.com:443"},
+                          "hub_contact_watchdog": {"enabled": True},
+                          "hub_tls_verify": "on"})
+    hub.spoke_id_alias = {"agent-1": "guid-1"}
+    if synthetic:
+        hub.synthetic_spokes.add("guid-1")
+    await LabManagerHub.push_config_to_spoke(hub, "agent-1")
+    host_cmds = {"SPOKE_SET_HUB_URL", "SPOKE_SET_WATCHDOG", "SPOKE_SET_TLS_VERIFY"}
+    types = {m.payload.type for m in hub.sent}
+    assert "SPOKE_SET_HUB_SECRET" in types
+    assert types & host_cmds == (set() if synthetic else host_cmds)
+
+
 class _FakeFanHub:
     """Minimal hub for push_hub_url_to_all_spokes: an approved_modules map and
     a recording push_or_queue_to_spoke that returns queued/pushed/raises per
     configured spoke."""
 
-    def __init__(self, approved, queued=(), fail=()):
+    _host_push_targets = LabManagerHub._host_push_targets
+
+    def __init__(self, approved, queued=(), fail=(), synthetic=()):
         self.approved_modules = {sid: True for sid in approved}
+        self.synthetic_spokes = set(synthetic)
         self._queued = set(queued)
         self._fail = set(fail)
         self.calls = []
@@ -290,8 +323,23 @@ async def test_push_hub_url_fan_out_no_targets():
     """No approved spokes → empty result, no calls."""
     hub = _FakeFanHub([])
     res = await LabManagerHub.push_hub_url_to_all_spokes(hub, "wss://new:443")
-    assert res == {"status": "SUCCESS", "pushed": [], "queued": [], "failed": []}
+    assert res == {"status": "SUCCESS", "pushed": [], "queued": [], "failed": [],
+                   "skipped": []}
     assert hub.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fan_out, cmd", [
+    ("push_hub_url_to_all_spokes", "SPOKE_SET_HUB_URL"),
+    ("push_watchdog_to_all_spokes", "SPOKE_SET_WATCHDOG"),
+])
+async def test_fan_out_skips_synthetic_spokes(fan_out, cmd):
+    """A synthetic (Test Data Feed) spoke is never sent a host-config push: it
+    could only acknowledge it, which read as "pushed" for a change no host made."""
+    hub = _FakeFanHub(["a-1", "feed-1"], synthetic=("feed-1",))
+    res = await getattr(LabManagerHub, fan_out)(hub, {"x": 1})
+    assert (res["pushed"], res["skipped"]) == (["a-1"], ["feed-1"])
+    assert [(sid, c) for sid, c, _ in hub.calls] == [("a-1", cmd)]
 
 
 # ── POST /api/setup/hub-url route ────────────────────────────────────────────
@@ -321,7 +369,7 @@ class _FakeRouteHub:
         self.fanned = []
         self._fan_result = fan_result or {
             "status": "SUCCESS", "pushed": ["a-1", "a-2"], "queued": ["a-3"],
-            "failed": []}
+            "failed": [], "skipped": ["feed-1"]}
 
     async def push_hub_url_to_all_spokes(self, url):
         self.fanned.append(url)
@@ -344,6 +392,7 @@ def test_route_set_hub_url_validates_writes_and_fans_out():
     assert body["status"] == "ok"
     assert body["pushed"] == ["a-1", "a-2"]
     assert body["queued"] == ["a-3"]
+    assert body["skipped"] == ["feed-1"]
     # global_config["hub"]["url"] persisted.
     assert hub.state.system_state["global_config"]["hub"]["url"] == "wss://hub.example.com:443"
     # Fan-out invoked once with the URL.

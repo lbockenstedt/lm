@@ -187,6 +187,17 @@ def test_exec_spoke_not_connected_is_404():
         assert ei.value.status_code == 404
 
 
+def test_exec_on_a_synthetic_spoke_is_400_and_never_relayed():
+    with tempfile.TemporaryDirectory() as tmp:
+        app, hub, tok = _reg_relay(tmp)
+        hub.synthetic_spokes = {"cs-svr-06"}
+        exec_fn = app.routes[("POST", "/admin/ops/exec")]
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(exec_fn(_BodyRequest("127.0.0.1", tok, {
+                "target": "cs-svr-06", "command": "uptime"})))
+        assert ei.value.status_code == 400 and hub.relayed == []
+
+
 def test_exec_missing_command_is_400():
     with tempfile.TemporaryDirectory() as tmp:
         app, hub, tok = _reg_relay(tmp)

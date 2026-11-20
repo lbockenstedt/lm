@@ -16,6 +16,10 @@ anything, which is precisely the gap.
 Scoped to undefined names only. This is NOT a lint gate — unused imports, style
 and shadowing are deliberately ignored, so the suite does not start failing over
 cosmetics.
+
+It scans every module under core/src, subpackages included. It used to look
+only at src/ and src/routes/, so when a dead-code sweep deleted a store setter
+that simulations/routes.py still called, three NameErrors shipped unnoticed.
 """
 import os
 import pathlib
@@ -43,11 +47,9 @@ _FATAL = (
 
 
 def _python_files():
-    for base in ("routes", ""):
-        d = _SRC / base if base else _SRC
-        if not d.is_dir():
-            continue
-        for p in sorted(d.glob("*.py")):
+    """Every module under core/src, subpackages included."""
+    for p in sorted(_SRC.rglob("*.py")):
+        if "__pycache__" not in p.parts:
             yield p
 
 
@@ -101,11 +103,21 @@ def _has_future_annotations(tree):
                for n in ast.walk(tree))
 
 
+def _label(path):
+    """The name findings and _BASELINE use for ``path``: its path under
+    core/src, as two modules can share a file name (routes/oidc.py and
+    security/oidc.py); a file outside core/src keeps its bare name."""
+    try:
+        return path.relative_to(_SRC).as_posix()
+    except ValueError:
+        return path.name
+
+
 def _undefined_names(path):
     try:
         tree = ast.parse(path.read_text(), filename=str(path))
     except SyntaxError as e:  # a syntax error is a different (louder) failure
-        return [f"{path.name}: SyntaxError: {e}"]
+        return [f"{_label(path)}: SyntaxError: {e}"]
     ignorable = _annotation_only_names(tree) if _has_future_annotations(tree) else set()
     out = []
     for m in checker.Checker(tree, filename=str(path)).messages:
@@ -114,23 +126,18 @@ def _undefined_names(path):
         name = m.message_args[0] if m.message_args else ""
         if name in ignorable:
             continue
-        out.append(f"{path.name}:{m.lineno}: {m.message % m.message_args}")
+        out.append(f"{_label(path)}:{m.lineno}: {m.message % m.message_args}")
     return out
 
 
-#: Pre-existing findings, recorded the day this check was added. Every one is a
-#: REAL latent NameError in a rarely-taken branch — not a false positive, and
-#: not something to leave forever. They are baselined rather than fixed here
-#: because they sit in unrelated modules and each needs its own judgement about
-#: what the missing name should be:
-#:
-#:   oidc `cfg`                   — one site.
+#: Pre-existing findings, recorded the day this check was added. Every one was
+#: a REAL latent NameError in a rarely-taken branch, baselined rather than
+#: fixed in that change because each sat in an unrelated module. All of them
+#: are fixed now, so the baseline is empty: a new finding fails at once.
 #:
 #: The list is self-cleaning: fix one and this test FAILS until it is removed
 #: from here, so the baseline cannot quietly rot into a permanent exemption.
-_BASELINE = {
-    ("oidc.py", "cfg"),
-}
+_BASELINE: set = set()
 
 
 def _key(finding):
@@ -139,7 +146,8 @@ def _key(finding):
     return (fname, name)
 
 
-@pytest.mark.parametrize("path", list(_python_files()), ids=lambda p: p.name)
+@pytest.mark.parametrize("path", list(_python_files()),
+                         ids=lambda p: str(p.relative_to(_SRC)))
 def test_no_undefined_names(path):
     """Every name a module uses must be importable/defined in that module.
 
@@ -170,3 +178,11 @@ def test_the_check_actually_catches_the_regression(tmp_path):
     bug = tmp_path / "regression.py"
     bug.write_text("def f():\n    return secrets.token_urlsafe(24)\n")
     assert _undefined_names(bug), "the check no longer detects a missing import"
+
+
+def test_each_module_has_its_own_label():
+    """Modules share file names (routes/oidc.py and security/oidc.py, every
+    package's __init__.py), so a _BASELINE entry keyed on the bare name would
+    also exempt its namesakes. Labels are paths under core/src instead."""
+    labels = [_label(p) for p in _python_files()]
+    assert len(labels) == len(set(labels))

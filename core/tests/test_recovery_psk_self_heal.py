@@ -85,7 +85,7 @@ def test_signature_verifies_under_the_spokes_psk(km):
 # --------------------------------------------------------------------------
 
 class _Spoke(BaseControlPlane):
-    """BaseControlPlane with persistence neutralized (see loadtest_spokes.py)."""
+    """BaseControlPlane with persistence neutralized (as messaging/synthetic_spoke.py does)."""
 
     def __init__(self, **kw):
         # Set before super(): __init__ persists INSTALL_UUID on the way through.

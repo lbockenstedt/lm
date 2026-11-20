@@ -408,6 +408,7 @@ class Run:
         hub.netbox_server_agents = set()
         hub.ldap_server_agents = set()
         hub.zabbix_server_agents = set()
+        hub.synthetic_spokes = set()
         hub.spoke_enc_capable = {}
         hub.spoke_mtls_csr_capable = {}
         hub.agent_info = {}

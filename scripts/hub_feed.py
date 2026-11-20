@@ -64,9 +64,13 @@ import http.cookiejar
 import json
 # os/sys: import paths, random bytes, stdout/stderr.
 import os
+# signal: turn the hub's Stop (SIGTERM) into a clean exit.
+import signal
 # ssl: TLS contexts for the source hub (self-signed accepted by default).
 import ssl
 import sys
+# threading: run the blocking source poll off the event loop (see _in_daemon_thread).
+import threading
 # time: pacing, deadlines and rate-limited error logs.
 import time
 # urllib: the HTTP client for the read-only source hub API.
@@ -110,6 +114,12 @@ except ImportError:  # pragma: no cover - bare checkout without core/src on path
 #: core/src/routes/test_feed.py, which parses these lines out of the child stream.
 TOKEN_ROTATION_SENTINEL = "##LM-TEST-FEED-TOKEN## "
 
+#: Socket timeout, in seconds, for each network step of the token refresh POST
+#: (connect, TLS handshake, answer). The hub's Stop waits for a refresh in flight
+#: before it SIGKILLs the feeder; its grace (_STOP_GRACE_S in
+#: core/src/routes/test_feed.py) covers three of these steps.
+REFRESH_TIMEOUT = 20
+
 
 class SourceHub:
     """Read-only client for the source hub's aggregate API.
@@ -139,6 +149,11 @@ class SourceHub:
         # When True, every successful rotation prints a TOKEN_ROTATION_SENTINEL
         # line so the parent hub persists the new pair (see the constant's note).
         self.emit_rotations = bool(emit_rotations)
+        # Held from the refresh POST until the new pair is printed, so close()
+        # can let a rotation finish before the process exits. Once closing
+        # (set at SIGTERM by stop_rotating), no new rotation starts.
+        self._rotating = threading.Lock()
+        self._closing = False
         # Cookie jar for password logins; TLS verification is off unless insecure=False.
         self.jar = http.cookiejar.CookieJar()
         ctx = ssl._create_unverified_context() if insecure else ssl.create_default_context()
@@ -188,31 +203,69 @@ class SourceHub:
         # No refresh token: cannot rotate.
         if not self.refresh_token:
             return False
-        # POST the refresh token to the hub's refresh endpoint.
-        body = json.dumps({"refresh_token": self.refresh_token}).encode()
-        req = urllib.request.Request(
-            f"{self.base}/auth/token/refresh", data=body,
-            headers={"Content-Type": "application/json"}, method="POST")
-        # Any failure clears the refresh token so we do not retry with a spent one.
-        try:
-            with self.opener.open(req, timeout=20) as r:
-                d = json.loads(r.read().decode())
-        except Exception as e:  # noqa: BLE001
-            print(f"  ! token refresh failed: {e}", file=sys.stderr)
-            self.refresh_token = ""   # spent or rejected; don't spin on it
-            return False
-        # Adopt the new pair (keep the old access token if none came back).
-        self.token = d.get("access_token") or self.token
-        self.refresh_token = d.get("refresh_token") or ""
-        print("  token refreshed")
-        if self.emit_rotations and self.token:
-            # Hand the fresh pair to the parent hub so it replaces the spent one
-            # in config. Its own line, flushed immediately, so the hub persists
-            # it before this process can exit or be killed mid-rotation.
-            sys.stdout.write(TOKEN_ROTATION_SENTINEL + json.dumps(
-                {"access": self.token, "refresh": self.refresh_token}) + "\n")
-            sys.stdout.flush()
-        return True
+        # Hold the lock until the new pair is printed (see close()).
+        with self._rotating:
+            # Stopping: the new pair might not reach the hub, so spend nothing.
+            if self._closing:
+                return False
+            # POST the refresh token to the hub's refresh endpoint.
+            body = json.dumps({"refresh_token": self.refresh_token}).encode()
+            req = urllib.request.Request(
+                f"{self.base}/auth/token/refresh", data=body,
+                headers={"Content-Type": "application/json"}, method="POST")
+            # Any failure clears the refresh token so we do not retry with a spent one.
+            try:
+                with self.opener.open(req, timeout=REFRESH_TIMEOUT) as r:
+                    d = json.loads(r.read().decode())
+            except Exception as e:  # noqa: BLE001
+                print(f"  ! token refresh failed: {e}", file=sys.stderr)
+                self.refresh_token = ""   # spent or rejected; don't spin on it
+                return False
+            # Adopt the new pair (keep the old access token if none came back).
+            self.token = d.get("access_token") or self.token
+            self.refresh_token = d.get("refresh_token") or ""
+            print("  token refreshed")
+            if self.emit_rotations and self.token:
+                # Hand the fresh pair to the parent hub so it replaces the spent
+                # one in config. Its own line, flushed immediately, so the hub
+                # persists it before this process can exit or be killed mid-rotation.
+                sys.stdout.write(TOKEN_ROTATION_SENTINEL + json.dumps(
+                    {"access": self.token, "refresh": self.refresh_token}) + "\n")
+                sys.stdout.flush()
+            return True
+
+    def stop_rotating(self):
+        """Let no new token rotation start, without waiting for one in flight.
+
+        The feeder's SIGTERM handler calls this on the event loop thread, so it
+        must not block, and a rotation in flight holds ``_rotating`` until its
+        answer arrives. ``_rotate`` reads the flag under that lock, so a
+        rotation that has not reached the check spends nothing, and one past it
+        is already in flight, which ``close()`` waits for."""
+        self._closing = True
+
+    def close(self):
+        """Stop token rotation, waiting for a rotation in flight to finish.
+
+        The poll runs in a daemon thread (``_in_daemon_thread``), so the process
+        can exit while that thread is inside ``_rotate``. The refresh POST spends
+        the old token on the source hub, and the parent hub learns the new pair
+        only from the sentinel line; exiting between the two leaves the hub
+        holding a spent token, and its next restart gets the whole token family
+        revoked. So the wait has no timeout of its own: the source may spend the
+        token and still answer up to REFRESH_TIMEOUT later, and a shorter wait
+        abandoned that answer.
+
+        After a Stop the SIGTERM handler has already called ``stop_rotating``,
+        so a rotation still running here began before the SIGTERM, and it ran
+        alongside the spokes' close rather than after it. Each network step of
+        its POST is bounded by REFRESH_TIMEOUT, and the hub's Stop allows for
+        three such steps from the SIGTERM before it SIGKILLs. A second Ctrl-C
+        interrupts the wait. After this returns, no rotation starts."""
+        self.stop_rotating()
+        # The lock is free once a rotation in flight has printed its sentinel.
+        with self._rotating:
+            pass
 
     def _get_json(self, path):
         """GET path as JSON, rotating the token once and retrying if the hub answers 401."""
@@ -293,33 +346,34 @@ def _assert_distinct(source_url, target_url):
 # --------------------------------------------------------------------------
 
 def _load_feed_spoke():
-    """Import BaseControlPlane lazily so --dry-run works off-box.
+    """Import SyntheticSpoke lazily so --dry-run works off-box.
 
     Scrubbing and sharding are pure and unit-testable; only the replay half
     needs the lm core on disk. Importing at module scope would make the whole
     script unusable — tests included — anywhere but a spoke host."""
     # Try both package layouts for the real spoke client.
-    BaseControlPlane = None
+    SyntheticSpoke = None
     err = None
-    for mod in ("core.src.messaging.control_plane", "messaging.control_plane"):
+    for mod in ("core.src.messaging.synthetic_spoke", "messaging.synthetic_spoke"):
         try:
-            BaseControlPlane = __import__(mod, fromlist=["BaseControlPlane"]).BaseControlPlane
+            SyntheticSpoke = __import__(mod, fromlist=["SyntheticSpoke"]).SyntheticSpoke
             break
         except Exception as e:  # noqa: BLE001
             err = e
     # Neither layout imports: stop with a hint.
-    if BaseControlPlane is None:
+    if SyntheticSpoke is None:
         raise SystemExit(
-            "Cannot import BaseControlPlane — run where the lm core is on disk "
+            "Cannot import SyntheticSpoke — run where the lm core is on disk "
             f"(e.g. PYTHONPATH=/opt/lm/core/src). Last error: {err}")
 
-    class FeedSpoke(BaseControlPlane):
+    class FeedSpoke(SyntheticSpoke):
         """A real spoke client replaying a fixed snapshot instead of inventing one.
 
-        Side-effects are neutralised the same way ``loadtest_spokes.LoadSpoke``
-        does, and for the same reason: this is a throwaway identity that must
-        never write a real ``.env``, touch healthy-marker files, or act on
-        SPOKE_UPDATE (which would git-pull /opt/lm and restart the host)."""
+        ``SyntheticSpoke`` keeps it off the host: the feeder runs as a child of
+        the Dev/QA hub, so a host command or a ``.env`` write would act on the
+        hub's own box. It refuses host commands (OS updates, reboot, Remote
+        Console), skips hub pushes such as SPOKE_UPDATE, and marks itself
+        synthetic so the hub does not target it."""
 
         def __init__(self, spoke_id, payload, stats, interval=30.0,
                      module_type="simulation", display_name="", **kw):
@@ -382,7 +436,6 @@ def _load_feed_spoke():
             p = payload or {}
             return bool(p.get("clients")) or bool(p.get("proxmox_vms")) or bool(p.get("vms"))
 
-        # ── neutralise side-effects (mirrors loadtest_spokes.LoadSpoke) ──────
         def _ensure_install_uuid(self):
             """Return a stable install id derived from the spoke id (no .env writes)."""
             # STABLE per synthetic spoke. The hub keys a module by its
@@ -395,34 +448,6 @@ def _load_feed_spoke():
             import uuid
             return uuid.uuid5(uuid.NAMESPACE_OID,
                               f"lm-feed-install:{self.spoke_id}").hex
-
-        def _persist_session_secret(self, new_secret):
-            """Do not persist rotated session secrets (throwaway spoke)."""
-            pass
-
-        def _persist_hub_secret(self, new_secret):
-            """Do not persist the hub secret."""
-            pass
-
-        def _persist_recovery_psk(self, new_psk):
-            """Do not persist a recovery PSK."""
-            pass
-
-        def _touch_healthy_marker(self):
-            """Do not create the healthy marker file."""
-            pass
-
-        def _clear_healthy_marker(self):
-            """Do not remove a healthy marker file."""
-            pass
-
-        async def handle_system_command(self, cmd_type, data):
-            """Handle a hub system command, ignoring SPOKE_UPDATE so nothing is pulled or
-            restarted.
-            """
-            if cmd_type == "SPOKE_UPDATE":
-                return {"status": "SUCCESS", "message": "hub_feed: SPOKE_UPDATE ignored"}
-            return await super().handle_system_command(cmd_type, data)
 
         def _create_spoke_tasks(self, websocket):
             """Return the per-connection tasks: the telemetry feed loop, or nothing for identity-
@@ -524,6 +549,51 @@ def _resolve_tenant(payload, tenant_map, default):
     return default or None
 
 
+async def _in_daemon_thread(fn):
+    """Run the blocking ``fn()`` in a daemon thread and return its result.
+
+    The hub's Stop sends SIGTERM and SIGKILLs a feeder that has not exited 75s
+    later. A snapshot makes up to four GETs, each with a 30s read timeout, so a
+    poll on the loop thread kept the SIGTERM handler from running for up to two
+    minutes: the feeder was killed and its scratch dir left behind. Awaiting
+    this instead lets SIGTERM cancel the wait at once.
+
+    Not ``asyncio.to_thread``: ``asyncio.run`` joins the default executor on
+    the way out, and ``concurrent.futures`` joins its workers at exit, so a
+    stuck GET would still hold up the exit. A daemon thread is abandoned at
+    exit. ``SourceHub.close`` covers the one thing it must not abandon, a token
+    rotation in flight.
+
+    An exception from ``fn`` is raised here, including the ``SystemExit`` that
+    ``snapshot()`` raises for a fatal 401 or 403."""
+    loop = asyncio.get_running_loop()
+    fut = loop.create_future()
+
+    def _settle(ok, value):
+        """Pass the thread's outcome to the waiting task, unless it was cancelled."""
+        if fut.done():
+            return
+        if ok:
+            fut.set_result(value)
+        else:
+            fut.set_exception(value)
+
+    def _work():
+        """Run fn() and hand its result or exception back to the loop thread."""
+        try:
+            outcome = (True, fn())
+        except BaseException as e:  # noqa: BLE001 - SystemExit must reach the caller
+            outcome = (False, e)
+        # The loop is closed when the feeder stopped while fn() was running.
+        try:
+            loop.call_soon_threadsafe(_settle, *outcome)
+        except RuntimeError:
+            pass
+
+    threading.Thread(target=_work, name="source-poll", daemon=True).start()
+    return await fut
+
+
 async def _run(args, source, salt):
     """Poll the source, start one synthetic spoke per source spoke, and keep them updated.
 
@@ -532,6 +602,21 @@ async def _run(args, source, salt):
         source: SourceHub client.
         salt: pseudonym salt for identity scrubbing.
     """
+    # The hub's Stop sends SIGTERM, whose default action exits without running
+    # atexit, leaving the spokes' scratch dir behind. Cancel this task instead,
+    # as Ctrl-C does, so the spokes stop and the process exits cleanly.
+    task = asyncio.current_task()
+
+    def _on_sigterm():
+        """Stop the feed: let no new token rotation start, then cancel the feed task."""
+        # Stop rotating first. The spokes can then take up to 50s to close (5 x
+        # close_timeout on websockets 13), and a refresh started meanwhile, by
+        # a poll that hits a 401, could still be waiting for its answer at the
+        # hub's SIGKILL after the source had spent the token (see close()).
+        source.stop_rotating()
+        task.cancel()
+
+    asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, _on_sigterm)
     # Build the spoke class (needs the lm core), shared counters and the stop event.
     FeedSpoke = _load_feed_spoke()
     stats = {"sent": 0, "send_err": 0, "connects": 0, "conn_err": 0, "polls": 0}
@@ -557,7 +642,7 @@ async def _run(args, source, salt):
     # Absolute stop time, or None to run forever.
     deadline = time.time() + args.duration if args.duration > 0 else None
     # First poll: scrubbed per-spoke payloads keyed by synthetic spoke id.
-    payloads = build_payloads(source.snapshot(), salt, args.prefix)
+    payloads = build_payloads(await _in_daemon_thread(source.snapshot), salt, args.prefix)
     stats["polls"] += 1
     if not payloads:
         # The source has no spokes YET — e.g. no active simulations are
@@ -577,7 +662,8 @@ async def _run(args, source, salt):
                                  "run — nothing to feed.")
             await asyncio.sleep(args.interval)
             try:
-                payloads = build_payloads(source.snapshot(), salt, args.prefix)
+                payloads = build_payloads(await _in_daemon_thread(source.snapshot),
+                                          salt, args.prefix)
                 stats["polls"] += 1
             except Exception as e:  # noqa: BLE001
                 print(f"  ! poll while waiting for data failed: {e}",
@@ -627,7 +713,8 @@ async def _run(args, source, salt):
             # target and churn the view.
             try:
                 # Fetch a fresh snapshot and find spokes we have not seen yet.
-                fresh = build_payloads(source.snapshot(), salt, args.prefix)
+                fresh = build_payloads(await _in_daemon_thread(source.snapshot),
+                                       salt, args.prefix)
                 stats["polls"] += 1
                 new_ids = [sid for sid in fresh if sid not in spokes]
                 # Existing spokes get the new data in place.
@@ -763,13 +850,22 @@ def main():
         print(f"\n-- {len(payloads)} spoke(s); salt={salt} (dry run, target untouched)")
         return
 
-    # Run the feed until stopped.
-    asyncio.run(_run(args, source, salt))
+    # Run the feed until stopped. On SIGTERM the poll thread may be mid token
+    # rotation; let it print the new pair first (see close()).
+    try:
+        asyncio.run(_run(args, source, salt))
+    finally:
+        # Closing the event loop gave SIGTERM back its default action, so a
+        # second one (Stop clicked twice, say) would kill the feeder before that
+        # pair is printed. Ignore it; the hub's SIGKILL still bounds the wait.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        source.close()
 
 
-# Run main(); Ctrl-C exits quietly.
+# Run main(); Ctrl-C or SIGTERM exits quietly. A SIGTERM during the first poll or
+# the ramp cancels _run outside its main loop, so CancelledError reaches here.
 if __name__ == "__main__":
     try:
         main()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         pass

@@ -117,6 +117,25 @@ def test_hub_push_groups_by_tenant_with_its_netbox_slug():
     assert [c[2]["tenant_slug"] for c in hub.calls] == ["acme-nb"]
 
 
+def test_hub_push_builds_the_graph_off_the_event_loop(monkeypatch):
+    """Building each tenant's map is CPU work; it must not stall the loop."""
+    import nw_topology
+    seen, real = [], nw_topology.build_topology
+
+    def spy(**kw):
+        # A worker thread has no running loop; the loop's own thread does.
+        try:
+            asyncio.get_running_loop()
+            seen.append("loop")
+        except RuntimeError:
+            seen.append("worker")
+        return real(**kw)
+    monkeypatch.setattr(nw_topology, "build_topology", spy)
+    hub = _Hub([{"id": "sw1", "name": "SW1", "tenant_id": ""}], {})
+    asyncio.run(hub.push_lldp_links_to_netbox())
+    assert seen == ["worker"]
+
+
 def test_hub_push_keeps_legacy_tenants_spelt_only_by_case_apart(monkeypatch):
     # With "acme" and "ACME" both stored, tenant ids compare by exact spelling
     # (access._AMBIGUOUS_TENANT_IDS): each tenant's links go under its own
