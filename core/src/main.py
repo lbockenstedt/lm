@@ -10801,30 +10801,32 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     result = await self.request_response(spoke_id, "NETBOX_GET_TENANTS", {}, timeout=60.0)
                     data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else {}
                     if isinstance(data, dict) and data.get("status") == "SUCCESS":
-                        # Upsert each tenant, keeping any local-only fields.
-                        for t in data.get("tenants", []):
-                            slug = t["slug"]
-                            cfg = self.state.get_tenant(slug) or {}
-                            try:
-                                self.state.update_tenant(slug, {
-                                    "name": t["name"],
-                                    "netbox_tenant_slug": slug,
-                                    "netbox_id": t["id"],
-                                    "description": t.get("description", ""),
-                                    # Which group (if any) owns this tenant, so the
-                                    # WebUI can show the tenant nested under it.
-                                    "tenant_group_slug": t.get("group_slug", "") or "",
-                                    "tenant_group_name": t.get("group_name", "") or "",
-                                    **{k: v for k, v in cfg.items() if k not in (
-                                        "name", "netbox_tenant_slug", "netbox_id", "description",
-                                        "tenant_group_slug", "tenant_group_name")},
-                                })
-                            except ValueError as e:
-                                # The slug is blank, or names several stored
-                                # tenants that differ only by case or surrounding
-                                # spaces (StateManager.tenant_key): skip it, so the
-                                # rest and the group sync below still run.
-                                logger.warning("Tenant sync: skipped %s: %s", slug, e)
+                        # Upsert each tenant, keeping any local-only fields,
+                        # with one tenant-cache refresh for the whole loop.
+                        with self.state.batch_tenant_writes():
+                            for t in data.get("tenants", []):
+                                slug = t["slug"]
+                                cfg = self.state.get_tenant(slug) or {}
+                                try:
+                                    self.state.update_tenant(slug, {
+                                        "name": t["name"],
+                                        "netbox_tenant_slug": slug,
+                                        "netbox_id": t["id"],
+                                        "description": t.get("description", ""),
+                                        # Which group (if any) owns this tenant, so the
+                                        # WebUI can show the tenant nested under it.
+                                        "tenant_group_slug": t.get("group_slug", "") or "",
+                                        "tenant_group_name": t.get("group_name", "") or "",
+                                        **{k: v for k, v in cfg.items() if k not in (
+                                            "name", "netbox_tenant_slug", "netbox_id", "description",
+                                            "tenant_group_slug", "tenant_group_name")},
+                                    })
+                                except ValueError as e:
+                                    # The slug is blank, or names several stored
+                                    # tenants that differ only by case or surrounding
+                                    # spaces (StateManager.tenant_key): skip it, so the
+                                    # rest and the group sync below still run.
+                                    logger.warning("Tenant sync: skipped %s: %s", slug, e)
                         # Persist and log.
                         self.state._mark_dirty()
                         logger.debug(f"Tenant sync: {len(data.get('tenants', []))} tenant(s) from NetBox")
@@ -10853,43 +10855,45 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                          (data or {}).get("status") if isinstance(data, dict) else "malformed")
             return
 
-        # Upsert each group as a hub tenant.
+        # Upsert each group as a hub tenant, with one tenant-cache refresh for
+        # the whole loop.
         import access as _access
         groups = data.get("groups", []) or []
         seen = set()
-        for g in groups:
-            # Skip groups without a slug.
-            gslug = str(g.get("slug") or "").strip()
-            if not gslug:
-                continue
-            # Group tenant id. The prune below keeps every stored spelling of it:
-            # ids are not case-sensitive, and update_tenant merges into one.
-            tid = _access.TENANT_GROUP_PREFIX + gslug
-            seen.add(tid.casefold())
-            # Upsert the group, keeping local-only fields.
-            cfg = self.state.get_tenant(tid) or {}
-            try:
-                self.state.update_tenant(tid, {
-                    "name": g.get("name") or gslug,
-                    "is_tenant_group": True,
-                    "netbox_tenant_group_slug": gslug,
-                    # A group owns no objects itself; an empty tenant slug keeps
-                    # every plain-tenant code path treating it as unscoped.
-                    "netbox_tenant_slug": "",
-                    "member_tenant_slugs": g.get("tenant_slugs", []) or [],
-                    "parent_group_slug": g.get("parent_slug", "") or "",
-                    "netbox_id": g.get("id"),
-                    "description": g.get("description", ""),
-                    **{k: v for k, v in cfg.items() if k not in (
-                        "name", "is_tenant_group", "netbox_tenant_group_slug",
-                        "netbox_tenant_slug", "member_tenant_slugs",
-                        "parent_group_slug", "netbox_id", "description")},
-                })
-            except ValueError as e:
-                # Several stored groups differ from this id only by case or
-                # surrounding spaces (StateManager.tenant_key): skip it and
-                # keep them all.
-                logger.warning("Tenant sync: skipped tenant group %s: %s", tid, e)
+        with self.state.batch_tenant_writes():
+            for g in groups:
+                # Skip groups without a slug.
+                gslug = str(g.get("slug") or "").strip()
+                if not gslug:
+                    continue
+                # Group tenant id. The prune below keeps every stored spelling of it:
+                # ids are not case-sensitive, and update_tenant merges into one.
+                tid = _access.TENANT_GROUP_PREFIX + gslug
+                seen.add(tid.casefold())
+                # Upsert the group, keeping local-only fields.
+                cfg = self.state.get_tenant(tid) or {}
+                try:
+                    self.state.update_tenant(tid, {
+                        "name": g.get("name") or gslug,
+                        "is_tenant_group": True,
+                        "netbox_tenant_group_slug": gslug,
+                        # A group owns no objects itself; an empty tenant slug keeps
+                        # every plain-tenant code path treating it as unscoped.
+                        "netbox_tenant_slug": "",
+                        "member_tenant_slugs": g.get("tenant_slugs", []) or [],
+                        "parent_group_slug": g.get("parent_slug", "") or "",
+                        "netbox_id": g.get("id"),
+                        "description": g.get("description", ""),
+                        **{k: v for k, v in cfg.items() if k not in (
+                            "name", "is_tenant_group", "netbox_tenant_group_slug",
+                            "netbox_tenant_slug", "member_tenant_slugs",
+                            "parent_group_slug", "netbox_id", "description")},
+                    })
+                except ValueError as e:
+                    # Several stored groups differ from this id only by case or
+                    # surrounding spaces (StateManager.tenant_key): skip it and
+                    # keep them all.
+                    logger.warning("Tenant sync: skipped tenant group %s: %s", tid, e)
 
         # Prune groups that no longer exist in NetBox, ending the sessions and
         # API tokens of the users who lost one, as deleting a tenant in Setup

@@ -953,24 +953,27 @@ async def _ensure_local_tenants(hub, registry: dict, existing: set) -> list:
     # update_tenant merges an id into a stored tenant spelt with another case,
     # so a tenant counts as existing here in any case.
     existing_keys = {str(t).strip().casefold() for t in (existing or ())}
-    for tid, row in (registry or {}).items():
-        clean = str(tid or "").strip()
-        if not clean or clean.casefold() in existing_keys:
-            continue
-        # 'shared' is applied below, under the single-shared invariant, rather
-        # than seeded here — seeding it directly could leave two flagged.
-        seed = {k: v for k, v in (row or {}).items()
-                if k in TENANT_FIELDS and k != "shared"}
-        seed.setdefault("name", clean.upper())
-        seed.setdefault("active", True)
-        seed["description"] = (seed.get("description")
-                               or "Created by the Test Data Feed.")
-        try:
-            hub.state.update_tenant(clean, seed)
-            created.append(clean)
-        except Exception:  # noqa: BLE001
-            logger.warning("[test-feed] could not create local tenant %s",
-                           clean, exc_info=True)
+    # Create each missing tenant, with one tenant-cache refresh for the whole
+    # loop.
+    with hub.state.batch_tenant_writes():
+        for tid, row in (registry or {}).items():
+            clean = str(tid or "").strip()
+            if not clean or clean.casefold() in existing_keys:
+                continue
+            # 'shared' is applied below, under the single-shared invariant, rather
+            # than seeded here — seeding it directly could leave two flagged.
+            seed = {k: v for k, v in (row or {}).items()
+                    if k in TENANT_FIELDS and k != "shared"}
+            seed.setdefault("name", clean.upper())
+            seed.setdefault("active", True)
+            seed["description"] = (seed.get("description")
+                                   or "Created by the Test Data Feed.")
+            try:
+                hub.state.update_tenant(clean, seed)
+                created.append(clean)
+            except Exception:  # noqa: BLE001
+                logger.warning("[test-feed] could not create local tenant %s",
+                               clean, exc_info=True)
 
     moved = _mirror_shared_tenant(hub, registry)
 

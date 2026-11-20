@@ -75,6 +75,9 @@ class _State:
     tenant_key = StateManager.tenant_key
     update_tenant = StateManager.update_tenant
     delete_tenant = StateManager.delete_tenant
+    # The real batch too: the NetBox sync loops write through it.
+    batch_tenant_writes = StateManager.batch_tenant_writes
+    _tenant_batch_depth = 0
 
     def save_state(self):
         return None
@@ -639,6 +642,34 @@ def test_netbox_sync_merges_case_variants_and_skips_ambiguous_slugs(keep_tenant_
     assert tenants["ACME"] == {"name": "A1"} and tenants["acme"] == {"name": "A2"}
     # "BETA" updated the stored "beta" and kept its local quotas.
     assert tenants["beta"]["netbox_id"] == 2 and tenants["beta"]["quotas"] == {"vm": 1}
+
+
+def test_netbox_sync_rebuilds_the_tenant_caches_once(keep_tenant_cache, monkeypatch):
+    """POST /setup/sync-tenants writes every NetBox tenant, then rebuilds the
+    tenant caches once, not once per tenant, and they hold every write."""
+    c, hub, holder = _build({})
+    holder.current = _global_admin()
+    hub.get_spoke_by_type = lambda module_type: "nb-1" if module_type == "ipam" else None
+    # 200 NetBox tenants, "acme" among them beside a deleted twin "ACME".
+    hub.state.tenant_state["retired_twin_ids"] = ["ACME"]
+    nb = [{"slug": f"t{i}", "name": f"T{i}", "id": i} for i in range(199)]
+    nb.append({"slug": "acme", "name": "Acme", "id": 999})
+
+    async def _reply(spoke_id, command, payload, **kw):
+        """NetBox's tenants."""
+        return {"payload": {"data": {"status": "SUCCESS", "tenants": nb}}}
+
+    hub.request_response = _reply
+    rebuilds = []
+    real = access.refresh_tenant_caches
+    monkeypatch.setattr(access, "refresh_tenant_caches",
+                        lambda tenant_state: rebuilds.append(1) or real(tenant_state))
+    access.refresh_tenant_caches(hub.state.tenant_state)
+    rebuilds.clear()
+    r = c.post("/setup/sync-tenants")
+    assert r.status_code == 200, r.text
+    assert len(r.json()["added"]) == 200 and len(rebuilds) == 1
+    assert not access.same_tenant("ACME", "acme")
 
 
 # ── blank tenant ids ─────────────────────────────────────────────────────────
