@@ -1,7 +1,10 @@
-"""Setup misc: subnet-filter, delete-user, GitHub repos/branches, global config."""
+"""Setup misc: subnet-filter, common VRFs, delete-user, GitHub repos/branches, global config."""
 # Regular expressions implement the charset allowlists for config values below.
 import re
 
+# The common-VRF setting (lm#1992): its global_config key, the check both
+# write routes apply, and the card's data.
+from access import COMMON_VRF_SETTING, common_vrf_settings, normalize_common_vrf_ids
 # Request/error types, subnet-filter settings helpers, session revocation, asyncio for
 # subprocesses/background tasks, and the shared logger, all re-exported by the api module.
 from api import (
@@ -122,6 +125,50 @@ def register(app, hub, ctx):
         app.state.hub.state._mark_dirty()
         # Return the effective settings after the change.
         return {"status": "ok", "modules": _filter_config(app.state.hub)}
+
+    # Read which NetBox VRFs shared infrastructure serves (lm#1992).
+    @app.get("/admin/common-vrfs")
+    async def get_common_vrfs(request: Request):
+        """Return the common-VRF setting, the VRFs common now and the NetBox
+        VRFs to pick from, by name, all from the hub cache (Global Admin only;
+        hub policy, the same for every tenant)."""
+        # Only Global Admins may view this setting.
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="Admin only")
+        return common_vrf_settings(app.state.hub)
+
+    # Name the common VRFs, or clear them to infer them again (lm#1992).
+    @app.put("/admin/common-vrfs")
+    async def set_common_vrfs(request: Request):
+        """Store ``vrf_ids``, the NetBox VRF ids shared infrastructure serves
+        besides the global table (Global Admin only). An empty list infers them
+        again (a VRF two or more tenants use). A missing or bad ``vrf_ids`` is
+        refused (400), so a typo cannot change what every tenant sees. Applies
+        at the next slice, with no restart; returns what GET returns."""
+        # Only Global Admins may change this setting.
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="Admin only")
+        # Read and check the body before anything is stored.
+        try:
+            data = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+        if not isinstance(data, dict) or "vrf_ids" not in data:
+            raise HTTPException(status_code=400,
+                                detail="vrf_ids is required (an empty list infers the common VRFs)")
+        try:
+            vrf_ids = normalize_common_vrf_ids(data["vrf_ids"])
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"vrf_ids {e}")
+        # Store it with the hub settings and mark state for saving.
+        hub = app.state.hub
+        hub.state.system_state.setdefault("global_config", {})[COMMON_VRF_SETTING] = vrf_ids
+        hub.state._mark_dirty()
+        logger.info("API: common VRFs set to %s by %s",
+                    ", ".join(vrf_ids) or "inferred", sess.get("user_id") or "?")
+        return {"status": "ok", **common_vrf_settings(hub)}
 
     # Delete a local user account.
     @app.delete("/setup/users/{user_id}")
@@ -293,6 +340,14 @@ def register(app, hub, ctx):
             # repoint the hub at an attacker repo or a weird ref. Admin-only
             # route, but config fields must never be arbitrary strings.
             _validate_update_config(config)
+            # The common VRFs (lm#1992) pass the same check as on their own
+            # route, so this merge cannot store a value the slicer ignores.
+            if isinstance(config, dict) and COMMON_VRF_SETTING in config:
+                try:
+                    config[COMMON_VRF_SETTING] = normalize_common_vrf_ids(
+                        config[COMMON_VRF_SETTING])
+                except ValueError as e:
+                    raise _ConfigValidationError(f"{COMMON_VRF_SETTING} {e}")
             if config.keys() & {"llm_cloud_profiles", "llm_task_models", "llm_ab_pr_repos",
                                 "llm_qualification_candidates"}:
                 from routes.llm import validate_cloud_profiles, validate_pool_config

@@ -2554,21 +2554,70 @@ def _scope_vrfs(hub, key) -> set:
     return set().union(*_scope_prefix_vrfs(hub, key).values())
 
 
-def _shared_vrfs(hub) -> set:
-    """NetBox VRF ids that more than one tenant has prefixes in: a common VRF,
-    which shared infrastructure serves just like the global table.
+# global_config key where a Global Admin names the common VRFs (System →
+# Common VRFs, ``/admin/common-vrfs``): NetBox VRF ids as strings, the form
+# ``_scope_vrfs`` compares. Empty or unset: ``_shared_vrfs`` infers them (lm#1992).
+COMMON_VRF_SETTING = "common_vrf_ids"
 
-    Each NetBox tenant counts once (two hub tenants on one NetBox tenant share
-    every prefix, so they are one user), and tenant groups don't count (their
-    prefixes are their members'). A tenant's VRFs come from ``_scope_vrfs``:
-    the newer of the NetBox cache feed's copy of its prefixes and the hub's
-    last live read of them, so the answer does not depend on which tenants a
-    page has read since the hub started, and a tenant NetBox says has no
-    prefixes left stops counting from that read on (``fetch_tenant_prefixes``).
-    Until a tenant has a feed copy, the VRFs the hub read for it count,
-    including the copies saved with the hub cache. Any VRF two tenants use
-    counts as shared, even one shared infrastructure does not serve (such as
-    a VRF two tenants of one customer share)."""
+
+def normalize_common_vrf_ids(value) -> List[str]:
+    """``value`` as it is stored under ``COMMON_VRF_SETTING``: a list of NetBox VRF
+    ids (whole numbers from 1, as numbers or digit strings), as strings,
+    without duplicates, in numeric order. An empty list means "infer them".
+    Raises ValueError on anything else, so a typo is refused rather than
+    switching what every tenant sees on shared infrastructure."""
+    if not isinstance(value, list):
+        raise ValueError("must be a list of NetBox VRF ids")
+    ids = set()
+    for i, v in enumerate(value):
+        # bool is an int (True would read as VRF 1); [0-9] keeps out the
+        # non-ASCII digits str.isdigit() accepts.
+        text = str(v).strip() if isinstance(v, (int, str)) and not isinstance(v, bool) else ""
+        if not re.fullmatch(r"[0-9]{1,18}", text) or int(text) < 1:
+            raise ValueError(f"entry {i + 1} is not a NetBox VRF id (a whole number from 1)")
+        ids.add(str(int(text)))
+    return sorted(ids, key=int)
+
+
+def configured_common_vrfs(hub) -> set:
+    """The common VRF ids a Global Admin named (``COMMON_VRF_SETTING``), or an
+    empty set when none are named, which leaves ``_shared_vrfs`` to infer
+    them. Read on every call, so a change applies at the next slice without a
+    restart. Both routes that write the key store only
+    ``normalize_common_vrf_ids`` output, so a value that fails it was edited
+    by hand: it is ignored (the VRFs are inferred) rather than half-applied."""
+    gc = _dict_attr(getattr(hub, "state", None), "system_state").get("global_config")
+    value = gc.get(COMMON_VRF_SETTING) if isinstance(gc, dict) else None
+    try:
+        return set(normalize_common_vrf_ids(value or []))
+    except ValueError:
+        return set()
+
+
+def _shared_vrfs(hub) -> set:
+    """NetBox VRF ids that are common: shared infrastructure serves them just
+    like the global table. The VRFs a Global Admin named
+    (``configured_common_vrfs``) are exactly the common ones; when none are
+    named, they are inferred: a VRF more than one tenant has prefixes in.
+
+    For the inference, each NetBox tenant counts once (two hub tenants on one
+    NetBox tenant share every prefix, so they are one user), and tenant groups
+    don't count (their prefixes are their members'). A tenant's VRFs come from
+    ``_scope_vrfs``: the newer of the NetBox cache feed's copy of its prefixes
+    and the hub's last live read of them, so the answer does not depend on
+    which tenants a page has read since the hub started, and a tenant NetBox
+    says has no prefixes left stops counting from that read on
+    (``fetch_tenant_prefixes``). Until a tenant has a feed copy, the VRFs the
+    hub read for it count, including the copies saved with the hub cache. The
+    inference counts any VRF two tenants use as shared, even one shared
+    infrastructure does not serve (such as a VRF two tenants of one customer
+    share); naming the common VRFs avoids that."""
+    # A named list wins outright: a listed VRF one tenant uses is common, and
+    # an unlisted VRF several tenants use is not.
+    configured = configured_common_vrfs(hub)
+    if configured:
+        return configured
+    # Otherwise infer them: the VRFs two or more NetBox tenants have prefixes in.
     users: Dict[str, set] = {}
     for tid in _scope_tenant_ids(hub):
         key = _prefix_vrf_key(hub, tid)
@@ -2577,16 +2626,61 @@ def _shared_vrfs(hub) -> set:
     return {vrf for vrf, keys in users.items() if len(keys) > 1}
 
 
+def _cached_vrf_names(hub) -> Dict[str, str]:
+    """``{vrf id: name}`` for every NetBox VRF a tenant has a prefix in, from
+    the NetBox cache feed's copies of the tenants' prefixes (each row carries
+    its VRF's id and name). Read from the hub cache only, never from NetBox,
+    so the Common VRFs card renders from the cache. A VRF no tenant has a
+    prefix in is not listed: it changes no tenant's slice. Rows from an older
+    netbox spoke carry no ``vrf_id`` and add nothing. A name is "" when no
+    row named it."""
+    names: Dict[str, str] = {}
+    keys = dict.fromkeys(_prefix_vrf_key(hub, tid) for tid in _scope_tenant_ids(hub))
+    for key in keys:
+        for p in _feed_prefix_rows(hub, key) or []:
+            vid = p.get("vrf_id") if isinstance(p, dict) else None
+            if vid in (None, "") or isinstance(vid, bool):
+                continue
+            name = str(p.get("vrf") or "").strip()
+            if name or str(vid) not in names:
+                names[str(vid)] = name
+    return names
+
+
+def common_vrf_settings(hub) -> dict:
+    """What the Common VRFs card shows (``GET /admin/common-vrfs``):
+    ``vrf_ids``, the named VRFs ([] when inferred); ``mode``, "configured" or
+    "automatic"; ``common``, the VRF ids common right now (named or inferred);
+    and ``vrfs``, the VRFs to pick from as ``{id, name}``, by name. A named or
+    common VRF the cache has no name for is still listed, with name "", so it
+    can be unticked. Hub policy, the same for every tenant."""
+    def by_id(vid):
+        """Numeric order for VRF id strings (shorter first, then by text),
+        without failing on one that is not a number."""
+        return (len(vid), vid)
+
+    named = sorted(configured_common_vrfs(hub), key=by_id)
+    common = sorted(_shared_vrfs(hub) - {""}, key=by_id)
+    names = _cached_vrf_names(hub)
+    for vid in named + common:
+        names.setdefault(vid, "")
+    # Named VRFs A to Z, then the ones with no cached name.
+    vrfs = sorted(({"id": vid, "name": name} for vid, name in names.items()),
+                  key=lambda v: (not v["name"], v["name"].lower(), by_id(v["id"])))
+    return {"vrf_ids": named, "mode": "configured" if named else "automatic",
+            "common": common, "vrfs": vrfs}
+
+
 def shared_slice_prefixes(hub, tenant_id, prefixes, module: str = "", spoke_id=None) -> list:
     """``prefixes`` with every prefix that lives only in the tenant's own NetBox
-    VRF removed, for slicing SHARED infrastructure (a shared firewall, Kea,
-    Unbound, Proxmox, ClearPass, …) down to ``tenant_id``.
+    VRF (one that is not common) removed, for slicing SHARED infrastructure (a
+    shared firewall, Kea, Unbound, Proxmox, ClearPass, …) down to ``tenant_id``.
 
     Owner-directed: shared infrastructure serves the common routing domain,
-    which is NetBox's global table or a VRF that several tenants share
-    (``_shared_vrfs``). A tenant that moves into its own VRF, one no other
-    tenant has prefixes in, can no longer use it, even when its addresses
-    overlap common ones; only NetBox stays shared. Without this, a VRF
+    which is NetBox's global table or a common VRF (``_shared_vrfs``): one a
+    Global Admin named in the hub config, else one several tenants share. A
+    tenant that moves into its own VRF can no longer use it, even when its
+    addresses overlap common ones; only NetBox stays shared. Without this, a VRF
     tenant's 10.x prefixes matched the shared firewall's rules for the same
     10.x addresses, and the tenant saw rules that were not its own. Every
     tenant can sit in a VRF: cutting every non-global VRF also cut the common
@@ -2616,7 +2710,7 @@ def shared_slice_prefixes(hub, tenant_id, prefixes, module: str = "", spoke_id=N
         except ValueError:
             known = None
         # Keep a prefix with an unknown VRF, or in the global table ("") or a
-        # VRF another tenant shares.
+        # common VRF.
         if not known or known & common:
             out.append(p)
     return out
@@ -3548,7 +3642,7 @@ _SHARED_SOURCE_MODULES = frozenset({"nac"})
 
 async def _served_networks(hub, module: str, spoke_id=None) -> List[Any]:
     """Every tenant's NetBox networks that shared infrastructure serves: the
-    global table and the VRFs several tenants share (``shared_slice_prefixes``).
+    global table and the common VRFs (``shared_slice_prefixes``).
 
     These decide who owns a shared source's row (``_keep_owned_items``). A
     prefix in a tenant's own VRF is a routing domain the shared source does
