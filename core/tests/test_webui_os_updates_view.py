@@ -786,3 +786,271 @@ def test_os_updates_deploy_listed_covers_only_the_listed_nodes(hub_url_and_sessi
             assert not errors, errors
         finally:
             browser.close()
+
+
+def test_os_updates_deploy_listed_redraws_the_list_before_it_deploys(hub_url_and_session):  # noqa: F811
+    """Time alone can move a node between states: 15 minutes after a reboot was scheduled
+    it stops counting, so a node still reporting reboot_required moves from Updates pending
+    to Needs attention with no new data, and the page does not poll while no run is going.
+    A click on "Approve & deploy listed" redraws the list first. When that changes the nodes
+    it counts, it asks nothing and says so, because Chrome and Edge do not paint the redraw
+    until a confirm() closes. The next click asks about, and deploys, what the list shows."""
+    base, token = hub_url_and_session
+    t0 = 1700000000
+    data = {
+        "totals": {"with_updates": 4, "packages": 4}, "checked_at": t0,
+        # b-01 needs a reboot nobody scheduled; r-01's and r-02's reboots were scheduled
+        # 800 s and 600 s ago, so each leaves Updates pending once its 900 s are up.
+        "nodes": [_node("a-01", "Acme", 1), _node("b-01", "Acme", 1, reboot_required=True),
+                  _node("r-01", "Acme", 1, reboot_required=True, reboot_scheduled_at=t0 - 800),
+                  _node("r-02", "Acme", 1, reboot_required=True, reboot_scheduled_at=t0 - 600)],
+    }
+    with sync_api.sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            context = browser.new_context()
+            context.add_cookies([{"name": "lm_session", "value": token, "url": base}])
+            page = context.new_page()
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            page.route("**/api/os-updates", lambda r: r.fulfill(
+                content_type="application/json", body=json.dumps(data)))
+            page.route("**/api/os-updates/cves/fleet", lambda r: r.fulfill(
+                content_type="application/json", body="[]"))
+            page.route("**/api/os-updates/apply", lambda r: r.fulfill(
+                content_type="application/json", body=json.dumps({"queued": 3})))
+            # Date.now() reads only what the test sets; the page's timers keep running.
+            page.clock.set_fixed_time(t0)
+            page.goto(base + "/")
+            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.evaluate("setView('osupdates')")
+            page.locator('#osu-body [data-action="pickState"]').first.wait_for()
+            deploy = page.locator("#osu-apply")
+            text = lambda sel: page.locator(sel).text_content()  # noqa: E731
+
+            def declined():
+                """Click the button, decline its approval prompt and return the prompt's text."""
+                prompts = []
+                page.once("dialog", lambda d: (prompts.append(d.message), d.dismiss()))
+                deploy.click()
+                assert prompts, "no approval prompt"
+                return prompts[0]
+
+            def changed():
+                """Click the button and check it redraws and says so, without a prompt."""
+                prompts = []
+                on_dialog = lambda d: (prompts.append(d.message), d.dismiss())  # noqa: E731
+                page.evaluate("document.querySelectorAll('#lm-toast-region .lm-toast').forEach(t => t.remove())")
+                page.on("dialog", on_dialog)
+                deploy.click()
+                page.remove_listener("dialog", on_dialog)
+                assert not prompts, prompts
+                page.locator("#lm-toast-region .lm-toast", has_text="The list changed").wait_for()
+
+            # r-01 leaves Updates pending after the list was drawn: the click redraws the
+            # list without it and asks nothing; the next click asks about the 2 shown.
+            _pick(page, "State", "pending")
+            assert deploy.inner_text() == "Approve & deploy listed (3)"
+            page.clock.set_fixed_time(t0 + 200)
+            changed()
+            assert deploy.inner_text() == "Approve & deploy listed (2)"
+            assert "r-01" not in text("#osu-s-tenant-acme-pending")
+            assert "All 2 listed node(s)" in declined()
+
+            # r-02 joins Needs attention after the list was drawn: it is drawn before the
+            # click that asks about it.
+            _pick(page, "State", "attention")
+            assert deploy.inner_text() == "Approve & deploy listed (2)"
+            page.clock.set_fixed_time(t0 + 400)
+            changed()
+            assert deploy.inner_text() == "Approve & deploy listed (3)"
+            assert "r-02" in text("#osu-s-tenant-acme-attention")
+
+            # Approved, it posts exactly the nodes the list now shows.
+            page.once("dialog", lambda d: d.accept())
+            with page.expect_request(lambda req: req.url.endswith("/api/os-updates/apply")) as req:
+                deploy.click()
+            assert json.loads(req.value.post_data) == {
+                "nodes": ["agent:b-01", "agent:r-01", "agent:r-02"], "security_only": False}
+            assert not errors, errors
+        finally:
+            browser.close()
+
+
+def test_os_updates_a_redraw_classifies_every_node_at_one_time(hub_url_and_session):  # noqa: F811
+    """Each drawing of the list reads the clock once, and the ticks it keeps, the nodes
+    "Approve & deploy listed" counts and the list it draws all use that time. A sort redraws
+    only the list, at the same time: after a node's 15 minutes run out it still lists that
+    node, ticked, and the next click redraws without it and says so. When a node's 15 minutes
+    run out during a click's own redraw (after the button is counted, before the list is
+    drawn), the prompt and the POST still name only the nodes the list shows."""
+    base, token = hub_url_and_session
+    t0 = 1700000000
+    data = {
+        "totals": {"with_updates": 4, "packages": 4}, "checked_at": t0,
+        # b-01 needs a reboot nobody scheduled. r-01's and r-02's reboots were scheduled
+        # 880 s and 895 s ago, so they leave Updates pending at t0 + 20 and t0 + 5.
+        "nodes": [_node("a-01", "Acme", 1), _node("b-01", "Acme", 1, reboot_required=True),
+                  _node("r-01", "Acme", 1, reboot_required=True, reboot_scheduled_at=t0 - 880),
+                  _node("r-02", "Acme", 1, reboot_required=True, reboot_scheduled_at=t0 - 895)],
+    }
+    with sync_api.sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            context = browser.new_context()
+            context.add_cookies([{"name": "lm_session", "value": token, "url": base}])
+            page = context.new_page()
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            page.route("**/api/os-updates", lambda r: r.fulfill(
+                content_type="application/json", body=json.dumps(data)))
+            page.route("**/api/os-updates/cves/fleet", lambda r: r.fulfill(
+                content_type="application/json", body="[]"))
+            page.route("**/api/os-updates/apply", lambda r: r.fulfill(
+                content_type="application/json", body=json.dumps({"queued": 2})))
+            # Date.now() reads window.__now (ms), which only the test moves.
+            page.add_init_script(f"window.__now = {t0 * 1000}; Date.now = () => window.__now;")
+            page.goto(base + "/")
+            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.evaluate("setView('osupdates')")
+            page.locator('#osu-body [data-action="pickState"]').first.wait_for()
+            page.evaluate("""() => {
+                // confirm() accepts, and keeps each prompt with the rows listed and the
+                // button's label when it opens, so as the click's own redraw left them.
+                window.__prompts = [];
+                window.confirm = message => {
+                    const rows = [...document.querySelectorAll('#osu-body [id^="osu-node-"]')];
+                    window.__prompts.push({ message, rows: rows.map(e => e.id.replace('osu-node-', '')),
+                                            button: document.getElementById('osu-apply').innerText });
+                    return true;
+                };
+                // Once window.__jump is set, the next label set on the button moves the clock
+                // there: inside _osuRender, after it counted the button's nodes and before it
+                // draws the list.
+                const btn = document.getElementById('osu-apply');
+                const text = Object.getOwnPropertyDescriptor(Node.prototype, 'textContent');
+                Object.defineProperty(btn, 'textContent', {
+                    get() { return text.get.call(this); },
+                    set(v) {
+                        text.set.call(this, v);
+                        if (window.__jump) { window.__now = window.__jump; window.__jump = 0; }
+                    },
+                });
+            }""")
+            deploy = page.locator("#osu-apply")
+            selected = page.locator("#osu-apply-selected")
+
+            def listed():
+                """The node keys the list shows, in its order."""
+                return page.locator('#osu-body [id^="osu-node-"]').evaluate_all(
+                    "els => els.map(e => e.id.replace('osu-node-', ''))")
+
+            def ticked():
+                """The node keys whose box is ticked in the list."""
+                return page.locator('#osu-body [data-action="toggleNode"]:checked').evaluate_all(
+                    "els => els.map(e => e.dataset.node)")
+
+            # r-02 is ticked, then its 15 minutes run out with no redraw. A sort only reorders
+            # the list as it was drawn: it does not drop r-02 while r-02 stays ticked.
+            _pick(page, "State", "pending")
+            page.check('#osu-body [data-action="toggleNode"][data-node="agent:r-02"]')
+            page.evaluate("t => { window.__now = t * 1000; }", t0 + 10)
+            page.select_option("#osu-sort", "name")
+            assert listed() == ["agent:a-01", "agent:r-01", "agent:r-02"]
+            assert ticked() == ["agent:r-02"]
+            assert deploy.inner_text() == "Approve & deploy listed (3)"
+            assert selected.inner_text() == "Deploy selected (1)"
+
+            # The next click redraws without r-02, unticks it and asks nothing.
+            deploy.click()
+            page.locator("#lm-toast-region .lm-toast", has_text="The list changed").wait_for()
+            assert page.evaluate("window.__prompts") == []
+            assert listed() == ["agent:a-01", "agent:r-01"]
+            assert deploy.inner_text() == "Approve & deploy listed (2)"
+            assert selected.inner_text() == "Deploy selected (0)"
+
+            # r-01's 15 minutes run out during the next click's own redraw. That redraw still
+            # lists r-01, so the list, the button, the prompt and the POST name the same nodes.
+            page.evaluate("t => { window.__jump = t * 1000; }", t0 + 30)
+            with page.expect_request(lambda req: req.url.endswith("/api/os-updates/apply")) as req:
+                deploy.click()
+            assert page.evaluate("window.__now") == (t0 + 30) * 1000, "the clock did not move mid-click"
+            [prompt] = page.evaluate("window.__prompts")
+            assert prompt["rows"] == ["agent:a-01", "agent:r-01"]
+            assert prompt["button"] == "Approve & deploy listed (2)"
+            assert "All 2 listed node(s)" in prompt["message"]
+            assert json.loads(req.value.post_data) == {"nodes": prompt["rows"], "security_only": False}
+            assert not errors, errors
+        finally:
+            browser.close()
+
+
+def test_os_updates_select_fixes_counts_the_list_as_drawn(hub_url_and_session):  # noqa: F811
+    """The CVE card counts "Select fixes" on the list as it was last drawn, even when a
+    node's 15 minutes run out before the lookup. The click's redraw drops that node and its
+    tick, and the toast counts only the fixes still ticked."""
+    base, token = hub_url_and_session
+    t0 = 1700000000
+    php = [{"package": "php8.2", "current": "1", "candidate": "2", "security": True}]
+    data = {
+        "totals": {"with_updates": 3, "packages": 3}, "checked_at": t0,
+        # b-01 needs a reboot nobody scheduled, so there is a state to pick. r-01's reboot
+        # was scheduled 895 s ago: it leaves Updates pending at t0 + 5.
+        "nodes": [_node("a-01", "Acme", 1, packages=php), _node("b-01", "Acme", 1, reboot_required=True),
+                  _node("r-01", "Acme", 1, packages=php, reboot_required=True, reboot_scheduled_at=t0 - 895)],
+    }
+    cves = {
+        "feeds": {"bookworm": {"fetched_at": t0}}, "query": "php", "kind": "package",
+        "affected_nodes": 2, "checked_nodes": 3,
+        "results": [{"cve": "CVE-2026-1", "affected": [
+            {"node": f"agent:{n}", "label": n, "release": "bookworm", "package": "php8.2",
+             "version": "1", "binaries": ["php8.2"], "update_pending": True} for n in ("a-01", "r-01")]}],
+    }
+    with sync_api.sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            context = browser.new_context()
+            context.add_cookies([{"name": "lm_session", "value": token, "url": base}])
+            page = context.new_page()
+            errors = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            page.route("**/api/os-updates", lambda r: r.fulfill(
+                content_type="application/json", body=json.dumps(data)))
+            page.route("**/api/os-updates/cves?*", lambda r: r.fulfill(
+                content_type="application/json", body=json.dumps(cves)))
+            page.route("**/api/os-updates/cves/fleet", lambda r: r.fulfill(
+                content_type="application/json", body="[]"))
+            # Date.now() reads window.__now (ms), which only the test moves.
+            page.add_init_script(f"window.__now = {t0 * 1000}; Date.now = () => window.__now;")
+            page.goto(base + "/")
+            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.evaluate("setView('osupdates')")
+            page.locator('#osu-body [data-action="pickState"]').first.wait_for()
+            cve = page.locator("#osu-cve-body")
+            rows = page.locator('#osu-body [id^="osu-node-"]')
+            _pick(page, "State", "pending")
+            assert rows.count() == 2
+
+            # r-01's 15 minutes run out before the lookup, with no redraw: the card counts
+            # the fixes on both nodes the list shows.
+            page.evaluate("t => { window.__now = t * 1000; }", t0 + 10)
+            page.fill("#osu-cve-q", "php")
+            page.click("text=Look up")
+            page.wait_for_selector("#osu-cve-body >> text=2 of 3 checked node(s) affected")
+            assert cve.locator("button").inner_text() == "Select fixes (2)"
+            assert "not listed above" not in cve.inner_text()
+
+            # The click's redraw moves r-01 to Needs attention and unticks it: the toast counts
+            # the one fix still ticked, and the card counts r-01's fix as not listed.
+            cve.locator("button").click()
+            toast = page.locator("#lm-toast-region .lm-toast", has_text="package update(s) selected")
+            toast.wait_for()
+            assert "1 package update(s) selected" in toast.inner_text()
+            assert rows.evaluate_all("els => els.map(e => e.id)") == ["osu-node-agent:a-01"]
+            assert page.locator('#osu-body input[data-action="togglePkg"][data-node="agent:a-01"][data-pkg="php8.2"]').is_checked()
+            assert page.locator("#osu-apply-selected").inner_text() == "Deploy selected (1)"
+            assert cve.locator("button").inner_text() == "Select fixes (1)"
+            assert "1 fix(es) on nodes not listed above" in cve.inner_text()
+            assert not errors, errors
+        finally:
+            browser.close()

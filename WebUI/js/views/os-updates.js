@@ -11,10 +11,13 @@ import { html as phtml, render, useState, useEffect } from '../../assets/preact-
 // state from every spoke and agent and, on explicit approval, sends the apply
 // commands. Nodes never update themselves.
 // Rolling one node at a time, hub last; a manual deploy never reboots (see
-// hub_os_updates.py). Deploy everything, or only selected nodes / packages /
-// security updates; reboot is a separate per-node action, or Auto-reboot on an
-// auto-patch node. Nodes LM cannot patch (appliances, unsupported OS) are left
-// out by the hub; the Nodes card shows how many were hidden.
+// hub_os_updates.py). Approve & deploy listed covers only the listed nodes
+// (never one the list hides), Deploy selected only the ticked nodes /
+// packages, and "Security updates only" limits either to security updates
+// (picked packages excepted). Reboot is a separate per-node action, or
+// Auto-reboot on an auto-patch node. Nodes LM cannot patch (appliances,
+// unsupported OS) are left out by the hub; the Nodes card shows how many were
+// hidden.
 let _osuPoll = null;
 
 // Every button and field on the page; wired by delegate() (js/core/view.js).
@@ -401,7 +404,9 @@ function osuToggleGroup(tenantKey, state, on) {
     _osuRender(d);
 }
 
-// Sort dropdown changed: redraw the list from the data already loaded.
+// Sort dropdown changed: redraw the list from the data already loaded, as of
+// the last drawing (_osuNow), so only the order changes: the list keeps the
+// nodes the buttons count and the ticks cover.
 function osuSetSort(sort) {
     _osuUi.sort = sort;
     _osuView.refresh();
@@ -448,7 +453,10 @@ function _osuCveFixes(d) {
     return { listed: pairs.filter(([key]) => shown.has(key)), hidden: pairs.filter(([key]) => !shown.has(key)).length };
 }
 
-// "Select fixes": tick the CVE's fixes on the listed nodes (_osuCveFixes).
+// "Select fixes": tick the CVE's fixes on the listed nodes (_osuCveFixes), as
+// the list was last drawn. The redraw that follows unticks a node it no longer
+// lists (its reboot's 15 minutes ran out since), so the toast counts the fixes
+// still ticked.
 function osuCveSelectFixes(d) {
     const picks = _osuCveFixes(d).listed;
     picks.forEach(([key, pkg]) => {
@@ -456,7 +464,8 @@ function osuCveSelectFixes(d) {
         _osuSel.nodes.delete(key);
     });
     _osuRender(_osuView.state.data);
-    showToast(`${picks.length} package update(s) selected — review, then "Deploy selected".`, 'success');
+    const kept = picks.filter(([key, pkg]) => _osuSel.pkgs[key] && _osuSel.pkgs[key].has(pkg)).length;
+    showToast(`${kept} package update(s) selected — review, then "Deploy selected".`, 'success');
 }
 
 // "Who is affected?" — a Preact component (React-lite phase 6). Search a CVE
@@ -590,11 +599,30 @@ function _osuDeployable(d, busy) {
     return (_osuListed((d.nodes || []).map(n => _osuClassify(n, d.run, busy))) || []).filter(c => _osuSelectable(c.n, busy));
 }
 
+// The rows "Approve & deploy listed" counted when _osuRender last drew it.
+let _osuDrawnRows = [];
+
+// The node keys of some rows, in one order, to compare two drawings.
+function _osuKeySig(rows) {
+    return rows.map(c => c.key).sort().join('\n');
+}
+
 // "Approve & deploy listed": send the listed deployable nodes by key, so the
 // hub patches only those (an empty body would mean every node in scope).
+// Redraw first: the page does not poll while no run is going, and time alone
+// moves a node between groups (a reboot scheduled 15 minutes ago stops
+// counting, _osuRebootScheduled). If the redraw changed which nodes the button
+// counts, ask nothing and let the operator look again: Chrome and Edge do not
+// paint a redraw until confirm() closes, so the prompt would count nodes the
+// screen does not show yet. The redraw counts its rows and draws the list at
+// one time (_osuNow), and the prompt and the POST use those rows, so they never
+// include a node the list did not show.
 async function osuApply() {
-    const rows = _osuDeployable(_osuView.state.data, _osuBusy());
+    const before = _osuKeySig(_osuDrawnRows);
+    _osuRender(_osuView.state.data);
+    const rows = _osuDrawnRows;
     if (!rows.length) { showToast('No listed node has pending updates.', 'info'); return; }
+    if (_osuKeySig(rows) !== before) { showToast('The list changed — check it and click again.', 'info'); return; }
     _osuDeploy({ nodes: rows.map(c => c.key) }, `All ${rows.length} listed node(s) with pending updates.`);
 }
 
@@ -660,8 +688,10 @@ function _osuVmLabel(n) {
 }
 
 // New data from the hub: update the toolbar around the list, then the list.
+// The clock is read once, here, with the data (_osuNow).
 function _osuRender(d) {
     _osuView.state.data = d;
+    _osuNow = Date.now() / 1000;
     if (!document.getElementById('osu-body')) return;
     const run = d.run;
     const busy = _osuBusy();
@@ -690,7 +720,8 @@ function _osuRender(d) {
             : (run && label[run.status] ? `last run${run.actor === 'auto-patch' ? ' (auto-patch)' : ''}: ${run.done}/${run.total} ${label[run.status]}` : '');
     }
     const nSel = _osuSelectedKeys().length;
-    const nAll = _osuDeployable(d, busy).length;
+    _osuDrawnRows = _osuDeployable(d, busy);
+    const nAll = _osuDrawnRows.length;
     const btn = document.getElementById('osu-apply');
     if (btn) { btn.disabled = !nAll; btn.textContent = `Approve & deploy listed (${nAll})`; }
     const selBtn = document.getElementById('osu-apply-selected');
@@ -762,9 +793,17 @@ const _OSU_STATES = [
     { id: 'current', label: 'Up to date', title: 'Patched: nothing left to install' },
 ];
 
-// A reboot was scheduled in the last 15 minutes (the node is about to restart).
+// The time (Unix seconds) every node is classified against. Only _osuRender
+// sets it, once per drawing, so the ticks it keeps, the nodes "Approve & deploy
+// listed" counts and the list it draws agree even when a reboot's 15 minutes
+// run out mid-drawing. A sort and the CVE card's "Select fixes" count use the
+// same time, so they match the list as drawn.
+let _osuNow = Date.now() / 1000;
+
+// A reboot was scheduled in the last 15 minutes (the node is about to restart),
+// as of the last drawing (_osuNow).
 function _osuRebootScheduled(n) {
-    return !!(n.reboot_scheduled_at && (Date.now() / 1000 - n.reboot_scheduled_at) < 900);
+    return !!(n.reboot_scheduled_at && (_osuNow - n.reboot_scheduled_at) < 900);
 }
 
 // A node that needs a reboot nobody has scheduled yet.
