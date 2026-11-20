@@ -80,19 +80,29 @@ async def test_empty_cold_and_non_list_result():
 
 
 async def test_legs_run_concurrently():
+    """Both legs are in flight at once. Each leg waits until the other has
+    started, so the test has no sleep and no wall-clock pass bound (fleet
+    rule 9.4). One leg after the other would peak at 1: the first leg would
+    wait out its timeout and both would come back degraded."""
     legs = {"now": 0, "max": 0}
+    both_started = asyncio.Event()
 
-    async def nap():
+    async def leg():
+        """Count this leg in flight and wait until the other leg has started."""
         legs["now"] += 1
-        legs["max"] = max(legs["max"], legs["now"])
-        await asyncio.sleep(0.05)
-        legs["now"] -= 1
+        try:
+            legs["max"] = max(legs["max"], legs["now"])
+            if legs["now"] == 2:
+                both_started.set()
+            await both_started.wait()
+        finally:
+            legs["now"] -= 1
         return [{"name": "x"}]
 
-    call = _stub({"NETBOX_SEARCH": nap, "SEARCH_VMS": nap})
-    rows, degraded = await topup_cold_legs([NB, VM], call, timeout=1.0)
-    # Counted, not timed, so a busy CI runner can't fail it (fleet rule
-    # 9.4). One leg after the other would peak at 1.
+    call = _stub({"NETBOX_SEARCH": leg, "SEARCH_VMS": leg})
+    # The timeout only bounds a broken (serial) run; a passing run never
+    # waits on the clock.
+    rows, degraded = await topup_cold_legs([NB, VM], call, timeout=5.0)
     assert legs["max"] == 2
     assert len(rows) == 2 and degraded == []
 

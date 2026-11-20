@@ -21,13 +21,17 @@ class _Hub:
         return ["fw-1", "fw-2"]
 
     async def request_response(self, sid, cmd, data, timeout=None):
+        """Answer the endpoint detail, or one firewall's leases after a short
+        nap, counting the lease calls in flight."""
         if cmd == "GET_ENDPOINT_DETAIL":
             return {"payload": {"data": dict(self.ep)}}
         self.lease_calls.append((sid, timeout))
         self.in_flight += 1
         self.peak = max(self.peak, self.in_flight)
-        await asyncio.sleep(0.05)
-        self.in_flight -= 1
+        try:
+            await asyncio.sleep(0.05)
+        finally:
+            self.in_flight -= 1
         leases = [{"mac": "08:76:71:08:7d:81", "ip": "10.1.1.9", "hostname": "cam"}] if sid == "fw-2" else []
         return {"payload": {"data": leases}}
 
