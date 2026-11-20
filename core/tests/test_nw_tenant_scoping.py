@@ -33,6 +33,7 @@ from types import SimpleNamespace
 
 import api as api_mod
 import access as access_mod
+import cred_vault
 from nw_cache import NwCacheMixin
 
 
@@ -257,17 +258,26 @@ def _build(monkeypatch, tmp_path, shared=False, gc_extra=None):
 
     # Faithful copy of the /api/nw/* middleware gate (api.py:1093,1162):
     # authenticated session required, then admin OR the nw module right.
+    # Then, on every path, the hub-wide ?tenant= gate at the end of api.py's
+    # auth middleware: a non-admin's ?tenant= must be spelt exactly as in
+    # their tenants list, so no test here claims a GET the hub refuses. The
+    # Global-Admin-only /setup/* gate is left out on purpose, so the tests
+    # can pin the non-admin guards of the /setup/nw-scan routes.
     @app.middleware("http")
     async def _nw_gate(request, call_next):
         path = request.url.path
+        sess = _session_user(request)
         if path.startswith("/api/nw/"):
-            sess = _session_user(request)
             if not sess:
                 return JSONResponse(status_code=401,
                                     content={"detail": "Authentication required"})
             if not (_is_admin(sess) or access_mod.has_nw_access(sess)):
                 return JSONResponse(status_code=403,
                                     content={"detail": "Network Devices access required"})
+        tenant = request.query_params.get("tenant")
+        if tenant and not access_mod.check_tenant_access(sess, tenant):
+            return JSONResponse(status_code=403,
+                                content={"detail": f"Not authorized for tenant '{tenant}'"})
         return await call_next(request)
 
     ctx = SimpleNamespace(_session_user=_session_user, _is_admin=_is_admin,
@@ -905,6 +915,195 @@ def test_scan_schedules_report_the_bucket_conflict_of_a_schedule_that_cannot_run
     for tid in ("acme", "beta"):
         assert "Move a secret out" in rows[tid]["vault_error"]
         assert rows[tid]["discovery_only"] is False
+
+
+# ── a tenant named in any case, and a primary-tenant-only session (#2028) ───
+
+def _mint_primary(hub, uid, tenant, role="tenant_admin"):
+    """A session with an empty tenants list and only a primary tenant_id,
+    which access._session_tenants falls back to. No login path builds one
+    today (login, OIDC, API tokens and impersonation all set tenant_id to
+    the first of the tenants list); the tests using it pin that the NW
+    paths read one tenant set, so they cannot disagree if one ever does."""
+    user_data = {"user_id": uid, "auth_type": "local",
+                 "permissions": {"role": role, "nw": True},
+                 "tenants": [], "tenant_id": tenant, "protected": False}
+    return api_mod._record_session(hub, user_data)
+
+
+def _acme_set(**extra):
+    """global_config with acme's stored scan credential set c-acme."""
+    return {"nw_scan_credentials": [{"id": "c-acme", "name": "acme login",
+                                     "tenant_id": "acme", "username": "u"}], **extra}
+
+
+def _answer_scan(hub, result):
+    """Have NW_SCAN return ``result``; every other call keeps its _scan_stubs
+    answer."""
+    inner = hub.request_response
+
+    async def rr(spoke_id, cmd, data, timeout=30.0):
+        """Answer NW_SCAN with ``result`` and record it; pass the rest on."""
+        if cmd != "NW_SCAN":
+            return await inner(spoke_id, cmd, data, timeout)
+        hub.calls.append((spoke_id, cmd, data))
+        return {"payload": {"data": {"status": "SUCCESS", "scanned": 1, **result}}}
+    hub.request_response = rr
+
+
+def test_scan_schedules_narrow_to_the_selected_tenant_in_any_case(monkeypatch, tmp_path):
+    """A Global Admin's ?tenant= names a tenant in any case (fleet rule 6.1).
+    A tenant admin's reaches the list only spelt as their tenants list has
+    it: the hub's ?tenant= gate refuses any other spelling first."""
+    c, hub = _build(monkeypatch, tmp_path)
+    admin = _mint(hub, "admin", tenants=[], admin=True)
+    for tenant, listed in (("ACME", ["acme"]), ("OTHERCORP", ["othercorp"])):
+        r = c.get(f"/api/nw/scan-schedules?tenant={tenant}", cookies={"lm_session": admin})
+        assert r.status_code == 200, r.text
+        assert [s["tenant_id"] for s in r.json()["schedules"]] == listed
+    ta = _mint(hub, "acme-admin", tenants=["acme"], role="tenant_admin")
+    r = c.get("/api/nw/scan-schedules?tenant=acme", cookies={"lm_session": ta})
+    assert r.status_code == 200, r.text
+    assert [s["tenant_id"] for s in r.json()["schedules"]] == ["acme"]
+    for other in ("ACME", "othercorp"):
+        r = c.get(f"/api/nw/scan-schedules?tenant={other}", cookies={"lm_session": ta})
+        assert r.status_code == 403, r.text
+
+
+def test_tenant_config_takes_the_callers_own_tenant_in_any_case(monkeypatch, tmp_path):
+    """A tenant admin naming their own tenant in another case in the body
+    saves it, keyed as their session spells it; another tenant is still 403.
+    A ?tenant= in another case never reaches the route: the hub's ?tenant=
+    gate refuses it, so the GET reads only the session's spelling."""
+    c, hub = _build(monkeypatch, tmp_path)
+    _noop_push(hub)
+    tok = _mint(hub, "acme-admin", tenants=["acme"], role="tenant_admin")
+    r = c.get("/api/nw/tenant-config?tenant=ACME", cookies={"lm_session": tok})
+    assert r.status_code == 403, r.text
+    assert r.json()["detail"] == "Not authorized for tenant 'ACME'"
+    r = c.post("/api/nw/tenant-config", cookies={"lm_session": tok},
+               json={"tenant": "ACME", "scan": {"max_targets": 256}})
+    assert r.status_code == 200, r.text
+    assert r.json()["tenant_id"] == "acme"
+    cfg = hub.state.system_state["global_config"]["nw_tenant_cfg"]
+    assert cfg["acme"]["scan"]["max_targets"] == 256 and "ACME" not in cfg
+    for other in ("othercorp", "OTHERCORP"):
+        r = c.get(f"/api/nw/tenant-config?tenant={other}", cookies={"lm_session": tok})
+        assert r.status_code == 403, r.text
+        r = c.post("/api/nw/tenant-config", cookies={"lm_session": tok},
+                   json={"tenant": other, "scan": {"max_targets": 1}})
+        assert r.status_code == 403, r.text
+    assert set(cfg) == {"acme"}
+
+
+def test_scan_run_takes_the_callers_own_tenant_in_any_case(monkeypatch, tmp_path):
+    """POST /setup/nw-scan/run: a tenant admin naming their own tenant in
+    another case scans it, on its agent with its set; another tenant is 403
+    and nothing reaches a spoke."""
+    c, hub = _build(monkeypatch, tmp_path, gc_extra=_acme_set())
+    _scan_stubs(monkeypatch, hub)
+    tok = _mint(hub, "acme-admin", tenants=["acme"], role="tenant_admin")
+    body = {"dry_run": True, "credential_ids": ["c-acme"],
+            "targets": ["10.0.0.2"], "ip_sources": ["explicit"]}
+    for other in ("othercorp", "OTHERCORP"):
+        r = c.post("/setup/nw-scan/run", cookies={"lm_session": tok},
+                   json={**body, "tenant": other})
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"] == "You may only scan your own tenant"
+    assert hub.calls == []
+    r = c.post("/setup/nw-scan/run", cookies={"lm_session": tok}, json={**body, "tenant": "ACME"})
+    assert r.status_code == 200, r.text
+    assert r.json()["tenant"] == "acme"
+    spoke, scan = next((s, d) for s, cmd, d in hub.calls if cmd == "NW_SCAN")
+    assert spoke == "nw-acme"
+    assert [x["id"] for x in scan["credentials"]] == ["c-acme"]
+
+
+def test_a_primary_tenant_only_session_scans_with_its_own_sets(monkeypatch, tmp_path):
+    """A session with only a primary tenant_id scans with its tenant's stored
+    set and vault login. The run route's tenant check already let it scan
+    its primary tenant, but the set filter (spoke_visible_to_session) read
+    only the tenants list, so it dropped both and ran a discovery-only pass.
+    Both now read one tenant set (_nw_scan_tenants), as the credential list
+    does (test_instance_crud_tenant_list_scoping)."""
+    login = {"mode": "hub", "type": "login"}
+    c, hub = _build(monkeypatch, tmp_path, gc_extra=_acme_set(
+        cred_vault={"secrets": {"acme": {"lower": dict(login)}}}))
+    _scan_stubs(monkeypatch, hub)
+
+    async def secret(_hub, bucket, name):
+        """A stand-in vault read, so the overlay needs no real vault."""
+        return {"username": "vu", "password": "vp"}
+    monkeypatch.setattr(cred_vault, "automation_get", secret)
+    tok = _mint_primary(hub, "acme-admin", "acme")
+    picked = ["c-acme", "vault:acme:lower"]
+    r = c.post("/setup/nw-scan/run", cookies={"lm_session": tok}, json={
+        "tenant": "acme", "dry_run": True, "credential_ids": picked,
+        "targets": ["10.0.0.2"], "ip_sources": ["explicit"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["discovery_only"] is False
+    scan = next(d for _s, cmd, d in hub.calls if cmd == "NW_SCAN")
+    assert sorted(x["id"] for x in scan["credentials"]) == picked
+
+
+def test_scan_schedules_list_a_primary_tenant_only_tenant_admins_tenant(monkeypatch, tmp_path):
+    """The schedule list reads the tenants _nw_caller_tenant lets a tenant
+    admin configure, a primary tenant included; it read only the tenants
+    list. With no ?tenant= the hub's gate does not apply; a ?tenant= from
+    such a session is refused there (the gate reads the tenants list)."""
+    c, hub = _build(monkeypatch, tmp_path)
+    tok = _mint_primary(hub, "acme-admin", "acme")
+    r = c.get("/api/nw/scan-schedules", cookies={"lm_session": tok})
+    assert r.status_code == 200, r.text
+    assert [s["tenant_id"] for s in r.json()["schedules"]] == ["acme"]
+    r = c.get("/api/nw/tenant-config", cookies={"lm_session": tok})
+    assert r.status_code == 200, r.text
+    assert r.json()["tenant_id"] == "acme"
+
+
+def test_scan_does_not_add_again_a_device_tagged_with_the_tenant_in_another_case(monkeypatch, tmp_path):
+    """A fleet device tagged "ACME" (its spoke's spelling) is acme's: a scan
+    of acme that identifies it reports it as in the fleet, not as a device
+    to add under "acme"."""
+    c, hub = _build(monkeypatch, tmp_path, gc_extra=_acme_set())
+    hub.state.system_state["global_config"]["nw_devices"].append(
+        {"id": "acme-core", "name": "core", "object_type": "cx_switch",
+         "address": "10.0.0.5", "tenant_id": "ACME", "spoke_id": "nw-acme"})
+    _scan_stubs(monkeypatch, hub)
+    _answer_scan(hub, {"identified": [
+        {"address": "10.0.0.5", "hostname": "edge", "object_type": "cx_switch",
+         "credential_id": "c-acme", "method": "ssh"}]})
+    tok = _mint(hub, "admin", tenants=[], admin=True)
+    r = c.post("/setup/nw-scan/run", cookies={"lm_session": tok}, json={
+        "tenant": "acme", "dry_run": True, "credential_ids": ["c-acme"],
+        "targets": ["10.0.0.5"], "ip_sources": ["explicit"]})
+    assert r.status_code == 200, r.text
+    assert [d["address"] for d in r.json()["identified"]] == ["10.0.0.5"]
+    assert r.json()["preview"] == []
+
+
+def test_scan_updates_a_monitor_only_host_recorded_in_another_case(monkeypatch, tmp_path):
+    """A monitor-only SNMP host recorded under "ACME" is acme's: a scan of
+    acme that reaches it again updates that row rather than adding a second
+    one, and another tenant's row at the same address is kept."""
+    c, hub = _build(monkeypatch, tmp_path)
+    gc = hub.state.system_state["global_config"]
+    gc["nw_monitor_neighbors"] = [
+        {"tenant_id": "ACME", "name": "old", "address": "10.0.0.6", "type": "switch",
+         "snmp_ok": True, "snmp_secret": "old"},
+        {"tenant_id": "othercorp", "name": "theirs", "address": "10.0.0.6", "type": "switch",
+         "snmp_ok": True, "snmp_secret": "theirs"}]
+    _scan_stubs(monkeypatch, hub)
+    _answer_scan(hub, {"reachable": [
+        {"address": "10.0.0.6", "reachable": True, "snmp_ok": True,
+         "snmp_credential_id": "vault:acme:snmp", "hostname": "tor1"}]})
+    tok = _mint(hub, "admin", tenants=[], admin=True)
+    r = c.post("/setup/nw-scan/run", cookies={"lm_session": tok}, json={
+        "tenant": "acme", "dry_run": True, "targets": ["10.0.0.6"],
+        "ip_sources": ["explicit"]})
+    assert r.status_code == 200, r.text
+    rows = sorted((n["tenant_id"], n["name"]) for n in gc["nw_monitor_neighbors"])
+    assert rows == [("acme", "tor1"), ("othercorp", "theirs")]
 
 
 # ── background sweep: gateway pass, then ping-first host sweep ─────────────

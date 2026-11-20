@@ -1463,6 +1463,9 @@ async function _renderNwTopologyManual() {
             links: (cfg.links || []).filter(l => l.id !== btn.dataset.delLink) });
     });
 }
+// Render Network → Scan for the selected tenant: its scan config and
+// credential sets (saved vault logins a vault conflict hides are kept on
+// #nwt-creds), then its scan schedules.
 async function _renderNwScanTab() {
     const c = document.getElementById('nw-table-container');
     if (!c) return;
@@ -1542,7 +1545,7 @@ async function _renderNwScanTab() {
     c.innerHTML = `<div class="space-y-5 max-w-4xl">
       <div class="${card}">
         <h3 class="text-sm font-bold text-slate-700 mb-1">Network Discovery Scan</h3>
-        <p class="text-xs text-slate-500 mb-4">Discover manageable devices on your network and add them to your fleet automatically. Scans run on your tenant's Network Devices spoke; with no credential set ticked, every set your tenant owns is tried.</p>
+        <p class="text-xs text-slate-500 mb-4">Discover manageable devices on your network and add them to your fleet automatically. Scans run on your tenant's Network Devices spoke; with no credential set ticked, a scan uses the saved selection, or every set your tenant owns when none is saved.</p>
         <div class="mb-4">
           <p class="${lblCls}">Scan Agent</p>
           ${spokeRows}
@@ -1550,7 +1553,7 @@ async function _renderNwScanTab() {
         <div class="mb-4">
           <p class="${lblCls}">Scan Credential Sets</p>
           <div id="nwt-creds" class="space-y-1.5">${credRows}</div>
-          ${vaultError ? '<p class="text-xs text-red-600 mt-1">No vault login is offered, and a scan with no set ticked or a vault login ticked is refused: <span id="nwt-vault-error"></span></p>' : ''}
+          ${vaultError ? '<p class="text-xs text-red-600 mt-1">No vault login is offered; saved ones are kept, though not shown. A scan is refused while a vault login is saved, or when no set is ticked and none is saved: <span id="nwt-vault-error"></span></p>' : ''}
         </div>
         <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
           <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-crawl" class="rounded border-slate-300 text-primary-text" ${chk(scan.crawl)}> Crawl LLDP neighbors</label>
@@ -1623,7 +1626,22 @@ async function _renderNwScanTab() {
     // Fill in the vault error as text, so the server's message is never parsed as markup.
     const vaultErrEl = document.getElementById('nwt-vault-error');
     if (vaultErrEl) vaultErrEl.textContent = vaultError;
+    // A vault conflict lists no vault login, so keep the saved ones on the
+    // list itself: Save config and a scan send them back (_nwtSelectedCreds)
+    // instead of dropping them. With no conflict an unlisted saved id is a
+    // deleted login, which a save drops as before.
+    const credsEl = document.getElementById('nwt-creds');
+    if (credsEl) credsEl.dataset.hiddenCreds = JSON.stringify(
+        vaultError ? _nwtHiddenVaultCreds(scan.credential_ids, creds) : []);
     _loadNwScanSchedules();
+}
+
+// The saved vault login ids (vault:<bucket>:<name>) that the listed sets
+// don't include: every saved one while a vault conflict hides them.
+function _nwtHiddenVaultCreds(savedIds, shownSets) {
+    const shown = new Set((shownSets || []).map(cr => String(cr.id)));
+    return (savedIds || []).map(String)
+        .filter(id => id.startsWith('vault:') && !shown.has(id));
 }
 
 // Fetch + render every configured recurring scan the caller may see. Separate
@@ -1712,9 +1730,14 @@ function _nwtSources() {
     if (document.getElementById('nwt-src-dns')?.checked) s.push('dns');
     return s;
 }
+// The credential set ids Save config and a scan send: the ticked sets, plus
+// the saved vault logins a vault conflict hides (kept on #nwt-creds by
+// _renderNwScanTab), so neither drops a tenant's saved vault ids.
 function _nwtSelectedCreds() {
-    return Array.from(document.querySelectorAll('.nwt-cred'))
+    const ticked = Array.from(document.querySelectorAll('.nwt-cred'))
         .filter(el => el.checked).map(el => el.value);
+    const hidden = JSON.parse(document.getElementById('nwt-creds')?.dataset.hiddenCreds || '[]');
+    return ticked.concat(hidden);
 }
 function _nwtParseList(str) {
     return String(str || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);

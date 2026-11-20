@@ -64,6 +64,28 @@ CI/tooling changes are omitted unless they change what an operator sees.
   that fails to load is named in a red "Could not load" line, and the picks
   stay until it loads. See [lm-hub.md](lm-hub.md#how-to-use-it).
 
+### Network devices
+
+- **Network → Scan no longer drops saved vault logins during a vault
+  conflict.** While several Credential Vault buckets name a tenant, the Scan
+  tab lists none of its vault logins. **Save config** used to save only the
+  ticked sets, so the tenant's saved vault logins were lost, and a scan left
+  them out too. They are now kept, though not shown, and sent with every save
+  and scan, so a scan stays refused (409) until the conflict is fixed instead
+  of running without them. The tab's hint now says what a scan with no set
+  ticked does: it uses the saved selection, or every set the tenant owns when
+  none is saved. See [nw.md](nw.md#how-to-use-it).
+- **A tenant's own id is recognised in any case when it is sent in a
+  request body.** Saving the NW tenant config (`POST /api/nw/tenant-config`),
+  the topology's manual links or the sweep settings accepts a tenant admin's
+  own tenant named in another case ("ACME" for "acme") and saves it under
+  the session's spelling. A `?tenant=` query parameter is unchanged: the
+  hub's auth middleware accepts from a non-admin only a tenant spelt exactly
+  as in their tenants list (403 otherwise), and the WebUI sends that
+  spelling. A scan no longer offers to add a device again when its record
+  names the tenant in another case, and it updates a monitor-only host
+  recorded that way instead of keeping a stale duplicate. See [nw.md](nw.md).
+
 ### Spokes and agents
 
 - **Renamed hosts show their new name.** When a spoke's or agent's host is
