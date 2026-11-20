@@ -104,7 +104,7 @@ were removed. The GET side loads config for module setup pages. Likely
 | `/setup/update/spokes` | POST | 2923 | Trigger spoke updates |
 | `/setup/modules` | GET | 2937 | List installable modules |
 | `/setup/install-module` | POST | 2963 | Install a module |
-| `/api/tenant/scoping` | GET | 3137 | Tenant scoping info |
+| `/api/tenant/scoping` | GET | 3137 | Tenant scoping info (NetBox slug, Proxmox tag, LDAP base DN). Scoped to the caller: a Global Admin may name any tenant (none named = the hub's active tenant); anyone else gets only a tenant they hold, and a user with no tenant, or whose tenant has no record of its own, gets empty scoping |
 | `/setup/generate-secret` | POST | 3177 | Generate a spoke secret |
 | `/setup/logs/all` | GET | 2056 | All-module logs |
 | `/admin/cache/status` | GET | 4081 | Admin cache status |
