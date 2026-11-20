@@ -805,3 +805,103 @@ def test_group_grants_each_tenant_by_its_stored_id(monkeypatch):
     assert r.status_code == 200
     gid = r.json()["group_id"]
     assert hub.state.system_state["permission_groups"][gid]["tenants"] == [" ACME ", "Other"]
+
+
+# ── GET /api/tenant/scoping is scoped to the caller (fleet rule 6.1) ────────
+def _two_tenants():
+    """acme and other, each with its own NetBox, Proxmox and LDAP scope."""
+    recs = _acme_record()
+    recs["other"] = {"name": "Other Inc", "netbox_tenant_slug": "other",
+                     "proxmox_tag": "tenant-other", "ldap_base_dn": "ou=other,dc=corp,dc=com"}
+    return recs
+
+
+@pytest.mark.parametrize("query", ["", "?tenant=other", "?tenant=OTHER"])
+def test_scoping_gives_a_tenant_user_only_its_own_tenant(keep_tenant_cache, query):
+    # Any signed-in user used to get the tenant it named, or with none named
+    # the hub's active tenant (the one a Global Admin last marked active).
+    c, hub, holder = _build(_two_tenants())
+    hub.state.system_state["active_tenant"] = "other"
+    holder.current = _plain_cs_user("acme")
+    r = c.get("/api/tenant/scoping" + query)
+    assert r.status_code == 200
+    assert r.json() == {"netbox_tenant_slug": "acme", "proxmox_tag": "tenant-acme",
+                        "ldap_base_dn": "ou=acme,dc=corp,dc=com", "tenant_id": "acme"}
+
+
+def test_scoping_gives_a_user_with_no_tenant_empty_scoping(keep_tenant_cache):
+    c, hub, holder = _build(_two_tenants())
+    hub.state.system_state["active_tenant"] = "other"
+    holder.current = _sess(user_id="nobody")
+    for query in ("", "?tenant=other"):
+        assert c.get("/api/tenant/scoping" + query).json() == {
+            "netbox_tenant_slug": "", "proxmox_tag": "", "ldap_base_dn": "", "tenant_id": None}
+
+
+def test_scoping_reads_the_stored_spelling_of_a_grant(keep_tenant_cache):
+    # get_tenant does not fold case, so the grant "ACME" must find "acme".
+    c, hub, holder = _build(_two_tenants())
+    holder.current = _sess(tenants=["ACME"], tenant_id="ACME", user_id="u-acme")
+    body = c.get("/api/tenant/scoping").json()
+    assert (body["netbox_tenant_slug"], body["tenant_id"]) == ("acme", "acme")
+
+
+def test_scoping_lets_a_global_admin_read_any_tenant(keep_tenant_cache):
+    c, hub, holder = _build(_two_tenants())
+    hub.state.system_state["active_tenant"] = "other"
+    holder.current = _global_admin()
+    assert c.get("/api/tenant/scoping?tenant=acme").json()["proxmox_tag"] == "tenant-acme"
+    assert c.get("/api/tenant/scoping").json()["tenant_id"] == "other"
+
+
+def test_scoping_401_no_session(keep_tenant_cache):
+    c, hub, holder = _build(_two_tenants())
+    assert c.get("/api/tenant/scoping").status_code == 401
+
+
+def test_scoping_gives_a_multi_tenant_user_the_tenant_it_picks(keep_tenant_cache):
+    c, hub, holder = _build(_two_tenants())
+    holder.current = _sess(role="tenant_admin", tenants=["acme", "other"], tenant_id="acme",
+                           user_id="tadm-both")
+    assert c.get("/api/tenant/scoping?tenant=other").json()["proxmox_tag"] == "tenant-other"
+    assert c.get("/api/tenant/scoping").json()["proxmox_tag"] == "tenant-acme"
+
+
+@pytest.fixture
+def hub_get_tenant(monkeypatch):
+    """The hub's own get_tenant in place of the fake's exact lookup: it also
+    ignores surrounding spaces, so a legacy twin's record is one lookup away."""
+    monkeypatch.setattr(_State, "get_tenant", StateManager.get_tenant)
+
+
+def _twin_records():
+    """Legacy twins "ACME" and " ACME " (saved before tenant ids had to be
+    unique ignoring case and spaces), each with its own scope."""
+    return {"ACME": {"netbox_tenant_slug": "acme", "proxmox_tag": "tenant-acme"},
+            " ACME ": {"netbox_tenant_slug": "acme-legacy", "proxmox_tag": "tenant-acme-legacy"}}
+
+
+@pytest.mark.parametrize("grant, query, slug", [
+    ("ACME", "", "acme"),             # each twin's exact id reads its own record
+    (" ACME ", "", "acme-legacy"),
+    (" ACME", "", ""),                # another spelling names neither twin
+    ("acme", "", ""),
+    (" ACME", "?tenant=ACME", ""),    # nor does naming one in the query help
+])
+def test_scoping_never_gives_a_grant_a_legacy_twins_record(keep_tenant_cache, hub_get_tenant,
+                                                          grant, query, slug):
+    c, hub, holder = _build(_twin_records())
+    access.refresh_tenant_caches(hub.state.tenant_state)
+    holder.current = _plain_cs_user(grant)
+    body = c.get("/api/tenant/scoping" + query).json()
+    assert (body["netbox_tenant_slug"], body["tenant_id"]) == (slug, grant)
+
+
+def test_scoping_never_gives_the_built_in_default_a_legacy_twins_record(keep_tenant_cache,
+                                                                         hub_get_tenant):
+    # The built-in Admin tenant ("default") has no record of its own here.
+    c, hub, holder = _build({" default ": {"netbox_tenant_slug": "legacy"}})
+    access.refresh_tenant_caches(hub.state.tenant_state)
+    holder.current = _tenant_admin("default")
+    assert c.get("/api/tenant/scoping").json() == {
+        "netbox_tenant_slug": "", "proxmox_tag": "", "ldap_base_dn": "", "tenant_id": "default"}
