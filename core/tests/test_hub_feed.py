@@ -11,6 +11,7 @@ Pure functions only — the replay half needs the lm core on disk and a live hub
 which is why ``hub_feed`` defers that import into ``_load_feed_spoke``.
 """
 import os
+import signal
 import sys
 
 import pytest
@@ -436,6 +437,35 @@ def test_rotation_emits_the_token_sentinel_when_asked(monkeypatch, capsys):
     assert pair == {"access": "t1", "refresh": "r1"}
 
 
+def test_a_closed_source_does_not_spend_its_refresh_token(monkeypatch):
+    """After close() the new pair could not reach the parent hub before the
+    feeder exits, so a rotation would spend the refresh token for nothing and
+    the hub's next restart would get the token family revoked."""
+    src = _mk_source(monkeypatch)
+    posts = []
+    monkeypatch.setattr(src.opener, "open", lambda req, *a, **kw: posts.append(req.full_url))
+    src.close()
+    assert src._rotate() is False
+    assert posts == [] and src.refresh_token == "r0"
+
+
+def test_stop_rotating_does_not_wait_for_a_rotation_in_flight(monkeypatch):
+    """The SIGTERM handler calls stop_rotating() on the event loop thread, so it
+    must not wait for the lock a rotation in flight holds until its answer
+    arrives: that would stall the spokes' close behind the refresh."""
+    import threading
+    src = _mk_source(monkeypatch)
+    posts = []
+    monkeypatch.setattr(src.opener, "open", lambda req, *a, **kw: posts.append(req.full_url))
+    with src._rotating:  # a rotation in flight
+        t = threading.Thread(target=src.stop_rotating, daemon=True)
+        t.start()
+        t.join(5)
+        assert not t.is_alive(), "stop_rotating() waited for the rotation in flight"
+    assert src._rotate() is False
+    assert posts == [] and src.refresh_token == "r0"
+
+
 def test_rotation_is_silent_when_not_asked(monkeypatch, capsys):
     """Default off: a human running the feeder by hand must never see tokens
     printed to their terminal."""
@@ -557,6 +587,7 @@ def test_tenant_map_arg_is_parsed_and_exposed(monkeypatch):
     class _FakeSource:
         def __init__(self, *a, **kw): pass
         def login(self, *a, **kw): pass
+        def close(self): pass
 
     def _fake_run(args, source, salt):
         seen["map"] = getattr(args, "_tenant_map", None)
@@ -568,7 +599,12 @@ def test_tenant_map_arg_is_parsed_and_exposed(monkeypatch):
             "--token", "t", "--tenant", "fb",
             "--tenant-map", '{"acme": "acme-local", "skip": ""}']
     monkeypatch.setattr(sys, "argv", argv)
-    hub_feed.main()
+    # main() ignores SIGTERM on its way out; keep that out of the test process.
+    old_sigterm = signal.getsignal(signal.SIGTERM)
+    try:
+        hub_feed.main()
+    finally:
+        signal.signal(signal.SIGTERM, old_sigterm)
     assert seen["map"] == {"acme": "acme-local"}
 
 
@@ -718,6 +754,49 @@ def test_permanently_empty_source_gives_up_after_the_run_duration(monkeypatch):
     monkeypatch.setattr(hub_feed, "_load_feed_spoke", lambda: object)
     with pytest.raises(SystemExit):
         asyncio.run(hub_feed._run(_feed_args(duration=0.03), _Empty(), SALT))
+
+
+def test_no_token_refresh_starts_after_sigterm_while_the_spokes_close(monkeypatch):
+    """Stop's SIGTERM must stop token rotation at once, not when main() closes
+    the source after the spokes have closed. On websockets 13 each close can
+    take 5 x close_timeout (50s), and a poll still in flight that hit a 401 in
+    that time started a refresh the hub's SIGKILL could cut off after the
+    source had spent the token. The fake spoke tries the rotation while it is
+    closing; it must spend nothing."""
+    import asyncio
+
+    src = _mk_source(monkeypatch)
+    posts, tried, handlers = [], [], {}
+    monkeypatch.setattr(src.opener, "open", lambda req, *a, **kw: posts.append(req.full_url))
+    monkeypatch.setattr(src, "snapshot", lambda: {"clients": [{"spoke_id": "s1", "hostname": "h1"}]})
+
+    class _Spoke:
+        def __init__(self, *a, **kw):
+            pass
+
+        def set_payload(self, _p):
+            pass
+
+        async def run_forever(self, stop_evt):
+            # Stop arrives mid-feed; the loop runs the handler as it would for a signal.
+            asyncio.get_running_loop().call_later(0.02, handlers[signal.SIGTERM])
+            try:
+                await stop_evt.wait()
+            finally:
+                # Still closing: the poll thread hits a 401 and tries to rotate.
+                tried.append(src._rotate())
+
+    async def _feed():
+        # Capture the SIGTERM handler instead of installing it: no real signal.
+        loop = asyncio.get_running_loop()
+        loop.add_signal_handler = lambda sig, cb, *a: handlers.__setitem__(sig, cb)
+        # duration only ends the run if the handler never fires.
+        await hub_feed._run(_feed_args(duration=2), src, SALT)
+
+    monkeypatch.setattr(hub_feed, "_load_feed_spoke", lambda: _Spoke)
+    asyncio.run(_feed())
+    assert tried == [False], "the spoke must have tried to rotate while closing"
+    assert posts == [] and src.refresh_token == "r0"
 
 
 def test_feed_spoke_install_uuid_is_stable_per_spoke_id():

@@ -126,6 +126,28 @@ def test_lldp_adjacency_becomes_a_link(monkeypatch, tmp_path):
     assert body["stats"]["edges_by_source"] == {"lldp": 1}
 
 
+def test_the_graph_is_built_off_the_event_loop(monkeypatch, tmp_path):
+    """Building a big tenant's map is CPU work; it must not stall the loop."""
+    import asyncio
+    from routes import nw as nw_routes
+    c, hub = _build(monkeypatch, tmp_path)
+    _seed(hub, {"acme-sw": {"NW_GET_LLDP_NEIGHBORS": []}})
+    threads, real = [], nw_routes.build_topology
+
+    def spy(**kw):
+        # A worker thread has no running loop; the loop's own thread does.
+        try:
+            asyncio.get_running_loop()
+            threads.append("loop")
+        except RuntimeError:
+            threads.append("worker")
+        return real(**kw)
+    monkeypatch.setattr(nw_routes, "build_topology", spy)
+    tok = _mint(hub, "u", tenants=["acme"])
+    assert c.get("/api/nw/topology?refresh=1", cookies={"lm_session": tok}).status_code == 200
+    assert threads == ["worker"]
+
+
 def test_a_refreshed_graph_is_then_served_from_cache(monkeypatch, tmp_path):
     """The page load must not re-SSH every device: after one refresh the graph
     rebuilds from the warm per-device cache with no further relay calls."""

@@ -339,6 +339,27 @@ def test_legacy_spoke_still_gets_cert_and_key(ca):
     assert h.sent[-1].payload.data.get("key")
 
 
+@pytest.mark.parametrize("remote_ip", ["10.0.0.5", "127.0.0.1"])
+def test_synthetic_spoke_is_issued_no_cert(ca, remote_ip):
+    # No host to hold a cert: issuing could only fail, on every connect. The
+    # hub's own feeder connects from 127.0.0.1 over wss, so the reason must
+    # say synthetic there too, not plaintext loopback.
+    h = _prov_hub(True)
+    del h._is_loopback_spoke
+    h.spoke_telemetry = {"spoke-1": {"remote_ip": remote_ip}}
+    h.synthetic_spokes = {"spoke-1"}
+
+    async def _rr(sid, cmd, data, timeout=None, signing_secret=None):
+        h.requests.append(cmd)
+        return {"status": "SUCCESS"}
+
+    h.request_response = _rr
+    out = _run(h._provision_spoke_mtls_cert("spoke-1", force=True))
+    assert (out["status"], out["reason"]) == ("skipped", "synthetic")
+    assert h.requests == [] and h.sent == []
+    assert "spoke-1" not in h.state.system_state["mtls_client_certs"]
+
+
 def test_revoke_records_serials_and_unbinds(ca):
     h = _prov_hub(False)
     _run(h._provision_spoke_mtls_cert("spoke-1", force=True))
@@ -544,8 +565,9 @@ def test_policy_file_overrides_env_at_startup(tmp_path, monkeypatch):
 
 def test_hub_fanout_reports_refusals_and_skips_role_subspokes():
     h = main.LabManagerHub.__new__(main.LabManagerHub)
-    h.approved_modules = {"a": True, "b": True, "a-netbox": True, "c": False}
+    h.approved_modules = {"a": True, "b": True, "a-netbox": True, "c": False, "feed": True}
     h._is_role_subspoke = lambda sid: sid == "a-netbox"
+    h.synthetic_spokes = {"feed"}
     sent = []
 
     async def _poq(sid, cmd, data):
@@ -559,5 +581,6 @@ def test_hub_fanout_reports_refusals_and_skips_role_subspokes():
     out = _run(h.push_tls_verify_to_all_spokes("on"))
     assert out["pushed"] == ["a"]
     assert out["refused"] == [{"spoke_id": "b", "message": "no verify"}]
+    assert out["skipped"] == ["feed"]
     assert {s for s, _, _ in sent} == {"a", "b"}
     assert all(c == "SPOKE_SET_TLS_VERIFY" and d == {"mode": "on"} for _, c, d in sent)

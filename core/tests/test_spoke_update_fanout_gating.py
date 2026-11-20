@@ -479,6 +479,45 @@ async def test_relayed_cs_agent_without_metadata_not_fanned_out(patched_clock):
     assert "lm-opnsense-spoke-1" in pushed_ids
 
 
+_SYNTHETIC_ROW = "lm-opnsense-spoke-1: synthetic spoke - no host to update"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("force_spokes", [False, True])
+async def test_synthetic_spoke_is_reported_not_pushed(patched_clock, force_spokes):
+    """A connected synthetic (Test Data Feed / load-test) spoke has no install
+    to update. It is never sent SPOKE_UPDATE, which it could only acknowledge,
+    so no "triggered" row or push marker is recorded, even on Update All."""
+    hub = _StubHub(remote_tip="cccc1")
+    hub.synthetic_spokes = {"lm-opnsense-spoke-1"}
+    result = await hub.perform_update(force_spokes=force_spokes)
+    assert hub.pushes == []
+    assert result["spokes"] == [_SYNTHETIC_ROW]
+    assert "lm-opnsense-spoke-1" not in (
+        hub.state.get_global_config().get("spoke_update_commits") or {})
+
+
+@pytest.mark.asyncio
+async def test_manual_spoke_and_agent_updates_skip_synthetic_spokes(monkeypatch):
+    """The manual Update Spokes / Update Agents paths report a synthetic spoke
+    as skipped instead of pushing it SPOKE_UPDATE."""
+    monkeypatch.setattr(update_pipeline.subprocess, "Popen", lambda *a, **k: None)
+    hub = _StubHub(remote_tip="cccc1")
+    hub.state._gc["update_sources"] = {"opnsense": OPNSENSE_REPO, "agent": LM_REPO}
+    hub.approved_modules[_AGENT_UUID] = True
+    hub.state.system_state["module_metadata"][_AGENT_UUID] = {"module_type": "agent"}
+    hub.synthetic_spokes = {"lm-opnsense-spoke-1", _AGENT_UUID}
+
+    spokes = await hub.update_spokes_only()
+    agents = await hub.update_agents_only()
+
+    assert hub.pushes == []
+    assert _SYNTHETIC_ROW in spokes["skipped"]
+    assert "lm-opnsense-spoke-1" not in spokes["triggered"]
+    assert agents["triggered"] == []
+    assert agents["skipped"] == [f"{_AGENT_UUID}: synthetic spoke - no host to update"]
+
+
 # --- In-lm-repo spoke static-asset gate (proxy/dns/dhcp share the hub repo) ---
 _AGENT_REPO = "https://github.com/lbockenstedt/agent-src.git"
 

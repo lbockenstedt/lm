@@ -676,11 +676,11 @@ def test_dns_dhcp_write_requires_admin(tmp_path):
                   cookies={"lm_session": admin_tok}).status_code != 403
 
 
-# ── 8a. External DNS (HE.NET) reads AND writes are Global-Admin-only ─────────
-# External DNS manages PUBLIC address-space records (no per-object tenant
-# model), so — unlike internal DNS where a dns-right user can READ — even READS
-# on /api/henet/* require Global Admin. A dns-right user and a tenant Admin are
-# both 403'd; the UI hides the External DNS subtab for them to match.
+# ── 8a. External DNS (HE.NET): right-gated reads, tiered writes ──────────────
+# Each record carries its tenant_id, so /api/henet/* reads need the dns or
+# henet right (a tenant Admin qualifies; the record list is filtered to the
+# caller's tenant), record and credential writes need the tenant-admin tier,
+# and the bulk Sync and Import stay Global-Admin-only.
 
 def test_henet_read_requires_dns_access(tmp_path):
     c, hub = _build({}, tmp_path)

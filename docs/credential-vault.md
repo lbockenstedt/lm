@@ -135,14 +135,18 @@ value.
   (`core/src/routes/net_services.py:487-541`); the tenant's chosen ref persists in
   `global_config["le_vault_dns_creds"]` (`net_services.py:543-555`) and re-syncs to
   the spoke on reconnect (`core/src/le_cache.py:103-161`). See [le.md](le.md).
-- **HE.NET (henet)** — `_henet_resolve_vault_cred()`
-  (`net_services.py:277-329`) resolves the assigned or explicit ref and injects
-  `ddns_key`; the module-level assignment persists in
-  `global_config["henet"]["vault_credential"]` via `GET/POST/DELETE
+- **HE.NET (henet)** — `_henet_resolve_account_login()`
+  (`core/src/routes/net_services.py`) resolves the assigned ref (the tenant's own
+  slot, else the global slot) to the HE.NET account login (email + password) for
+  the hub-side web writes and Import; the scheduled re-sync picks the same slot
+  with `henet_sync.cred_ref_for_scope()`. The global assignment persists in
+  `global_config["henet"]["vault_credential"]` and a tenant's in
+  `global_config["henet"]["tenant_credentials"]`, via `GET/POST/DELETE
   /api/henet/credential`. **One Hurricane Electric credential serves both LE and
   HE.NET** — the picker accepts `henet` DDNS-key secrets *and* shared `dns`
-  Hurricane-Electric secrets, and the hub reformats either shape into the dyndns
-  push password (`_henet_extract_ddns_key`). See [henet.md](henet.md).
+  Hurricane-Electric secrets, and saving one checks that it holds a usable key
+  or password (`_henet_extract_ddns_key`). Writes and Import need the account
+  login, so a bare DDNS key is refused there with a 422. See [henet.md](henet.md).
 - **Console** — `_console_load_credentials_resolved()`
   (`core/src/routes/console.py:451-465`) prefers the `__admin__` slot secret
   `console-auto-credentials` (`type=console`, `mode=hub`); `POST

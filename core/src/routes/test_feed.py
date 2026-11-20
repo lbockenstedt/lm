@@ -120,6 +120,18 @@ _proc = {"p": None, "started": 0.0, "log": "", "psk": "", "tenants": []}
 #: the whole family, which is why the feed used to die for good after an update.
 TOKEN_ROTATION_SENTINEL = "##LM-TEST-FEED-TOKEN## "
 
+#: Seconds Stop waits after SIGTERM before it SIGKILLs the feeder. The feeder's
+#: SIGTERM handler lets no new token refresh start (SourceHub.stop_rotating in
+#: scripts/hub_feed.py), and the feeder waits for one already in flight to print
+#: the new pair before it exits (SourceHub.close), because a kill in between
+#: leaves this hub holding a spent refresh token, and reusing that revokes the
+#: whole token family. Such a refresh began before the SIGTERM and runs
+#: alongside the spokes' close, so its deadline does not depend on how long they
+#: take (up to 50s on websockets 13). Each network step of the refresh (connect,
+#: TLS handshake, answer) times out after hub_feed.REFRESH_TIMEOUT (20s); 75s
+#: covers all three and also bounds the spokes' close.
+_STOP_GRACE_S = 75
+
 
 def register(app, hub, ctx):
     _session_user = ctx._session_user
@@ -562,6 +574,8 @@ def register(app, hub, ctx):
 
     @app.post("/api/test-feed/stop")
     async def stop_feed(request: Request):
+        """Stop the feeder (SIGTERM, then SIGKILL after _STOP_GRACE_S) and
+        revoke the feed's onboarding PSK."""
         sess = _require_admin(request)
         p = _proc["p"]
         if not (p and p.poll() is None):
@@ -574,7 +588,7 @@ def register(app, hub, ctx):
             # tasks and synthetic spoke connections, and killing only the parent
             # would leave those sockets attached to the hub.
             os.killpg(os.getpgid(p.pid), signal.SIGTERM)
-            await asyncio.to_thread(p.wait, 10)
+            await asyncio.to_thread(p.wait, _STOP_GRACE_S)
         except Exception:  # noqa: BLE001
             try:
                 os.killpg(os.getpgid(p.pid), signal.SIGKILL)
@@ -939,24 +953,27 @@ async def _ensure_local_tenants(hub, registry: dict, existing: set) -> list:
     # update_tenant merges an id into a stored tenant spelt with another case,
     # so a tenant counts as existing here in any case.
     existing_keys = {str(t).strip().casefold() for t in (existing or ())}
-    for tid, row in (registry or {}).items():
-        clean = str(tid or "").strip()
-        if not clean or clean.casefold() in existing_keys:
-            continue
-        # 'shared' is applied below, under the single-shared invariant, rather
-        # than seeded here — seeding it directly could leave two flagged.
-        seed = {k: v for k, v in (row or {}).items()
-                if k in TENANT_FIELDS and k != "shared"}
-        seed.setdefault("name", clean.upper())
-        seed.setdefault("active", True)
-        seed["description"] = (seed.get("description")
-                               or "Created by the Test Data Feed.")
-        try:
-            hub.state.update_tenant(clean, seed)
-            created.append(clean)
-        except Exception:  # noqa: BLE001
-            logger.warning("[test-feed] could not create local tenant %s",
-                           clean, exc_info=True)
+    # Create each missing tenant, with one tenant-cache refresh for the whole
+    # loop.
+    with hub.state.batch_tenant_writes():
+        for tid, row in (registry or {}).items():
+            clean = str(tid or "").strip()
+            if not clean or clean.casefold() in existing_keys:
+                continue
+            # 'shared' is applied below, under the single-shared invariant, rather
+            # than seeded here — seeding it directly could leave two flagged.
+            seed = {k: v for k, v in (row or {}).items()
+                    if k in TENANT_FIELDS and k != "shared"}
+            seed.setdefault("name", clean.upper())
+            seed.setdefault("active", True)
+            seed["description"] = (seed.get("description")
+                                   or "Created by the Test Data Feed.")
+            try:
+                hub.state.update_tenant(clean, seed)
+                created.append(clean)
+            except Exception:  # noqa: BLE001
+                logger.warning("[test-feed] could not create local tenant %s",
+                               clean, exc_info=True)
 
     moved = _mirror_shared_tenant(hub, registry)
 

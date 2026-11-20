@@ -1086,3 +1086,16 @@ def test_target_payload_extras_reach_install_cert():
         rr, lambda mt, ident: "fw", {"firewall"}, "le", "d",
         [{"module_type": "firewall", "identifier": "fw"}], target_payload=extras))
     assert [d["host"] for d in sent["devices"]] == ["10.0.0.1", "10.0.0.2"]
+
+
+def test_mtls_pushes_go_to_primary_real_spokes_only():
+    """Role sub-spokes ride their parent's push; synthetic (test-feed) spokes
+    have no cert dir and would keep the mTLS readiness check "not ready"."""
+    from types import SimpleNamespace
+
+    from hub_cert_distribution import HubCertDistributionMixin as M
+    hub = SimpleNamespace(
+        spoke_module_types={"agent-1": "agent", "agent-1-dns": "dns", "feed-1": "cs", "gone": "cs"},
+        active_connections={"agent-1": 1, "agent-1-dns": 1, "feed-1": 1},
+        spoke_parent_map={"agent-1-dns": "agent-1"}, synthetic_spokes={"feed-1"})
+    assert M._get_primary_spokes(hub) == [("agent-1", "agent")]

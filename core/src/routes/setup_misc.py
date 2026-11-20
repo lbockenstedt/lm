@@ -382,7 +382,7 @@ def register(app, hub, ctx):
             gc.setdefault("hub", {})["url"] = ""
             hub.state._mark_dirty()
             return {"status": "ok", "message": "Hub URL override cleared.",
-                    "pushed": [], "queued": [], "failed": []}
+                    "pushed": [], "queued": [], "failed": [], "skipped": []}
         # Reject anything outside the allowed hub URL charset.
         if not _HUB_URL_RE.match(url):
             raise HTTPException(
@@ -395,10 +395,11 @@ def register(app, hub, ctx):
         hub.state._mark_dirty()
         # Push the URL to every approved spoke (offline ones are queued for reconnect).
         result = await hub.push_hub_url_to_all_spokes(url)
-        # Report how many spokes got it now, how many are queued, and which failed.
+        # Report how many spokes got it now, how many are queued, and which
+        # failed or were skipped (synthetic spokes, which have no host).
         return {"status": "ok",
                 "message": (f"Hub URL set to {url}; pushed to "
                             f"{len(result['pushed'])}, queued for "
                             f"{len(result['queued'])} offline."),
                 "pushed": result["pushed"], "queued": result["queued"],
-                "failed": result["failed"]}
+                "failed": result["failed"], "skipped": result["skipped"]}

@@ -633,6 +633,9 @@ class _SpokeHello:
     enc_capable: bool
     # The spoke can generate its own mTLS key + CSR (SPOKE_MTLS_CSR).
     mtls_csr_capable: bool
+    # A test-feed / load-test spoke with no host of its own
+    # (messaging/synthetic_spoke.py): the hub sends it no host actions.
+    synthetic: bool
 
     @classmethod
     def from_auth_frame(cls, auth_data):
@@ -654,10 +657,12 @@ class _SpokeHello:
         # Encryption only counts when the spoke asked for it and the hub has it enabled.
         enc_capable = bool(auth_data.get("enc") == ENC_MARKER) and encryption_enabled()
         mtls_csr_capable = bool(auth_data.get("mtls_csr"))
+        synthetic = bool(auth_data.get("synthetic"))
         # Build the hello record.
         return cls(spoke_id, secret, module_type, onboarding_psk, tenant_id_hint,
                    install_uuid, hostname, parent_spoke_id, netbox_server,
-                   ldap_server, zabbix_server, enc_capable, mtls_csr_capable)
+                   ldap_server, zabbix_server, enc_capable, mtls_csr_capable,
+                   synthetic)
 
 
 @dataclass
@@ -821,6 +826,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # ("zabbix_server": true); offers + resolves a "zabbix-server" LE cert
         # target so the Monitoring web UI gets a real certificate.
         self.zabbix_server_agents: set = set()
+
+        # Synthetic spokes (Test Data Feed / load test) — they advertise
+        # "synthetic": 1 in the auth frame. They have no host of their own (the
+        # feed runs as this hub's own child process), so OS Updates, Remote
+        # Console and the mTLS cert pushes leave them out. Recorded only for the
+        # connection that owns the spoke's slot (see _record_spoke_capabilities).
+        self.synthetic_spokes: set = set()
 
         # --- System Diagnostics ---
         # Hub log ring buffer and per-agent log buffers.
@@ -3372,6 +3384,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             except Exception:  # noqa: BLE001
                 logger.debug("Recovery PSK push to %s failed", spoke_id, exc_info=True)
 
+            # A synthetic (Test Data Feed / load-test) spoke has no host of its
+            # own, so the hub URL, watchdog and TLS-verify re-pushes below skip
+            # it, as the save-time fan-outs do (_host_push_targets). The marker
+            # is recorded at connect, before this push, under the primary key.
+            synthetic = self._primary_key(spoke_id) in getattr(self, "synthetic_spokes", ())
+
             # Reconcile the operator-set hub URL on every (re)connect: if
             # global_config["hub"]["url"] is set, re-push SPOKE_SET_HUB_URL so a
             # spoke that was offline when the hub's DNS name changed (or that
@@ -3385,7 +3403,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             try:
                 # Re-push the hub URL when one is configured.
                 hub_url = self.state.get_global_config().get("hub", {}).get("url")
-                if hub_url:
+                if hub_url and not synthetic:
                     url_msg = Message(
                         header=MessageHeader(
                             message_id=str(uuid.uuid4()),
@@ -3408,7 +3426,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             try:
                 # Push the watchdog config when one is configured.
                 wd = self.state.get_global_config().get("hub_contact_watchdog")
-                if wd is not None:
+                if wd is not None and not synthetic:
                     wd_msg = Message(
                         header=MessageHeader(
                             message_id=str(uuid.uuid4()),
@@ -3430,7 +3448,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             try:
                 # Push the TLS-verify policy to non-role spokes when set.
                 tv = self.state.get_global_config().get("hub_tls_verify")
-                if tv and not self._is_role_subspoke(spoke_id):
+                if tv and not synthetic and not self._is_role_subspoke(spoke_id):
                     await self.send_setup_to_spoke(Message(
                         header=MessageHeader(
                             message_id=str(uuid.uuid4()),
@@ -4861,6 +4879,16 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         logger.info(f"On-demand rotate-all: {len(rotated)} rotated, {len(failed)} failed.")
         return {"status": "SUCCESS", "rotated": rotated, "failed": failed}
 
+    def _host_push_targets(self):
+        """Approved spokes for a fleet-wide push that changes host config, as
+        ``(targets, skipped)``. A connected synthetic (Test Data Feed /
+        load-test) spoke has no host of its own: it could only acknowledge the
+        push without applying it, so it is listed as skipped, never as pushed."""
+        synthetic = getattr(self, "synthetic_spokes", ())
+        approved = [sid for sid, ap in self.approved_modules.items() if ap]
+        return ([sid for sid in approved if sid not in synthetic],
+                [sid for sid in approved if sid in synthetic])
+
     async def push_hub_url_to_all_spokes(self, hub_url: str) -> Dict[str, Any]:
         """Fan out a hub-URL change to every approved spoke immediately (the
         save-time path; the reconcile-on-every-connect path in
@@ -4870,9 +4898,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         in the durable mailbox and re-delivered on its next connect, where the
         idempotent handler no-ops (it's already on the new URL) and clears the
         ack. Loopback/auto spokes skip in-handler, so the fan-out is safe to
-        send to everyone. Returns ``{"status","pushed","queued","failed"}``."""
-        # Every approved spoke.
-        targets = [sid for sid, ap in self.approved_modules.items() if ap]
+        send to everyone. Synthetic spokes are not sent it (see
+        ``_host_push_targets``). Returns
+        ``{"status","pushed","queued","failed","skipped"}``."""
+        # Every approved spoke except synthetic ones.
+        targets, skipped = self._host_push_targets()
 
         # Push to one spoke and report how it went.
         async def _one(sid):
@@ -4893,8 +4923,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         queued = [sid for sid, kind in results if kind == "queued"]
         failed = [sid for sid, kind in results if kind == "failed"]
         logger.info(f"Hub-URL fan-out: {len(pushed)} pushed, {len(queued)} queued, "
-                    f"{len(failed)} failed.")
-        return {"status": "SUCCESS", "pushed": pushed, "queued": queued, "failed": failed}
+                    f"{len(failed)} failed, {len(skipped)} skipped.")
+        return {"status": "SUCCESS", "pushed": pushed, "queued": queued, "failed": failed,
+                "skipped": skipped}
 
     async def push_watchdog_to_all_spokes(self, wd_cfg: Dict[str, Any]) -> Dict[str, Any]:
         """Fan out the hub-contact watchdog config to every approved spoke/agent
@@ -4902,9 +4933,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         every connect for spokes that connect later). Uses ``push_or_queue_to_spoke``
         so an offline spoke gets it from the durable mailbox on next connect. The
         handler is idempotent (just rewrites the local config file), so the fan-out
-        is safe for everyone. Returns ``{"status","pushed","queued","failed"}``."""
-        # Every approved spoke.
-        targets = [sid for sid, ap in self.approved_modules.items() if ap]
+        is safe for everyone. Synthetic spokes are not sent it (see
+        ``_host_push_targets``). Returns
+        ``{"status","pushed","queued","failed","skipped"}``."""
+        # Every approved spoke except synthetic ones.
+        targets, skipped = self._host_push_targets()
 
         # Push to one spoke and report how it went.
         async def _one(sid):
@@ -4921,17 +4954,20 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         pushed = [sid for sid, kind in results if kind == "pushed"]
         queued = [sid for sid, kind in results if kind == "queued"]
         failed = [sid for sid, kind in results if kind == "failed"]
-        logger.info(f"Watchdog fan-out: {len(pushed)} pushed, {len(queued)} queued, {len(failed)} failed.")
-        return {"status": "SUCCESS", "pushed": pushed, "queued": queued, "failed": failed}
+        logger.info(f"Watchdog fan-out: {len(pushed)} pushed, {len(queued)} queued, "
+                    f"{len(failed)} failed, {len(skipped)} skipped.")
+        return {"status": "SUCCESS", "pushed": pushed, "queued": queued, "failed": failed,
+                "skipped": skipped}
 
     async def push_tls_verify_to_all_spokes(self, mode: str) -> Dict[str, Any]:
         """Fan out the hub-TLS-verify policy to every approved spoke/agent (the
         save-time path; ``push_config_to_spoke`` reconciles on every connect).
-        Returns pushed/queued/failed plus ``refused`` — nodes that declined
-        ``on`` because the hub cert does not verify from them."""
-        # Approved spokes, excluding role sub-spokes.
-        targets = [sid for sid, ap in self.approved_modules.items()
-                   if ap and not self._is_role_subspoke(sid)]
+        Returns pushed/queued/failed, ``refused`` — nodes that declined ``on``
+        because the hub cert does not verify from them — and ``skipped``
+        synthetic spokes (see ``_host_push_targets``)."""
+        # Approved spokes, excluding synthetic spokes and role sub-spokes.
+        targets, skipped = self._host_push_targets()
+        targets = [sid for sid in targets if not self._is_role_subspoke(sid)]
 
         # Push to one spoke and report how it went.
         async def _one(sid):
@@ -4954,13 +4990,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
         # Push to all in parallel and group by outcome.
         results = await asyncio.gather(*(_one(sid) for sid in targets)) if targets else []
-        out = {"status": "SUCCESS", "pushed": [], "queued": [], "failed": [], "refused": []}
+        out = {"status": "SUCCESS", "pushed": [], "queued": [], "failed": [], "refused": [],
+               "skipped": skipped}
         for sid, kind, msg in results:
             out[kind].append({"spoke_id": sid, "message": msg} if kind == "refused" else sid)
         # Log and return the summary.
-        logger.info("Hub-TLS-verify fan-out (%s): %d pushed, %d queued, %d refused, %d failed.",
-                    mode, len(out["pushed"]), len(out["queued"]), len(out["refused"]),
-                    len(out["failed"]))
+        logger.info("Hub-TLS-verify fan-out (%s): %d pushed, %d queued, %d refused, %d failed, "
+                    "%d skipped.", mode, len(out["pushed"]), len(out["queued"]),
+                    len(out["refused"]), len(out["failed"]), len(skipped))
         return out
 
     async def revoke_spoke(self, spoke_id: str, reason: Optional[str] = None,
@@ -7297,7 +7334,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             await self._psk_auto_approve(conn, hello)
 
         # Record advertised capabilities and link role sub-spokes to their parent.
-        self._record_spoke_capabilities(pk, hello)
+        self._record_spoke_capabilities(pk, hello, self._owns_spoke_slot(spoke_id, websocket))
         if hello.parent_spoke_id:
             await self._link_role_subspoke(conn, hello.parent_spoke_id)
 
@@ -7358,7 +7395,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                 f"tenant_hint={tenant_id_hint}")
         self._record_spoke_auth_failure(conn.peer_ip, spoke_id, "invalid_onboarding_psk")
 
-    def _record_spoke_capabilities(self, pk, hello):
+    def _record_spoke_capabilities(self, pk, hello, owns_slot):
         """Record what the spoke advertised in its auth frame.
 
         Recorded on every connect, authenticated or not (zero-touch too), and
@@ -7369,6 +7406,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         * H4 encryption — a non-capable or kill-switched spoke records False
           and its outbound frames stay plaintext.
         * mTLS CSR — the spoke can generate its own key + CSR.
+        * synthetic — a Test Data Feed / load-test spoke, which OS Updates,
+          Remote Console and the mTLS cert pushes leave out. Recorded only
+          when ``owns_slot`` (this socket holds the spoke's active slot): a
+          ghost connection that reuses a live spoke's id must not be able to
+          hide that spoke from patching, or un-mark a live synthetic one.
         """
         # Track netbox-server, ldap-server and zabbix-server capabilities.
         if hello.netbox_server:
@@ -7389,6 +7431,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Record encryption and CSR capabilities.
         self.spoke_enc_capable[pk] = hello.enc_capable
         self.spoke_mtls_csr_capable[pk] = hello.mtls_csr_capable
+        # Record the synthetic marker, only for the slot owner.
+        if owns_slot:
+            if hello.synthetic:
+                self.synthetic_spokes.add(pk)
+            else:
+                self.synthetic_spokes.discard(pk)
 
     async def _link_role_subspoke(self, conn, parent_spoke_id):
         """Record a role sub-spoke's parent agent; auto-approve on a vouch.
@@ -8507,6 +8555,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         self.netbox_server_agents.discard(pk)
         self.ldap_server_agents.discard(pk)
         self.zabbix_server_agents.discard(pk)
+        self.synthetic_spokes.discard(pk)
         self.spoke_authenticated.pop(pk, None)
         self.spoke_enc_capable.pop(pk, None)
         # Drop the per-connection "never authenticated" diagnosis state so a
@@ -8745,6 +8794,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 return {"status": "error", "message": "mtls_ca unavailable"}
         # Primary key.
         pk = self._primary_key(spoke_id)
+        # Synthetic (Test Data Feed / load-test) spokes have no host of their own
+        # to hold a client cert: they refuse SPOKE_MTLS_CSR and skip the cert
+        # install, so issuing could only fail — and would retry on every connect.
+        # Checked first: the hub's own feeder connects from 127.0.0.1 over wss,
+        # so the loopback reason below would misreport it as plaintext ws.
+        if pk in getattr(self, "synthetic_spokes", ()):
+            return {"status": "skipped", "reason": "synthetic",
+                    "message": "synthetic test-feed / load-test spoke — it has no host "
+                               "of its own to hold a client cert"}
         # Co-located spokes connect over plaintext loopback (ws://127.0.0.1) — no
         # TLS leg, so a client cert can never be presented. Skip: issuing one just
         # writes files the spoke can't use and shows a misleading "issued but never
@@ -10743,30 +10801,32 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     result = await self.request_response(spoke_id, "NETBOX_GET_TENANTS", {}, timeout=60.0)
                     data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else {}
                     if isinstance(data, dict) and data.get("status") == "SUCCESS":
-                        # Upsert each tenant, keeping any local-only fields.
-                        for t in data.get("tenants", []):
-                            slug = t["slug"]
-                            cfg = self.state.get_tenant(slug) or {}
-                            try:
-                                self.state.update_tenant(slug, {
-                                    "name": t["name"],
-                                    "netbox_tenant_slug": slug,
-                                    "netbox_id": t["id"],
-                                    "description": t.get("description", ""),
-                                    # Which group (if any) owns this tenant, so the
-                                    # WebUI can show the tenant nested under it.
-                                    "tenant_group_slug": t.get("group_slug", "") or "",
-                                    "tenant_group_name": t.get("group_name", "") or "",
-                                    **{k: v for k, v in cfg.items() if k not in (
-                                        "name", "netbox_tenant_slug", "netbox_id", "description",
-                                        "tenant_group_slug", "tenant_group_name")},
-                                })
-                            except ValueError as e:
-                                # The slug is blank, or names several stored
-                                # tenants that differ only by case or surrounding
-                                # spaces (StateManager.tenant_key): skip it, so the
-                                # rest and the group sync below still run.
-                                logger.warning("Tenant sync: skipped %s: %s", slug, e)
+                        # Upsert each tenant, keeping any local-only fields,
+                        # with one tenant-cache refresh for the whole loop.
+                        with self.state.batch_tenant_writes():
+                            for t in data.get("tenants", []):
+                                slug = t["slug"]
+                                cfg = self.state.get_tenant(slug) or {}
+                                try:
+                                    self.state.update_tenant(slug, {
+                                        "name": t["name"],
+                                        "netbox_tenant_slug": slug,
+                                        "netbox_id": t["id"],
+                                        "description": t.get("description", ""),
+                                        # Which group (if any) owns this tenant, so the
+                                        # WebUI can show the tenant nested under it.
+                                        "tenant_group_slug": t.get("group_slug", "") or "",
+                                        "tenant_group_name": t.get("group_name", "") or "",
+                                        **{k: v for k, v in cfg.items() if k not in (
+                                            "name", "netbox_tenant_slug", "netbox_id", "description",
+                                            "tenant_group_slug", "tenant_group_name")},
+                                    })
+                                except ValueError as e:
+                                    # The slug is blank, or names several stored
+                                    # tenants that differ only by case or surrounding
+                                    # spaces (StateManager.tenant_key): skip it, so the
+                                    # rest and the group sync below still run.
+                                    logger.warning("Tenant sync: skipped %s: %s", slug, e)
                         # Persist and log.
                         self.state._mark_dirty()
                         logger.debug(f"Tenant sync: {len(data.get('tenants', []))} tenant(s) from NetBox")
@@ -10795,43 +10855,45 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                          (data or {}).get("status") if isinstance(data, dict) else "malformed")
             return
 
-        # Upsert each group as a hub tenant.
+        # Upsert each group as a hub tenant, with one tenant-cache refresh for
+        # the whole loop.
         import access as _access
         groups = data.get("groups", []) or []
         seen = set()
-        for g in groups:
-            # Skip groups without a slug.
-            gslug = str(g.get("slug") or "").strip()
-            if not gslug:
-                continue
-            # Group tenant id. The prune below keeps every stored spelling of it:
-            # ids are not case-sensitive, and update_tenant merges into one.
-            tid = _access.TENANT_GROUP_PREFIX + gslug
-            seen.add(tid.casefold())
-            # Upsert the group, keeping local-only fields.
-            cfg = self.state.get_tenant(tid) or {}
-            try:
-                self.state.update_tenant(tid, {
-                    "name": g.get("name") or gslug,
-                    "is_tenant_group": True,
-                    "netbox_tenant_group_slug": gslug,
-                    # A group owns no objects itself; an empty tenant slug keeps
-                    # every plain-tenant code path treating it as unscoped.
-                    "netbox_tenant_slug": "",
-                    "member_tenant_slugs": g.get("tenant_slugs", []) or [],
-                    "parent_group_slug": g.get("parent_slug", "") or "",
-                    "netbox_id": g.get("id"),
-                    "description": g.get("description", ""),
-                    **{k: v for k, v in cfg.items() if k not in (
-                        "name", "is_tenant_group", "netbox_tenant_group_slug",
-                        "netbox_tenant_slug", "member_tenant_slugs",
-                        "parent_group_slug", "netbox_id", "description")},
-                })
-            except ValueError as e:
-                # Several stored groups differ from this id only by case or
-                # surrounding spaces (StateManager.tenant_key): skip it and
-                # keep them all.
-                logger.warning("Tenant sync: skipped tenant group %s: %s", tid, e)
+        with self.state.batch_tenant_writes():
+            for g in groups:
+                # Skip groups without a slug.
+                gslug = str(g.get("slug") or "").strip()
+                if not gslug:
+                    continue
+                # Group tenant id. The prune below keeps every stored spelling of it:
+                # ids are not case-sensitive, and update_tenant merges into one.
+                tid = _access.TENANT_GROUP_PREFIX + gslug
+                seen.add(tid.casefold())
+                # Upsert the group, keeping local-only fields.
+                cfg = self.state.get_tenant(tid) or {}
+                try:
+                    self.state.update_tenant(tid, {
+                        "name": g.get("name") or gslug,
+                        "is_tenant_group": True,
+                        "netbox_tenant_group_slug": gslug,
+                        # A group owns no objects itself; an empty tenant slug keeps
+                        # every plain-tenant code path treating it as unscoped.
+                        "netbox_tenant_slug": "",
+                        "member_tenant_slugs": g.get("tenant_slugs", []) or [],
+                        "parent_group_slug": g.get("parent_slug", "") or "",
+                        "netbox_id": g.get("id"),
+                        "description": g.get("description", ""),
+                        **{k: v for k, v in cfg.items() if k not in (
+                            "name", "is_tenant_group", "netbox_tenant_group_slug",
+                            "netbox_tenant_slug", "member_tenant_slugs",
+                            "parent_group_slug", "netbox_id", "description")},
+                    })
+                except ValueError as e:
+                    # Several stored groups differ from this id only by case or
+                    # surrounding spaces (StateManager.tenant_key): skip it and
+                    # keep them all.
+                    logger.warning("Tenant sync: skipped tenant group %s: %s", tid, e)
 
         # Prune groups that no longer exist in NetBox, ending the sessions and
         # API tokens of the users who lost one, as deleting a tenant in Setup

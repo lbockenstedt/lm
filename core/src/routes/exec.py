@@ -1,5 +1,7 @@
 """Remote Console — run a diagnostic (allowlist) or, when Debug/shell mode is on,
 an arbitrary command on the hub or any connected spoke, from the WebUI.
+Synthetic (Test Data Feed / load-test) spokes are not targets: they have no
+host of their own, and refuse RUN_COMMAND.
 
 Security posture (matches how the feature was requested):
   * OFF by default — every route 403s until a Global-Admin flips
@@ -88,11 +90,14 @@ def register(app, hub, ctx):
         """Return the hub, each connected spoke and each reachable relayed agent."""
         # Global Admins only.
         _require_admin(request)
-        # hub + every connected spoke (generic agents + role sub-spokes connect
-        # as spokes, so this list covers them by spoke_id).
+        # hub + every connected real spoke (generic agents + role sub-spokes connect
+        # as spokes, so this list covers them by spoke_id). Synthetic spokes have
+        # no host to run a command on.
         targets = [{"id": "hub", "label": "Hub (this box)", "kind": "hub"}]
+        synthetic = getattr(hub, "synthetic_spokes", ())
         for sid in sorted(getattr(hub, "active_connections", {}) or {}):
-            targets.append({"id": sid, "label": sid, "kind": "spoke"})
+            if sid not in synthetic:
+                targets.append({"id": sid, "label": sid, "kind": "spoke"})
         # Relayed node agents (pxmx agents dial a spoke's /ws/agent, not the hub).
         # Route id "agent:<owning_spoke_id>:<agent_id>" so the run path can relay
         # RUN_COMMAND down through the owning spoke. Only include ones whose owning
@@ -166,6 +171,10 @@ def register(app, hub, ctx):
             else:
                 if hub._primary_key(target) not in conns:
                     raise HTTPException(status_code=404, detail=f"spoke '{target}' not connected")
+                if hub._primary_key(target) in getattr(hub, "synthetic_spokes", ()):
+                    raise HTTPException(status_code=400,
+                                        detail=f"'{target}' is a synthetic test-feed / load-test "
+                                               "spoke — it has no host to run commands on")
                 resp = await hub.request_response(
                     target, "RUN_COMMAND",
                     {"command": command, "allow_shell": allow_shell, "timeout": 30.0},

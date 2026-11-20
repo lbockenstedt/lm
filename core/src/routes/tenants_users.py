@@ -361,30 +361,32 @@ def register(app, hub, ctx):
             added, updated, skipped = [], [], []
             nb_slugs = {t["slug"] for t in nb_tenants}
 
-            # Upsert each NetBox tenant, keeping any extra hub-only fields it already had.
-            for t in nb_tenants:
-                slug = t["slug"]
-                try:
-                    # Stored already in any case, or the built-in default
-                    # (update_tenant merges into it)?
-                    exists = hub.state.tenant_key(slug) is not None
-                    cfg = hub.state.get_tenant(slug) or {}
-                    hub.state.update_tenant(slug, {
-                        "name": t["name"],
-                        "netbox_tenant_slug": slug,
-                        "netbox_id": t["id"],
-                        "description": t.get("description", ""),
-                        **{k: v for k, v in cfg.items() if k not in ("name", "netbox_tenant_slug", "netbox_id", "description")},
-                    })
-                except ValueError as e:
-                    # This slug names several stored tenants that differ only
-                    # by case or surrounding spaces (StateManager.tenant_key):
-                    # skip it, sync the rest.
-                    logger.warning("sync_tenants_from_netbox: skipped %s: %s", slug, e)
-                    skipped.append(slug)
-                    continue
-                # Record whether this was an update or an add.
-                (updated if exists else added).append(slug)
+            # Upsert each NetBox tenant, keeping any extra hub-only fields it
+            # already had, with one tenant-cache refresh for the whole loop.
+            with hub.state.batch_tenant_writes():
+                for t in nb_tenants:
+                    slug = t["slug"]
+                    try:
+                        # Stored already in any case, or the built-in default
+                        # (update_tenant merges into it)?
+                        exists = hub.state.tenant_key(slug) is not None
+                        cfg = hub.state.get_tenant(slug) or {}
+                        hub.state.update_tenant(slug, {
+                            "name": t["name"],
+                            "netbox_tenant_slug": slug,
+                            "netbox_id": t["id"],
+                            "description": t.get("description", ""),
+                            **{k: v for k, v in cfg.items() if k not in ("name", "netbox_tenant_slug", "netbox_id", "description")},
+                        })
+                    except ValueError as e:
+                        # This slug names several stored tenants that differ only
+                        # by case or surrounding spaces (StateManager.tenant_key):
+                        # skip it, sync the rest.
+                        logger.warning("sync_tenants_from_netbox: skipped %s: %s", slug, e)
+                        skipped.append(slug)
+                        continue
+                    # Record whether this was an update or an add.
+                    (updated if exists else added).append(slug)
 
             # Mark state for saving.
             hub.state._mark_dirty()
