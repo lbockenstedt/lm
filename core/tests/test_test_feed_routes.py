@@ -422,8 +422,11 @@ def test_tenant_registry_survives_unreadable_state():
 
 
 class _FakeState:
-    # The real id resolution, so the test feed matches ids as the hub does.
+    # The real id resolution, so the test feed matches ids as the hub does,
+    # and the real batch _ensure_local_tenants writes through.
     tenant_key = StateManager.tenant_key
+    batch_tenant_writes = StateManager.batch_tenant_writes
+    _tenant_batch_depth = 0
 
     def __init__(self, tenants=None):
         self.tenant_state = {"tenants": dict(tenants or {})}

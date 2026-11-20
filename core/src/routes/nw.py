@@ -1504,8 +1504,11 @@ def register(app, hub, ctx):
         cfg_tid = acting_tenant or _nw_caller_tenant(sess, None)
         manual = _nw_topology_cfg(hub, cfg_tid)
 
-        # Build the map from every source.
-        graph = build_topology(
+        # Build the map from every source, off the event loop: a big tenant's
+        # MAC tables take a noticeable time to fold, and every other request
+        # waits while the loop is busy.
+        graph = await asyncio.to_thread(
+            build_topology,
             fleet=fleet,
             lldp_by_device=lldp_by_device,
             macs_by_device=macs_by_device,
@@ -2209,25 +2212,56 @@ def register(app, hub, ctx):
         hub.state._mark_dirty()
         return {"status": "ok", "nw_scan": clean}
 
-    def _nw_caller_tenant(sess, req_tenant):
-        """Resolve+authorize the tenant a caller may configure. Admin: the named
-        tenant or the shared tenant. Tenant-admin: only one of their own tenants.
-        Raises 403/400 on violation."""
+    def _nw_scan_tenants(sess):
+        """The tenants a non-admin session owns on the NW pages: its tenants
+        list, else its primary tenant_id (access._session_tenants), as stored.
+
+        It is the one tenant set the NW scan paths read: the tenant a caller
+        may configure or scan (_nw_caller_tenant), the scan credential sets
+        they see and use (_scan_set_visible), the vault gate of the
+        credential list and the schedule list. The scan used to filter its
+        sets with spoke_visible_to_session, which reads only the tenants
+        list, so a session with only a primary tenant was offered its vault
+        logins and lost them when it scanned."""
+        return access._session_tenants(sess)
+
+    def _scan_set_visible(sess, set_tenant):
+        """Whether a scan credential set tagged ``set_tenant`` is visible to
+        ``sess``, for the credential list and the scan alike: an admin sees
+        every set; anyone else a shared one or one of their own tenants'
+        (_nw_scan_tenants), compared in any case (fleet rule 6.1). An
+        untagged set is admin-only, as in spoke_visible_to_session."""
+        # Admins see every set; an untagged set is admin-only.
+        if _is_admin(sess):
+            return True
+        if not access.raw_tenant_id(set_tenant):
+            return False
+        # A shared set, or one of the caller's own tenants'.
+        return (access.tenant_is_shared(set_tenant)
+                or access.tenant_among(set_tenant, _nw_scan_tenants(sess)))
+
+    def _nw_caller_tenant(sess, req_tenant, action="configure"):
+        """Resolve and authorize the tenant a caller may ``action`` (the verb
+        of the error messages). Admin: the named tenant, else the shared
+        tenant. Anyone else: one of their own tenants (_nw_scan_tenants),
+        named in any case (fleet rule 6.1) and returned as the session spells
+        it, since the per-tenant config is keyed by it; none named, the first
+        one they own. Raises 403 for another tenant, 400 when they have none."""
         # Admins: the named tenant, else the shared tenant.
         req_tenant = str(req_tenant or "").strip()
         if _is_admin(sess):
             return req_tenant or access.shared_tenant_id() or ""
-        # Others: their own tenants only.
-        own = ((sess or {}).get("user", {}).get("tenants")
-               or [(sess or {}).get("user", {}).get("tenant_id")])
-        own = [t for t in own if t]
-        if req_tenant and req_tenant not in own:
-            raise HTTPException(status_code=403, detail="You may only configure your own tenant")
-        # Use the requested tenant, else the first one they own.
-        tid = req_tenant or (own[0] if own else "")
-        if not tid:
-            raise HTTPException(status_code=400, detail="No tenant resolved")
-        return tid
+        # Others: their own tenants only, in any case.
+        own = _nw_scan_tenants(sess)
+        if req_tenant:
+            if not access.tenant_among(req_tenant, own):
+                raise HTTPException(status_code=403,
+                                    detail=f"You may only {action} your own tenant")
+            return next(t for t in own if access.same_tenant(t, req_tenant))
+        # None named: the first tenant they own.
+        if not own:
+            raise HTTPException(status_code=400, detail=f"No tenant to {action}")
+        return own[0]
 
     def _tenant_owned_scan_sets(hub, tenant_id):
         """Scan credential sets the tenant owns: stored sets in its scope plus its vault-held sets.
@@ -2364,12 +2398,13 @@ def register(app, hub, ctx):
         # Admins or tenant admins only.
         if not (_is_admin(sess) or _is_tenant_admin(sess)):
             raise HTTPException(status_code=403, detail="admin or tenant-admin required")
-        # Admins see every tenant; tenant admins only their own.
+        # Admins see every tenant; tenant admins only their own, the tenants
+        # _nw_caller_tenant lets them configure (a primary tenant included).
         all_t = (getattr(hub.state, "tenant_state", {}) or {}).get("tenants", {}) or {}
         if _is_admin(sess):
             ids = list(all_t.keys())
         else:
-            ids = [t for t in ((sess or {}).get("user", {}).get("tenants") or []) if t]
+            ids = list(_nw_scan_tenants(sess))
         # Narrow to the selected tenant, if any.
         selected = str(request.query_params.get("tenant") or "").strip()
         if selected:
@@ -2571,8 +2606,8 @@ def register(app, hub, ctx):
         Credential scoping: the chosen sets are always narrowed to ones owned by
         the scanned tenant (or the shared tenant), for every caller including a
         full admin — a scan runs with THAT tenant's vault credentials, never
-        another tenant's. A tenant-admin is additionally limited to sets visible
-        to their session."""
+        another tenant's. A non-admin is additionally limited to the sets the
+        credential list shows them (_scan_set_visible)."""
         # A scheduled (system) scan has no session.
         system = sess is None
         # The spoke to scan with: requested, else saved, limited to the tenant's own or shared
@@ -2626,11 +2661,11 @@ def register(app, hub, ctx):
         # scoping exists to prevent), and only spaces as the shared scope alone.
         owned = access.tenant_scope_ids(
             tenant_id if str(tenant_id or "").strip() else access.ADMIN_TENANT_ID)
-        # Keep only sets in that scope; tenant admins are also limited to sets they can see.
+        # Keep only sets in that scope; a non-admin also only the sets the
+        # credential list shows them (their own tenants', a primary one too).
         chosen = [c for c in chosen if access.in_tenant_scope(c.get("tenant_id"), owned)]
         if not system and not _is_admin(sess):
-            chosen = [c for c in chosen
-                      if access.spoke_visible_to_session(sess, c.get("tenant_id", ""))]
+            chosen = [c for c in chosen if _scan_set_visible(sess, c.get("tenant_id", ""))]
         # The vault's SNMP communities ride along with every scan, so devices that
         # take no SSH login (e.g. a TOR switch) are still identified over SNMP and
         # the winning community is recorded.
@@ -2863,8 +2898,12 @@ def register(app, hub, ctx):
 
         # Existing addresses for this tenant (dedup) — an identified device that
         # is already in the fleet (own or shared) is reported but not re-added.
+        # A named tenant also matches in any case (fleet rule 6.1): a device
+        # tagged "ACME" (its spoke's spelling) is acme's, not added again.
+        owners = (tenant_id, access.shared_tenant_id())
         mine = [d for d in devices if isinstance(d, dict)
-                and d.get("tenant_id", "") in (tenant_id, access.shared_tenant_id())]
+                and (d.get("tenant_id", "") in owners
+                     or access.tenant_among(d.get("tenant_id"), owners))]
         known = {str(a or "").strip() for d in mine
                  for a in [d.get("address")] + list(d.get("alt_addresses") or [])}
         # A switch answers on every SVI: an identified host whose hostname and
@@ -2990,9 +3029,15 @@ def register(app, hub, ctx):
         snmp_only = [d for d in reachable if d.get("snmp_ok") and d.get("snmp_credential_id")
                      and str(d.get("address") or "").strip() not in known]
         if snmp_only:
-            # This tenant's monitor-only hosts by address; add or update each SNMP host.
+            # This tenant's monitor-only hosts by address (a named tenant's
+            # rows in any case, fleet rule 6.1); add or update each SNMP host.
+            def _own_row(n):
+                """True for a monitor-only row of the scanned tenant."""
+                return isinstance(n, dict) and (
+                    n.get("tenant_id") == tenant_id
+                    or access.tenant_among(n.get("tenant_id"), [tenant_id]))
             mine = {str(n.get("address")): n for n in (gc.get("nw_monitor_neighbors") or [])
-                    if isinstance(n, dict) and n.get("tenant_id") == tenant_id}
+                    if _own_row(n)}
             for d in snmp_only:
                 addr = str(d["address"]).strip()
                 mine[addr] = {"tenant_id": tenant_id, "name": d.get("hostname") or addr,
@@ -3001,8 +3046,7 @@ def register(app, hub, ctx):
                               "snmp_secret": d["snmp_credential_id"]}
             # Replace this tenant's entries with the updated set.
             gc["nw_monitor_neighbors"] = [n for n in (gc.get("nw_monitor_neighbors") or [])
-                                          if not (isinstance(n, dict) and n.get("tenant_id") == tenant_id)
-                                          ] + list(mine.values())
+                                          if not _own_row(n)] + list(mine.values())
             hub.state.system_state["global_config"] = gc
             hub.state._mark_dirty()
             logger.info("nw scan tenant=%s monitor-only SNMP hosts: %s", tenant_id,
@@ -3569,18 +3613,7 @@ def register(app, hub, ctx):
 
         # Resolve the tenant to scan. A tenant-admin is pinned to their own
         # tenant; an admin may name any tenant (default: the shared tenant).
-        req_tenant = str(data.get("tenant") or "").strip()
-        if _is_admin(sess):
-            tenant_id = req_tenant or access.shared_tenant_id() or ""
-        else:
-            own = ((sess or {}).get("user", {}).get("tenants")
-                   or [(sess or {}).get("user", {}).get("tenant_id")])
-            own = [t for t in own if t]
-            if req_tenant and req_tenant not in own:
-                raise HTTPException(status_code=403, detail="You may only scan your own tenant")
-            tenant_id = req_tenant or (own[0] if own else "")
-            if not tenant_id:
-                raise HTTPException(status_code=400, detail="No tenant to scan")
+        tenant_id = _nw_caller_tenant(sess, data.get("tenant"), "scan")
 
         # Per-tenant scan config (falls back to the global admin config).
         saved = _nw_scan_config(hub, tenant_id)
@@ -3883,11 +3916,15 @@ def register(app, hub, ctx):
             # Tenant-scope the LIST: a non-admin sees only instances in the shared
             # tenant or their own tenant(s); other-tenant / unassigned instances
             # are admin-only. Object-level filtering + the add/write gates are
-            # separate. Admins see all.
+            # separate. Admins see all. NW scan credential sets use the scan's
+            # own check (_scan_set_visible), so the list shows exactly the sets
+            # a scan by this caller uses.
             sess = _session_user(request)
             if not _is_admin(sess):
+                visible = (_scan_set_visible if storage_key == "nw_scan_credentials"
+                           else access.spoke_visible_to_session)
                 instances = [i for i in instances
-                             if isinstance(i, dict) and access.spoke_visible_to_session(sess, i.get("tenant_id", ""))]
+                             if isinstance(i, dict) and visible(sess, i.get("tenant_id", ""))]
             # Narrow to an explicitly requested tenant (see above).
             # Optional explicit tenant scope (``?tenant=``): narrow to that
             # tenant's own instances plus shared ones. Opt-in and additive — no
@@ -3913,17 +3950,19 @@ def register(app, hub, ctx):
                 scope = access.tenant_scope_ids(req_tenant)
                 instances = [i for i in instances
                              if isinstance(i, dict) and access.in_tenant_scope(i.get("tenant_id"), scope)]
-                # The tenant's vault logins, only for a tenant the caller may
-                # scan: an admin any, anyone else one of their own (as
-                # _nw_caller_tenant and the scan route allow). The filters
-                # above never see these rows, so without this check a
-                # non-admin naming another tenant would get its secret names
-                # and vault_error (rule 6.4). The auth middleware keeps
-                # /setup/* Global-Admin-only today; this guards the non-admin
-                # path in case the list is ever opened to tenants.
+                # The tenant's vault logins, only for a caller who may scan
+                # that tenant, as /api/nw/tenant-config and the scan route
+                # allow: an admin any tenant, a tenant admin one of their own
+                # (_nw_scan_tenants), in any case. The filters above never
+                # see these rows, so without this check another caller
+                # naming a tenant would get its secret names and
+                # vault_error (rule 6.4). The auth middleware keeps /setup/*
+                # Global-Admin-only today; this guards the non-admin path in
+                # case the list is ever opened to tenants.
                 if storage_key == "nw_scan_credentials" and (
                         _is_admin(sess)
-                        or access.tenant_among(req_tenant, access._session_tenants(sess))):
+                        or (_is_tenant_admin(sess)
+                            and access.tenant_among(req_tenant, _nw_scan_tenants(sess)))):
                     # Several vault buckets naming the tenant: list the stored
                     # sets and say why no vault login is offered.
                     try:

@@ -86,6 +86,12 @@ _IN_LM_REPO_MODULE_TYPES = {"agent", "dns", "dhcp", "henet", "console", "statusp
 # as designed. Reported honestly as self-updating instead.
 _SELF_UPDATING_MODULE_TYPES = {"ab"}
 
+# Update row for a connected synthetic (Test Data Feed / load-test) spoke. It
+# has no install of its own, so it is never sent SPOKE_UPDATE: it could only
+# acknowledge it, and the hub would record "triggered", advance the spoke's
+# push marker and mark it draining for an update that never happens.
+_SYNTHETIC_SKIP = "synthetic spoke - no host to update"
+
 # Canonical default for the hub's own repo. Used to fall back when
 # ``global_config["update_sources"]["hub"]`` is absent OR an empty string. An
 # empty-string value MUST behave like absent, not like a real URL: ``git
@@ -1913,6 +1919,10 @@ class UpdatePipelineMixin:
                 logger.debug("[update] skipping non-registered approved_modules id %r "
                               "(relayed/orphan agent — no module_metadata)", spoke_id)
                 continue
+            # Synthetic spokes are reported, never pushed (see _SYNTHETIC_SKIP).
+            if spoke_id in getattr(self, "synthetic_spokes", ()):
+                update_results.append(f"{spoke_id}: {_SYNTHETIC_SKIP}")
+                continue
             # Self-updating modules need no push.
             if mtype in _SELF_UPDATING_MODULE_TYPES:
                 update_results.append(f"{spoke_id}: self-updates (no push needed)")
@@ -2307,6 +2317,10 @@ class UpdatePipelineMixin:
         for spoke_id, approved in self.approved_modules.items():
             if not approved:
                 continue
+            # Synthetic spokes are reported, never pushed (see _SYNTHETIC_SKIP).
+            if spoke_id in getattr(self, "synthetic_spokes", ()):
+                skipped.append(f"{spoke_id}: {_SYNTHETIC_SKIP}")
+                continue
             # Self-updating modules need no push.
             mtype = self._effective_module_type(spoke_id)
             if mtype in _SELF_UPDATING_MODULE_TYPES:
@@ -2401,6 +2415,10 @@ class UpdatePipelineMixin:
             if not approved:
                 continue
             if self._effective_module_type(spoke_id) != "agent":
+                continue
+            # Synthetic spokes are reported, never pushed (see _SYNTHETIC_SKIP).
+            if spoke_id in getattr(self, "synthetic_spokes", ()):
+                skipped.append(f"{spoke_id}: {_SYNTHETIC_SKIP}")
                 continue
             # Push and record the outcome.
             err = await self._push_spoke_update(spoke_id, repo_url, branch,

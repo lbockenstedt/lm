@@ -369,7 +369,7 @@ def register(app, hub, ctx):
         # The directory is not writable by the hub process.
         except PermissionError as e:
             raise HTTPException(status_code=500,
-                detail=(f"cannot write to {cfg.key_path} — the hub process needs "
+                detail=(f"cannot write to {key_path} — the hub process needs "
                         f"write access to that directory: {e}"))
         # Anything else is logged with a traceback and reported as a 500.
         except Exception as e:  # noqa: BLE001

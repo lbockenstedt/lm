@@ -44,16 +44,21 @@ class _Hub:
         return sid
 
 
-def _build(is_admin=True, own_tenants=(), primary=""):
+def _build(is_admin=True, own_tenants=(), primary="", tenant_admin=None):
+    """A client on the nw routes for one session: a Global Admin, else a
+    tenant admin (or, with ``tenant_admin=False``, a plain member) of
+    ``own_tenants`` / ``primary``."""
     hub = _Hub()
     app = FastAPI()
     app.state.hub = hub
     sess = {"user": {"user_id": "u", "tenants": list(own_tenants), "tenant_id": primary,
                      "permissions": {"admin": is_admin}}}
+    if tenant_admin is None:
+        tenant_admin = not is_admin
     ctx = SimpleNamespace(
         _session_user=lambda req: sess,
         _is_admin=lambda s: is_admin,
-        _is_tenant_admin=lambda s: not is_admin,
+        _is_tenant_admin=lambda s: tenant_admin,
         _filter_nw=lambda *a, **k: [],
     )
     nw.register(app, hub, ctx)
@@ -231,3 +236,36 @@ def test_non_admin_with_only_a_primary_tenant_gets_its_vault_logins():
     assert _ids(c.get("/setup/nw-scan-credentials?tenant=tenant-admin")) == [
         "vault:tenant-admin:mine"]
     assert _ids(c.get("/setup/nw-scan-credentials?tenant=tenant-lrb")) == []
+
+
+def test_non_admin_with_only_a_primary_tenant_gets_its_stored_sets_too():
+    """The primary tenant counts for the stored sets as for the vault logins:
+    the list and the scan read one tenant set (nw._nw_scan_tenants). The list
+    showed such a session its vault logins but not its stored sets, and the
+    scan used neither."""
+    c, hub = _build(is_admin=False, primary="tenant-admin")
+    _seed(hub)
+    _vault(hub, {"tenant-admin": ["mine"], "tenant-lrb": ["theirs"]})
+    assert _ids(c.get("/setup/nw-scan-credentials")) == ["c-admin", "c-shared"]
+    assert _ids(c.get("/setup/nw-scan-credentials?tenant=tenant-admin")) == [
+        "c-admin", "c-shared", "vault:tenant-admin:mine"]
+    assert _ids(c.get("/setup/nw-scan-credentials?tenant=tenant-lrb")) == ["c-shared"]
+
+
+@pytest.mark.parametrize("role", ["admin", "tenant_admin", "member"])
+def test_vault_logins_list_only_for_a_caller_who_may_scan_the_tenant(role):
+    """The vault logins, and vault_error, list only for a caller who may scan
+    the tenant, as /api/nw/tenant-config and POST /setup/nw-scan/run allow:
+    an admin, or a tenant admin of it. A plain member of the tenant gets its
+    stored sets alone."""
+    c, hub = _build(is_admin=role == "admin", own_tenants=["tenant-admin"],
+                    tenant_admin=role == "tenant_admin")
+    _seed(hub)
+    _vault(hub, {"tenant-admin": ["mine"]})
+    vault = [] if role == "member" else ["vault:tenant-admin:mine"]
+    assert _ids(c.get("/setup/nw-scan-credentials?tenant=tenant-admin")) == [
+        "c-admin", "c-shared"] + vault
+    _vault(hub, {"TENANT-ADMIN": ["upper"], "tenant-admin": ["lower"]})
+    r = c.get("/setup/nw-scan-credentials?tenant=tenant-admin")
+    assert r.status_code == 200, r.text
+    assert ("vault_error" in r.json()) is (role != "member")

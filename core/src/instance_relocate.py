@@ -33,6 +33,10 @@ Three-part design (see project memory
 A record with no ``spoke_pool`` (or an empty one) is untouched by either
 pass — that's the plain PR1 single-spoke behavior, unchanged.
 
+Neither pass moves an instance onto a spoke that already serves another
+record of the same product (``_spoke_occupant``): a role sub-spoke serves one
+record, so the move would leave one of the two unserved.
+
 A nice emergent property worth calling out in the failover pass: candidates
 are tried in stored order, INCLUDING the currently-active one's own base
 agent. If only that spoke's role *sub*-connection died (the role process
@@ -155,13 +159,25 @@ class InstanceRelocateMixin:
                 continue
             if not self._pool_candidate_allowed(inst, base_id):
                 continue
-            # Try loading the role on this candidate.
-            try:
-                new_sub_id = await self._relocate_load_role(base_id, role, module_type)
-            except Exception as e:  # noqa: BLE001 — one candidate's failure tries the next
-                # A failing candidate is logged and the next one is tried.
-                logger.debug("[instance-relocate] %s candidate %s not viable: %s",
-                             storage_key, base_id, e)
+            # Skip a candidate that already serves another record of this
+            # product, checked before LOAD_ROLE so an occupied agent is sent nothing.
+            occupant = self._spoke_occupant(inst, storage_key, f"{base_id}-{role}")
+            if occupant is None:
+                # Try loading the role on this candidate.
+                try:
+                    new_sub_id = await self._relocate_load_role(base_id, role, module_type)
+                except Exception as e:  # noqa: BLE001 — one candidate's failure tries the next
+                    # A failing candidate is logged and the next one is tried.
+                    logger.debug("[instance-relocate] %s candidate %s not viable: %s",
+                                 storage_key, base_id, e)
+                    new_sub_id = None
+                # Check again with the sub-spoke id the agent reported, which can differ.
+                if new_sub_id:
+                    occupant = self._spoke_occupant(inst, storage_key, new_sub_id)
+            if occupant is not None:
+                logger.warning("[instance-relocate] %s '%s': pool candidate %s already serves "
+                               "'%s' — skipped (a spoke serves one record)", storage_key, name,
+                               base_id, occupant.get("name") or occupant.get("id") or "?")
                 new_sub_id = None
             # Stop at the first candidate that worked.
             if new_sub_id:
@@ -226,6 +242,31 @@ class InstanceRelocateMixin:
                        inst.get("name") or inst.get("id") or "?", base_id,
                        candidate_tenant, target_tenant)
         return False
+
+    def _spoke_occupant(self, inst, storage_key, sub_id):
+        """Another record of this product already bound to role sub-spoke
+        ``sub_id``, or None.
+
+        A role sub-spoke serves one record: the push sends it the first
+        record bound to it (main.py push_config_to_spoke, push_nac_config,
+        _ldap_config_for_spoke). Moving a second record there leaves one of
+        the two unserved: the moved one, or, when it comes first in config
+        order, the healthy one already there. Two tenants' NAC records on one
+        spoke also make it admin-only (hub_spoke_registry.
+        get_nac_spoke_owner), so neither tenant sees its ClearPass.
+
+        Ids compare by primary key, as the push matches records. The
+        instance's own spoke never counts, so a role that died there still
+        restarts in place."""
+        # The spoke the instance would move to.
+        target = self._primary_key(sub_id)
+        if inst.get("spoke_id") and self._primary_key(inst["spoke_id"]) == target:
+            return None
+        # Any other record of this product bound to it.
+        records = self.state.system_state.get("global_config", {}).get(storage_key, []) or []
+        return next((r for r in records if isinstance(r, dict) and r is not inst
+                     and r.get("spoke_id") and self._primary_key(r["spoke_id"]) == target),
+                    None)
 
     async def _relocate_load_role(self, base_id, role, module_type):
         """Minimal inline LOAD_ROLE — see module docstring for why this
@@ -338,10 +379,13 @@ class InstanceRelocateMixin:
                     # Skip invalid entries and the current base agent.
                     if not isinstance(base_id, str) or not base_id or base_id == current_base:
                         continue
-                    # Skip offline candidates and candidates outside the tenant.
+                    # Skip offline candidates, candidates outside the tenant,
+                    # and candidates that already serve another record of this product.
                     if not self._candidate_viable(base_id, role, module_type):
                         continue
                     if not self._pool_candidate_allowed(inst, base_id):
+                        continue
+                    if self._spoke_occupant(inst, storage_key, f"{base_id}-{role}") is not None:
                         continue
                     # Track the lowest-load candidate seen so far.
                     candidate_load = load.get(base_id, 0)
@@ -356,8 +400,9 @@ class InstanceRelocateMixin:
                     logger.debug("[instance-relocate] rebalance candidate %s not viable: %s",
                                  best_base, e)
                     continue
-                # Loading did not succeed; leave the instance where it is.
-                if not new_sub_id:
+                # Loading did not succeed, or the agent named a sub-spoke that
+                # serves another record: leave the instance where it is.
+                if not new_sub_id or self._spoke_occupant(inst, storage_key, new_sub_id) is not None:
                     continue
                 # Commit the move.
                 await self._activate_relocation(inst, storage_key, role, active, new_sub_id,
