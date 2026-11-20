@@ -3,6 +3,7 @@ import asyncio
 from types import SimpleNamespace
 
 import cloud_vault
+import pytest
 from simulations import central_secrets
 
 
@@ -20,6 +21,10 @@ class FakeVault:
 
     async def resolve_ref(self, hub, ref):
         return self.secrets.get(ref[len("kv:"):])
+
+    async def delete_secret(self, hub, name):
+        self.secrets.pop(name, None)
+        return True
 
 
 class FakeStore:
@@ -46,6 +51,7 @@ def _patch_vault(monkeypatch):
     vault = FakeVault()
     monkeypatch.setattr(cloud_vault, "set_secret", vault.set_secret)
     monkeypatch.setattr(cloud_vault, "resolve_ref", vault.resolve_ref)
+    monkeypatch.setattr(cloud_vault, "delete_secret", vault.delete_secret)
     central_secrets._resolved.clear()
     return vault
 
@@ -71,12 +77,99 @@ def test_no_vault_keeps_secrets_inline(monkeypatch):
     assert vault.secrets == {}
 
 
+def test_public_status_config_returns_presence_flags_not_secrets():
+    cfg = {
+        "client_id": "id",
+        "client_secret": "inline-secret",
+        "access_token": "kv:tenant-token",
+        "refresh_token": "",
+        "cluster_url": "https://central.example",
+        "cc_thresholds": {"warn_pct": 20, "error_pct": 50, "unexpected": "secret"},
+        "unexpected": "secret",
+    }
+    public = central_secrets.public_status_config(cfg)
+    assert public["client_id"] == "id"
+    assert public["client_secret_set"] is True
+    assert public["access_token_set"] is True
+    assert public["refresh_token_set"] is False
+    assert public["cc_thresholds"] == {"warn_pct": 20, "error_pct": 50}
+    assert "client_secret" not in public
+    assert "access_token" not in public
+    assert "refresh_token" not in public
+    assert "unexpected" not in public
+    assert "inline-secret" not in repr(public)
+    assert "kv:tenant-token" not in repr(public)
+
+
+@pytest.mark.parametrize("field", central_secrets.SECRET_FIELDS)
+def test_merge_secret_updates_preserves_rotates_and_clears(field):
+    existing = {field: "stored-secret"}
+    for update in ({}, {field: ""}, {field: "  "}):
+        merged, cleared = central_secrets.merge_secret_updates(update, existing)
+        assert merged[field] == "stored-secret"
+        assert cleared == []
+
+    merged, cleared = central_secrets.merge_secret_updates(
+        {field: "rotated-secret"}, existing)
+    assert merged[field] == "rotated-secret"
+    assert cleared == []
+
+    merged, cleared = central_secrets.merge_secret_updates(
+        {f"{field}_clear": True}, existing)
+    assert field not in merged
+    assert cleared == [field]
+
+
+def test_merge_secret_updates_rejects_conflicting_or_malformed_clear():
+    with pytest.raises(ValueError):
+        central_secrets.merge_secret_updates(
+            {"client_secret": "new-secret", "client_secret_clear": True}, {})
+    with pytest.raises(ValueError):
+        central_secrets.merge_secret_updates(
+            {"client_secret_clear": "true"}, {})
+
+
+def test_merge_secret_updates_preserves_vault_reference_when_blank():
+    ref = "kv:sim-central-t1-client-secret"
+    merged, cleared = central_secrets.merge_secret_updates(
+        {"client_secret": ""}, {"client_secret": ref})
+    assert merged["client_secret"] == ref
+    assert cleared == []
+
+
 def test_existing_ref_from_form_is_kept(monkeypatch):
     vault = _patch_vault(monkeypatch)
     cfg = {"client_secret": "kv:sim-central-t1-client-secret"}
     stored = asyncio.run(central_secrets.to_vault(_hub(True), "central_config", "t1", cfg))
     assert stored == cfg
     assert vault.secrets == {}
+
+
+def test_clear_detaches_vault_reference_without_deleting_secret(monkeypatch):
+    vault = _patch_vault(monkeypatch)
+    hub = _hub(True)
+    stored = asyncio.run(central_secrets.to_vault(
+        hub, "central_config", "t1", {"client_secret": "secret"}))
+    cleared, fields = central_secrets.merge_secret_updates(
+        {"client_secret_clear": True}, stored)
+    persisted = asyncio.run(central_secrets.to_vault(
+        hub, "central_config", "t1", cleared))
+    assert "client_secret" not in persisted
+    assert persisted["client_secret_clear"] is True
+    assert fields == ["client_secret"]
+    assert vault.secrets == {"sim-central-t1-client-secret": "secret"}
+
+
+def test_clear_marker_survives_blank_resave_and_is_removed_by_rotation():
+    existing = {"client_secret_clear": True}
+    for update in ({}, {"client_secret": ""}, {"client_secret_clear": False}):
+        merged, cleared = central_secrets.merge_secret_updates(update, existing)
+        assert merged["client_secret_clear"] is True
+        assert cleared == ["client_secret"]
+    merged, cleared = central_secrets.merge_secret_updates(
+        {"client_secret": "replacement"}, existing)
+    assert merged == {"client_secret": "replacement"}
+    assert cleared == []
 
 
 def test_migrate_moves_inline_secrets(monkeypatch):

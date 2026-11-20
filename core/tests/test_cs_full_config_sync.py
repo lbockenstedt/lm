@@ -147,6 +147,14 @@ def test_full_push_carries_resolved_processing_modes():
     assert pm["mist_api"] == "centralized"
 
 
+def test_reconnect_push_carries_persisted_central_clear_marker():
+    """A missed save-time clear is replayed on the next full config push."""
+    hub = _build(["s1"])
+    hub.simulations_store.central = {"client_secret_clear": True}
+    asyncio.run(hub._cs_full_config_push("s1"))
+    assert hub.pushed[0][2]["central_config"] == {"client_secret_clear": True}
+
+
 def test_full_push_unbound_spoke_is_noop():
     hub = _build(["s1"])
     hub.state.bindings = {}
