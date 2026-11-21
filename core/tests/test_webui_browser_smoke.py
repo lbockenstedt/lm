@@ -32,6 +32,13 @@ from test_auth_session_security import _FakeHub  # noqa: E402
 
 SPOKE_UUID = "3f2b8c1e-9d4a-4e6b-8a71-2c5d9e0f1a22"
 
+# What a browser test waits for before it acts on the app: main.js has wired
+# its click handlers, and the tenant switch _initApp starts at sign-in
+# (setTenant) has unlocked and redrawn the page. That redraw drops the page
+# reads still in flight, so a dialog a test opened before it kept empty lists.
+APP_READY = ("window._lmClickFeedbackInstalled === true && _setTenantSeq > 0"
+             " && !document.getElementById('page-content').hasAttribute('inert')")
+
 
 def _free_port():
     with socket.socket() as s:

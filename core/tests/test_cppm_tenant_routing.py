@@ -237,6 +237,25 @@ def test_admin_no_tenant_selected_uses_unassigned_global_spoke_for_single_lookup
     assert hub.forwarded[-1][0] == "cppm-a"
 
 
+def test_admin_nac_status_for_a_picked_tenant_comes_from_its_clearpass():
+    """The ClearPass page's NAC tiles name the header's tenant (?tenant=). A
+    Global Admin who picked a tenant gets that tenant's ClearPass totals,
+    never another tenant's or the global one; naming none reads the global
+    one."""
+    spokes = ("cppm-a", "cppm-b", "cppm-g")
+    hub = FakeHub(
+        set(spokes),
+        replies={sid: {"CPPM_GET_NAC_STATUS": {"status": "SUCCESS", "server": sid}} for sid in spokes},
+        module_metadata={"cppm-a": {"tenant_id": "tenantA"},
+                         "cppm-b": {"tenant_id": "tenantB"}},
+        global_nac="cppm-g",
+    )
+    c = _build(_admin(), hub)
+    assert c.get("/api/cppm/nac-status?tenant=tenantB").json()["server"] == "cppm-b"
+    assert c.get("/api/cppm/nac-status?tenant=tenantA").json()["server"] == "cppm-a"
+    assert c.get("/api/cppm/nac-status").json()["server"] == "cppm-g"
+
+
 # ── admin combined (merge-fanout) view ───────────────────────────────────────
 
 def test_admin_devices_view_combines_every_tenants_spoke_tagged():

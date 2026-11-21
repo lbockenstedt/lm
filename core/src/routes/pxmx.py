@@ -2778,10 +2778,13 @@ def register(app, hub, ctx):
         # the proxy to dial the spoke directly (hub out of the console byte path).
         # Purely additive — the browser flow ignores `relay` and still works via the hub.
         relay_token = secrets.token_urlsafe(32)
-        # Register the session so the websocket route can find it.
+        # Register the session so the websocket route can find it. The agent
+        # is stored with the VM: a unique_id names no agent, and the write
+        # lock, the viewer list and a takeover key on both (_vnc_lock_key).
         tenant_id = sess.get("tenant_id") or ""
         hub.register_vnc_session(session_id, {
             "spoke_id": pxmx_spoke,
+            "agent_id": agent_id,
             "tenant_id": tenant_id,
             "ws_token": ws_token,
             "relay_token": relay_token,
@@ -2790,12 +2793,12 @@ def register(app, hub, ctx):
             "unique_id": unique_id,
             "username": sess.get("username") or sess.get("user_id") or "",
         })
-        # Write lock: first viewer of this VM becomes the writer; everyone
-        # else opens read-only (their VNC_FRAME_DOWN input is dropped by the
-        # relay below) until they force a takeover. QEMU still multiplexes
-        # the SCREEN to every viewer regardless — only mouse/keyboard input
-        # is gated.
-        is_writer = hub.vnc_attach(unique_id, session_id)
+        # Write lock: first viewer of this VM (on its agent) becomes the
+        # writer; everyone else opens read-only (their VNC_FRAME_DOWN input is
+        # dropped by the relay below) until they force a takeover. QEMU still
+        # multiplexes the SCREEN to every viewer regardless — only
+        # mouse/keyboard input is gated.
+        is_writer = hub.vnc_attach(unique_id, session_id, agent_id)
         try:
             # request_response (NOT send_to_spoke_command): the spoke→agent
             # opens the Proxmox vncwebsocket synchronously and returns the
@@ -2861,12 +2864,15 @@ def register(app, hub, ctx):
     async def pxmx_console_viewers(request: Request):
         """Multiuser presence: who is currently on a VM's VNC console.
 
-        Query: ``?unique_id=<cluster>/<node>/<vmid>``. Each viewer holds their
-        OWN VNC session (QEMU multiplexes the clients so they share one screen);
-        this returns the connected roster so the console dock can show a live
-        viewer count. Authorized exactly like opening the console — admin sees
-        any VM, otherwise the caller must OWN the VM (same _assert_vm_owned gate),
-        so a tenant cannot enumerate viewers on another tenant's VM."""
+        Query: ``?unique_id=<cluster>/<node>/<vmid>&agent_id=<agent>``. Each
+        viewer holds their OWN VNC session (QEMU multiplexes the clients so they
+        share one screen); this returns the connected roster so the console
+        dock can show a live viewer count. Only the viewers of the VM on that
+        agent are listed: a unique_id names no agent, so another tenant's VM
+        can share it (``_vnc_lock_key``). Authorized exactly like opening the
+        console — admin sees any VM, otherwise the caller must OWN the VM (same
+        _assert_vm_owned gate, on the same agent), so a tenant cannot enumerate
+        viewers on another tenant's VM."""
         # Must be logged in.
         sess = _session_user(request)
         if not sess:
@@ -2882,12 +2888,14 @@ def register(app, hub, ctx):
             vmid = int(parts[2])
         except ValueError:
             raise HTTPException(status_code=400, detail="invalid vmid in unique_id")
+        # The agent the VM is on: checked for ownership and used for the list.
+        agent_id = str(request.query_params.get("agent_id") or "").strip()
         # Same ownership check as opening the console.
         await _assert_vm_owned(request, unique_id=unique_id, vmid=vmid, node=node,
-                               agent_id=str(request.query_params.get("agent_id") or "").strip())
-        # Return the current viewers.
+                               agent_id=agent_id)
+        # Return the current viewers of this VM on this agent.
         hub = app.state.hub
-        viewers = hub.vnc_viewers(unique_id)
+        viewers = hub.vnc_viewers(unique_id, agent_id)
         return {"unique_id": unique_id, "count": len(viewers), "viewers": viewers}
 
     @app.post("/api/pxmx/console/{session_id}/takeover")
@@ -2896,7 +2904,9 @@ def register(app, hub, ctx):
         VNC console session, evicting whoever currently holds it. Same
         ownership gate as opening a console (control-tier, _assert_vm_owned) —
         a viewer who can open the console read-only is not automatically
-        allowed to force a takeover from someone else."""
+        allowed to force a takeover from someone else. The VM and its agent
+        are the ones stored in the session when it was opened; the request
+        body is not read (the WebUI still sends ``{agent_id}``)."""
         # Must be logged in.
         sess = _session_user(request)
         if not sess:
@@ -2917,16 +2927,15 @@ def register(app, hub, ctx):
             vmid = int(parts[2])
         except ValueError:
             raise HTTPException(status_code=400, detail="invalid vmid in unique_id")
-        # Read the JSON body; a bad body counts as empty.
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
+        # The agent stored with the session, not one the caller names: the
+        # session is bound to the VM it was opened on, so ownership is checked
+        # against that VM, and the lock taken is that VM's (_vnc_lock_key).
+        agent_id = str(vsess.get("agent_id") or "")
         # Same ownership check as opening the console.
         await _assert_vm_owned(request, unique_id=unique_id, vmid=vmid, node=node,
-                               agent_id=str((body or {}).get("agent_id") or "").strip())
+                               agent_id=agent_id)
         # Take the write lock and tell the previous writer they are now read-only.
-        previous_writer = hub.vnc_takeover(unique_id, session_id)
+        previous_writer = hub.vnc_takeover(unique_id, session_id, agent_id)
         if previous_writer:
             await hub.notify_vnc_downgraded(previous_writer)
         return {"status": "ok", "session_id": session_id, "previous_writer": previous_writer}

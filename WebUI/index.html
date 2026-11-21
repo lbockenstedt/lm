@@ -352,6 +352,10 @@
         }
         .sub-nav-item:hover { color: #0f172a; } /* slate-900 */
         .sub-nav-item.active { color: var(--hpe-green-text); font-weight: 600; border-bottom-color: var(--hpe-green); }
+        /* A tenant switch in flight: the page (the view's tabs, its action
+           buttons and its content) still shows the old tenant and takes no
+           clicks until it is redrawn (setTenant in main.js). */
+        #page-content[inert] { opacity: 0.6; transition: opacity 0.15s ease; }
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: #ccc; border-radius: 10px; }
@@ -605,7 +609,7 @@
         </aside>
 
         <!-- CONTENT VIEWPORT -->
-        <main class="flex-1 flex flex-col min-w-0">
+        <main id="page-content" class="flex-1 flex flex-col min-w-0">
             <div id="top-nav" class="h-12 flex items-center px-6 gap-6 text-sm font-medium text-slate-600 bg-white border-b border-slate-200 shrink-0">
                 <!-- Dynamically injected sub-menu items (primary) -->
             </div>
