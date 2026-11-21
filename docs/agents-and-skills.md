@@ -114,19 +114,24 @@ The numbers in `.github/ai-budget.json`:
 
 Spend comes from Copilot CLI's own usage log on the machine,
 `$COPILOT_HOME/session-store.db` (default `~/.copilot`). It covers every CLI
-session and sub-agent on that machine; local Ollama models cost $0 in it.
+session and sub-agent on that machine; local models (Ollama, llama.cpp) cost
+$0 in it.
 
 What the hooks do:
 
 - At session and sub-agent start, the agent is told today's spend and to
   prefer local models.
-- Past the gate, every tool call is refused except `task_complete`,
+- Past the gate, every tool call of a session that used a cloud model today
+  (its own calls or a sub-agent's) is refused, except `task_complete`,
   `ask_user`, `stop_bash` and a shell call that only runs
   `python3 .../ai_budget.py status`. The refusal tells the agent to stop and
-  tell the user.
+  tell the user. A session whose model calls today were all free (local
+  models) keeps working, but cannot start cloud sub-agents. A session with
+  no model calls logged after a 2-second wait, or with no session id in the
+  hook, counts as cloud.
 - Within `reserve_usd` of the gate, a `task` sub-agent on a cloud model is
-  refused (any model not named `ollama/*`; with no model given, any agent
-  type not named `local-*`), and so is a workflow run.
+  refused (any model not named `ollama/*` or `llamacpp/*`; with no model
+  given, any agent type not named `local-*`), and so is a workflow run.
 - An agent's attempt to run `ai_budget.py continue`, or to change the state
   file, is always refused.
 
