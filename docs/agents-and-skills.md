@@ -24,7 +24,8 @@ owns. On every lm `dev` push that changes them, `sync-fleet-files.yml` runs
 `.github/scripts/sync_fleet_files.py`, which:
 
 - copies `.github/fleet-rules.md`, `.github/agents/`, `.claude/skills/` and
-  the AI spend gate (`.github/hooks/`, `.github/ai-budget.json`) into each
+  the AI spend gate (`.github/hooks/`, `.github/ai-budget.json`) and the
+  model policy (`.github/model-policy.json`) into each
   repo, removing files lm no longer has (except a repo's own `<repo>-*`
   agents and skills);
 - writes the rules into each repo's `AGENTS.md`, between the
@@ -163,6 +164,43 @@ Where it applies:
   per day, and stops calling Copilot at the gate until a person presses
   Continue in AB (see `ab/docs/ab.md`). Each machine running Copilot CLI,
   and AB, has its own gate.
+
+## The model policy
+
+`.github/model-policy.json` says which Copilot model and effort each role
+uses, so CLI sessions and AB climb the same ladder. It is fleet-owned (edit
+only in lm) and synced to every repo with the rules.
+
+- **`effort`**: `medium` for every role. Measured Nov 2026: about 80% of this
+  Mac's Opus spend was at max effort, and low effort is not a usable rung
+  (Opus at low approved a bad change in review and passed 1 of 3 real fixes;
+  Sonnet at low passed none).
+- **`coordinator`**: the interactive session's model. It plans, scopes,
+  reviews every diff, runs the tests and commits; it does not code.
+- **`coding.ladder`**: cheapest first: Haiku 5.5 (`cloud-coder`), Sonnet 5.5
+  (`cloud-coder-plus`), then Opus 5.5. Climb one rung only when the tests
+  still fail. On three real fleet fixes with a precise spec, Haiku passed 2
+  (about $0.02 each), Opus and GPT-5.6-sol 1 each (about $0.40), and Sonnet
+  came closest on the hardest (37 of 39 tests).
+- **`review`**: `proposed`, not yet applied to AB. A cheap first pass, then
+  one frontier seat from a different vendor than the author, in sequence,
+  stopping at the first Reject.
+
+Who reads it:
+
+- **CLI**: `scripts/copilot-setup/install.sh` stamps the coordinator model
+  and effort into `~/.copilot/settings.json` and each rung's model into the
+  `cloud-coder*` agents, and installs the coordinator rules
+  (`scripts/copilot-setup/README.md`). Re-run it after the policy changes.
+- **AB**: not wired yet. AB still picks fix models with its own allowlist
+  and cost-tier picker (`fix_engine.DEFAULT_FIX_ALLOWLIST`), which cannot
+  express this ladder: its model registry caps Haiku at `medium` complexity
+  while every fix asks for `large`, and Sonnet and Opus share one cost tier.
+  Making AB walk `coding.ladder` is a separate AB change.
+
+The same installer sets up the daily AI spend gate below as a personal hook,
+so it covers every session on the machine, not only those started in a
+fleet repo.
 
 ## Adding or changing one
 
