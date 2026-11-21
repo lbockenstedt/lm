@@ -1,4 +1,6 @@
 """Setup: updates, modules, tenants, users routes."""
+# secrets makes the random tickets that fence a Global Admin's tenant switch.
+import secrets
 # node_name gives the human-readable name of a spoke/node.
 from display_names import node_name  # sibling leaf
 # Hub-wide helpers: HTTP errors, password hashing, spoke messaging and unwrapping, logging.
@@ -603,16 +605,62 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=400,
                                 detail=f"shared_access must be one of {', '.join(SHARED_ACCESS_MODES)}")
 
+    # The one tenant-switch ticket issued and not used yet (None: there is
+    # none). Kept in memory only, so no ticket from before a hub restart works.
+    _switch = {"ticket": None}
+
+    @app.post("/setup/tenant/switch-ticket")
+    async def tenant_switch_ticket():
+        """Issue the ticket for the next tenant switch and name the active tenant.
+
+        Issuing a ticket voids the previous one, so a switch POST still on its
+        way under an older ticket can no longer change the active tenant (it
+        gets 409). The tenant returned is therefore final for every ticketed
+        switch sent before this call.
+
+        Voiding the old ticket and reading the tenant are one step: the hub
+        serves every request on one event loop and this handler has no await,
+        so no request runs in between. Keep it ``async`` with no await: a plain
+        ``def`` would run in the thread pool, beside the switch POST's check.
+
+        A POST, not a GET, because it changes hub state: the middleware then
+        keeps it from read-only accounts as well as from anyone but a Global
+        Admin (/setup/* is Global-Admin-only).
+
+        Returns {"ticket": ..., "active_tenant": ...}, the tenant id as stored.
+        """
+        hub = app.state.hub
+        _switch["ticket"] = secrets.token_urlsafe(16)
+        active = hub.state.system_state.get("active_tenant", "default") or "default"
+        return {"ticket": _switch["ticket"], "active_tenant": active}
+
     @app.post("/setup/tenant")
     async def update_tenant(request: Request):
         """Create or update a tenant's config, optionally making it shared or active.
 
-        Expects JSON {"tenant_id": ..., "config": {...}}.
+        Expects JSON {"tenant_id": ..., "config": {...}}. The WebUI's tenant
+        switch adds "switch_ticket" (see tenant_switch_ticket): the switch is
+        then applied only while that ticket is the latest one issued.
         """
         # Read the tenant id (default: "default") and the config changes.
         hub = app.state.hub
         try:
             data = await request.json()
+            # A ticketed switch is applied only under the latest ticket;
+            # otherwise a newer switch was asked for after it, and it changes
+            # nothing (409). The ticket is used up here, before the checks
+            # below, so a switch they refuse (400) still voids it. There is no
+            # await from here to set_active_tenant, so the check and the
+            # switch are one step. The ticket is not a credential (whoever may
+            # switch may issue one); it only orders switches. A body without
+            # "switch_ticket" works as before for API callers (fleet rule 3.3).
+            if "switch_ticket" in data:
+                if not data["switch_ticket"] or data["switch_ticket"] != _switch["ticket"]:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="This tenant switch was not applied: a newer tenant switch was "
+                               "requested after it. Pick the tenant again.")
+                _switch["ticket"] = None
             tenant_id = data.get("tenant_id", "default")
             # A blank id names no tenant (as a scope it would read as no
             # selection), so it is refused like a missing one.
@@ -640,8 +688,8 @@ def register(app, hub, ctx):
             _after_tenant_write(hub, before)
 
             return {"status": "ok", "message": f"Tenant {tenant_id} updated."}
-        # A 400 raised above keeps its own message; any other failure is
-        # reported as a bad request.
+        # An HTTP error raised above (the 409 and the 400s) keeps its own
+        # status and message; any other failure is reported as a bad request.
         except HTTPException:
             raise
         except Exception as e:

@@ -10,6 +10,10 @@ clients so everyone shares one screen. Two behaviors make that robust:
   unclaimed session the browser never connected to.)
 * ``vnc_viewers(unique_id)`` returns the connected roster for a VM so the UI can
   show a live viewer count.
+
+The write lock and the roster belong to the VM on the agent that relays it: a
+unique_id names no agent, so two tenants' VMs can share one, and neither may
+see the other's viewers or hold the other's lock.
 """
 
 import time
@@ -147,3 +151,63 @@ async def test_notify_vnc_downgraded_noop_for_closed_session():
     hub = _Hub()
     # Must not raise even though the session was never registered.
     await hub.notify_vnc_downgraded("never-existed")
+
+
+# ── Two agents' VMs that share a unique_id never share a lock or a roster ────
+# A unique_id ("<cluster>/<node>/<vmid>") names no agent, so two tenants'
+# separate clusters can share one (default node name, same VM ID). The write
+# lock and the viewer list are keyed by the agent as well (_vnc_lock_key).
+
+UID = "pve/pve/100"
+
+
+def _connected(hub, sid, agent, username):
+    """Register a connected VNC session on ``UID`` opened through ``agent``."""
+    hub.register_vnc_session(sid, {"unique_id": UID, "agent_id": agent,
+                                    "username": username})
+    hub.vnc_sessions[sid]["connected"] = True
+    hub.vnc_sessions[sid]["connected_at"] = time.time()
+
+
+def test_vnc_lock_is_per_agent_and_takeover_evicts_only_its_own_agent():
+    """Each agent's VM gets its own first writer, a session is writer only
+    under its own agent, and a takeover on agent-b leaves agent-a's writer."""
+    hub = _Hub()
+    assert hub.vnc_attach(UID, "a1", "agent-a") is True
+    assert hub.vnc_attach(UID, "b1", "agent-b") is True
+    assert hub.vnc_is_writer(UID, "a1", "agent-a") is True
+    assert hub.vnc_is_writer(UID, "a1", "agent-b") is False
+    assert hub.vnc_is_writer(UID, "b1", "agent-b") is True
+    assert hub.vnc_is_writer(UID, "b1", "agent-a") is False
+    # A second agent-b viewer opens read-only, then takes control.
+    assert hub.vnc_attach(UID, "b2", "agent-b") is False
+    assert hub.vnc_takeover(UID, "b2", "agent-b") == "b1"
+    assert hub.vnc_is_writer(UID, "b2", "agent-b") is True
+    assert hub.vnc_is_writer(UID, "b1", "agent-b") is False
+    assert hub.vnc_is_writer(UID, "a1", "agent-a") is True
+
+
+def test_vnc_viewers_lists_only_the_requested_agents_viewers():
+    """The roster of agent-b's VM never names agent-a's viewer, and the
+    reverse, though both VMs share the unique_id."""
+    hub = _Hub()
+    _connected(hub, "a1", "agent-a", "alice")
+    _connected(hub, "b1", "agent-b", "bob")
+    hub.vnc_attach(UID, "a1", "agent-a")
+    hub.vnc_attach(UID, "b1", "agent-b")
+    assert [(v["username"], v["is_writer"]) for v in hub.vnc_viewers(UID, "agent-b")] == [("bob", True)]
+    assert [(v["username"], v["is_writer"]) for v in hub.vnc_viewers(UID, "agent-a")] == [("alice", True)]
+
+
+def test_vnc_unregister_frees_only_its_own_agents_lock():
+    """agent-b's writer leaving frees agent-b's lock (the next agent-b opener
+    becomes writer) and leaves agent-a's writer in place."""
+    hub = _Hub()
+    _connected(hub, "a1", "agent-a", "alice")
+    _connected(hub, "b1", "agent-b", "bob")
+    hub.vnc_attach(UID, "a1", "agent-a")
+    hub.vnc_attach(UID, "b1", "agent-b")
+    hub.unregister_vnc_session("b1")
+    assert hub.vnc_is_writer(UID, "a1", "agent-a") is True
+    assert hub.vnc_attach(UID, "b2", "agent-b") is True
+    assert hub.vnc_is_writer(UID, "a1", "agent-a") is True

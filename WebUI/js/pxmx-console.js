@@ -1364,10 +1364,17 @@ async function pxmxCreateVmSubmit() {
 // terminal wired to the hub's /ws/console-serial/{session_id} byte relay. xterm
 // is dynamic-imported from CDN once (mirrors how noVNC is loaded below).
 let _consolePorts = [];
+// The tenant `_consolePorts` was read for (null: none yet). The list is that
+// tenant's alone: serialRefreshAvailablePorts drops it as soon as the header
+// names another tenant.
+let _consolePortsTenant = null;
 let _consoleSpokes = [];
 let _consoleDpaSpokes = [];
 let _xtermMod = null;
 
+// Console view loader: reads the tenant's console ports into `_consolePorts`,
+// tagged with that tenant, and draws the port table. A read that a tenant
+// switch overtook is dropped.
 async function loadConsoleData() {
     const el = document.getElementById('console-container');
     if (!el) return;
@@ -1382,6 +1389,7 @@ async function loadConsoleData() {
         const data = await res.json();
         if ((currentTenant || 'default') !== tenant) return;
         _consolePorts = data.ports || [];
+        _consolePortsTenant = tenant;
         _consoleSpokes = data.consoles || [];
         _consoleDpaSpokes = data.dpa_consoles || [];
         _renderConsolePorts(el, data);
@@ -2955,10 +2963,24 @@ function _serialPortLabel(p) {
 // Pull the full set of console ports the current user has rights to (tenant-
 // scoped + rights-filtered server-side) into `_consolePorts`, then repaint the
 // dock's left menu. This is what lets the left menu act as a directory of
-// EVERY console you can connect to — not just the ones already open. Silently
-// keeps the last-known list on error (the menu still shows open sessions).
+// EVERY console you can connect to — not just the ones already open. The list
+// belongs to the tenant it was read for (`_consolePortsTenant`). When the header
+// names another tenant, the old tenant's ports are dropped and the menu is
+// repainted at once, before the first await: setTenant calls this before it
+// unlocks the page, so none of them is clickable under the new tenant's name.
+// Open sessions (window._serialConsoles) are not in this list and stay
+// listed. On an error the last-known list is kept only within one tenant:
+// after a switch the list stays empty until a read for the new tenant
+// succeeds. The tenant compare is a strict !== on purpose: legacy tenant ids
+// that differ only in case or spaces can be two tenants, so any difference
+// drops the list and reads it again, which is the safe direction.
 async function serialRefreshAvailablePorts() {
     const tenant = currentTenant || 'default';
+    if (_consolePortsTenant !== tenant) {
+        _consolePorts = [];
+        _consolePortsTenant = tenant;
+        serialRenderConsoleList();
+    }
     try {
         const res = await fetch(`/api/console/ports?tenant=${encodeURIComponent(tenant)}`,
                                 { credentials: 'same-origin', _keepOnNavigate: true });
@@ -2966,8 +2988,9 @@ async function serialRefreshAvailablePorts() {
             const data = await res.json();
             if ((currentTenant || 'default') !== tenant) return;  // tenant switched mid-fetch
             _consolePorts = data.ports || [];
+            _consolePortsTenant = tenant;
         }
-    } catch (e) { /* keep last-known list */ }
+    } catch (e) { /* keep the list: it is this tenant's (see above) */ }
     serialRenderConsoleList();
 }
 
@@ -3646,20 +3669,39 @@ async function consoleConfigPush(spokeId, portId) {
     } catch (e) { _consoleConfigOut('Push failed: ' + e.message, true); }
 }
 
+// A VM's identity in the console registry (window._pxmxConsoles) and in the
+// console search's rows: its agent plus its unique_id (the vmid if it has
+// none). Both can hold VMs of several agents, and so of several tenants, and
+// unique_id ("<cluster>/<node>/<vmid>") names no agent: two independent
+// clusters can share one, e.g. "pve/pve/100". The key is only compared, never
+// shown or parsed (fleet rule 7.3: the agent id is a UUID). '' when the VM
+// has neither id.
+function pxmxConsoleKey(vm) {
+    const id = (vm && (vm.unique_id || vm.vmid)) || '';
+    return id ? (vm.agent_id || '') + '|' + id : '';
+}
+
 // VNC console opener (agent-terminates-WSS): POST /api/pxmx/console to mint a
 // one-shot session, then open a modal hosting noVNC whose RFB connects to the
 // hub's /ws/console/{session_id}?token=... byte relay. The hub relays browser
 // bytes → agent (VNC_FRAME_DOWN) and Proxmox bytes → browser (VNC_FRAME_UP);
 // the agent owns the Proxmox vncwebsocket (local root-authed token). noVNC is
 // loaded once from CDN and cached on window.__noVNCRFB.
-async function pxmxOpenConsole(uniqueId) {
-    const vm = (window._pxmxVms || []).find(v => v.unique_id === uniqueId);
+// A caller that holds the VM (the console search, the device dashboard)
+// passes it as `chosen`, and it is used as is: it names the agent that owns
+// the VM, and a lookup by unique_id alone could find another agent's VM (see
+// pxmxConsoleKey). The VM table and the VM detail pass only the unique_id,
+// which is looked up in window._pxmxVms, the list they were drawn from.
+async function pxmxOpenConsole(uniqueId, chosen) {
+    const vm = chosen || (window._pxmxVms || []).find(v => v.unique_id === uniqueId);
     if (!vm) { showToast('VM not found in cache', 'error'); return; }
     // Already open? Don't mint a second session — just surface the console dock
-    // and switch to that VM's existing tab.
-    if (window._pxmxConsoles && window._pxmxConsoles.has(vm.unique_id)) {
+    // and switch to that VM's existing tab. The key names the agent as well,
+    // so another agent's VM with the same unique_id gets a tab of its own.
+    const key = pxmxConsoleKey(vm);
+    if (key && window._pxmxConsoles && window._pxmxConsoles.has(key)) {
         pxmxEnsureConsoleDock();
-        pxmxActivateConsole(vm.unique_id);
+        pxmxActivateConsole(key);
         pxmxSetDockCollapsed(false);
         showToast(`Console for ${vm.name || vm.vmid} is already open`, 'info');
         return;
@@ -3713,7 +3755,7 @@ function pxmxLoadNoVNC() {
 // them without dropping any. Each session's noVNC RFB renders into its own body
 // div; inactive bodies are hidden (display:none) but their WebSocket stays open,
 // so switching tabs is instant and non-destructive. Registry: window._pxmxConsoles
-// (Map<unique_id, {vm, session, rfb, bodyEl, statusText, statusCls}>);
+// (Map<pxmxConsoleKey(vm), {vm, session, rfb, bodyEl, statusText, statusCls}>);
 // window._pxmxActiveConsole holds the visible tab's key.
 
 // Create (or reveal) the shared console dock shell. Idempotent — the list
@@ -3852,10 +3894,12 @@ function pxmxActiveConsole() {
 
 // Mint a console tab: build its body div, attach a noVNC RFB, register it, and
 // make it the active tab. Mirrors the old single-modal RFB wiring (ticket →
-// VNC password, status events) but per-session.
+// VNC password, status events) but per-session. The tab is keyed by
+// pxmxConsoleKey, so two agents' VMs that share a unique_id get a tab each;
+// a VM with neither id is keyed by its session.
 function pxmxAddConsoleTab(vm, RFB, session) {
     if (!window._pxmxConsoles) window._pxmxConsoles = new Map();
-    const key = vm.unique_id || String(session.session_id);
+    const key = pxmxConsoleKey(vm) || String(session.session_id);
     const modal = pxmxEnsureConsoleDock();
     const bodies = modal.querySelector('#pxmx-vnc-bodies');
     const bodyEl = document.createElement('div');
@@ -3961,11 +4005,13 @@ async function pxmxReconnectConsole(key) {
 // Multiuser presence: poll who else is on this VM's console. Each viewer holds
 // their own VNC session (QEMU multiplexes them onto one shared screen), so the
 // roster lets a user see when a teammate is looking at / driving the same VM.
+// The hub is asked by the VM's unique_id and agent, never by the registry key
+// (pxmxConsoleKey), which stays in the browser.
 function pxmxStartViewerPoll(entry) {
     const poll = async () => {
         try {
             const vm = entry.vm || {};
-            const qs = `unique_id=${encodeURIComponent(vm.unique_id || entry.key)}` +
+            const qs = `unique_id=${encodeURIComponent(vm.unique_id || '')}` +
                 (vm.agent_id ? `&agent_id=${encodeURIComponent(vm.agent_id)}` : '');
             const r = await setupFetch(`/api/pxmx/console/viewers?${qs}`);
             const data = await r.json().catch(() => ({}));
@@ -4079,44 +4125,79 @@ function pxmxVmIsVncCapable(vm) {
     return !isTpl;
 }
 
+// The tenant window._pxmxConsoleDirVms was read for (null: none yet). The
+// directory is that tenant's alone: pxmxRefreshConsoleDir drops it as soon as
+// the header names another tenant.
+let _pxmxConsoleDirTenant = null;
+
+// Store the console search's VM directory, and the template pools read with
+// it, together with the tenant it was read for; null drops it. They are set
+// only here, so the directory is never left tagged with another tenant.
+function _pxmxSetConsoleDir(tenant, vms, pools) {
+    window._pxmxConsoleDirVms = vms;
+    window._pxmxConsoleDirTemplatePools = pools;
+    _pxmxConsoleDirTenant = tenant;
+}
+
 // Lazily fetch + cache the rights-scoped VM directory that powers the console
 // search picker. Reuses the SAME endpoint loadPxmxData uses — /api/pxmx/vms is
 // already tenant-scoped + rights-filtered server-side, so the client never sees
 // a VM the caller can't access (and the console-open itself is separately
 // authorized server-side; this is just the UX affordance). Cached on
 // window._pxmxConsoleDirVms; `force` bypasses the cache (the ⟳ button).
+// The directory belongs to the tenant it was read for, as the serial dock's
+// list does (serialRefreshAvailablePorts): when the header names another
+// tenant, the old tenant's VMs are dropped and the list is repainted at once,
+// before the first await, so setTenant (which calls this while a search is
+// typed) leaves none of them clickable when it unlocks the page. An error
+// keeps the directory only within one tenant. A read that a switch overtook
+// is dropped; its tenant check runs after the read, and the switch's own call
+// was turned away while it was loading, so the new tenant's directory is read
+// then, if the operator is still searching.
 async function pxmxRefreshConsoleDir(force) {
+    const tenant = currentTenant;
+    if (_pxmxConsoleDirTenant !== tenant) {
+        _pxmxSetConsoleDir(tenant, null, null);
+        pxmxRenderConsoleList();
+    }
     if (window._pxmxConsoleDirLoading) return;
     if (window._pxmxConsoleDirVms && !force) return;
     window._pxmxConsoleDirLoading = true;
     const btn = document.getElementById('pxmx-vnc-refresh');
     if (btn) btn.classList.add('animate-spin');
     try {
-        const res = await fetch(`/api/pxmx/vms?tenant=${encodeURIComponent(currentTenant)}`,
+        const res = await fetch(`/api/pxmx/vms?tenant=${encodeURIComponent(tenant)}`,
                                 { credentials: 'same-origin', _keepOnNavigate: true });
         if (res.ok) {
             const data = await res.json();
-            window._pxmxConsoleDirVms = data.vms || [];
-            window._pxmxConsoleDirTemplatePools = (data.template_pools || []).map(p => String(p).toLowerCase());
+            if (currentTenant === tenant) {
+                _pxmxSetConsoleDir(tenant, data.vms || [],
+                                   (data.template_pools || []).map(p => String(p).toLowerCase()));
+            }
         }
-    } catch (e) { /* keep last-known directory */ }
+    } catch (e) { /* keep the directory: it is this tenant's (see above) */ }
     finally {
         window._pxmxConsoleDirLoading = false;
         if (btn) btn.classList.remove('animate-spin');
+    }
+    // A tenant switch overtook this read (its answer was not kept above).
+    if (currentTenant !== tenant) {
+        if (window._pxmxConsoleFilter && document.getElementById('pxmx-vnc-modal')) pxmxRefreshConsoleDir(false);
+        return;
     }
     pxmxRenderConsoleList();
 }
 
 // Open a console for a VM chosen from the search picker (a directory row that
-// isn't open yet). pxmxOpenConsole resolves the VM from window._pxmxVms, which
-// may not have been populated if the operator opened the dock without visiting
-// the VM table first — so seed the chosen VM into that cache before delegating.
+// isn't open yet). The row's key is pxmxConsoleKey, which names the agent as
+// well as the VM, so it finds the very VM the row showed, and that VM is
+// passed on whole. Looking it up again by unique_id in window._pxmxVms (the
+// VM table's cache, which may be empty or hold another agent's VM with the
+// same unique_id) could open another VM.
 function pxmxOpenConsoleFromDir(key) {
-    const vm = (window._pxmxConsoleDirVms || []).find(v => (v.unique_id || String(v.vmid)) === key);
+    const vm = (window._pxmxConsoleDirVms || []).find(v => pxmxConsoleKey(v) === key);
     if (!vm) { showToast('VM not found', 'error'); return; }
-    if (!window._pxmxVms) window._pxmxVms = [];
-    if (!window._pxmxVms.some(v => v.unique_id === vm.unique_id)) window._pxmxVms.push(vm);
-    pxmxOpenConsole(vm.unique_id || key);
+    pxmxOpenConsole(vm.unique_id, vm);
 }
 
 // Paint the left-side console list. When the search box is EMPTY it lists ONLY
@@ -4137,24 +4218,28 @@ function pxmxRenderConsoleList() {
     const open = window._pxmxConsoles || new Map();
 
     // Merge open sessions with (only when searching) the VM directory, keyed by
-    // VM unique_id. Open sessions always seed rows; directory rows are added
-    // only under an active search and never override an already-open row.
+    // pxmxConsoleKey (agent + VM). Open sessions always seed rows; directory
+    // rows are added only under an active search and never override an
+    // already-open row. The key names the agent, so an open console hides
+    // only its own VM's row, not another agent's VM with the same unique_id.
     const byKey = new Map();
     open.forEach((e, key) => { byKey.set(key, { key, open: true, entry: e, vm: e.vm || {} }); });
     if (filter) {
         (window._pxmxConsoleDirVms || []).forEach(vm => {
             if (!pxmxVmIsVncCapable(vm)) return;
-            const key = vm.unique_id || String(vm.vmid);
+            const key = pxmxConsoleKey(vm);
             if (byKey.has(key)) return;   // already open — the open row wins
             byKey.set(key, { key, open: false, entry: null, vm });
         });
     }
 
+    // The search matches what the row is about, never the key: the key holds
+    // the agent id (pxmxConsoleKey).
     let rows = Array.from(byKey.values());
     if (filter) {
         rows = rows.filter(r => {
             const vm = r.vm || {};
-            return [vm.name, vm.vmid, vm.node, vm.cluster, r.key]
+            return [vm.name, vm.vmid, vm.node, vm.cluster, vm.unique_id]
                 .some(f => String(f == null ? '' : f).toLowerCase().includes(filter));
         });
     }
@@ -4174,7 +4259,8 @@ function pxmxRenderConsoleList() {
     list.innerHTML = rows.length ? rows.map(r => {
         const vm = r.vm || {};
         const kAttr = escapeHtml(r.key);
-        const label = escapeHtml(vm.name || vm.vmid || r.key);
+        // The name shown is the VM's, never the key (it holds the agent id).
+        const label = escapeHtml(vm.name || vm.vmid || vm.unique_id || '');
         if (r.open) {
             const e = r.entry;
             const isA = r.key === active;
@@ -4499,18 +4585,27 @@ function pxmxScheduleNodeOpsPoll() {
     if (_pxmxNodeOpsTimer || !_pxmxNodeOps.size) return;
     _pxmxNodeOpsTimer = setTimeout(async () => {
         _pxmxNodeOpsTimer = null;
+        // Only while the Nodes table is shown and an operation still waits.
         if (!document.getElementById('pxmx-nodes-wrap')) return;
         pxmxExpireNodeOps();
         if (!_pxmxNodeOps.size) { renderPxmxNodes(); return; }
         try {
+            // Read the node list for the tenant shown now.
+            const tenant = currentTenant;   // the tenant this read is for
             const r = await fetch('/api/pxmx/nodes?tenant=' + encodeURIComponent(currentTenant || ''));
             const d = r.ok ? await r.json() : null;
-            if (pxmxNodeListIsLive(d) && Array.isArray(window._pxmxNodes)) {
+            // A tenant switch started while this read was in flight: its
+            // answer is the old tenant's nodes. setTenant drops the old
+            // tenant's node cache, and splicing this answer in would bring
+            // them back. lmFetch drops a page read the switch overtook only
+            // while the answer has not started to arrive; this one had.
+            if (currentTenant === tenant && pxmxNodeListIsLive(d) && Array.isArray(window._pxmxNodes)) {
                 window._pxmxNodes.splice(0, window._pxmxNodes.length, ...d.nodes);
                 pxmxReconcileNodeOps(d.nodes);
                 renderPxmxNodes();
             }
         } catch (e) { console.warn('node state poll failed', e); }
+        // Poll again either way, until no operation waits.
         pxmxScheduleNodeOpsPoll();
     }, 10000);
 }
@@ -4997,6 +5092,9 @@ async function renderPxmxDiagnostics(container, forceRefresh = false) {
     if (lmViews.ilohealthWire) lmViews.ilohealthWire(container);
 }
 
+// Draw the Hypervisors page's `subMenu` tab. Overview and Virtual Machines
+// read the tenant's VMs and nodes into window._pxmxVms and _pxmxNodes, the
+// caches the VM table, the node views and their actions look VMs up in.
 async function loadPxmxData(subMenu, forceRefresh = false) {    const container = document.getElementById('pxmx-content');
     if (!container) return;
     container.innerHTML = '<p class="text-sm text-slate-500 italic p-4">Loading…</p>';
@@ -5020,12 +5118,19 @@ async function loadPxmxData(subMenu, forceRefresh = false) {    const container 
             const filter = (subMenu === 'Virtual Machines' && window._pxmxNodeFilterPending)
                 ? window._pxmxNodeSel : null;
             window._pxmxNodeFilterPending = false;
+            const tenant = currentTenant;   // the tenant this read is for
             const [vmR, nodesR] = await Promise.all([
                 fetch(`/api/pxmx/vms?tenant=${encodeURIComponent(currentTenant)}`),
                 fetch('/api/pxmx/nodes?tenant=' + encodeURIComponent(currentTenant)),
             ]);
             const vmData    = vmR.ok    ? await vmR.json()    : {};
             const nodesData = nodesR.ok ? await nodesR.json() : {};
+            // A tenant switch started while this read was in flight: drop its
+            // answer. setTenant drops the old tenant's VM cache (a unique_id
+            // names no agent) and node list, and storing this answer would
+            // bring them back. lmFetch drops a page read the switch overtook
+            // only while the answer has not started to arrive; this one had.
+            if (currentTenant !== tenant) return;
 
             const vms   = vmData.vms   || [];
             const nodes = nodesData.nodes || [];

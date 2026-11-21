@@ -47,9 +47,18 @@ async function _cppmErrorPanel(r, e) {
     </div>`);
 }
 
-async function loadCPPMNACStatus() {
+// The ClearPass page's loader: the `subMenu` tab's content (loadCPPMData) and
+// the NAC summary tiles above every tab. Every load refills the tiles: a
+// tenant switch redraws the page from its template, which puts them back to
+// "—", and then runs only this loader. The tiles name the header's tenant, as
+// the tabs' own reads do; without it the hub answers from the session's
+// tenant (a Global Admin's: the global ClearPass), under the picked tenant's
+// name. Resolves once the tab's content has loaded.
+async function loadCPPMNACStatus(subMenu = 'NAC Status') {
+    const content = loadCPPMData(subMenu);
+    const tparam = currentTenant && currentTenant !== 'default' ? `?tenant=${encodeURIComponent(currentTenant)}` : '';
     try {
-        const r = await fetch('/api/cppm/nac-status');
+        const r = await fetch(`/api/cppm/nac-status${tparam}`);
         if (r.ok) {
             const d = await r.json();
             const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v ?? '—'; };
@@ -59,7 +68,7 @@ async function loadCPPMNACStatus() {
             set('nac-unknown', d.unknown_devices);
         }
     } catch (err) { console.error('loadCPPMNACStatus: nac-status fetch failed', err); }
-    loadCPPMData('NAC Status');
+    return content;
 }
 
 // _renderCppmSessions() — the Access Tracker / NAC Status branch of

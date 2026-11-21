@@ -226,10 +226,13 @@ def register(app, hub, ctx):
             await websocket.accept()
             await websocket.close(code=4401, reason="invalid or expired console session")
             return
-        # Pull the agent, frame queue and VM id from the session.
+        # Pull the agent, frame queue and VM id from the session. The VM's
+        # write lock is keyed by its agent as well as its unique_id
+        # (_vnc_lock_key): a unique_id names no agent.
         spoke_id = sess["spoke_id"]
         queue = sess["queue"]
         unique_id = str(sess.get("unique_id") or "")
+        agent_id = str(sess.get("agent_id") or "")
         # Mark connected so the 60s TTL no longer reaps this session (a viewer
         # sits on a console far longer than 60s, and each upstream frame re-reads
         # the session by id). connected_at drives the multiuser presence roster.
@@ -259,7 +262,7 @@ def register(app, hub, ctx):
                     # regardless) — only this direction is gated. Re-checked live
                     # (not just at open) so a force-takeover elsewhere downgrades
                     # this session's input immediately, without a reconnect.
-                    if unique_id and not hub.vnc_is_writer(unique_id, session_id):
+                    if unique_id and not hub.vnc_is_writer(unique_id, session_id, agent_id):
                         continue
                     # Send the bytes to the agent (base64-encoded).
                     await hub.send_to_spoke_command(spoke_id, "VNC_FRAME_DOWN", {

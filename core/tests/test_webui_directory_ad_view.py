@@ -8,7 +8,7 @@ import os
 
 import pytest
 
-from test_webui_browser_smoke import hub_url_and_session  # noqa: F401 (fixture)
+from test_webui_browser_smoke import APP_READY, hub_url_and_session  # noqa: F401 (fixture)
 
 if os.environ.get("CI"):
     from playwright import sync_api
@@ -45,7 +45,7 @@ def _open(p, base, token, ad):
     page.route("**/api/ldap/ous?*", json_route({"ous": [], "root_user_count": 0}))
     page.route("**/api/ldap/ad?*", json_route(ad))
     page.goto(base + "/")
-    page.wait_for_function("window._lmClickFeedbackInstalled === true")
+    page.wait_for_function(APP_READY)
     page.evaluate("setView('ldap')")
     page.wait_for_function("document.getElementById('ldap-tenant-select')?.value === 'acme'")
     page.evaluate("setSubView('AD')")
@@ -99,7 +99,7 @@ def test_setup_ad_connection_form_is_vault_only_and_tenant_bound(hub_url_and_ses
             route.fulfill(content_type="application/json", body="{}")
         page.route("**/setup/ad-connections", save)
         page.goto(base + "/")
-        page.wait_for_function("window._lmClickFeedbackInstalled === true")
+        page.wait_for_function(APP_READY)
         page.evaluate("showAddDeviceModal('ad')")
         page.wait_for_function("document.querySelectorAll('#dev-tenant_id option').length === 2")
 
@@ -145,7 +145,7 @@ def test_ad_connection_row_shows_its_own_tenant(hub_url_and_session):  # noqa: F
                 {"id": "c1", "name": "Corp AD", "tenant_id": "ssplm", "tenant_key": "ssplm",
                  "spoke_id": "", "domain": "corp.example"}]})))
         page.goto(base + "/")
-        page.wait_for_function("window._lmClickFeedbackInstalled === true")
+        page.wait_for_function(APP_READY)
         page.evaluate("""async () => {
             const el = document.createElement('div'); el.id = 'all-devices-list';
             document.body.appendChild(el); await loadAllDevices(); }""")
@@ -167,7 +167,7 @@ def test_editing_an_ad_connection_keeps_its_named_credential(hub_url_and_session
             content_type="application/json", body=json.dumps({"vault_available": False, "secrets": [
                 {"bucket": "ssplm", "name": "other"}, {"bucket": "ssplm", "name": "ad-bind"}]})))
         page.goto(base + "/")
-        page.wait_for_function("window._lmClickFeedbackInstalled === true")
+        page.wait_for_function(APP_READY)
         page.evaluate("""showAddDeviceModal('ad', {id: 'c1', name: 'Corp AD', tenant_id: 'ssplm',
             spoke_id: '', domain: 'corp.example', vault_credential: {name: 'ad-bind'}})""")
         page.wait_for_function("document.querySelectorAll('#dev-vaultcred option').length === 3")

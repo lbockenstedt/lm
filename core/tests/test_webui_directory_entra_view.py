@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from test_webui_browser_smoke import hub_url_and_session  # noqa: F401 (fixture)
+from test_webui_browser_smoke import APP_READY, hub_url_and_session  # noqa: F401 (fixture)
 
 if os.environ.get("CI"):
     from playwright import sync_api
@@ -54,7 +54,7 @@ def _open(p, base, token, entra, posts):
     page.route("**/api/ldap/entra?*", json_route(entra))
     page.route("**/api/ldap/entra/users", create)
     page.goto(base + "/")
-    page.wait_for_function("window._lmClickFeedbackInstalled === true")
+    page.wait_for_function(APP_READY)
     page.evaluate("setView('ldap')")
     page.wait_for_function("document.getElementById('ldap-tenant-select')?.value === 'acme'")
     page.evaluate("setSubView('Entra')")

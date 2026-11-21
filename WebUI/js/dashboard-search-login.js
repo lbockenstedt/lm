@@ -324,18 +324,16 @@ function openSearchResult(item) {
 }
 
 // Open the Proxmox VNC console for a VM discovered via the device dashboard.
-// The dashboard's proxmox leg (SEARCH_VMS) may surface a VM that isn't in the
-// PXMX page's window._pxmxVms cache that pxmxOpenConsole() looks up, so seed it
-// first, close the dashboard, then delegate to the existing console flow.
+// The dashboard's proxmox leg (SEARCH_VMS) hands over the VM with its agent
+// (agent_id), so it is passed to pxmxOpenConsole whole. Looking it up by
+// unique_id in the PXMX page's window._pxmxVms cache could miss it, or find
+// another agent's VM with the same unique_id (a unique_id names no agent).
+// Close the dashboard, then delegate to the existing console flow.
 function ddOpenVnc(vm) {
     if (!vm || !vm.unique_id) { showToast('VM console identifiers unavailable', 'error'); return; }
-    window._pxmxVms = window._pxmxVms || [];
-    if (!window._pxmxVms.find(v => v.unique_id === vm.unique_id)) {
-        window._pxmxVms.push(vm);
-    }
     document.getElementById('device-dashboard-modal')?.remove();
     if (typeof pxmxOpenConsole === 'function') {
-        pxmxOpenConsole(vm.unique_id);
+        pxmxOpenConsole(vm.unique_id, vm);
     } else {
         showToast('Console unavailable in this view', 'error');
     }

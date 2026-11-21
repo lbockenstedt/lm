@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from test_webui_browser_smoke import hub_url_and_session  # noqa: F401 (fixture)
+from test_webui_browser_smoke import APP_READY, hub_url_and_session  # noqa: F401 (fixture)
 
 if os.environ.get("CI"):
     from playwright import sync_api
@@ -65,7 +65,7 @@ def test_syslog_view_tabs(hub_url_and_session):  # noqa: F811
             page.route("**/api/syslog/archive*", archive)
             page.route("**/api/syslog/diagnostics*", json_route(DIAG))
             page.goto(base + "/")
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
 
             # Search: the Local badge and the hostile message as plain text.
             page.evaluate("setView('syslog')")
