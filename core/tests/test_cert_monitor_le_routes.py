@@ -37,6 +37,8 @@ def _setup(tmp_path, monkeypatch, certs, served_not_after, admin=False):
                 "san": [entry["host"]]}
 
     monkeypatch.setattr(cm, "probe_host", fake_probe)
+    # The tick's daily vendor-page refresh would fetch over the network and hang offline.
+    monkeypatch.setattr(cm, "refresh_sources", lambda *a, **k: {})
     import routes.cert_monitor as rcm
     cache = {"status": "SUCCESS", "data": {"certs": certs}}
     hub = SimpleNamespace(state=_State(), le_cache_get=lambda k: cache if k == "certs" else None)
