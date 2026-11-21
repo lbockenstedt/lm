@@ -1,0 +1,234 @@
+"""Publish one verified candidate to the isolated, read-only serving store."""
+
+import hashlib
+import json
+import os
+import re
+import shutil
+import stat
+import tempfile
+import uuid
+from pathlib import Path
+
+CANDIDATE_RUNTIME = Path("/opt/lm-llm-candidate")
+CANDIDATE_STORE = Path("/var/lib/lm-llm-candidate/models")
+SERVING_RUNTIME = Path("/opt/lm-llm")
+EXTERNAL_CATALOG = Path("/etc/lm/llm-models.json")
+MAX_MANIFEST = 4 * 1024 * 1024
+
+
+def _read_regular(path, maximum=None):
+    """Read a regular, non-symlink file with an optional size bound."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as source:
+        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            raise ValueError("Model store contains a non-regular file")
+        data = source.read() if maximum is None else source.read(maximum + 1)
+    if maximum is not None and len(data) > maximum:
+        raise ValueError("Model manifest exceeds the size limit")
+    return data
+
+
+def _store_path(root, *parts):
+    """Refuse symlinks in model-store paths below the systemd state directory."""
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("Invalid model store root")
+    current = root
+    for part in parts[:-1]:
+        current = current / part
+        if current.is_symlink() or not current.is_dir():
+            raise ValueError("Invalid model store directory")
+    return current / parts[-1]
+
+
+def _mkdirs(root, parts):
+    """Create store directories without traversing existing symlinks."""
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("Invalid model store root")
+    current = root
+    for part in parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError("Invalid model store directory")
+        created = not current.exists()
+        current.mkdir(exist_ok=True, mode=0o755)
+        if not current.is_dir():
+            raise ValueError("Invalid model store directory")
+        if created:
+            current.chmod(0o755)
+
+
+def _manifest(candidate):
+    """Verify the exact public manifest and enumerate only its pinned blobs."""
+    model, tag = candidate["model"].split(":", 1)
+    namespace, name = model.split("/", 1) if "/" in model else ("library", model)
+    parts = ("manifests", "registry.ollama.ai", namespace, name, tag)
+    raw = _read_regular(_store_path(CANDIDATE_STORE, *parts), MAX_MANIFEST)
+    if hashlib.sha256(raw).hexdigest() != candidate["digest"]:
+        raise ValueError("Candidate manifest digest mismatch")
+    manifest = json.loads(raw)
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("layers"), list):
+        raise ValueError("Invalid candidate manifest")
+    records = [manifest.get("config"), *manifest["layers"]]
+    digests = []
+    for record in records:
+        digest = record.get("digest") if isinstance(record, dict) else None
+        if not isinstance(digest, str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
+            raise ValueError("Invalid candidate blob digest")
+        digests.append(digest[7:])
+    if not digests or len(digests) > 256:
+        raise ValueError("Invalid candidate blob count")
+    return parts, raw, list(dict.fromkeys(digests))
+
+
+def _copy_blob(digest, target):
+    """Copy and hash one blob without following source or destination links."""
+    source_path = _store_path(CANDIDATE_STORE, "blobs", f"sha256-{digest}")
+    fd = os.open(source_path, os.O_RDONLY | os.O_NOFOLLOW)
+    checksum = hashlib.sha256()
+    with os.fdopen(fd, "rb") as source, target.open("xb") as output:
+        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            raise ValueError("Model blob is not a regular file")
+        while chunk := source.read(1024 * 1024):
+            checksum.update(chunk)
+            output.write(chunk)
+        output.flush()
+        os.fsync(output.fileno())
+    if checksum.hexdigest() != digest:
+        raise ValueError("Candidate blob digest mismatch")
+    target.chmod(0o644)
+
+
+def _hash_file(path):
+    """Verify an existing serving blob before reusing it."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    checksum = hashlib.sha256()
+    with os.fdopen(fd, "rb") as source:
+        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            raise ValueError("Serving blob is not a regular file")
+        while chunk := source.read(1024 * 1024):
+            checksum.update(chunk)
+    return checksum.hexdigest()
+
+
+def _atomic_catalog(path, content):
+    """Atomically publish or restore a root-managed model catalog."""
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as output:
+        temporary = Path(output.name)
+        try:
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+            os.fchmod(output.fileno(), 0o644)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+    try:
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def publish(candidate, expected_runtime_digest):
+    """Stage verified model data and return an exact rollback record."""
+    if EXTERNAL_CATALOG.exists() or EXTERNAL_CATALOG.is_symlink():
+        raise ValueError("An operator-managed catalog overrides automatic activation")
+    marker = _read_regular(CANDIDATE_RUNTIME / "bundle.json", 1024)
+    if json.loads(marker) != {"sha256": expected_runtime_digest}:
+        raise ValueError("Candidate runtime is not the pinned public release")
+    parts, manifest, blobs = _manifest(candidate)
+    serving = SERVING_RUNTIME
+    created = not serving.exists() and not serving.is_symlink()
+    if not created:
+        if serving.is_symlink() or _read_regular(serving / "bundle.json", 1024) != marker:
+            raise ValueError("Existing serving runtime is not managed by this provisioner")
+        expected_env = f"OLLAMA_MODELS={serving / 'models'}\n".encode()
+        if _read_regular(serving / "bundle.env", 1024) != expected_env:
+            raise ValueError("Existing serving store is not managed by this provisioner")
+    token = uuid.uuid4().hex
+    with tempfile.TemporaryDirectory(dir=serving.parent) as temp:
+        root = Path(temp)
+        staged = root / "models"
+        (staged / "blobs").mkdir(parents=True)
+        for digest in blobs:
+            _copy_blob(digest, staged / "blobs" / f"sha256-{digest}")
+        manifest_path = staged.joinpath(*parts)
+        manifest_path.parent.mkdir(parents=True)
+        manifest_path.write_bytes(manifest)
+        manifest_path.chmod(0o644)
+        if created:
+            runtime = root / "runtime"
+            shutil.copytree(CANDIDATE_RUNTIME, runtime, symlinks=True)
+            shutil.move(staged, runtime / "models")
+            env = runtime / "bundle.env"
+            env.write_text(f"OLLAMA_MODELS={serving / 'models'}\n", encoding="utf-8")
+            catalog = runtime / "llm-models.json"
+            catalog.write_text("{}\n", encoding="utf-8")
+            (runtime / ".activation-token").write_text(token, encoding="utf-8")
+            env.chmod(0o644)
+            catalog.chmod(0o644)
+            for directory in (runtime / "models", *(runtime / "models").rglob("*")):
+                if directory.is_dir():
+                    directory.chmod(0o755)
+            if serving.exists() or serving.is_symlink():
+                raise ValueError("Serving runtime appeared during activation")
+            runtime.rename(serving)
+            after = (json.dumps({candidate["model"]: candidate["digest"]}) + "\n").encode()
+            return {"created": True, "token": token, "before": b"{}\n", "after": after,
+                    "committed": False}
+
+        catalog_path = serving / "llm-models.json"
+        before = _read_regular(catalog_path, 16384)
+        catalog = json.loads(before)
+        if not isinstance(catalog, dict) or (candidate["model"] in catalog
+                                             and catalog[candidate["model"]] != candidate["digest"]):
+            raise ValueError("Existing serving catalog conflicts with the selected model")
+        after = (json.dumps({**catalog, candidate["model"]: candidate["digest"]}) + "\n").encode()
+        destination = serving / "models"
+        for digest in blobs:
+            name = f"sha256-{digest}"
+            target = _store_path(destination, "blobs", name)
+            if target.exists() or target.is_symlink():
+                if _hash_file(target) != digest:
+                    raise ValueError("Existing serving blob digest mismatch")
+            else:
+                os.link(staged / "blobs" / name, target, follow_symlinks=False)
+        _mkdirs(destination, parts[:-1])
+        target = _store_path(destination, *parts)
+        added = not target.exists() and not target.is_symlink()
+        if added:
+            os.link(manifest_path, target, follow_symlinks=False)
+        elif _read_regular(target, MAX_MANIFEST) != manifest:
+            raise ValueError("Existing serving manifest conflicts with the selected model")
+        return {"created": False, "before": before, "after": after,
+                "manifest": target, "manifest_bytes": manifest, "manifest_added": added,
+                "committed": False}
+
+
+def finalize(record):
+    """Approve a staged artifact only after the serving runtime reports its digest."""
+    catalog = SERVING_RUNTIME / "llm-models.json"
+    if _read_regular(catalog, 16384) != record["before"]:
+        raise ValueError("Serving catalog changed during activation")
+    _atomic_catalog(catalog, record["after"])
+    record["committed"] = True
+
+
+def rollback(record):
+    """Undo only files installed by this activation; preserve unrelated changes."""
+    if record["created"]:
+        marker = SERVING_RUNTIME / ".activation-token"
+        if _read_regular(marker, 128).decode() != record["token"]:
+            raise ValueError("Serving runtime changed during rollback")
+        shutil.rmtree(SERVING_RUNTIME)
+        return
+    if record["committed"]:
+        catalog = SERVING_RUNTIME / "llm-models.json"
+        if _read_regular(catalog, 16384) != record["after"]:
+            raise ValueError("Serving catalog changed during rollback")
+        _atomic_catalog(catalog, record["before"])
+    if record["manifest_added"]:
+        target = record["manifest"]
+        if _read_regular(target, MAX_MANIFEST) != record["manifest_bytes"]:
+            raise ValueError("Serving manifest changed during rollback")
+        target.unlink()

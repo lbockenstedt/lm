@@ -3441,6 +3441,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             except Exception as e:
                 logger.warning(f"Failed to push watchdog config to {spoke_id}: {e}")
 
+            # Resume the saved public-model preparation after an LLM reconnect.
+            if not synthetic and self.spoke_module_types.get(spoke_id) == "llm":
+                self.llm_pool.reconcile_bootstrap(spoke_id)
+
             # Fleet hub-TLS-verify policy (Setup → Hub TLS Verification). Only
             # pushed once an admin has set it; the spoke handler is idempotent
             # (restarts only when its effective mode changes). Role sub-spokes

@@ -10,6 +10,7 @@ from access import (read_scope, request_effective_tenant, safe_external_url, sam
                     tenant_is_shared, write_scope)
 import instance_vault
 from llm_cloud import TOKEN_LIMIT_FIELDS, valid_endpoint
+from llm_candidates import CANDIDATES
 from llm_pool import HARDWARE_LIMITS, SAMPLING_LIMITS, diagnostic, model_minimums, model_sampling, valid_model
 
 
@@ -29,6 +30,12 @@ ROUTING_FORM_SCHEMA = {
          "maximum": SAMPLING_LIMITS["temperature"], "step": 0.05},
         {"name": "top_p", "label": "Top-p (blank = default)", "type": "number",
          "maximum": SAMPLING_LIMITS["top_p"], "step": 0.05},
+        {"name": "top_k", "label": "Top-k (blank = default)", "type": "number",
+         "maximum": SAMPLING_LIMITS["top_k"], "step": 1},
+        {"name": "repeat_penalty", "label": "Repeat penalty (blank = default)", "type": "number",
+         "maximum": SAMPLING_LIMITS["repeat_penalty"], "step": 0.05},
+        {"name": "num_ctx", "label": "Context tokens (blank = default)", "type": "number",
+         "maximum": SAMPLING_LIMITS["num_ctx"], "step": 1},
     ],
     "repo": [
         {"name": "repo", "label": "Repository", "required": True, "pattern": REPO_KEY, "placeholder": "owner/repo"},
@@ -143,6 +150,9 @@ def register(app, hub, ctx):
         workers = hub.state.system_state.get("module_metadata", {})
         return {**{key: config.get(key, {}) for key in POOL_SETTINGS[:-1]},
                 "routing_form_schema": ROUTING_FORM_SCHEMA,
+                "public_candidates": [{"key": key, "label": row["label"], "model": row["model"],
+                                       "digest": row["digest"], "options": row["options"]}
+                                      for key, row in CANDIDATES.items()],
                 "llm_cloud_profiles": [row for item in (cloud if isinstance(cloud, list) else [])
                                        if (row := cloud_profile_reference(item)) is not None],
                 "test_workers": [{"key": key, "label": hub.state.get_module_name(key)}
@@ -179,6 +189,24 @@ def register(app, hub, ctx):
         candidate = data.get("candidate")
         if not isinstance(candidate, str) or not hub.llm_pool.start_qualification(candidate):
             raise HTTPException(409, "Candidate is not configured or its worker is unavailable")
+        return {"status": "accepted"}
+
+    @app.post("/api/llm/admin/prepare", status_code=202)
+    async def prepare(request: Request, data: dict):
+        """Stage a public CPU candidate only on an approved Shared test worker."""
+        require_admin(request)
+        if data.keys() != {"worker", "candidate"} or not await hub.llm_pool.start_bootstrap(
+                data.get("worker"), data.get("candidate")):
+            raise HTTPException(409, "Candidate or Shared test worker is unavailable")
+        return {"status": "accepted"}
+
+    @app.post("/api/llm/admin/activate", status_code=202)
+    async def activate(request: Request, data: dict):
+        """Explicitly activate a previously prepared candidate on a Shared worker."""
+        require_admin(request)
+        if data.keys() != {"worker", "candidate"} or not hub.llm_pool.start_activation(
+                data.get("worker"), data.get("candidate")):
+            raise HTTPException(409, "Candidate or Shared test worker is unavailable")
         return {"status": "accepted"}
 
     def scoped_tenant(request, tenant, run=False):
@@ -233,9 +261,12 @@ def register(app, hub, ctx):
             raise HTTPException(400, "Choose the json or indentation fixture")
 
         # Never use user data as a diagnostic prompt or return the raw test output.
+        if "task" in data and ("model" in data or "digest" in data):
+            raise HTTPException(400, "Choose a task or an exact model, not both")
+        target = ({"task": data["task"]} if "task" in data
+                  else {"model": data.get("model"), "digest": data.get("digest")})
         result = await hub.llm_pool.complete(effective, {
-            "model": data.get("model"), "digest": data.get("digest"),
-            "prompt": prompt, "format": output_format,
+            **target, "prompt": prompt, "format": output_format,
         })
         if result.get("status") != "SUCCESS":
             return result
