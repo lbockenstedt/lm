@@ -13,7 +13,7 @@ import subprocess
 
 import pytest
 
-from test_webui_browser_smoke import hub_url_and_session  # noqa: F401 (fixture)
+from test_webui_browser_smoke import APP_READY, hub_url_and_session  # noqa: F401 (fixture)
 from webui_src import WEBUI
 
 if os.environ.get("CI"):
@@ -126,7 +126,7 @@ def test_system_general_saves_the_ticked_vrfs(hub_url_and_session):  # noqa: F81
             route.fulfill(content_type="application/json", body=json.dumps(reply))
         page.route("**/admin/common-vrfs", common_vrfs)
         page.goto(base + "/")
-        page.wait_for_function("window._lmClickFeedbackInstalled === true")
+        page.wait_for_function(APP_READY)
         page.evaluate("setView('settings')")
         card = page.locator("#common-vrfs-card")
         card.locator("text=Automatic:").wait_for()
@@ -162,7 +162,7 @@ def test_reopening_system_during_a_save_waits_for_the_hub(hub_url_and_session): 
                 route.fulfill(content_type="application/json", body=json.dumps(_reply(stored)))
         page.route("**/admin/common-vrfs", common_vrfs)
         page.goto(base + "/")
-        page.wait_for_function("window._lmClickFeedbackInstalled === true")
+        page.wait_for_function(APP_READY)
         page.evaluate("setView('settings')")
         card = page.locator("#common-vrfs-card")
         card.locator("text=Automatic:").wait_for()

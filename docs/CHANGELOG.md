@@ -168,6 +168,61 @@ CI/tooling changes are omitted unless they change what an operator sees.
   the records could not be loaded and change nothing. Before, they acted on
   the previous tenant's records, or reported that there were none. See
   [henet.md](henet.md).
+- **A tenant switch no longer leaves the old tenant's page clickable.** Until
+  LM has redrawn the page for the tenant you picked, the page (its tabs, its
+  action buttons such as **+ Add Record**, and its content) dims and takes no
+  clicks, so nothing acts on the old tenant's data. The header, the side menu
+  and the footer stay usable. A confirm or prompt still waiting for your
+  answer (such as **Delete this rack?**) is cancelled and goes away, the old
+  page's dialogs and menus close, and a confirm or prompt that comes up while
+  the page is dimmed is cancelled at once, with a notice. An open console, the
+  USB dongle watch, Help and a bug report stay open but take no input until
+  the page is redrawn. A console dock keeps its open sessions but drops the
+  old tenant's consoles from its list, and the VNC dock's search drops the old
+  tenant's VMs, before the page takes clicks again; the new tenant's show
+  once they load. The Hypervisors page's VM and node lists are dropped too
+  and read again for the new tenant, and a node list still arriving for the
+  old tenant is discarded. VNC consoles are told apart by the agent that
+  hosts the VM as well as by the VM, so when two tenants' VMs share a cluster
+  name, node and VM ID, the console search and the device dashboard open the
+  VM you picked, not the other tenant's, and an open console no longer hides
+  the other tenant's VM from the search. The hub no longer gives such VMs'
+  consoles one write lock or one list of who is watching, and **Take Over**
+  is checked against the VM the console was opened on.
+  The header names your pick at once; after two quick
+  picks the page, the header and the subnet filter follow the last one, and
+  the page still redraws when part of the switch fails. A Global Admin's picks
+  now reach the hub one at a time, in the order they were made, so the hub can
+  no longer end up on an older pick than the page. A switch the hub refuses,
+  or does not answer within about 15 seconds, shows an error and puts the page
+  back on the tenant the hub then names (see the switch ticket below), instead
+  of leaving the page dimmed until a reload. If the hub does not say which
+  tenant it is on, the page stays dimmed and LM asks you to pick a tenant
+  again, rather than naming a tenant the hub may not be on (a tenant it named
+  earlier proves nothing: another admin may have switched it since). A dialog the old tenant's page was still
+  loading when you switched no longer opens over the new tenant's page. LM
+  compares tenant ids exactly as the hub stores them and takes the hub's own
+  spelling, so tenants whose ids differ only by case (such as `ACME` and
+  `acme`) are never taken for each other. Read-only accounts and users who are
+  not Global Admins no longer send the hub a switch it refuses. The page is
+  redrawn from scratch for the new tenant, so the old tenant's rows never stay
+  on screen, and the ClearPass page's NAC tiles are filled again from the
+  picked tenant's ClearPass. See [webui.md](webui.md#how-to-use-it) and
+  [pxmx.md](pxmx.md#how-to-use-it).
+- **The hub applies a tenant switch only under its latest switch ticket.**
+  Before a Global Admin's switch, LM gets a ticket from the hub
+  (`POST /setup/tenant/switch-ticket`, which returns the ticket and the hub's
+  active tenant). Issuing a ticket voids the one before, and a
+  `POST /setup/tenant` whose `switch_ticket` is not the latest is refused
+  (**409**) and changes nothing. After a refused or unanswered switch, LM gets
+  a fresh ticket and goes to the tenant the hub names with it, so a switch
+  that reaches the hub late can no longer move it to a tenant the page does
+  not show. When two tabs or two admins switch at the same moment, only the
+  switch that got its ticket last can be applied; a page whose switch was not
+  applied shows an error and goes to the hub's tenant. A slow hub can keep the
+  page dimmed for up to about 45 seconds (the ticket, the switch and the fresh
+  ticket). `POST /setup/tenant` without `switch_ticket` works as before. See
+  [lm-hub.md](lm-hub.md#how-to-use-it) and [webui.md](webui.md#how-to-use-it).
 
 ## Week of 2026-11-09
 

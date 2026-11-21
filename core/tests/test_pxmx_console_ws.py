@@ -18,7 +18,9 @@ so the RFB handshake bytes piled up unread and noVNC's connect timer fired →
 """
 
 import asyncio
+import base64
 import tempfile
+import time
 
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
@@ -57,6 +59,7 @@ class _FakeHub:
         self.state = _FakeState(data_dir)
         self._vnc = sessions          # {session_id: {queue, ws_token, spoke_id, ...}}
         self.sent = []                # recorded (spoke_id, cmd, data) down-commands
+        self.writer_checks = []       # recorded vnc_is_writer (unique_id, session_id, agent_id)
         # ``register_simulations_routes`` reads these at app-build time (closures
         # capture them; they're never exercised by the console WS tests).
         self.simulations_store = type("_Store", (), {})()
@@ -65,6 +68,13 @@ class _FakeHub:
 
     def get_vnc_session(self, sid):
         return self._vnc.get(sid)
+
+    def vnc_is_writer(self, unique_id, session_id, agent_id=""):
+        """Record the relay's write-lock check. The lock is held on
+        "agent-b" only: the session tests open their VM through that agent,
+        and a unique_id names no agent, so the relay must ask with it."""
+        self.writer_checks.append((unique_id, session_id, agent_id))
+        return agent_id == "agent-b"
 
     def register_vnc_session(self, sid, meta):
         # Tests pre-seed the queue directly; mirror the real shape if called.
@@ -187,3 +197,27 @@ def test_ws_connect_marks_session_connected():
         ws.receive_bytes()
         assert sess.get("connected") is True
         assert isinstance(sess.get("connected_at"), (int, float))
+
+
+def test_vnc_input_asks_for_the_lock_of_the_sessions_own_agent():
+    """Browser input reaches the VM only while the session holds the write
+    lock of its VM on the agent it was opened through. A unique_id names no
+    agent, so two tenants' VMs can share one and the hub keys the lock by
+    both (HubVncConsoleMixin._vnc_lock_key); the relay must ask with the
+    agent stored in the session. Asked without it, it would read the lock
+    of another VM, and this session's keystrokes would be dropped."""
+    sess = _session(items=[("ready",)])
+    sess["agent_id"] = "agent-b"
+    client, hub = _build_client({"s1": sess})
+    with client.websocket_connect("/ws/console/s1?token=tok") as ws:
+        ws.send_bytes(b"key")
+        # The relay runs on the test client's own thread: wait until it has
+        # checked the lock and forwarded the bytes (or 2 s), before the close
+        # on leaving this block cancels it.
+        for _ in range(200):
+            if any(cmd == "VNC_FRAME_DOWN" for _, cmd, _ in hub.sent):
+                break
+            time.sleep(0.01)
+    assert hub.writer_checks == [("c1/pve1/101", "s1", "agent-b")]
+    frames = [data for _, cmd, data in hub.sent if cmd == "VNC_FRAME_DOWN"]
+    assert [base64.b64decode(f["data"]) for f in frames] == [b"key"]
