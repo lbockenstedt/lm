@@ -9,6 +9,8 @@ import subprocess
 import time
 from pathlib import Path
 
+from agent.src.llm_options import valid_sampling
+
 
 MANIFEST = Path("/etc/lm/llm-qualification.json")
 # Loopback ports set by OLLAMA_HOST in lm-llm-candidate.service and lm-llm-ollama.service
@@ -29,7 +31,14 @@ def _candidate(key):
     if not isinstance(spec, dict):
         return None
     candidate, baseline = _artifact(spec), _artifact(spec.get("baseline"))
-    return (candidate, baseline) if candidate and baseline else None
+    options = spec.get("options")
+    bootstrap = spec.get("bootstrap", False)
+    if (type(bootstrap) is not bool or not candidate
+            or (bootstrap and ("baseline" in spec or not isinstance(options, dict) or "num_ctx" not in options))
+            or (not bootstrap and not baseline)
+            or (options is not None and not valid_sampling(options))):
+        return None
+    return candidate, baseline, options, bootstrap
 
 
 def _artifact(spec):
@@ -37,21 +46,24 @@ def _artifact(spec):
     if not isinstance(spec, dict):
         return None
     model, digest, version = (spec.get(name) for name in ("model", "digest", "version"))
-    if (not isinstance(model, str) or not re.fullmatch(r"[\w-]+(?:/[\w-]+)?:[\w.-]+", model, re.ASCII)
+    if (not isinstance(model, str) or len(model) > 200
+            or not re.fullmatch(r"(?:[\w-]+/)?[\w-][\w.-]*:[\w.-]+", model, re.ASCII)
             or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
             or not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+", version)):
         return None
     return model, digest, version
 
 
-def _run_case(request, port, model, fixture, prompt):
+def _run_case(request, port, model, fixture, prompt, options=None):
     """Score exact semantics and capture timing without retaining generated text."""
+    profile = {"num_predict": 1024, **options} if options is not None else {
+        "num_predict": 256, "temperature": 0}
     body = {"model": model, "prompt": prompt, "stream": False, "think": False,
-            "keep_alive": 0, "options": {"num_gpu": 0, "num_predict": 256, "temperature": 0}}
+            "keep_alive": 0, "options": {**profile, "num_gpu": 0}}
     if fixture == "json":
         body["format"] = "json"
     started = time.monotonic()
-    reply = request("/api/generate", body, 240, port=port)
+    reply = request("/api/generate", body, 900 if options is not None else 240, port=port)
     elapsed = time.monotonic() - started
     valid = reply.get("done") is True and reply.get("done_reason") == "stop" and reply.get("model") == model
     try:
@@ -75,32 +87,34 @@ def _installed(request, port, model, digest):
         and not row.get("remote_host") and not row.get("remote_model") for row in inventory)
 
 
-def _suite(request, port, artifact):
+def _suite(request, port, artifact, options=None):
     """Run the same cold-start fixtures on each CPU runtime."""
     model, digest, version = artifact
     fixtures = [
-        _run_case(request, port, model, "json", "Return only this exact JSON object:\n" + json.dumps(JSON_EXPECTED)),
-        _run_case(request, port, model, "indentation", "Return this exact Python text, without fences:\n" + PYTHON_EXPECTED),
+        _run_case(request, port, model, "json", "Return only this exact JSON object:\n" + json.dumps(JSON_EXPECTED), options),
+        _run_case(request, port, model, "indentation", "Return this exact Python text, without fences:\n" + PYTHON_EXPECTED, options),
     ]
     return {"model": model, "digest": digest, "version": version, "fixtures": fixtures}
 
 
-def _run(key, request, approved_baseline, *, spec=None):
+def _run(key, request, approved_baseline, *, spec=None, progress=None):
     """Use only the pre-provisioned candidate service and its separate store."""
     spec = spec or _candidate(key)
     if spec is None:
         return {"status": "ERROR", "code": "candidate_not_provisioned"}
-    candidate, baseline = spec
+    candidate, baseline, options, bootstrap = spec
     model, digest, version = candidate
-    if (approved_baseline.get(baseline[0]) != baseline[1]
+    if not bootstrap and (approved_baseline.get(baseline[0]) != baseline[1]
             or request("/api/version", port=BASELINE_PORT).get("version") != baseline[2]
             or not _installed(request, BASELINE_PORT, baseline[0], baseline[1])):
         return {"status": "ERROR", "code": "baseline_unavailable"}
     if request("/api/version", port=PORT).get("version") != version:
         return {"status": "ERROR", "code": "runtime_version_mismatch"}
     # Validate the artifact after download and before running any fixture.
+    if progress:
+        progress("pull")
     try:
-        pulled = request("/api/pull", {"model": model, "stream": False}, 420, port=PORT)
+        pulled = request("/api/pull", {"model": model, "stream": False}, 7200, port=PORT)
     except (OSError, ValueError, http.client.HTTPException):
         return {"status": "ERROR", "code": "candidate_pull_failed"}
     if pulled.get("status") != "success":
@@ -108,12 +122,19 @@ def _run(key, request, approved_baseline, *, spec=None):
     if not _installed(request, PORT, model, digest):
         return {"status": "ERROR", "code": "candidate_digest_mismatch"}
     # Nothing from a real job is provided to the candidate runtime.
-    reference = _suite(request, BASELINE_PORT, baseline)
-    result = _suite(request, PORT, candidate)
+    if progress:
+        progress("fixtures")
+    reference = None if bootstrap else _suite(request, BASELINE_PORT, baseline, options)
+    result = _suite(request, PORT, candidate, options)
+    if bootstrap:
+        passed = all(row["passed"] for row in result["fixtures"])
+        return {**result, "mode": "bootstrap", "options": options,
+                "status": "SUCCESS" if passed else "ERROR",
+                "code": "bootstrap_smoke_passed" if passed else "fixture_mismatch"}
     code = ("baseline_fixture_mismatch" if not all(row["passed"] for row in reference["fixtures"])
             else "qualified" if all(row["passed"] for row in result["fixtures"])
             else "fixture_mismatch")
-    return {**result, "baseline": reference,
+    return {**result, "baseline": reference, **({"options": options} if options is not None else {}),
             "status": "SUCCESS" if code == "qualified" else "ERROR", "code": code}
 
 
@@ -123,11 +144,8 @@ def _service(action):
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 
 
-def _run_with_service(key, request, approved_baseline):
+def _run_with_service(key, request, approved_baseline, spec, progress=None):
     """Start and stop the candidate service within the exclusive qualification job."""
-    spec = _candidate(key)
-    if spec is None:
-        return {"status": "ERROR", "code": "candidate_not_provisioned"}
     try:
         if not _service("start") or not _service("is-active"):
             result = {"status": "ERROR", "code": "candidate_not_provisioned"}
@@ -141,16 +159,22 @@ def _run_with_service(key, request, approved_baseline):
                     time.sleep(0.5)
             else:
                 return {"status": "ERROR", "code": "qualification_runtime_failed"}
-            result = _run(key, request, approved_baseline, spec=spec)
+            result = _run(key, request, approved_baseline, spec=spec, progress=progress)
     finally:
         stopped = _service("stop")
     return result if stopped else {"status": "ERROR", "code": "qualification_runtime_failed"}
 
 
-async def qualify(key, request, available_models):
+async def qualify(key, request, available_models, runtime_started):
     """Run the comparison under the spoke's exclusive job slot."""
     try:
-        return await asyncio.to_thread(_run_with_service, key, request, await available_models())
+        spec = await asyncio.to_thread(_candidate, key)
+        if spec is None:
+            return {"status": "ERROR", "code": "candidate_not_provisioned"}
+        if not spec[3] and not runtime_started:
+            return {"status": "ERROR", "code": "baseline_unavailable"}
+        approved = {} if spec[3] else await available_models()
+        return await asyncio.to_thread(_run_with_service, key, request, approved, spec)
     except FileNotFoundError:
         return {"status": "ERROR", "code": "candidate_not_provisioned"}
     except (OSError, ValueError, http.client.HTTPException, subprocess.TimeoutExpired):

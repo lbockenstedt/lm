@@ -4,12 +4,14 @@ import asyncio
 import logging
 import re
 import time
+import uuid
 from collections import deque
 from collections.abc import Mapping
 
 from access import same_tenant, tenant_is_shared
 import instance_vault
 import llm_cloud
+from llm_candidates import CANDIDATES
 
 logger = logging.getLogger(__name__)
 
@@ -108,12 +110,14 @@ def model_minimums(row):
 
 
 # Per-artifact sampling caps replace any model-name rule in the worker.
-SAMPLING_LIMITS = {"temperature": 2.0, "top_p": 1.0}
-# Worker worst case (agent/src/llm_qualification.py): two 20 s systemctl calls,
-# a 15 s listener wait, a 420 s pull, four 240 s fixtures, a 20 s stop and
-# short probes, about 1470 s. Keep headroom so a slow but live job is not
-# reported as an unknown outcome while the worker still holds its slot.
-QUALIFY_TIMEOUT = 1800
+SAMPLING_LIMITS = {
+    "temperature": 2.0, "top_p": 1.0, "top_k": 256,
+    "repeat_penalty": 2.0, "num_ctx": 131072,
+}
+LEGACY_OPTIONS = {"temperature", "top_p"}
+INTEGER_OPTIONS = {"top_k", "num_ctx"}
+# A runtime download, model pull and CPU fixtures can take several hours.
+QUALIFY_TIMEOUT = 15000
 
 
 def model_sampling(row):
@@ -123,9 +127,11 @@ def model_sampling(row):
         if field in row:
             value = row[field]
             # bool is an int subclass, and NaN fails both comparisons.
-            if type(value) not in (int, float) or not 0 <= value <= limit:
+            if (type(value) not in (int, float) or not 0 <= value <= limit
+                    or (field in INTEGER_OPTIONS and type(value) is not int)
+                    or (field in ("num_ctx", "repeat_penalty") and value == 0)):
                 return None
-            pairs.append((field, float(value)))
+            pairs.append((field, value if field in INTEGER_OPTIONS else float(value)))
     return tuple(pairs)
 
 
@@ -150,11 +156,19 @@ def qualification_result(data):
 
 
 QUALIFICATION_GUIDANCE = {
+    "bootstrap_smoke_passed": "The synthetic smoke test passed; this is not model certification.",
     "unsupported_or_invalid_reply": "Update the test agent and rerun qualification.",
     "baseline_unavailable": "Start the pinned baseline and install its approved model on the test worker.",
     "baseline_fixture_mismatch": "Repair the pinned baseline before drawing conclusions from this comparison.",
     "runtime_version_mismatch": "Check the staged candidate version and manifest before rerunning.",
     "candidate_not_provisioned": "Stage the candidate and its local qualification manifest.",
+    "candidate_runtime_install_failed": "Check the worker's download, disk space and LLM agent logs.",
+    "preparation_state_failed": "Check the worker's preparation journal and disk; the hub will retry.",
+    "preparation_superseded": "Inspect the hub and worker preparation journals before retrying.",
+    "candidate_not_smoke_tested": "Prepare the selected candidate on this worker before activating it.",
+    "operator_catalog_override": "Remove the role catalog override only after reviewing the operator-managed catalog.",
+    "activation_failed": "Check the worker's LLM logs and serving runtime before retrying.",
+    "activation_rollback_failed": "Inspect the worker immediately; automatic activation rollback failed.",
     "candidate_pull_failed": "Check registry access and disk space on the test worker.",
     "candidate_digest_mismatch": "Check the approved digest and registry tag; do not promote this artifact.",
     "qualification_runtime_failed": "Check CPU, memory and the candidate service logs; consider a smaller model.",
@@ -180,6 +194,9 @@ class LlmPool:
         self.active_jobs = {}
         self.runtime_versions = {}
         self.hardware = {}
+        self.worker_options = {}
+        self.bootstrap_done = {}
+        self.bootstrap_retry_at = {}
 
     def qualification_candidates(self):
         """Resolve configured candidates to approved Shared test workers only."""
@@ -257,11 +274,8 @@ class LlmPool:
         if not candidate:
             return False
         worker, label = candidate
-        socket = self.hub.active_connections.get(worker)
-        report = self.inventory.get(worker)
-        if (socket is None or self.hub.is_draining(worker) or worker in self.reserved
-                or not report or report[1] is not socket or not report[3]
-                or time.monotonic() - report[0] >= 75):
+        socket = self._available_test_worker(worker)
+        if socket is None:
             return False
         job = {"kind": "qualification", "state": "running", "candidate": label, "tier": "local",
                "worker": self.hub.state.get_module_name(worker)}
@@ -270,16 +284,171 @@ class LlmPool:
         asyncio.create_task(self._qualify(worker, socket, key, job))
         return True
 
-    async def _qualify(self, worker, socket, key, job):
-        """Store only validated qualification results from the reserved socket."""
-        start = time.monotonic()
+    def _available_test_worker(self, worker):
+        """Check that the configured Shared worker is connected and not reserved."""
+        metadata = self.hub.state.system_state.get("module_metadata", {})
+        record = metadata.get(worker, {})
+        if (not isinstance(record, dict) or record.get("module_type") != "llm"
+                or not self.hub.approved_modules.get(worker)
+                or not tenant_is_shared(record.get("tenant_id"))):
+            return None
+        socket = self.hub.active_connections.get(worker)
+        report = self.inventory.get(worker)
+        hardware = self.hardware.get(worker)
+        fresh_report = bool(report and report[1] is socket and time.monotonic() - report[0] < 75)
+        fresh_status = (fresh_report or bool(
+            hardware and hardware[1] is socket and time.monotonic() - hardware[0] < 75))
+        idle = not report or (fresh_report and (report[3] or not report[2]))
+        if (socket is None or self.hub.is_draining(worker) or worker in self.reserved
+                or not fresh_status or not idle):
+            return None
+        return socket
+
+    async def start_bootstrap(self, worker, key):
+        """Reserve an approved Shared worker for one pinned synthetic candidate."""
+        if (not isinstance(worker, str) or not 0 < len(worker) <= 255
+                or not isinstance(key, str) or key not in CANDIDATES):
+            return False
+        worker = self.hub._primary_key(worker)
+        socket = self._available_test_worker(worker)
+        if socket is None:
+            return False
+        configured = self.hub.state.get_global_config().get("llm_worker_preparations")
+        if configured is not None and not isinstance(configured, dict):
+            return False
+        desired = dict(configured or {})
+        request_id = uuid.uuid4().hex
+        prior = desired.get(worker)
+        prior_revision = prior.get("revision", 0) if isinstance(prior, dict) else 0
+        if type(prior_revision) is not int or not 0 <= prior_revision < 2**53 - 1:
+            return False
+        revision = prior_revision + 1
+        desired[worker] = {"candidate": key, "request_id": request_id, "revision": revision}
+        self.reserved.add(worker)
         try:
-            candidate = self.qualification_candidates().get(key)
-            if not candidate or candidate[0] != worker or self.hub.active_connections.get(worker) is not socket:
+            self.hub.state.update_global_config({"llm_worker_preparations": desired})
+            await self.hub.state.save_state_now()
+        except BaseException:
+            current = self.hub.state.get_global_config().get("llm_worker_preparations")
+            if isinstance(current, dict) and current.get(worker) == desired[worker]:
+                restored = dict(current)
+                if prior is None:
+                    restored.pop(worker, None)
+                else:
+                    restored[worker] = prior
+                self.hub.state.update_global_config({"llm_worker_preparations": restored})
+            self.reserved.discard(worker)
+            raise
+        self._schedule_bootstrap(worker, socket, key, request_id, revision)
+        return True
+
+    def _schedule_bootstrap(self, worker, socket, key, request_id, revision):
+        """Track and dispatch a persisted, idempotent preparation request."""
+        job = {"kind": "bootstrap", "state": "running", "candidate": CANDIDATES[key]["label"], "tier": "local",
+               "worker": self.hub.state.get_module_name(worker)}
+        self.qualification_jobs[worker] = job
+        self.reserved.add(worker)
+        asyncio.create_task(self._qualify(
+            worker, socket, key, job, bootstrap=True, request_id=request_id, revision=revision))
+
+    def reconcile_bootstrap(self, worker):
+        """Replay a saved preparation on reconnect or after an ambiguous reply."""
+        configured = self.hub.state.get_global_config().get("llm_worker_preparations")
+        row = configured.get(worker) if isinstance(configured, dict) else None
+        if not isinstance(row, dict):
+            return
+        key, request_id, revision = (row.get(name) for name in ("candidate", "request_id", "revision"))
+        if (not isinstance(key, str) or key not in CANDIDATES or not isinstance(request_id, str)
+                or not re.fullmatch(r"[a-f0-9]{32}", request_id)
+                or type(revision) is not int or not 1 <= revision < 2**53
+                or self.bootstrap_done.get(worker) == request_id
+                or self.bootstrap_retry_at.get(worker, 0) > time.monotonic()):
+            return
+        socket = self._available_test_worker(worker)
+        if socket is not None:
+            self._schedule_bootstrap(worker, socket, key, request_id, revision)
+
+    def start_activation(self, worker, key):
+        """Schedule explicit activation on the approved Shared test worker."""
+        if (not isinstance(worker, str) or not 0 < len(worker) <= 255
+                or not isinstance(key, str) or key not in CANDIDATES):
+            return False
+        worker = self.hub._primary_key(worker)
+        desired = self.hub.state.get_global_config().get("llm_worker_preparations")
+        row = desired.get(worker) if isinstance(desired, dict) else None
+        if not isinstance(row, dict) or row.get("candidate") != key:
+            return False
+        socket = self._available_test_worker(worker)
+        if socket is None:
+            return False
+        job = {"kind": "activation", "state": "running", "candidate": CANDIDATES[key]["label"],
+               "tier": "local", "worker": self.hub.state.get_module_name(worker)}
+        self.qualification_jobs[worker] = job
+        self.reserved.add(worker)
+        asyncio.create_task(self._activate(worker, socket, key, job))
+        return True
+
+    async def _activate(self, worker, socket, key, job):
+        """Validate the activation reply without replaying an ambiguous result."""
+        started = time.monotonic()
+        try:
+            row = self.hub.state.system_state.get("module_metadata", {}).get(worker, {})
+            desired = self.hub.state.get_global_config().get("llm_worker_preparations")
+            selection = desired.get(worker) if isinstance(desired, dict) else None
+            if (not isinstance(row, dict) or row.get("module_type") != "llm"
+                    or not tenant_is_shared(row.get("tenant_id")) or not self.hub.approved_modules.get(worker)
+                    or not isinstance(selection, dict) or selection.get("candidate") != key
+                    or self.hub.active_connections.get(worker) is not socket):
                 job.update(state="failed", code="worker_changed")
                 return
             reply = await asyncio.wait_for(self.hub.request_response(
-                worker, "LLM_QUALIFY", {"candidate": key}, timeout=QUALIFY_TIMEOUT), QUALIFY_TIMEOUT + 5)
+                worker, "LLM_ACTIVATE", {"candidate": key}, timeout=QUALIFY_TIMEOUT), QUALIFY_TIMEOUT + 5)
+            envelope = reply.get("payload", {}) if isinstance(reply, Mapping) else None
+            data = envelope.get("data", reply) if isinstance(envelope, Mapping) else None
+            if not isinstance(data, Mapping):
+                data = {}
+            if self.hub.active_connections.get(worker) is not socket or data.get("message") == SPOKE_TIMEOUT:
+                job.update(state="failed", code="dispatch_outcome_unknown")
+                return
+            expected = CANDIDATES[key]
+            passed = (data.get("status") == "SUCCESS" and data.get("code") == "activated"
+                      and data.get("model") == expected["model"] and data.get("digest") == expected["digest"])
+            code = data.get("code") if data.get("code") in (
+                "candidate_not_smoke_tested", "operator_catalog_override", "activation_failed",
+                "activation_rollback_failed", "runtime_version_mismatch", "preparation_state_failed", "busy") else (
+                "activated" if passed else "unsupported_or_invalid_reply")
+            job.update(state="passed" if passed else "failed", code=code)
+            if passed:
+                job.update(model=expected["model"], digest=expected["digest"])
+        except asyncio.CancelledError:
+            job.update(state="failed", code="dispatch_outcome_unknown")
+            raise
+        except (TimeoutError, ConnectionError):
+            job.update(state="failed", code="dispatch_outcome_unknown")
+        finally:
+            if job.get("code") in QUALIFICATION_GUIDANCE:
+                job["resolution"] = QUALIFICATION_GUIDANCE[job["code"]]
+            self.reserved.discard(worker)
+            self.qualification_jobs.pop(worker, None)
+            job["elapsed_s"] = round(time.monotonic() - started, 3)
+            self.jobs.append(job)
+
+    async def _qualify(self, worker, socket, key, job, bootstrap=False, request_id=None, revision=None):
+        """Store only validated qualification results from the reserved socket."""
+        start = time.monotonic()
+        try:
+            candidate = self.qualification_candidates().get(key) if not bootstrap else None
+            metadata = self.hub.state.system_state.get("module_metadata", {}).get(worker, {})
+            valid = (isinstance(metadata, dict) and metadata.get("module_type") == "llm"
+                     and self.hub.approved_modules.get(worker) and tenant_is_shared(metadata.get("tenant_id")))
+            if (not valid or (not bootstrap and (not candidate or candidate[0] != worker))
+                    or self.hub.active_connections.get(worker) is not socket):
+                job.update(state="failed", code="worker_changed")
+                return
+            reply = await asyncio.wait_for(self.hub.request_response(
+                worker, "LLM_PREPARE" if bootstrap else "LLM_QUALIFY",
+                {"candidate": key, **({"request_id": request_id, "revision": revision} if bootstrap else {})},
+                timeout=QUALIFY_TIMEOUT), QUALIFY_TIMEOUT + 5)
             envelope = reply.get("payload", {}) if isinstance(reply, Mapping) else None
             data = envelope.get("data", reply) if isinstance(envelope, Mapping) else None
             if not isinstance(data, Mapping):
@@ -287,26 +456,46 @@ class LlmPool:
             if self.hub.active_connections.get(worker) is not socket:
                 job.update(state="failed", code="worker_changed")
                 return
+            if bootstrap and data.get("status") == "SUCCESS":
+                expected = CANDIDATES[key]
+                if (data.get("mode") != "bootstrap" or data.get("model") != expected["model"]
+                        or data.get("digest") != expected["digest"]
+                        or data.get("options") != expected["options"]):
+                    job.update(state="failed", code="unsupported_or_invalid_reply")
+                    return
             code = data.get("code")
             if data.get("message") == SPOKE_TIMEOUT:
                 code = "dispatch_outcome_unknown"
-            elif code not in ("qualified", "fixture_mismatch", "baseline_fixture_mismatch", "candidate_not_provisioned",
+            elif code not in ("qualified", "bootstrap_smoke_passed", "fixture_mismatch", "baseline_fixture_mismatch", "candidate_not_provisioned",
                             "runtime_version_mismatch", "candidate_pull_failed",
-                            "candidate_digest_mismatch", "qualification_runtime_failed",
+                            "candidate_digest_mismatch", "candidate_runtime_install_failed", "preparation_state_failed",
+                            "preparation_superseded",
+                            "qualification_runtime_failed",
                             "baseline_unavailable", "busy"):
                 code = "unsupported_or_invalid_reply"
             result, baseline = qualification_result(data), qualification_result(data.get("baseline"))
+            bootstrap = data.get("mode") == "bootstrap"
+            options = data.get("options")
+            sampling = model_sampling(options) if isinstance(options, dict) else None
+            valid_options = sampling is not None and options.keys() <= SAMPLING_LIMITS.keys()
+            if bootstrap and result and valid_options and "num_ctx" in options:
+                job.update(result, mode="bootstrap", options=dict(sampling))
             if result and baseline:
                 job.update(result, baseline=baseline)
+                if valid_options:
+                    job["options"] = dict(sampling)
                 job["fixture_deltas"] = [
                     {"fixture": after["fixture"], "pass_delta": int(after["passed"]) - int(before["passed"]),
                      **({"elapsed_s_delta": round(after["elapsed_s"] - before["elapsed_s"], 3)}
                         if "elapsed_s" in after and "elapsed_s" in before else {})}
                     for after, before in zip(result["fixtures"], baseline["fixtures"])
                 ]
-            passed = (result and baseline and code == "qualified" and data.get("status") == "SUCCESS"
-                      and all(row["passed"] for row in result["fixtures"] + baseline["fixtures"]))
-            if code == "qualified" and not passed:
+            passed = (result and data.get("status") == "SUCCESS" and (
+                bootstrap and not baseline and valid_options and "num_ctx" in options and code == "bootstrap_smoke_passed"
+                and all(row["passed"] for row in result["fixtures"])
+                or not bootstrap and baseline and (options is None or valid_options) and code == "qualified"
+                and all(row["passed"] for row in result["fixtures"] + baseline["fixtures"])))
+            if code in ("qualified", "bootstrap_smoke_passed") and not passed:
                 code = "unsupported_or_invalid_reply"
             job.update(state="passed" if passed else "failed", code=code)
         except asyncio.CancelledError:
@@ -315,6 +504,13 @@ class LlmPool:
         except (TimeoutError, ConnectionError):
             job.update(state="failed", code="dispatch_outcome_unknown")
         finally:
+            if request_id:
+                if job.get("code") in ("dispatch_outcome_unknown", "worker_changed", "busy",
+                                       "preparation_state_failed"):
+                    self.bootstrap_retry_at[worker] = time.monotonic() + 120
+                else:
+                    self.bootstrap_done[worker] = request_id
+                    self.bootstrap_retry_at.pop(worker, None)
             if job.get("code") in QUALIFICATION_GUIDANCE:
                 job["resolution"] = QUALIFICATION_GUIDANCE[job["code"]]
             self.reserved.discard(worker)
@@ -331,6 +527,10 @@ class LlmPool:
                 or hub.active_connections.get(key) is not websocket
                 or not isinstance(data, dict)):
             return
+        job = self.qualification_jobs.get(key)
+        phase = data.get("provision_phase")
+        if job and job.get("kind") == "bootstrap" and phase in ("runtime", "pull", "fixtures"):
+            job["phase"] = phase
         models = data.get("models")
         raw = data.get("capabilities")
         if isinstance(raw, dict) and raw.get("mode") == "cpu":
@@ -362,10 +562,17 @@ class LlmPool:
                     and now - self.start_attempts.get(key, float("-inf")) >= 120):
                 self.start_attempts[key] = now
                 asyncio.create_task(self._start_runtime(key, websocket))
+            self.reconcile_bootstrap(key)
             return
         self.start_attempts.pop(key, None)
         approved = {name: digest for name, digest in models.items() if valid_model(name, digest)}
         self.inventory[key] = (time.monotonic(), websocket, approved, data.get("available") is True)
+        options = data.get("supported_options")
+        self.worker_options[key] = (
+            {name for name in options if isinstance(name, str) and name in SAMPLING_LIMITS}
+            if isinstance(options, list) and len(options) <= len(SAMPLING_LIMITS)
+            else LEGACY_OPTIONS.copy() if "supported_options" not in data else set()
+        )
         version = data.get("version")
         if isinstance(version, str) and re.fullmatch(r"\d{1,5}\.\d{1,5}\.\d{1,5}", version):
             self.runtime_versions[key] = version
@@ -375,6 +582,7 @@ class LlmPool:
             self._set_worker_issue(key, "no_matching_models")
         else:
             self._clear_worker_issue(key)
+        self.reconcile_bootstrap(key)
 
     def _set_worker_issue(self, key, code):
         """Log an unavailable transition once and store bounded guidance."""
@@ -442,6 +650,7 @@ class LlmPool:
         self.inventory.pop(key, None)
         self.runtime_versions.pop(key, None)
         self.hardware.pop(key, None)
+        self.worker_options.pop(key, None)
         self.worker_issues.pop(key, None)
         self.start_attempts.pop(key, None)
 
@@ -627,14 +836,13 @@ class LlmPool:
         """Try one artifact across its eligible workers, or return no capacity."""
         request = {"prompt": prompt, "model": model, "digest": digest, "format": output_format}
         if sampling:
-            # Older workers ignore this key and keep Ollama's default sampling.
             request["options"] = dict(sampling)
         # Rotate the starting point, but recheck all claims before each dispatch.
         workers = self._tenant_workers(tenant)
         offset = self.sequence % len(workers) if workers else 0
         self.sequence += 1
         for key in workers[offset:] + workers[:offset]:
-            if not self._eligible(key, tenant, model, digest, minimums):
+            if not self._eligible(key, tenant, model, digest, minimums, sampling):
                 continue
             job["version"] = self.runtime_versions.get(key)
             self.reserved.add(key)
@@ -675,10 +883,14 @@ class LlmPool:
             return {"status": "ERROR", **diagnostic(code)}
         return None
 
-    def _eligible(self, key, tenant, model, digest, minimums=(0, 0)):
+    def _eligible(self, key, tenant, model, digest, minimums=(0, 0), sampling=()):
         """Use fresh live status only; a stale snapshot cannot authorize routing."""
         status = self.inventory.get(key)
         if not status or key in self.reserved or key not in self._tenant_workers(tenant):
+            return False
+        # Older workers may ignore options; never silently lose context or sampling.
+        required = {name for name, _ in sampling}
+        if not required <= self.worker_options.get(key, set()):
             return False
         seen, websocket, models, available = status
         if any(minimums):

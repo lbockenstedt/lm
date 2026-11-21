@@ -13,6 +13,8 @@ import time
 from pathlib import Path
 
 from core.src.base_spoke import BaseSpoke
+from agent.src.llm_install import PUBLIC_RUNTIME_VERSION
+from agent.src.llm_options import SAMPLING_LIMITS, valid_sampling
 
 # A fixed name: the agent loads this file as module lm_role_llm, and only a
 # name under the llm role's "LLM" stem (_ROLE_LOG_PREFIXES) reaches the
@@ -22,10 +24,8 @@ logger = logging.getLogger("LLMSpoke")
 MAX_PROMPT_BYTES = 64 * 1024
 MAX_RESPONSE_BYTES = 256 * 1024
 INFERENCE_TIMEOUT = 900
-# Sampling caps a hub task profile may set; mirrors core/src/llm_pool.py SAMPLING_LIMITS.
-SAMPLING_LIMITS = {"temperature": 2.0, "top_p": 1.0}
 # Start from the owner's CLI pin; Linux CPU artifacts still need qualification.
-DEFAULT_OLLAMA_VERSION = "0.40.16"
+DEFAULT_OLLAMA_VERSION = PUBLIC_RUNTIME_VERSION
 SERVICE = "lm-llm-ollama.service"
 SERVICE_UNIT_PATH = Path("/etc/systemd/system") / SERVICE
 RUNTIME_BINARY_PATH = Path("/opt/lm-llm/bin/ollama")
@@ -60,13 +60,6 @@ def cpu_capabilities():
         # An unavailable metric is unknown, never zero or assumed capacity.
         pass
     return result
-
-
-def valid_sampling(options):
-    """Accept only the bounded sampling caps a hub task profile can set."""
-    return (isinstance(options, dict) and options.keys() <= SAMPLING_LIMITS.keys()
-            and all(type(value) in (int, float) and 0 <= value <= SAMPLING_LIMITS[key]
-                    for key, value in options.items()))
 
 
 def runtime_service(action):
@@ -129,6 +122,10 @@ class LlmSpoke(BaseSpoke):
         # A local operator changes this pin after qualification, never a hub job.
         self._runtime_version = os.environ.get("LM_LLM_OLLAMA_VERSION", DEFAULT_OLLAMA_VERSION)
         self._job = None
+        self._preparation_job = None
+        self._provision_phase = None
+        self._preparation = None
+        self._preparation_load = None
         self._stopping = False
         self.control_plane = None
         self._reporter = None
@@ -142,6 +139,106 @@ class LlmSpoke(BaseSpoke):
         """Start a reconnect-safe inventory reporter for this role."""
         if self._reporter is None:
             self._reporter = asyncio.create_task(self._report_status())
+        if self._preparation_load is None:
+            self._preparation_load = asyncio.create_task(self._load_preparation())
+
+    async def _load_preparation(self):
+        """Restore an interrupted preparation for an authorized hub retry."""
+        from agent.src.llm_provisioning import load_state
+        try:
+            self._preparation = await asyncio.to_thread(load_state)
+        except (OSError, ValueError) as exc:
+            logger.error("LLM preparation journal cannot be read: %s", exc)
+            return False
+        return True
+
+    def _start_preparation(self):
+        """Reserve the worker slot before a preparation can start."""
+        job = self._preparation_job = self._job = asyncio.create_task(self._run_preparation())
+        job.add_done_callback(self._release)
+        return job
+
+    async def _run_preparation(self):
+        """Persist the request and its terminal result around the synthetic job."""
+        from agent.src.llm_provisioning import prepare, save_state
+        state = self._preparation
+        loop = asyncio.get_running_loop()
+        job = asyncio.current_task()
+
+        def progress(phase):
+            """Publish phase changes only for the current preparation."""
+            def apply():
+                """Ignore delayed updates from an already finished job."""
+                if self._job is job:
+                    self._provision_phase = phase
+            loop.call_soon_threadsafe(apply)
+
+        try:
+            await asyncio.to_thread(save_state, state)
+            result = await prepare(state["candidate"], self._runtime_version, ollama_request, progress)
+            final = {**state, "state": "passed" if result.get("status") == "SUCCESS" else "failed",
+                     "result": result}
+            await asyncio.to_thread(save_state, final)
+            self._preparation = final
+            return result
+        except (OSError, ValueError) as exc:
+            logger.error("LLM preparation journal could not be saved: %s", exc)
+            return {"status": "ERROR", "code": "preparation_state_failed"}
+
+    async def _activate_candidate(self, candidate):
+        """Publish a smoke-tested candidate and verify the serving inventory."""
+        from agent.src.llm_activation import finalize, publish, rollback
+        from agent.src.llm_install import PUBLIC_RUNTIME
+        from agent.src.llm_qualification import _installed
+        release = PUBLIC_RUNTIME.get(platform.machine())
+        if release is None or self._runtime_version != PUBLIC_RUNTIME_VERSION:
+            return {"status": "ERROR", "code": "runtime_version_mismatch"}
+        if self.config.get("models") is not None:
+            return {"status": "ERROR", "code": "operator_catalog_override"}
+        record, start_attempted = None, False
+        try:
+            record = await asyncio.to_thread(publish, candidate, release["sha256"])
+            if record["created"] and self._service_started:
+                raise ValueError("Serving service is running without a managed runtime")
+            if not self._service_started:
+                start_attempted = True
+                if not await asyncio.to_thread(runtime_service, "start"):
+                    raise ValueError("Serving service failed to start")
+                self._service_started = True
+            # systemd Type=exec can report started before the API listens.
+            for attempt in range(20):
+                try:
+                    version = await asyncio.to_thread(ollama_request, "/api/version")
+                    if version.get("version") != self._runtime_version:
+                        raise RuntimeVersionMismatch
+                    if await asyncio.to_thread(_installed, ollama_request, SERVING_PORT,
+                                               candidate["model"], candidate["digest"]):
+                        break
+                except (OSError, ValueError, http.client.HTTPException):
+                    if attempt == 19:
+                        raise
+                await asyncio.sleep(0.5)
+            else:
+                raise ValueError("Published model is not present in the serving inventory")
+            await asyncio.to_thread(finalize, record)
+            models = await self._available_models()
+            if models.get(candidate["model"]) != candidate["digest"]:
+                raise ValueError("Published model is not approved by the serving catalog")
+            return {"status": "SUCCESS", "code": "activated",
+                    "model": candidate["model"], "digest": candidate["digest"]}
+        except (OSError, ValueError, http.client.HTTPException, subprocess.TimeoutExpired) as exc:
+            logger.warning("LLM candidate activation failed: %s", exc)
+            try:
+                if start_attempted:
+                    if not await asyncio.to_thread(runtime_service, "stop"):
+                        raise ValueError("Serving service could not be stopped")
+                    self._service_started = False
+                if record is not None:
+                    await asyncio.to_thread(rollback, record)
+            except (OSError, ValueError, subprocess.TimeoutExpired) as rollback_exc:
+                logger.error("LLM candidate activation rollback failed: %s", rollback_exc)
+                return {"status": "ERROR", "code": "activation_rollback_failed"}
+            return {"status": "ERROR", "code": "activation_failed"}
 
     async def _report_status(self):
         """Publish inventory periodically; workers remain unready before approval."""
@@ -153,7 +250,7 @@ class LlmSpoke(BaseSpoke):
 
     async def _start_runtime(self):
         """Start the pre-provisioned service on an approved hub command."""
-        if self._stopping:
+        if self._stopping or self._job is not None:
             return {"status": "ERROR", "code": "busy"}
         if self._startup is None or self._startup.done():
             self._startup = asyncio.create_task(self._run_service_start("start"))
@@ -231,7 +328,9 @@ class LlmSpoke(BaseSpoke):
 
     async def get_status(self):
         """Report matching local models and capacity without returning any content."""
-        hardware = {"capabilities": await asyncio.to_thread(cpu_capabilities)}
+        hardware = {"capabilities": await asyncio.to_thread(cpu_capabilities),
+                    **({"provision_phase": self._provision_phase} if self._provision_phase else {}),
+                    **({"preparation": self._preparation} if self._preparation else {})}
         if not self._service_started:
             if self._runtime_issue is not None:
                 self._runtime_issue = await asyncio.to_thread(runtime_failure_code)
@@ -248,6 +347,7 @@ class LlmSpoke(BaseSpoke):
         return {
             "status": "SUCCESS", "models": models, "version": self._runtime_version,
             "available": bool(models) and self._job is None and not self._stopping,
+            "supported_options": sorted(SAMPLING_LIMITS),
             **hardware,
         }
 
@@ -261,6 +361,8 @@ class LlmSpoke(BaseSpoke):
         if self._reporter is not None:
             self._reporter.cancel()
             await asyncio.gather(self._reporter, return_exceptions=True)
+        if self._preparation_load is not None:
+            await asyncio.shield(self._preparation_load)
         if self._job is not None:
             await asyncio.shield(self._job)
         if self._startup is not None:
@@ -274,16 +376,64 @@ class LlmSpoke(BaseSpoke):
             return await self.get_status()
         if command_type == "LLM_START_RUNTIME":
             return await self._start_runtime()
-        if command_type in ("LLM_COMPLETE", "LLM_QUALIFY") and self._startup and not self._startup.done():
+        if command_type in ("LLM_COMPLETE", "LLM_QUALIFY", "LLM_PREPARE", "LLM_ACTIVATE") and self._startup and not self._startup.done():
             return {"status": "ERROR", "code": "busy"}
+        if command_type == "LLM_PREPARE":
+            from core.src.llm_candidates import CANDIDATES
+            key, request_id, revision = (data.get(name) for name in ("candidate", "request_id", "revision"))
+            if (not isinstance(key, str) or key not in CANDIDATES
+                    or not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id)
+                    or type(revision) is not int or not 1 <= revision < 2**53):
+                return {"status": "ERROR", "code": "invalid_request"}
+            if self._preparation_load is None:
+                self._preparation_load = asyncio.create_task(self._load_preparation())
+            if not await asyncio.shield(self._preparation_load):
+                return {"status": "ERROR", "code": "preparation_state_failed"}
+            current = self._preparation
+            if current and (revision < current["revision"]
+                            or (revision == current["revision"] and request_id != current["request_id"])):
+                return {"status": "ERROR", "code": "preparation_superseded"}
+            if current and current["request_id"] == request_id:
+                if current["candidate"] != key or current["revision"] != revision:
+                    return {"status": "ERROR", "code": "invalid_request"}
+                if current["state"] != "running":
+                    return current["result"]
+                if self._preparation_job is not None:
+                    return await asyncio.shield(self._preparation_job)
+            if self._stopping or self._job is not None:
+                return {"status": "ERROR", "code": "busy"}
+            self._preparation = {"request_id": request_id, "candidate": key, "revision": revision, "state": "running"}
+            job = self._start_preparation()
+            return await asyncio.shield(job)
+        if command_type == "LLM_ACTIVATE":
+            from core.src.llm_candidates import CANDIDATES
+            key = data.get("candidate")
+            if not isinstance(key, str) or key not in CANDIDATES:
+                return {"status": "ERROR", "code": "invalid_request"}
+            if self._preparation_load is None:
+                self._preparation_load = asyncio.create_task(self._load_preparation())
+            if not await asyncio.shield(self._preparation_load):
+                return {"status": "ERROR", "code": "preparation_state_failed"}
+            state = self._preparation
+            result = state.get("result") if isinstance(state, dict) else None
+            candidate = CANDIDATES[key]
+            if (not state or state.get("candidate") != key or state.get("state") != "passed"
+                    or not isinstance(result, dict) or result.get("code") != "bootstrap_smoke_passed"
+                    or result.get("model") != candidate["model"] or result.get("digest") != candidate["digest"]
+                    or result.get("options") != candidate["options"]):
+                return {"status": "ERROR", "code": "candidate_not_smoke_tested"}
+            if (self._stopping or self._job is not None
+                    or (self._startup is not None and not self._startup.done())):
+                return {"status": "ERROR", "code": "busy"}
+            job = self._job = asyncio.create_task(self._activate_candidate(candidate))
+            job.add_done_callback(self._release)
+            return await asyncio.shield(job)
         if command_type == "LLM_QUALIFY":
             from agent.src.llm_qualification import qualify
             if self._stopping or self._job is not None:
                 return {"status": "ERROR", "code": "busy"}
-            if not self._service_started:
-                return {"status": "ERROR", "code": "baseline_unavailable"}
             job = self._job = asyncio.create_task(
-                qualify(data.get("candidate"), ollama_request, self._available_models))
+                qualify(data.get("candidate"), ollama_request, self._available_models, self._service_started))
             job.add_done_callback(self._release)
             return await asyncio.shield(job)
         if command_type == "GET_VERSION":
@@ -314,6 +464,9 @@ class LlmSpoke(BaseSpoke):
         """Release the slot only when the actual inference task has finished."""
         if self._job is job:
             self._job = None
+            if self._preparation_job is job:
+                self._preparation_job = None
+            self._provision_phase = None
 
     async def _complete(self, prompt, model, digest, output_format, sampling=None):
         """Recheck the pinned model immediately before calling local inference."""
