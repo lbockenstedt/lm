@@ -275,6 +275,51 @@ def test_annotate_never_mutates_cached_object():
     assert hub.cache_annotate([1], "ns", "k") == [1]
 
 
+def test_fetch_later_queues_behind_the_lane_limit():
+    """cache_fetch_later registers a read job and fetches in the background
+    through the lane limit, so rebuilding many entries at once runs at most
+    LANE_CONCURRENCY of them together, and each one is stored."""
+    hub = _Hub()
+    live = {"now": 0, "peak": 0}
+
+    def fetch_for(k):
+        async def fetch():
+            live["now"] += 1
+            live["peak"] = max(live["peak"], live["now"])
+            await asyncio.sleep(0.02)
+            live["now"] -= 1
+            return {"k": k}
+        return fetch
+
+    async def go():
+        for i in range(6):
+            assert hub.cache_fetch_later("m", f"k{i}", fetch_for(i), lane="m")
+        await hub.cache_wait_idle()
+
+    run(go())
+    assert live["peak"] == wc.LANE_CONCURRENCY
+    assert sorted(hub.cache_keys("m")) == [f"k{i}" for i in range(6)]
+    assert not hub.cache_fetch_later("m", "k9", fetch_for(9), lane="m")  # no loop
+
+
+def test_fresh_read_waits_for_a_due_refresh_but_never_inside_the_floor():
+    """cache_read_fresh (a background build feeding another entry) waits for
+    a due refresh instead of returning the copy it replaces; inside the floor
+    it fetches nothing, and a failed refresh serves the cached copy."""
+    kw = {"min_interval_s": 300.0, "refresh_s": 300.0}
+    hub, fetch = _Hub(), _Fetch("new")
+    hub.warm_cache["ns"] = {"k": {"data": "old", "fetched_at": time.time() - 400}}
+    assert run(hub.cache_read_fresh("ns", "k", fetch, **kw)) == "new"
+    assert run(hub.cache_read_fresh("ns", "k", fetch, **kw)) == "new"
+    assert fetch.calls == 1
+    hub, fetch = _Hub(), _Fetch()
+    fetch.fail = RuntimeError("spoke down")
+    hub.warm_cache["ns"] = {"k": {"data": "old", "fetched_at": time.time() - 400}}
+    assert run(hub.cache_read_fresh("ns", "k", fetch, **kw)) == "old"
+    assert run(hub.cache_read_fresh("ns", "k", fetch, **kw)) == "old"
+    assert fetch.calls == 1
+
+
 def test_fetch_now_bypasses_a_fresh_entry():
     hub, fetch = _Hub(), _Fetch("live")
     hub.warm_cache["ns"] = {"k": {"data": "cached", "fetched_at": time.time()}}

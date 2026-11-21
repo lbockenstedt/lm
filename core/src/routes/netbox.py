@@ -16,6 +16,8 @@ from api import (
     get_netbox_spoke, get_spoke_or_503, get_tenant_scoping, logger,
     netbox_tenant_scope, tenant_netbox_slugs,
 )
+# The topology map re-reads NetBox after a device or IP write made here.
+from routes.nw import nw_topology_netbox_changed
 # Background warm-cache job type, and the marker meaning "visible to every admin".
 from warm_cache import ALL_SCOPE, CacheJob
 
@@ -119,6 +121,22 @@ def nb_cache_feed(hub):
             if (job.ns, job.key) not in seen:   # tenants sharing a slug share one entry
                 seen.add((job.ns, job.key))
                 yield job
+
+
+def _refresh_after_write(hub, key: str, topology: bool = False) -> None:
+    """After a NetBox write made through these routes: refresh module ``key``
+    for every tenant. ``topology`` is set by the writes that change device
+    rows or their IPs (what the topology map reads from NetBox), and has the
+    map re-read NetBox. It is the write that decides, not the cache key: a
+    prefix allocation also refreshes ``netbox_ips`` and the device-type
+    catalog seed refreshes ``netbox_devices``, and neither changes a device
+    row (a prefix change reaches the map through its digest). Only user
+    writes re-read; the discovery syncs refresh through
+    ``hub.refresh_module_cache`` on every cycle, changed or not, and their
+    changes reach the map at its hourly refresh."""
+    _refresh_module_all_tenants(hub, key)
+    if topology:
+        nw_topology_netbox_changed(hub)
 
 
 def register(app, hub, ctx):
@@ -312,7 +330,7 @@ def register(app, hub, ctx):
     async def _netbox_write(request, cmd, refresh_keys, *, log_name,
                             id_field=None, obj_id=None, verify_key=None,
                             tenant_mode="always", sync_body=None, timeout=None,
-                            sync_dhcp=False):
+                            sync_dhcp=False, topology=False):
         """Shared body of the 12 NetBox write (POST/PUT/DELETE) handlers:
         spoke-check → ownership verify → body/id build → tenant-enforce →
         relay → cache-refresh → optional endpoint-sync trigger → unwrap
@@ -328,7 +346,9 @@ def register(app, hub, ctx):
         ``sync_body`` drives _trigger_endpoint_sync_after_ipam_edit: "data"
         (pass the written body), "null" (pass None), None (no trigger).
         ``verify_key`` runs the cross-tenant ownership gate against that cache
-        module BEFORE the mutation (unchanged order: spoke 503 first)."""
+        module BEFORE the mutation (unchanged order: spoke 503 first).
+        ``topology`` marks a write that changes device rows or their IPs, so
+        the topology map re-reads NetBox (see ``_refresh_after_write``)."""
         # Find the NetBox spoke (503 if none) and, when asked, check the caller owns the object
         # first.
         hub = app.state.hub
@@ -354,7 +374,7 @@ def register(app, hub, ctx):
             response = _unwrap_netbox(result)
             # Refresh the cached lists the change affects for every tenant.
             for key in refresh_keys:
-                _refresh_module_all_tenants(hub, key)
+                _refresh_after_write(hub, key, topology)
             # Optionally trigger an endpoint sync with the written data (or with none).
             if sync_body == "data":
                 _trigger_endpoint_sync_after_ipam_edit(hub, request, data)
@@ -505,7 +525,7 @@ def register(app, hub, ctx):
         # A big reassignment stales every cached NetBox list across tenants.
         for mk in ("netbox_devices", "netbox_prefixes", "netbox_ips", "netbox_racks"):
             try:
-                _refresh_module_all_tenants(hub, mk)
+                _refresh_after_write(hub, mk, topology=mk == "netbox_devices")
             except Exception:  # noqa: BLE001
                 pass
         return out
@@ -550,7 +570,7 @@ def register(app, hub, ctx):
                                                 {}, timeout=300.0)
             # New/changed device types alter the device form-options picklist.
             try:
-                _refresh_module_all_tenants(hub, "netbox_devices")
+                _refresh_after_write(hub, "netbox_devices")
             except Exception:  # noqa: BLE001
                 pass
             return _unwrap_netbox(result)
@@ -739,8 +759,8 @@ def register(app, hub, ctx):
             # Invalidate rack + device picklist caches (creates/updates both).
             if not dry_run:
                 try:
-                    _refresh_module_all_tenants(hub, "netbox_racks")
-                    _refresh_module_all_tenants(hub, "netbox_devices")
+                    _refresh_after_write(hub, "netbox_racks")
+                    _refresh_after_write(hub, "netbox_devices", topology=True)
                 except Exception:  # noqa: BLE001
                     pass
             # Return the spoke's import summary.
@@ -869,7 +889,8 @@ def register(app, hub, ctx):
         """Create a NetBox device; invalidates the device cache and triggers an endpoint sync."""
         # Shared write path, then sync endpoints with the new device data.
         return await _netbox_write(request, "NETBOX_ADD_DEVICE", ["netbox_devices"],
-                                   log_name="netbox_add_device", sync_body="data")
+                                   log_name="netbox_add_device", sync_body="data",
+                                   topology=True)
 
     @app.get("/api/netbox/claim-device/options")
     async def netbox_claim_device_options(request: Request):
@@ -974,8 +995,8 @@ def register(app, hub, ctx):
             # immediately. claim-device also re-tags the CPPM endpoint, so
             # refresh cppm_devices too (the endpoint sync below is best-effort
             # and async; this guarantees the cache is dropped now).
-            _refresh_module_all_tenants(hub, "netbox_devices")
-            _refresh_module_all_tenants(hub, "cppm_devices")
+            _refresh_after_write(hub, "netbox_devices", topology=True)
+            _refresh_after_write(hub, "cppm_devices")
             _trigger_endpoint_sync_after_ipam_edit(hub, request, {"tenant": requested_slug} if requested_slug else None)
         # Return the spoke's result either way.
         return result
@@ -988,7 +1009,8 @@ def register(app, hub, ctx):
                                    log_name="netbox_delete_device",
                                    id_field="device_id", obj_id=device_id,
                                    verify_key="netbox_devices", tenant_mode=None,
-                                   sync_body="null")
+                                   sync_body="null",
+                                   topology=True)
 
     @app.put("/api/netbox/devices/{device_id}")
     async def netbox_update_device(device_id: int, request: Request):
@@ -998,7 +1020,8 @@ def register(app, hub, ctx):
                                    log_name="netbox_update_device",
                                    id_field="device_id", obj_id=device_id,
                                    verify_key="netbox_devices",
-                                   tenant_mode="if_present", sync_body="data")
+                                   tenant_mode="if_present", sync_body="data",
+                                   topology=True)
 
     @app.get("/api/netbox/prefixes")
     async def netbox_get_prefixes(request: Request, site: str = None, tenant: str = None):
@@ -1127,8 +1150,8 @@ def register(app, hub, ctx):
             data = _unwrap_netbox(result)
             # On success refresh the prefix/IP caches and push the change to Kea DHCP.
             if isinstance(data, dict) and data.get("status") == "SUCCESS":
-                _refresh_module_all_tenants(hub, "netbox_prefixes")
-                _refresh_module_all_tenants(hub, "netbox_ips")
+                _refresh_after_write(hub, "netbox_prefixes")
+                _refresh_after_write(hub, "netbox_ips")
                 _trigger_dhcp_sync_after_prefix_edit()
             return data
         except HTTPException:
@@ -1154,7 +1177,8 @@ def register(app, hub, ctx):
         # Shared write path, then sync endpoints with the new IP data.
         return await _netbox_write(request, "NETBOX_ALLOCATE_IP", ["netbox_ips"],
                                    log_name="netbox_allocate_ip",
-                                   sync_body="data", timeout=30.0)
+                                   sync_body="data", timeout=30.0,
+                                   topology=True)
 
     @app.delete("/api/netbox/ips/{ip_id}")
     async def netbox_release_ip(ip_id: int, request: Request):
@@ -1164,7 +1188,8 @@ def register(app, hub, ctx):
                                    log_name="netbox_release_ip",
                                    id_field="ip_id", obj_id=ip_id,
                                    verify_key="netbox_ips", tenant_mode=None,
-                                   sync_body="null")
+                                   sync_body="null",
+                                   topology=True)
 
     @app.put("/api/netbox/ips/{ip_id}")
     async def netbox_update_ip(ip_id: int, request: Request):
@@ -1174,6 +1199,7 @@ def register(app, hub, ctx):
                                    log_name="netbox_update_ip",
                                    id_field="ip_id", obj_id=ip_id,
                                    verify_key="netbox_ips",
-                                   tenant_mode="if_present", sync_body="data")
+                                   tenant_mode="if_present", sync_body="data",
+                                   topology=True)
 
     # ── Update trigger + module install (/setup/update, /setup/modules/*) ─────

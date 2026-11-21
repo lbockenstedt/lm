@@ -1,6 +1,8 @@
 """Network-devices routes + multi-instance product CRUD (_instance_crud)."""
 import asyncio
+import hashlib
 import ipaddress
+import json
 import time
 
 import instance_vault
@@ -13,6 +15,7 @@ from nw_topology import build_topology, netbox_lldp_links
 from nw_discovery_sync import nw_short_name
 from routes import directory_ad
 from routes.role_pool import PRODUCT_ROLE, ensure_role_loaded, maybe_unload_orphaned_role
+from warm_cache import CacheJob, CacheSkipped
 
 
 # ── cache-first (stale-while-revalidate) read path ───────────────────────────
@@ -26,10 +29,31 @@ from routes.role_pool import PRODUCT_ROLE, ensure_role_loaded, maybe_unload_orph
 # fetch. This trades a bounded staleness window for an instant, poll-free UI.
 _NW_SERVE_MAX_AGE_S = 60.0
 
-# The map's NetBox inventory (whole fleet, unfiltered) is reused for this long:
-# the full device list takes ~6 s, and every map load used to wait on it.
-# Each reader's tenant filter still runs on every request.
-_NW_NETBOX_INV_TTL_S = 120.0
+# The map's NetBox inventory (whole fleet, unfiltered) lives in the hub cache:
+# the full device list takes 5-40 s, and every map load used to wait on it.
+# Each reader's tenant filter still runs on every build.
+_NW_TOPO_NB_NS = "nw_topo_netbox"
+_NW_TOPO_NB_CMDS = {"devices": "NETBOX_GET_DEVICES", "cables": "NETBOX_GET_CABLES"}
+# Owner-set: the environment changes little, so NetBox is asked for these
+# lists at most once an hour (failed attempts included).
+_NW_TOPO_NB_FLOOR_S = 3600.0
+
+# Each tenant's map is pre-built in the hub cache (namespace below, one entry
+# per tenant, keyed by the tenant id) and kept warm by the cache refresher, so
+# the Topology tab opens without building anything. See nw_topology_feed.
+_NW_TOPO_NS = "nw_topology"
+# The "infer off" view has its own namespace rather than a key suffix: tenant
+# ids are free text, so a "<tid>|noinfer" key could equal another tenant's id.
+# warm_drop matches namespaces by prefix, so dropping _NW_TOPO_NS drops both.
+_NW_TOPO_OFF_NS = "nw_topology_off"
+# Owner-set: a map is rebuilt in the background at most hourly. Refresh from
+# devices, a manual edit and any access change (the digest) still rebuild it
+# at once.
+_NW_TOPO_REFRESH_S = 3600.0
+# nw device fields that change what the map draws (never credentials).
+_NW_TOPO_DEV_FIELDS = ("id", "tenant_id", "spoke_id", "name", "hostname", "address",
+                       "ip", "mgmt_ip", "mac", "base_mac", "object_type", "model",
+                       "site", "role", "serial")
 
 
 def _nb_rows(resp, key):
@@ -42,24 +66,368 @@ def _nb_rows(resp, key):
     return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else None
 
 
-async def _nw_netbox_inventory(hub, netbox):
-    """(devices, cables) from NetBox, fetched together and cached on the hub.
-    A list whose call failed comes back empty, and nothing is cached then."""
-    cached = getattr(hub, "_nw_netbox_inv", None)
-    if cached and time.monotonic() - cached[0] < _NW_NETBOX_INV_TTL_S:
-        return cached[1], cached[2]
-    rr, cr = await asyncio.gather(
-        hub.request_response(netbox, "NETBOX_GET_DEVICES", {}, timeout=60.0),
-        hub.request_response(netbox, "NETBOX_GET_CABLES", {}, timeout=60.0),
-        return_exceptions=True)
-    rows, crows = _nb_rows(rr, "devices"), _nb_rows(cr, "cables")
-    if rows is not None and crows is not None:
-        hub._nw_netbox_inv = (time.monotonic(), rows, crows)
-    elif isinstance(rr, BaseException) or isinstance(cr, BaseException):
-        logger.info("nw_topology: NetBox inventory partly unavailable (%s / %s)",
-                    rr if isinstance(rr, BaseException) else "ok",
-                    cr if isinstance(cr, BaseException) else "ok")
-    return rows or [], crows or []
+def _nw_netbox_job(hub, key):
+    """Hub-cache job for one whole-fleet NetBox list the map uses
+    (``devices`` or ``cables``). Its fetch raises when the call fails, so an
+    error is never cached; a hard floor keeps NetBox to one list call per
+    hour (fleet rule 4.8)."""
+    cmd = _NW_TOPO_NB_CMDS[key]
+
+    async def fetch():
+        """Fetch the list from the NetBox (ipam) spoke connected now."""
+        # Owner ruling: the hub has one NetBox spoke. A tenant given its own
+        # NetBox loses the shared one, so there is no second spoke to pick.
+        netbox = hub.get_spoke_by_type("ipam")
+        if not netbox:
+            # Not a NetBox call (say, right after a hub restart, before the
+            # spoke reconnects), so it must not start the hourly floor.
+            raise CacheSkipped("no NetBox spoke connected")
+        rows = _nb_rows(await hub.request_response(netbox, cmd, {}, timeout=60.0), key)
+        if rows is None:
+            raise RuntimeError(f"{cmd} failed")
+        return rows
+
+    return CacheJob(_NW_TOPO_NB_NS, key, fetch, None, lane=_NW_TOPO_NB_NS,
+                    refresh_s=_NW_TOPO_NB_FLOOR_S, min_interval_s=_NW_TOPO_NB_FLOOR_S)
+
+
+async def _nw_netbox_inventory(hub, fresh=False, used=None):
+    """(devices, cables) from NetBox for the map, served from the hub cache.
+
+    The full device list takes 5-40 s, and every map load used to wait on it.
+    The cache refreshes it in the background; only the first read after a
+    cold start waits. A list that can't be had (no NetBox spoke, a failed
+    call inside the floor) comes back empty: the map then shows no NetBox
+    gear, never an error. The rows are shared, so callers must copy them.
+
+    ``fresh`` (the background pre-build only) waits for a list refresh that
+    is due or running, so an hourly map is not built from the hour-old list
+    the same tick is replacing, which would keep it for another hour.
+
+    ``used`` (a dict, optional) gets each list's fetch time as it is read,
+    0 for a list that could not be had or was invalidated."""
+    read = hub.cache_read_fresh if fresh else hub.cache_read
+
+    async def one(key):
+        """One cached list, or [] when it can't be had."""
+        job = _nw_netbox_job(hub, key)
+        try:
+            rows = await read(job.ns, job.key, job.fetch, lane=job.lane,
+                              min_interval_s=job.min_interval_s, refresh_s=job.refresh_s)
+        except Exception as e:  # noqa: BLE001 - incl. CacheFloorError: degrade, never 500
+            logger.info("nw_topology: NetBox %s unavailable (%s)", key, e)
+            rows = None
+        # Stamped with no await after the read, so it is the copy just read.
+        if used is not None:
+            used[key] = (hub.warm_fetched_at(job.ns, job.key) or 0) if rows is not None else 0
+        return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+
+    devices, cables = await asyncio.gather(one("devices"), one("cables"))
+    return devices, cables
+
+
+def _nw_topo_visible(tid, acting, hide_shared):
+    """Whether a device of tenant ``tid`` is on the map of a reader acting as
+    tenant ``acting``: the tenant's own devices and shared ones (unless the
+    tenant has its own nw spoke), plus unassigned devices in the ADMIN
+    (``default``) scope. The route and the pre-built map both use this."""
+    if hide_shared and access.tenant_is_shared(tid):
+        return False
+    if acting == "default" and not str(tid or "").strip():
+        return True
+    return access.tenant_among(tid, [acting]) or access.tenant_is_shared(tid)
+
+
+def _nw_topology_cfg(hub, tid):
+    """Operator-declared devices + links for one tenant.
+
+    These are the whole point of the feature: a lot of lab gear (unmanaged
+    switches, media converters, PDUs, older APs) speaks no LLDP and would
+    otherwise be invisible on the map."""
+    # This tenant's saved topology config.
+    gc = hub.state.system_state.get("global_config", {}) or {}
+    cur = (((gc.get("nw_tenant_cfg") or {}).get(tid) or {}).get("topology") or {})
+    # Only dict entries are kept.
+    return {
+        "devices": [d for d in (cur.get("devices") or []) if isinstance(d, dict)],
+        "links": [l for l in (cur.get("links") or []) if isinstance(l, dict)],
+    }
+
+
+def _nw_cached_rows(hub, device_id, endpoint):
+    """Rows from the warm per-device cache, or [] on a cold miss."""
+    # The cached envelope's data rows, if it is a list.
+    env = hub.nw_cache_get_device(device_id, endpoint)
+    rows = env.get("data") if isinstance(env, dict) else None
+    return rows if isinstance(rows, list) else []
+
+
+async def _nw_topology_assemble(hub, fleet, infer, tenant_id, scoped, filter_netbox,
+                                fresh_netbox=False, nb_used=None):
+    """Build the map for ``fleet`` from the warm caches. The live route and
+    the pre-built map share it; only the tenant filters differ:
+    ``scoped(dev, endpoint, rows)`` narrows one device's LLDP/MAC rows and
+    ``filter_netbox(rows)`` narrows the NetBox device list.
+    ``fresh_netbox`` and ``nb_used`` are passed to ``_nw_netbox_inventory``
+    as ``fresh`` and ``used``."""
+    # Each device's cached (and tenant-filtered) LLDP and MAC rows.
+    lldp_by_device, macs_by_device = {}, {}
+    for dev in fleet:
+        did = dev["id"]
+        lldp_by_device[did] = await scoped(dev, "lldp", _nw_cached_rows(hub, did, "lldp"))
+        if infer:
+            macs_by_device[did] = await scoped(dev, "macs", _nw_cached_rows(hub, did, "macs"))
+
+    # NetBox inventory: gear the nw fleet never logs into (PDUs, patch
+    # panels, APs) still belongs on the map. Cables carry no IP of their own
+    # and are resolved purely by device NAME against nodes already on the
+    # map, so a cable whose end was filtered out below (another tenant's
+    # gear) harmlessly fails to resolve rather than needing its own filter.
+    rows, crows = await _nw_netbox_inventory(hub, fresh=fresh_netbox, used=nb_used)
+    netbox_devices = [dict(r) for r in rows]
+    netbox_cables = [dict(r) for r in crows]
+    if netbox_devices:
+        # NetBox is a FLEET-WIDE inventory with no LM tenant stamp, so it is
+        # the one input that could leak another tenant's gear onto a scoped
+        # reader's map. Narrow it to the reader's prefixes by IP; a row with
+        # no IP can't be placed in a tenant and is dropped (fails closed).
+        for row in netbox_devices:
+            row["ip"] = str(row.get("primary_ip") or "").split("/")[0]
+        netbox_devices = await filter_netbox(netbox_devices)
+
+    # Build the map from every source, off the event loop: a big tenant's
+    # MAC tables take a noticeable time to fold, and every other request
+    # waits while the loop is busy.
+    manual = _nw_topology_cfg(hub, tenant_id)
+    graph = await asyncio.to_thread(
+        build_topology,
+        fleet=fleet,
+        lldp_by_device=lldp_by_device,
+        macs_by_device=macs_by_device,
+        netbox_devices=netbox_devices,
+        netbox_cables=netbox_cables,
+        manual_devices=manual["devices"],
+        manual_links=manual["links"],
+        infer_from_macs=infer,
+    )
+    graph["status"] = "SUCCESS"
+    graph["tenant_id"] = tenant_id
+    graph["netbox"] = bool(netbox_devices)
+    return graph
+
+
+def _nw_topo_ns(infer):
+    """Hub-cache namespace of the pre-built maps for one inference setting
+    (the key is the tenant id)."""
+    return _NW_TOPO_NS if infer else _NW_TOPO_OFF_NS
+
+
+async def _nw_topology_authz(hub, tid, fleet, infer, known_only=False):
+    """Digest of every input that decides what tenant ``tid``'s map may
+    show: the devices on it (and their owners and spokes), the tenant's
+    subnet filter state and prefixes, the shared-tenant rules and the
+    declared gear. A pre-built map is served only while this still matches,
+    so a map built (or restored from disk) before a prefix, owner or tenant
+    change is never shown. Device display fields are included so a rename
+    shows at once. Secrets are not: only the listed fields are read.
+
+    A page read passes ``known_only``, so the tenant's prefixes are the ones
+    the hub already holds and the read never waits on NetBox. The background
+    build passes nothing: it refreshes an expired copy, so the next read
+    sees the new prefixes and a changed list fails the match."""
+    # The devices, their owners and how the tenant filter treats each spoke.
+    devs = sorted(
+        [[str(d.get(f) or "") for f in _NW_TOPO_DEV_FIELDS]
+         + [access.tenant_is_shared(d.get("tenant_id", ""))]
+         for d in fleet], key=json.dumps)
+    spokes = sorted({str(d.get("spoke_id") or "") for d in fleet} - {""})
+    state = await access.nw_tenant_filter_state(hub, tid, [None] + spokes,
+                                                known_only=known_only)
+    blob = json.dumps([tid, bool(infer), access.tenant_left_shared(hub, tid, "nw"),
+                       devs, state, _nw_topology_cfg(hub, tid)],
+                      sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode()).hexdigest()
+
+
+def _nw_netbox_behind(used):
+    """The list fetch times a map was built from (``_nw_netbox_inventory``
+    ``used``) when any list was missing, invalidated or past its hourly
+    refresh, else None. Only such a map is checked for newer lists."""
+    if any(time.time() - at >= _NW_TOPO_NB_FLOOR_S for at in used.values()):
+        return dict(used)
+    return None
+
+
+def _nw_netbox_newer(hub, behind):
+    """Whether the hub now holds a NetBox list newer than the one a map was
+    built from (``behind``, from ``_nw_netbox_behind``)."""
+    return any((hub.warm_fetched_at(_NW_TOPO_NB_NS, k) or 0) > at
+               for k, at in behind.items())
+
+
+def _nw_topology_fleet(hub, tid):
+    """The nw devices on tenant ``tid``'s map (see ``_nw_topo_visible``)."""
+    hide_shared = access.tenant_left_shared(hub, tid, "nw")
+    devices = (hub.state.system_state.get("global_config", {}) or {}).get("nw_devices", []) or []
+    return [d for d in devices if isinstance(d, dict) and d.get("id")
+            and _nw_topo_visible(d.get("tenant_id", ""), tid, hide_shared)]
+
+
+async def _nw_topology_build_for(hub, tid, infer):
+    """Pre-build tenant ``tid``'s map with no request or session: what a
+    logged-in reader acting as ``tid`` would get from the live route. The
+    tenant filter is ``access.filter_nw_for_tenant``, the same one the
+    route's filter delegates to for such a reader. The digest is taken
+    BEFORE the rows are read, so a change during the build makes the map
+    fail its check rather than pass it. ``_nb_behind`` records the fetch
+    times of NetBox lists that were missing or out of date when the build
+    read them (see ``_nw_topology_prebuilt``)."""
+    # The devices and the authorization digest, first.
+    fleet = _nw_topology_fleet(hub, tid)
+    authz = await _nw_topology_authz(hub, tid, fleet, infer)
+
+    async def scoped(dev, endpoint, rows):
+        """A dedicated device's rows are its tenant's; others are filtered."""
+        dtid = dev.get("tenant_id", "")
+        if not (dtid and not access.tenant_is_shared(dtid)):
+            out = await access.filter_nw_for_tenant(hub, {"data": rows}, endpoint, tid,
+                                                    dev.get("spoke_id"))
+            rows = out.get("data") if isinstance(out, dict) else None
+        return [r for r in (rows or []) if isinstance(r, dict)]
+
+    async def filter_netbox(rows):
+        """NetBox devices inside the tenant's prefixes."""
+        out = await access.filter_nw_for_tenant(hub, {"data": rows}, "netbox_devices", tid)
+        got = out.get("data") if isinstance(out, dict) else None
+        return [r for r in (got or []) if isinstance(r, dict)]
+
+    used = {}
+    graph = await _nw_topology_assemble(hub, fleet, infer, tid, scoped, filter_netbox,
+                                        fresh_netbox=True, nb_used=used)
+    graph["_authz"] = authz
+    graph["_nb_behind"] = _nw_netbox_behind(used)
+    return graph
+
+
+def _nw_topology_job(hub, tid, infer=True):
+    """Hub-cache job for tenant ``tid``'s pre-built map."""
+    return CacheJob(_nw_topo_ns(infer), tid,
+                    lambda: _nw_topology_build_for(hub, tid, infer),
+                    (tid,), lane=_NW_TOPO_NS, refresh_s=_NW_TOPO_REFRESH_S)
+
+
+def nw_topology_rebuild(hub, tid):
+    """Rebuild tenant ``tid``'s cached maps after its data changed (a live
+    gather, a manual edit). The keys are dropped first, because
+    ``cache_refresh`` alone joins a build already running, which may have
+    read the old rows and would store them. A dropped build stores nothing,
+    and the next read builds from the new data."""
+    if not tid or not hasattr(hub, "warm_drop"):
+        return
+    # The infer-off map is not fed: it lives only as a read job, which
+    # warm_drop also removes, so cache_refresh would not find it. Rebuild it
+    # explicitly when it was cached, so its next load is not a cold build.
+    had_off = tid in hub.cache_keys(_NW_TOPO_OFF_NS)
+    # Drops the tenant's entry in both namespaces (matched by prefix).
+    hub.warm_drop(_NW_TOPO_NS, (tid,), exact=True)
+    hub.cache_refresh(_NW_TOPO_NS, (tid,), exact=True)
+    if had_off:
+        _nw_topology_rebuild_off(hub, tid)
+
+
+def _nw_topology_rebuild_off(hub, tid):
+    """Queue a background build of tenant ``tid``'s infer-off map, which also
+    re-registers its read job (a no-op with no running event loop). It runs
+    in the map lane, so a shared device's refresh that rebuilds every
+    tenant's map builds at most two at a time; a failure is recorded on the
+    entry and the next load builds it."""
+    job = _nw_topology_job(hub, tid, False)
+    hub.cache_fetch_later(job.ns, job.key, job.fetch, tenants=job.tenants,
+                          lane=job.lane, refresh_s=job.refresh_s)
+
+
+def _nw_topology_tenants(hub):
+    """Every tenant with a pre-built map: ADMIN (often no stored record, so
+    added by name) and every stored tenant."""
+    seen = []
+    for tid in [access.ADMIN_TENANT_ID] + access.all_tenant_ids(hub):
+        if tid and tid not in seen:
+            seen.append(tid)
+    return seen
+
+
+def nw_topology_rebuild_showing(hub, devices, also=()):
+    """Rebuild the map of every tenant that shows any of ``devices`` (their
+    rows were just gathered live), plus the tenants in ``also``. Shared
+    devices are on many tenants' maps, and a refresh without ``?tenant=``
+    names none, so the tenants are worked out from the devices."""
+    targets = [t for t in also if t]
+    for tid in _nw_topology_tenants(hub):
+        hide = access.tenant_left_shared(hub, tid, "nw")
+        if tid not in targets and any(
+                _nw_topo_visible(d.get("tenant_id", ""), tid, hide) for d in devices):
+            targets.append(tid)
+    for tid in targets:
+        nw_topology_rebuild(hub, tid)
+
+
+# A NetBox device or IP written from LM's NetBox pages reaches every map
+# without waiting for the hourly refresh: the map's NetBox lists are re-read
+# once, this long after the last such write. The netbox spoke caches each list
+# for 300 s, and a list read racing the write can cache the old rows, so the
+# re-read waits that cache out. Changes made in NetBox itself, or by the
+# discovery syncs (which re-send every record each cycle, changed or not, so
+# re-reading on them would undo the hourly floor), show at the hourly refresh:
+# the owner ruled the lab changes little and NetBox must not carry the load.
+_NW_TOPO_NB_WRITE_DELAY_S = 330.0
+
+
+def nw_topology_netbox_changed(hub):
+    """Note a NetBox device or IP write made through LM. One background task
+    per hub waits until ``_NW_TOPO_NB_WRITE_DELAY_S`` after the latest write
+    (a burst of writes moves the deadline, so it costs one re-read), then
+    drops the cached NetBox lists, floor included, and rebuilds every
+    tenant's map from fresh ones. A device moved or readdressed out of a
+    tenant's prefixes leaves that tenant's map then, not up to an hour later.
+    No running event loop (sync test path): nothing to do."""
+    if not hasattr(hub, "warm_drop"):
+        return
+    state = vars(hub).setdefault("_nw_topo_nb_write", {"due": 0.0})
+    pending = state["due"] > 0
+    state["due"] = time.time() + _NW_TOPO_NB_WRITE_DELAY_S
+    if pending:
+        return   # the waiting task picks up the new deadline
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        state["due"] = 0.0
+        return
+
+    async def _run():
+        """Wait out the deadline, then re-read the lists and rebuild the maps."""
+        try:
+            while (left := state["due"] - time.time()) > 0:
+                await asyncio.sleep(left)
+            hub.warm_drop(_NW_TOPO_NB_NS, tuple(_NW_TOPO_NB_CMDS), exact=True)
+            for tid in _nw_topology_tenants(hub):
+                nw_topology_rebuild(hub, tid)
+        except Exception as e:  # noqa: BLE001 - the hourly refresh still runs
+            logger.warning("nw_topology: rebuild after a NetBox write failed: %s", e)
+        finally:
+            state["due"] = 0.0
+
+    task = loop.create_task(_run())
+    _NW_BG_TASKS.add(task)
+    task.add_done_callback(_NW_BG_TASKS.discard)
+
+
+def nw_topology_feed(hub):
+    """Feed: the two NetBox lists, and every tenant's map (with MAC
+    inference, the default view), so the Topology tab opens from the cache."""
+    yield _nw_netbox_job(hub, "devices")
+    yield _nw_netbox_job(hub, "cables")
+    for tid in _nw_topology_tenants(hub):
+        yield _nw_topology_job(hub, tid)
 
 
 # In-flight guard so rapid navigation coalesces to at most one background
@@ -1272,27 +1640,55 @@ def register(app, hub, ctx):
     # registration order, so "/api/nw/topology/manual" would otherwise be
     # swallowed by the two-segment device catch-all as device_id="topology".
 
-    def _nw_topology_cfg(hub, tid):
-        """Operator-declared devices + links for one tenant.
+    if hasattr(hub, "cache_register_feed"):
+        hub.cache_register_feed(_NW_TOPO_NS, nw_topology_feed)
 
-        These are the whole point of the feature: a lot of lab gear (unmanaged
-        switches, media converters, PDUs, older APs) speaks no LLDP and would
-        otherwise be invisible on the map."""
-        # This tenant's saved topology config.
-        gc = hub.state.system_state.get("global_config", {}) or {}
-        cur = (((gc.get("nw_tenant_cfg") or {}).get(tid) or {}).get("topology") or {})
-        # Only dict entries are kept.
-        return {
-            "devices": [d for d in (cur.get("devices") or []) if isinstance(d, dict)],
-            "links": [l for l in (cur.get("links") or []) if isinstance(l, dict)],
-        }
+    async def _nw_topology_prebuilt(hub, tid, infer, fleet):
+        """Tenant ``tid``'s pre-built map, or None when it can't be used.
 
-    def _nw_cached_rows(hub, device_id, endpoint):
-        """Rows from the warm per-device cache, or [] on a cold miss."""
-        # The cached envelope's data rows, if it is a list.
-        env = hub.nw_cache_get_device(device_id, endpoint)
-        rows = env.get("data") if isinstance(env, dict) else None
-        return rows if isinstance(rows, list) else []
+        It is used only when its authorization digest matches the one for
+        this request's own device list right now (see _nw_topology_authz),
+        which makes it exactly what the live build would return. On a
+        mismatch a rebuild starts and this request builds live.
+
+        The same happens to a map built from a NetBox list that was missing,
+        invalidated or past its hourly refresh (no NetBox spoke yet after a
+        restart, a failed list call) once the hub holds a newer one, so the
+        map does not go without its NetBox gear, or keep the pre-restart
+        list, for another hour. A map built from current lists is not
+        checked, so the lists' own hourly refresh rebuilds nothing. This is
+        not in the digest: a page read takes the digest before a cold build
+        fetches the lists, so it would never match."""
+        job = _nw_topology_job(hub, tid, infer)
+        ns, key = job.ns, job.key
+        try:
+            authz = await _nw_topology_authz(hub, tid, fleet, infer, known_only=True)
+            graph = await hub.cache_read(ns, key, job.fetch, tenants=job.tenants,
+                                         lane=job.lane, refresh_s=job.refresh_s)
+        except Exception as e:  # noqa: BLE001 - the live build still answers
+            logger.info("nw_topology: pre-built map for %s unavailable (%s)", tid, e)
+            return None
+        if not isinstance(graph, dict) or graph.get("_authz") != authz:
+            # Rebuild only when the map is out of date for the tenant itself.
+            # A reader whose rights narrow the tenant's device list just builds
+            # live; rebuilding for them would restart the build on every load.
+            own = _nw_topology_fleet(hub, tid)
+            try:
+                if own == fleet:
+                    want = authz
+                else:
+                    want = await _nw_topology_authz(hub, tid, own, infer, known_only=True)
+            except Exception:  # noqa: BLE001 - unknown: rebuild to be safe
+                want = None
+            if not isinstance(graph, dict) or graph.get("_authz") != want:
+                hub.cache_refresh(ns, (key,), exact=True)
+            return None
+        behind = graph.get("_nb_behind")
+        if isinstance(behind, dict) and _nw_netbox_newer(hub, behind):
+            hub.cache_refresh(ns, (key,), exact=True)
+            return None
+        out = {k: v for k, v in graph.items() if k not in ("_authz", "_nb_behind")}
+        return hub.cache_annotate(out, ns, key)
 
     @app.get("/api/nw/topology")
     async def nw_topology(request: Request, tenant: str = None):
@@ -1306,11 +1702,15 @@ def register(app, hub, ctx):
         ``?tenant=`` scopes even an admin to that tenant; a non-admin sees their
         own + shared devices.
 
-        Cache-first, like every other nw read: built from the warm per-device
-        LLDP/MAC cache WITHOUT blocking on live SSH, kicking off a background
-        revalidate for aging entries. ``?refresh=1`` gathers live from every
-        visible device first (bounded concurrency) — expensive, so it is the
-        explicit "Refresh topology" button, not the page load.
+        Pre-built: with a tenant selected (the WebUI always sends one) the
+        map comes from the hub cache, where the refresher rebuilds each
+        tenant's map from the warm LLDP/MAC/NetBox caches at most hourly
+        (see nw_topology_feed). Otherwise it is built
+        here from the same caches WITHOUT blocking on live SSH. Either way
+        aging per-device entries get a background revalidate. ``?refresh=1``
+        gathers live from every visible device first (bounded concurrency) —
+        expensive, so it is the explicit "Refresh topology" button, not the
+        page load — then rebuilds the cached map.
 
         ``?infer=0`` drops MAC-table inference and shows only links something
         actually asserted (LLDP or a human)."""
@@ -1318,14 +1718,11 @@ def register(app, hub, ctx):
         hub = app.state.hub
         sess = _session_user(request)
         is_admin = _is_admin(sess)
-        # The result for an empty map.
-        empty = {"nodes": [], "edges": [], "trunks": [],
-                 "stats": {"nodes": 0, "edges": 0, "trunks": 0,
-                           "trunk_ports": 0, "nodes_without_lldp": 0,
-                           "edges_by_source": {}}}
         # ADMIN (default) tenant explicitly selected in the picker: the WebUI
         # always sends ?tenant=<currentTenant> and 'default' is the built-in
         # ADMIN scope. Same rule as the device inventory — see nw_list_devices.
+        # check_tenant_access is an exact match, so for a non-admin the
+        # selection is also their effective tenant: the map depends only on it.
         acting_tenant = None
         if tenant and tenant != "default" and access.check_tenant_access(sess, tenant):
             acting_tenant = tenant
@@ -1342,12 +1739,10 @@ def register(app, hub, ctx):
             """Whether a device of tenant tid is visible to this request (same rule as the device
             list).
             """
+            if acting_tenant is not None:
+                return _nw_topo_visible(tid, acting_tenant, hide_shared)
             if hide_shared and access.tenant_is_shared(tid):
                 return False
-            if acting_tenant is not None:
-                if acting_tenant == "default" and not str(tid or "").strip():
-                    return True
-                return access.tenant_among(tid, [acting_tenant]) or access.tenant_is_shared(tid)
             return is_admin or access.spoke_visible_to_session(sess, tid)
 
         # Visible devices from the hub config.
@@ -1375,6 +1770,44 @@ def register(app, hub, ctx):
         # Whether to fetch live first, and whether to infer links from MAC tables.
         force = _nw_truthy(request.query_params.get("refresh"))
         infer = not (request.query_params.get("infer") in ("0", "false", "no"))
+
+        def _revalidate():
+            """Stale-while-revalidate: refresh aging per-device entries in the
+            background for the NEXT build (never after a forced live fetch).
+            On the pre-built path that next build is the hourly one: the
+            refreshed LLDP and MAC rows do not rebuild the map. The owner set
+            the map to refresh at most hourly ("there is not that much change
+            in the environment"); Refresh from devices rebuilds at once. The
+            rows also serve the per-device LLDP and MAC views."""
+            if force:
+                return
+            for dev in fleet:
+                did = dev["id"]
+                # Only devices with a spoke whose cache is older than the window.
+                if not spoke_by_id.get(did):
+                    continue
+                if time.time() - hub.nw_cache_device_fetched_at(did) <= _NW_SERVE_MAX_AGE_S:
+                    continue
+                # Refresh each stale endpoint, sending the device's tenant along.
+                payload = {"device_id": did}
+                if dev.get("tenant_id"):
+                    payload["tenant"] = dev["tenant_id"]
+                for endpoint, cmd in (("lldp", "NW_GET_LLDP_NEIGHBORS"),
+                                      ("macs", "NW_GET_MAC_TABLE")):
+                    if endpoint == "macs" and not infer:
+                        continue
+                    _nw_spawn_refresh(
+                        f"{did}:{endpoint}",
+                        (lambda d=did, e=endpoint, c=cmd, s=spoke_by_id[did], p=payload:
+                         _nw_bg_refresh_device(hub, d, e, s, c, p, 30.0)),
+                        min_gap_s=_NW_SERVE_MAX_AGE_S)
+
+        # The pre-built map, when it is exactly what this request may see.
+        if acting_tenant and not force:
+            graph = await _nw_topology_prebuilt(hub, acting_tenant, infer, fleet)
+            if graph is not None:
+                _revalidate()
+                return graph
 
         async def _gather(device_id, endpoint, spoke_cmd, timeout):
             """Live-fetch one device endpoint and seed the cache. Never raises:
@@ -1437,99 +1870,30 @@ def register(app, hub, ctx):
             got = out.get("data") if isinstance(out, dict) else None
             return [r for r in (got or []) if isinstance(r, dict)]
 
-        # Collect each device's cached (and tenant-filtered) LLDP and MAC rows.
-        lldp_by_device, macs_by_device = {}, {}
-        for dev in fleet:
-            did = dev["id"]
-            lldp_by_device[did] = await _scoped(
-                dev, "lldp", _nw_cached_rows(hub, did, "lldp"))
-            if infer:
-                macs_by_device[did] = await _scoped(
-                    dev, "macs", _nw_cached_rows(hub, did, "macs"))
-            # No background refresh after a forced live fetch, or without a spoke.
-            if force or not spoke_by_id.get(did):
-                continue
-            # Stale-while-revalidate: refresh aging entries for the NEXT load.
-            age = time.time() - hub.nw_cache_device_fetched_at(did)
-            if age <= _NW_SERVE_MAX_AGE_S:
-                continue
-            # Refresh each stale endpoint in the background, sending the device's tenant along.
-            payload = {"device_id": did}
-            if dev.get("tenant_id"):
-                payload["tenant"] = dev["tenant_id"]
-            for endpoint, cmd in (("lldp", "NW_GET_LLDP_NEIGHBORS"),
-                                  ("macs", "NW_GET_MAC_TABLE")):
-                if endpoint == "macs" and not infer:
-                    continue
-                _nw_spawn_refresh(
-                    f"{did}:{endpoint}",
-                    (lambda d=did, e=endpoint, c=cmd, s=spoke_by_id[did], p=payload:
-                     _nw_bg_refresh_device(hub, d, e, s, c, p, 30.0)),
-                    min_gap_s=_NW_SERVE_MAX_AGE_S)
+        async def _filter_netbox(rows):
+            """NetBox devices inside the reader's prefixes."""
+            filtered = await _filter_nw(request, {"data": rows}, "netbox_devices",
+                                        acting_tenant)
+            got = filtered.get("data") if isinstance(filtered, dict) else None
+            return [r for r in (got or []) if isinstance(r, dict)]
 
-        # NetBox inventory: gear the nw fleet never logs into (PDUs, patch
-        # panels, APs) still belongs on the map. Best-effort — no IPAM spoke, a
-        # timeout or a NetBox error degrades to "no inventory", never a 500.
-        netbox = None
-        netbox_devices = []
-        netbox_cables = []
-        try:
-            netbox = hub.get_spoke_by_type("ipam")
-            if netbox:
-                # Cables carry no IP of their own and are resolved purely by
-                # device NAME against nodes already on the map, so a cable
-                # whose end was filtered out below (another tenant's gear)
-                # harmlessly fails to resolve rather than needing its own
-                # tenant filter.
-                rows, crows = await _nw_netbox_inventory(hub, netbox)
-                # Copies: the rows are shared by every reader for the window.
-                netbox_devices = [dict(r) for r in rows]
-                netbox_cables = [dict(r) for r in crows]
-        except Exception as e:
-            logger.info("nw_topology: NetBox inventory unavailable (%s)", e)
-
-        if netbox_devices:
-            # NetBox is a FLEET-WIDE inventory with no LM tenant stamp, so it is
-            # the one input that could leak another tenant's gear onto a scoped
-            # reader's map. Narrow it to the reader's prefixes by IP; a row with
-            # no IP can't be placed in a tenant and is dropped (fails closed).
-            for row in netbox_devices:
-                row["ip"] = str(row.get("primary_ip") or "").split("/")[0]
-            filtered = await _filter_nw(request, {"data": netbox_devices},
-                                        "netbox_devices", acting_tenant)
-            rows = filtered.get("data") if isinstance(filtered, dict) else None
-            netbox_devices = [r for r in (rows or []) if isinstance(r, dict)]
-
-        # The tenant whose declared devices and links are added to the map.
+        # Build the map live; the declared gear is the acting (or caller's) tenant's.
         cfg_tid = acting_tenant or _nw_caller_tenant(sess, None)
-        manual = _nw_topology_cfg(hub, cfg_tid)
+        graph = await _nw_topology_assemble(hub, fleet, infer, cfg_tid, _scoped,
+                                            _filter_netbox)
+        _revalidate()
 
-        # Build the map from every source, off the event loop: a big tenant's
-        # MAC tables take a noticeable time to fold, and every other request
-        # waits while the loop is busy.
-        graph = await asyncio.to_thread(
-            build_topology,
-            fleet=fleet,
-            lldp_by_device=lldp_by_device,
-            macs_by_device=macs_by_device,
-            netbox_devices=netbox_devices,
-            netbox_cables=netbox_cables,
-            manual_devices=manual["devices"],
-            manual_links=manual["links"],
-            infer_from_macs=infer,
-        )
-        graph["status"] = "SUCCESS"
-        graph["tenant_id"] = cfg_tid
-        graph["netbox"] = bool(netbox_devices)
-
-        # Write LLDP's live truth back into NetBox as real cables, so it
-        # persists past nw's in-memory cache — but only on an explicit scan
-        # (``?refresh=1``), never on a routine page load, and only for
-        # "lldp"-sourced edges (a real, confirmed adjacency — never a "mac"
-        # guess). Fire-and-forget: a slow/broken NetBox must never make the
-        # topology view itself slow or fail.
-        if force and netbox:
-            links = netbox_lldp_links(graph)
+        if force:
+            # The cached maps now lag the data just gathered: rebuild them.
+            nw_topology_rebuild_showing(hub, fleet, also=(acting_tenant or cfg_tid,))
+            # Write LLDP's live truth back into NetBox as real cables, so it
+            # persists past nw's in-memory cache — but only on an explicit scan
+            # (``?refresh=1``), never on a routine page load, and only for
+            # "lldp"-sourced edges (a real, confirmed adjacency — never a "mac"
+            # guess). Fire-and-forget: a slow/broken NetBox must never make the
+            # topology view itself slow or fail.
+            netbox = hub.get_spoke_by_type("ipam")
+            links = netbox_lldp_links(graph) if netbox else []
             if links:
                 slug = str((hub.state.get_tenant(cfg_tid) or {}).get(
                     "netbox_tenant_slug") or "").strip() if cfg_tid else ""
@@ -1610,6 +1974,8 @@ def register(app, hub, ctx):
         gc["nw_tenant_cfg"] = tmap
         hub.state.system_state["global_config"] = gc
         hub.state._mark_dirty()
+        # Rebuild the tenant's cached maps with the new gear.
+        nw_topology_rebuild(hub, tid)
         return {"status": "ok", "tenant_id": tid, **_nw_topology_cfg(hub, tid)}
 
     @app.get("/api/nw/{device_id}/{endpoint}")

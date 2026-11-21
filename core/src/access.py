@@ -2104,12 +2104,24 @@ def _owned_spoke_visible(hub, sessions, request, spoke_id, explicit_tenant=None,
         except Exception:  # noqa: BLE001
             explicit_tenant = None
     tid = effective_tenant(sessions, request, explicit_tenant)
+    if tid:
+        return _spoke_visible_to_tenant(hub, spoke_id, tid, owner, firewall_id)
+    # No tenant selected: admins see owned data; shared data goes to the IP filter.
+    return is_admin(sess) if owner else None
+
+
+def _spoke_visible_to_tenant(hub, spoke_id, tid, owner=None,
+                             firewall_id=None) -> Optional[bool]:
+    """``_owned_spoke_visible`` for a reader whose effective tenant is ``tid``
+    (non-empty), with no session: the answer depends only on ``tid``."""
+    # Find the owner; nothing to decide for unidentified data.
+    owner = owner or spoke_data_owner(hub, spoke_id)
+    if not owner and not (spoke_id or firewall_id):
+        return None
     # Shared spoke: hidden if the tenant has its own; otherwise let the IP filter decide.
     if not owner:
-        return False if tid and _shared_spoke_masked(hub, spoke_id, tid, firewall_id) else None
-    # Owned spoke: admins see it with no selection; otherwise the owner must match.
-    if not tid:
-        return is_admin(sess)
+        return False if _shared_spoke_masked(hub, spoke_id, tid, firewall_id) else None
+    # Owned spoke: the owner must be the tenant or in the selected group.
     return tenant_in(owner, tid)
 
 
@@ -2394,6 +2406,25 @@ def clear_prefix_cache(hub) -> None:
     cache = _hub_prefix_cache(hub)
     if cache is not None:
         cache.clear()
+        vars(hub).get("_tenant_prefix_read_at", {}).clear()
+
+
+def _live_read_newer_than_feed(hub, key) -> bool:
+    """True when scope ``key``'s cached prefixes come from a live NetBox read
+    (``fetch_tenant_prefixes``) newer than the NetBox cache feed's copy, or
+    the feed's copy has no time. The feed keeps its old copy when a refresh
+    fails, so it is not always the newer answer."""
+    try:
+        read_at = vars(hub).get("_tenant_prefix_read_at", {}).get(key)
+    except TypeError:
+        return False
+    if not read_at:
+        return False
+    try:
+        feed_at = hub.warm_last_fetched_at(_PREFIX_FEED_NS, key)
+    except Exception:  # noqa: BLE001 - a hub without a warm cache
+        feed_at = None
+    return not feed_at or read_at > feed_at
 
 
 # Warm-cache namespace persisting each NetBox scope's prefix VRFs, so the VRF
@@ -2513,6 +2544,17 @@ def _scope_prefix_vrfs(hub, key) -> Dict[str, set]:
         if isinstance(saved, dict):
             store[key] = {p: set(v) for p, v in saved.items() if isinstance(v, list)}
     return store.get(key) or {}
+
+
+def _feed_invalidated(hub, key) -> bool:
+    """True when the NetBox cache feed's copy of scope ``key``'s prefixes has
+    been invalidated (``cache_refresh`` after a prefix write keeps the old
+    rows, with no ``fetched_at``, until the refresh lands)."""
+    try:
+        return (hub.warm_get(_PREFIX_FEED_NS, key) is not None
+                and not hub.warm_fetched_at(_PREFIX_FEED_NS, key))
+    except Exception:  # noqa: BLE001 - a hub without a warm cache
+        return False
 
 
 def _read_vrfs_newer_than_feed(hub, key):
@@ -2716,6 +2758,79 @@ def shared_slice_prefixes(hub, tenant_id, prefixes, module: str = "", spoke_id=N
     return out
 
 
+def _prefix_scope(hub, tenant_id):
+    """``(cache key, NETBOX_GET_PREFIXES payload)`` of ``tenant_id``'s NetBox
+    scope, or ``(None, None)`` when it has none."""
+    scope = netbox_tenant_scope(hub, tenant_id)
+    nb_slug = scope.get("tenant")
+    if nb_slug:
+        return nb_slug, {"tenant": nb_slug}
+    # A tenant GROUP has no slug of its own: union its members' prefixes
+    # via NetBox's tree-aware tenant_group filter.
+    if not scope.get("tenant_group"):
+        return None, None
+    return "group:" + str(scope["tenant_group"]), {"tenant_group": scope["tenant_group"]}
+
+
+def known_tenant_prefixes(hub, tenant_id):
+    """``tenant_id``'s prefixes from what the hub already holds, without
+    asking NetBox, for a page that must render from cache: the last
+    ``fetch_tenant_prefixes`` answer while it is within its TTL, else the
+    NetBox cache feed's copy (the feed re-reads every tenant's prefixes in
+    the background every few minutes, logged in or not), else the expired
+    answer. None when the hub holds none of these.
+
+    The feed's copy is skipped when the expired answer is a newer live read
+    (``_live_read_newer_than_feed``): a feed refresh that fails keeps its
+    old copy, which must not bring back prefixes NetBox has since moved.
+    It is also skipped, with None returned so the caller reads NetBox, in
+    two cases:
+
+    - A NetBox write through LM has invalidated it (``_feed_invalidated``).
+      The feed keeps the old rows until its re-read lands, and a prefix
+      just moved or removed must not be served from them.
+    - The only record of a newer live read is the VRFs it saved with the
+      hub cache (``_read_vrfs_newer_than_feed``). After a hub restart the
+      in-memory answer and its read time are gone, but the saved VRFs show
+      the feed's copy is older than what NetBox last said.
+
+    Once that read has failed, its fallback is served as usual. Every live read that
+    finds prefixes, or finds none, saves them (``_persist_prefix_vrfs``,
+    ``_forget_prefix_vrfs``), so their time is the last live read's.
+
+    Serving the feed's copy also records its VRFs (as ``fetch_tenant_prefixes``
+    does when it falls back to that copy): ``shared_slice_prefixes`` reads
+    them, so a prefix that moved into the tenant's own VRF is cut from this
+    answer too, not only from the next live read's."""
+    if not tenant_id:
+        return []
+    key, _payload = _prefix_scope(hub, tenant_id)
+    if not key:
+        return []
+    # A fresh answer first, then the feed's copy, then an expired answer.
+    cache = _hub_prefix_cache(hub)
+    hit = cache.get(key) if cache is not None else None
+    if hit and hit[1] > time.time():
+        return list(hit[0])
+    rows = _feed_prefix_rows(hub, key)
+    if rows is None or (hit and _live_read_newer_than_feed(hub, key)):
+        return list(hit[0]) if hit else None
+    # A feed copy a write has invalidated (cache_refresh keeps the old rows
+    # while the new ones load): after a NetBox prefix write the old prefixes
+    # must not pass the map's digest, so let the caller ask NetBox.
+    if _feed_invalidated(hub, key):
+        return None
+    # A saved live read newer than the feed's copy (say, from before a
+    # restart): the feed's copy is stale, so let the caller ask NetBox. An
+    # expired answer here is that ask's fallback after it failed (a live
+    # answer would be newer than the feed), so serve it rather than make
+    # every page read wait on a failing NetBox.
+    if _read_vrfs_newer_than_feed(hub, key) is not None:
+        return list(hit[0]) if hit else None
+    _note_prefix_vrfs(hub, key, rows)
+    return [p["prefix"] for p in rows if isinstance(p, dict) and p.get("prefix")]
+
+
 async def fetch_tenant_prefixes(hub, tenant_id) -> list:
     """NetBox prefixes for an arbitrary tenant id (by slug), no admin no-op —
     the fetch shared by ``resolve_prefixes`` (session tenant) and
@@ -2734,26 +2849,29 @@ async def fetch_tenant_prefixes(hub, tenant_id) -> list:
     # back, which starves attribute_by_prefix of them and silently drops (or
     # mis-attributes) Admin-tenant DHCP/ARP discoveries that land in NetBox
     # under the real "default" tenant (see netbox_tenant_scope).
-    scope = netbox_tenant_scope(hub, tenant_id)
-    nb_slug = scope.get("tenant")
-    payload = {"tenant": nb_slug}
-    if not nb_slug:
-        # A tenant GROUP has no slug of its own: union its members' prefixes
-        # via NetBox's tree-aware tenant_group filter.
-        if not scope.get("tenant_group"):
-            return []
-        payload = {"tenant_group": scope["tenant_group"]}
+    key, payload = _prefix_scope(hub, tenant_id)
+    if not key:
+        return []
     # Serve from the cache while fresh.
-    key = payload.get("tenant") or ("group:" + str(payload.get("tenant_group")))
     cache = _hub_prefix_cache(hub)
     hit = cache.get(key) if cache is not None else None
     if hit and hit[1] > time.time():
         return list(hit[0])
 
-    def _remember(prefixes, ttl):
-        """Cache ``prefixes`` for ``ttl`` seconds and return them."""
+    def _remember(prefixes, ttl, live=False):
+        """Cache ``prefixes`` for ``ttl`` seconds and return them. ``live``
+        marks NetBox's own answer, whose time ``known_tenant_prefixes``
+        compares with the feed's copy; a fallback to that copy clears it."""
         if cache is not None:
             cache[key] = (list(prefixes), time.time() + ttl)
+        try:
+            read_at = vars(hub).setdefault("_tenant_prefix_read_at", {})
+        except TypeError:
+            return prefixes
+        if live:
+            read_at[key] = time.time()
+        else:
+            read_at.pop(key, None)
         return prefixes
 
     def _from_warm():
@@ -2801,9 +2919,9 @@ async def fetch_tenant_prefixes(hub, tenant_id) -> list:
                 # NetBox failure into an ERROR envelope, so a failed read never
                 # gets here and forgets nothing.
                 await _forget_prefix_vrfs(hub, key)
-                return _remember([], _PREFIX_CACHE_TTL)
+                return _remember([], _PREFIX_CACHE_TTL, live=True)
             return _remember(_from_warm(), _PREFIX_FAIL_TTL)
-        return _remember(out, _PREFIX_CACHE_TTL)
+        return _remember(out, _PREFIX_CACHE_TTL, live=True)
     # Request failed: last-known prefixes, retried sooner.
     except Exception as e:
         logger.warning(f"Failed to fetch prefixes for tenant '{tenant_id}': {e}")
@@ -3464,25 +3582,78 @@ async def filter_nw(hub, sessions: dict, request: "Request", data, endpoint: str
     spec = _NW_FILTER_SPEC.get(endpoint)
     if not spec:
         return data  # devices / info / unknown → no IP to filter on
+    # A logged-in reader acting as a tenant: the result depends only on that
+    # tenant, so it is the same filter the pre-built topology uses.
+    sess = session_user(sessions, request)
+    tid = session_effective_tenant(sess, explicit_tenant) if explicit_tenant else None
+    if sess and tid:
+        return await filter_nw_for_tenant(hub, data, endpoint, tid, spoke_id)
     # Dedicated spoke: all or nothing.
     visible = _owned_spoke_visible(hub, sessions, request, spoke_id, explicit_tenant)
     if visible is not None:
         return data if visible else _empty_filter_result(data)
-    # Prefixes for the selected tenant, or the session tenant (admins pass).
-    mode, fields = spec
+    # Prefixes for the session tenant (admins pass).
+    if not sess or is_admin(sess):
+        return data
+    if not filter_enabled(hub, "nw"):
+        return data
     tid = effective_tenant(sessions, request, explicit_tenant)
-    if explicit_tenant and tid:
-        if not filter_enabled(hub, "nw"):
-            return data
-        prefixes = shared_slice_prefixes(hub, tid, await resolve_prefixes_for_tenant(hub, tid))
-    else:
-        sess = session_user(sessions, request)
-        if not sess or is_admin(sess):
-            return data
-        if not filter_enabled(hub, "nw"):
-            return data
-        prefixes = shared_slice_prefixes(hub, _session_tenant_id(sess),
-                                         await resolve_prefixes(hub, sess))
+    prefixes = shared_slice_prefixes(hub, _session_tenant_id(sess),
+                                     await resolve_prefixes(hub, sess))
+    return _nw_prefix_result(data, endpoint, spec, tid, prefixes)
+
+
+async def filter_nw_for_tenant(hub, data, endpoint: str, tenant_id: str, spoke_id=None):
+    """``filter_nw`` for a logged-in reader whose effective tenant is
+    ``tenant_id``, without a request or session. Background jobs (the
+    pre-built topology) use it: a stored request would outlive its session,
+    and ``filter_nw`` with no session passes data through unfiltered."""
+    # Endpoint's filter spec; no tenant fails closed.
+    spec = _NW_FILTER_SPEC.get(endpoint)
+    if not spec:
+        return data
+    if not tenant_id:
+        return _empty_filter_result(data)
+    # Dedicated spoke: all or nothing.
+    visible = _spoke_visible_to_tenant(hub, spoke_id, tenant_id)
+    if visible is not None:
+        return data if visible else _empty_filter_result(data)
+    # The tenant's prefixes, when the nw filter is on.
+    if not filter_enabled(hub, "nw"):
+        return data
+    prefixes = shared_slice_prefixes(hub, tenant_id,
+                                     await resolve_prefixes_for_tenant(hub, tenant_id))
+    return _nw_prefix_result(data, endpoint, spec, tenant_id, prefixes)
+
+
+async def nw_tenant_filter_state(hub, tenant_id: str, spoke_ids, *,
+                                 known_only: bool = False) -> list:
+    """Everything ``filter_nw_for_tenant`` decides on for ``tenant_id`` and
+    data from ``spoke_ids`` (None for data with no spoke): the shared tenant,
+    whether the nw filter is on, the tenant's prefixes and each spoke's
+    visibility. Two equal states filter any data the same way, so a cached
+    result filtered under one may be served under the other.
+
+    ``known_only`` reads the prefixes the hub already holds
+    (``known_tenant_prefixes``) instead of refreshing an expired copy from
+    NetBox, so a page read never waits on NetBox; it fetches only when the
+    hub holds none."""
+    on = filter_enabled(hub, "nw")
+    raw = None
+    if on and tenant_id and known_only:
+        raw = known_tenant_prefixes(hub, tenant_id)
+    if on and tenant_id and raw is None:
+        raw = await resolve_prefixes_for_tenant(hub, tenant_id)
+    prefixes = shared_slice_prefixes(hub, tenant_id, raw) if on and tenant_id else []
+    return [shared_tenant_id() or "", on,
+            sorted(str(p) for p in prefixes),
+            [[s or "", _spoke_visible_to_tenant(hub, s, tenant_id) if tenant_id else None]
+             for s in spoke_ids]]
+
+
+def _nw_prefix_result(data, endpoint, spec, tid, prefixes):
+    """The tail of the nw filter: keep the rows inside ``prefixes``."""
+    _mode, fields = spec
     # No prefixes: shared sees all, others see nothing.
     if not prefixes:
         if tenant_is_shared(tid):
