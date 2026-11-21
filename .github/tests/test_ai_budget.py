@@ -110,6 +110,16 @@ class GateTest(unittest.TestCase):
             self.assertTrue(ai_budget.local_session("new", since))
             self.assertFalse(ai_budget.local_session("never", since, wait_s=0.2))
 
+    def test_local_session_sees_a_delayed_paid_call_after_free_calls(self):
+        """Earlier free rows must not make a session local before a late paid row lands."""
+        since = ai_budget.day_start()[1]
+        self.spend(None, session="switch")
+        timer = threading.Timer(0.5, self.spend, (1,), {"session": "switch"})
+        self.addCleanup(timer.cancel)
+        with mock.patch.dict(os.environ, {"COPILOT_HOME": str(self.home)}):
+            timer.start()
+            self.assertFalse(ai_budget.local_session("switch", since))
+
     def test_spend_before_today_does_not_count(self):
         """Only today's spend counts towards the gate."""
         self.spend(GATE * 5, days_ago=2)
