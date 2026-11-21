@@ -6,7 +6,7 @@ worker in the caller's tenant, or to explicitly Shared workers if the tenant
 has no approved pool. A busy reply can move to another worker; an ambiguous
 disconnect is not automatically replayed. Direct inference requests are local-only.
 Loading the role restores missing service-unit files and reloads systemd, but
-does not install the Ollama bundle or download models.
+does not itself install the Ollama bundle or download models.
 
 ## Provision a worker VM
 
@@ -35,7 +35,7 @@ summaries and docs, `qwen3.6-35b-coding-64k` for small coding drafts, and
 `qwen3.8-27b-64k` for read-only scouting. These are CLI aliases, not
 automatically approved Ollama artifacts.
 GPU results do not qualify those same weights or context sizes for a CPU VM.
-The role does not download model tags or upgrade the runtime.
+The role does not automatically upgrade an existing runtime.
 After Linux CPU qualification and review of open regressions, VM provisioning
 can set `LM_LLM_OLLAMA_VERSION` in the `lm-agent` service environment to pin
 the vetted replacement. The role rejects mismatched or invalid pins instead
@@ -58,8 +58,9 @@ of serving with an unapproved version.
   lists of `{model, digest}` records. The hub tries the next approved artifact
   only when the preferred one cannot accept the job. No task is enabled by
   default.
-- `POST /api/llm/check?tenant=…` accepts an exact `model`, `digest`, and
-  `fixture` (`json` or `indentation`). It runs a synthetic pool smoke test,
+- `POST /api/llm/check?tenant=…` accepts either an exact `model` and `digest`
+  or a `task`, plus a `fixture` (`json` or `indentation`). A task check uses
+  the task's configured model order and options. It runs a synthetic pool smoke test,
   checks that the output kept the expected structure and content, and reports
   timings or a recommended fix without returning the generated text.
 
@@ -103,7 +104,7 @@ Global admins can use **LLM** to inspect worker readiness, active jobs, and the 
 
 Use **LLM → Settings** to append reported, digest-pinned models in task priority order, bind exact AppBuilder repositories to a tenant and certificate SAN, select an approved Shared worker for a staged candidate, or create a Vault-backed cloud overflow profile. Edit an existing candidate by saving its staged key again. The worker restarts its serving daemon after three failed idle API health probes, at most once in five minutes; it does not interrupt an active inference or qualification.
 
-Workers report CPU mode, CPU model when available, CPU architecture, logical vCPUs and total guest RAM in bytes, even before Ollama is ready. These are VM totals, not free memory or service cgroup limits. An `llm_task_models` entry can set `min_vcpus` and `min_ram_bytes` from qualification results: the hub skips narrower or unreported capacity for that entry, then tries the next ordered artifact without bypassing tenant boundaries. Entries without minima retain older-worker compatibility. An entry can also set optional `temperature` (0–2) and `top_p` (0–1) in **LLM → Settings**; leave them blank for Ollama's defaults. The hub sends them only with that artifact, and the worker rejects any other option or out-of-range value. Workers never choose sampling from a model's name; the CLI trials capped Gemma drafts at temperature 0.7 and top-p 0.8, so set those values on a Gemma entry. Workers released before this setting ignore it and keep their built-in Gemma cap (0.7/0.8 for model names starting with `gemma`), so update every worker before relying on per-profile sampling.
+Workers report CPU mode, CPU model when available, CPU architecture, logical vCPUs and total guest RAM in bytes, even before Ollama is ready. These are VM totals, not free memory or service cgroup limits. An `llm_task_models` entry can set `min_vcpus` and `min_ram_bytes` from qualification results: the hub skips narrower or unreported capacity for that entry, then tries the next ordered artifact without bypassing tenant boundaries. Entries without minima retain older-worker compatibility. An entry can also set `temperature` (0–2), `top_p` (0–1), integer `top_k` (0–256), `repeat_penalty` (>0–2), and integer `num_ctx` (1–131072) in **LLM → Settings**; leave them blank for Ollama's defaults. The hub sends them only with that artifact, and the worker rejects any other option or out-of-range value. Workers advertise supported options; a worker that omits this field retains compatibility with the earlier `temperature` and `top_p` profile options, but cannot receive the newer options until it advertises them. Still older workers may ignore those earlier options, so update workers before relying on exact sampling. Workers never choose sampling from a model's name; the CLI trials capped Gemma drafts at temperature 0.7 and top-p 0.8, so set those values on a Gemma entry. A 65,536-token context can require substantial CPU VM memory and must be tested on that VM.
 
 Workers report lifecycle status every 30 seconds. Start failures distinguish a
 missing service unit (`runtime_unit_missing`), missing Ollama binary
@@ -117,9 +118,10 @@ reinstalling. An invalid or masked service-unit symlink is reported as
 `runtime_unit_symlink`; inspect its target before changing it. If unit staging
 or `systemctl daemon-reload` fails during role load, the agent retries once a
 minute while the LLM role remains loaded, without requiring another hub
-command. That retry only repairs the units; it never starts Ollama. Only the
-hub starts the runtime, and only on an approved worker bound to a tenant: it
-retries transient runtime-start failures every two minutes, which covers a
+command. That retry only repairs the units; it never starts Ollama. The hub
+requests runtime starts only on approved workers bound to a tenant; explicit
+candidate activation may also start the serving runtime. The hub retries
+transient runtime-start failures every two minutes, which covers a
 worker whose units were just repaired. Missing binaries and masked or broken
 unit links remain visible for operator repair.
 The agent logs the first repair failure, and any change in its error, as a
@@ -144,4 +146,34 @@ The routing forms read their field constraints from the hub settings schema.
 Model choices come from reporting workers, and repository bindings offer only
 non-Shared tenants.
 
-`POST /api/llm/admin/qualify` accepts `{"candidate":"trial"}` and returns 202 when scheduled. Set the hub's `llm_qualification_candidates.trial` to `{"worker":"<Shared LLM registration ID>","label":"CPU trial"}`; that worker is excluded from tenant inference. On the dedicated VM, stage the vetted candidate at `/opt/lm-llm-candidate/bin/ollama`, or on a fresh install pass `--llm-candidate-bundle /path/to/candidate.tar --llm-candidate-bundle-sha256 <trusted-sha256>`. That archive holds only `bin/ollama` and `lib/` as regular files; the installer verifies it like the serving bundle, rejects a bundled model store, and never replaces an existing candidate (remove the old one by hand first). The installer supplies a disabled candidate unit; the role starts it for the job on loopback port 11439 and stops it afterward. It uses `/var/lib/lm-llm-candidate/models`, not the baseline store on port 11438. Set the root-managed `/etc/lm/llm-qualification.json` to `{"trial":{"model":"<public tag>","digest":"<64 hex>","version":"<x.y.z>","baseline":{"model":"<installed tag>","digest":"<64 hex>","version":"<x.y.z>"}}}`. Only the candidate service pulls a model. Both runtimes run the same fixed CPU JSON and indentation fixtures; inspect correctness and timing separately. The hub waits up to 1,800 seconds for a result: the worker's worst case, with every step at its timeout, is about 1,470 seconds. No test automatically activates an artifact or upgrades Ollama. Check open release regressions before staging the candidate.
+For a first Shared worker, **Prepare and test** selects an owner-approved public
+CPU candidate and downloads the pinned x86_64 Ollama 0.40.16 release and model
+on the worker, not through the hub. The worker needs access to GitHub's release
+assets and the Ollama registry, plus disk space for the 1.55 GB runtime archive,
+model download, and a second model copy during activation. On a Debian-family
+worker missing `zstd`, preparation installs it through apt before downloading
+the runtime; the package manager and configured repositories must be usable.
+Other architectures,
+changed model tags, or an incompatible existing runtime fail instead of being
+silently substituted. The dashboard shows runtime, pull and fixture phases, not
+byte-level download progress. An interrupted preparation is retried after an
+authorized hub reconnect. It runs two synthetic fixtures with thinking disabled;
+passing them is **not certification**. After inspecting the result, use
+**Activate** to publish that exact artifact. An operator-managed catalog or
+role catalog override blocks automatic activation. Activation does not configure
+or enable a task profile.
+
+The public candidates use a 65,536-token context. Gemma 4 12B uses temperature
+0.7, top-p 0.8 and top-k 64; Qwen 3.6 coding uses 0.6, 0.95, 20 and repeat
+penalty 1; Qwen 3.8 scouting uses 1, 0.95, 20 and repeat penalty 1. The Gemma
+values include the tested proxy overrides; Qwen values are observed alias
+defaults, not verified per-request overrides. These public artifacts are
+candidates, not necessarily the same weights or format tested on the Macs.
+Selecting an exact candidate artifact in a task profile prefills these options;
+they can be changed, and blank fields use Ollama defaults. Benchmark correctness and timing on the
+target worker before routing real work. The previous shadow review backtest
+did not establish local models as replacements for AB's cloud voting panels.
+
+`POST /api/llm/admin/qualify` accepts `{"candidate":"trial"}` and returns 202 when scheduled. Set the hub's `llm_qualification_candidates.trial` to `{"worker":"<Shared LLM registration ID>","label":"CPU trial"}`; that worker is excluded from tenant inference. On the dedicated VM, stage the vetted candidate at `/opt/lm-llm-candidate/bin/ollama`, or on a fresh install pass `--llm-candidate-bundle /path/to/candidate.tar --llm-candidate-bundle-sha256 <trusted-sha256>`. That archive holds only `bin/ollama` and `lib/` as regular files; the installer verifies it like the serving bundle, rejects a bundled model store, and never replaces an existing candidate (remove the old one by hand first). The installer supplies a disabled candidate unit; the role starts it for the job on loopback port 11439 and stops it afterward. It uses `/var/lib/lm-llm-candidate/models`, not the baseline store on port 11438. Set the root-managed `/etc/lm/llm-qualification.json` to `{"trial":{"model":"<public tag>","digest":"<64 hex>","version":"<x.y.z>","baseline":{"model":"<installed tag>","digest":"<64 hex>","version":"<x.y.z>"}}}`. Only the candidate service pulls a model. Both runtimes run fixed CPU JSON and indentation fixtures with the same options; inspect correctness and timing separately. The hub waits up to 15,000 seconds, including up to two hours for a pull and up to 15 minutes per tuned fixture. A qualification test does not automatically activate an artifact or upgrade Ollama. Check open release regressions before staging the candidate.
+
+On the first Shared test worker, where no baseline exists, the root-managed manifest can instead use `"bootstrap": true` and an `"options"` object containing `num_ctx` and any other intended sampling settings; omit `baseline`. The candidate alone runs the two fixtures with those options, CPU-only and thinking disabled. `bootstrap_smoke_passed` means only those fixtures passed, not that the model is certified or usable for real work. For this operator-managed qualification path the candidate runtime and manifest must be staged by an operator; a passing smoke test does not publish the model. Task checks use the eligible tenant pool, not necessarily a particular worker.

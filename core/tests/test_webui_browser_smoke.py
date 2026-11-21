@@ -111,7 +111,10 @@ def test_llm_dashboard_uses_reported_model_and_launches_qualification(hub_url_an
     base, token = hub_url_and_session
     digest = "a" * 64
     config = {"llm_task_models": {}, "llm_ab_pr_repos": {}, "routing_form_schema": ROUTING_FORM_SCHEMA,
-              "llm_qualification_candidates": {}, "llm_cloud_profiles": [], "test_workers": []}
+              "llm_qualification_candidates": {}, "llm_cloud_profiles": [], "test_workers": [],
+              "public_candidates": [{"key": "trial", "label": "Trial", "model": "trial:cpu",
+                                     "digest": digest, "options": {"num_ctx": 65536, "temperature": 0.6,
+                                                                   "top_p": 0.95, "top_k": 20}}]}
     with sync_api.sync_playwright() as p:
         browser = p.chromium.launch()
         try:
@@ -148,6 +151,8 @@ def test_llm_dashboard_uses_reported_model_and_launches_qualification(hub_url_an
             page.get_by_role("button", name="Settings", exact=True).click()
             page.get_by_label("Task", exact=True).fill("pr_summary")
             page.get_by_label("Approved model").select_option("0")
+            assert page.get_by_label("Context tokens", exact=False).input_value() == "65536"
+            assert page.get_by_label("Temperature", exact=False).input_value() == "0.6"
             page.get_by_label("Minimum vCPUs").fill("16")
             page.get_by_label("Temperature", exact=False).fill("0.7")
             with page.expect_request(lambda req: req.url.endswith("/admin/settings")
@@ -155,10 +160,10 @@ def test_llm_dashboard_uses_reported_model_and_launches_qualification(hub_url_an
                 page.get_by_role("button", name="Add model", exact=True).click()
             assert save.value.post_data_json == {"llm_task_models": {"pr_summary": [
                 {"model": "trial:cpu", "digest": digest, "min_vcpus": 16, "min_ram_bytes": 0,
-                 "temperature": 0.7},
+                 "temperature": 0.7, "top_p": 0.95, "top_k": 20, "num_ctx": 65536},
             ]}}
             page.get_by_text("16 vCPUs, 0 RAM bytes minimum", exact=False).wait_for()
-            page.get_by_text("temperature 0.7, top-p default", exact=False).wait_for()
+            page.get_by_text("temperature 0.7, top-p 0.95", exact=False).wait_for()
             page.get_by_label("Repository", exact=True).fill("not-a-repository")
             repository = page.get_by_label("Repository", exact=True)
             assert repository.evaluate("(input) => input.validity.patternMismatch")
