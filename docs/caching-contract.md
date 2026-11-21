@@ -107,9 +107,16 @@ so NetBox is asked at most hourly). A background map build reads them with
 running instead of returning the copy it replaces (else the map would keep the
 hour-old list for another hour). Inside the floor it fetches nothing, and a
 failed refresh serves the cached copy. Page reads never use it. With no
-NetBox spoke connected (right after a hub restart, before it reconnects) the
-fetch raises `CacheSkipped`: NetBox was never asked, so no floor starts and
-the next tick tries again. A map built from a list that was missing,
+NetBox spoke connected (right after a hub restart, before it reconnects), or
+one whose connection has not yet been sent its config (a reconnected spoke
+runs its default config, which points at localhost, until the hub's
+`UPDATE_CONFIG` lands), or one whose connect push failed before it was
+ever sent its config (held until an `UPDATE_CONFIG` reaches it: a
+reconnect, approval, config save or admin re-push;
+`hub_spoke_registry.spoke_config_state`), the fetch raises `CacheSkipped`:
+NetBox was never asked, so no floor starts and the first tick after the
+config lands fetches the lists. `send_to_spoke` records every delivered
+`UPDATE_CONFIG`, and a later failed push does not undo it. A map built from a list that was missing,
 invalidated or past its hourly refresh (the restart case: none held yet, or
 the copy persisted before the restart) records the fetch time of each list it
 read (`_nb_behind`). Once the hub holds a newer list, the next page read
@@ -170,7 +177,7 @@ rate also sets `min_interval_s`, a hard floor that the background refresher,
 page reads, login kicks and `cache_refresh()` all honor (the NAC Access
 Tracker's 24-hour history uses 300 s). The floor counts from the last attempt,
 failed ones included. A fetch that could not ask its source at all (its spoke
-is not connected) raises `warm_cache.CacheSkipped`: the read fails, but no
+is not connected, or not yet sent its config) raises `warm_cache.CacheSkipped`: the read fails, but no
 error is recorded and no floor starts. Inside it a page read serves what is cached, even when
 it is old or invalidated; with nothing cached the read raises
 `CacheFloorError`, which a route answers with 503 and a `Retry-After` header.
