@@ -13,8 +13,8 @@ import logging
 import re
 # time drives session expiry and last-sync timestamps.
 import time
-# Type hints for session dicts and optional lookups.
-from typing import Any, Dict, Optional
+# Type hints for session dicts, optional lookups and the write-lock key.
+from typing import Any, Dict, Optional, Tuple
 
 # Device spec lookup used when mapping console-identified models to NetBox types.
 from device_specs import get_spec as get_device_spec
@@ -262,56 +262,76 @@ class HubVncConsoleMixin:
             return None
         return sess
 
-    def _vnc_writer_map(self) -> Dict[str, str]:
-        """Lazily-initialized unique_id → writer session_id map. Lazy (like
-        ``_console_sync_status``) so hub test fixtures that predate this
-        feature don't need to know about a new ``__init__`` attribute."""
+    @staticmethod
+    def _vnc_lock_key(agent_id: Any, unique_id: Any) -> Tuple[str, str]:
+        """The key of a VM's write lock and viewer list: the agent that
+        relays the VM, and its unique_id. A unique_id
+        ("<cluster>/<node>/<vmid>") names no agent, so two tenants' separate
+        clusters can share one (default node name, same VM ID). Keying by the
+        agent as well keeps their consoles' write locks and viewer lists
+        apart. A session opened with no agent keys on ("", unique_id): one
+        host's VM, as before."""
+        return (str(agent_id or ""), str(unique_id or ""))
+
+    def _vnc_writer_map(self) -> Dict[Tuple[str, str], str]:
+        """Lazily-initialized (agent_id, unique_id) → writer session_id map
+        (see ``_vnc_lock_key``). Lazy (like ``_console_sync_status``) so hub
+        test fixtures that predate this feature don't need to know about a
+        new ``__init__`` attribute."""
         # Create the writer map on first use.
         if not hasattr(self, "_vnc_writers"):
-            self._vnc_writers: Dict[str, str] = {}
+            self._vnc_writers: Dict[Tuple[str, str], str] = {}
         return self._vnc_writers
 
     def unregister_vnc_session(self, session_id: str) -> None:
-        """Remove a VNC session and release its write lock if it held one."""
-        # Drop the session and read which VM it was viewing.
-        sess = self.vnc_sessions.pop(session_id, None)
-        unique_id = str((sess or {}).get("unique_id") or "")
+        """Remove a VNC session and release its write lock if it held one.
+        The lock is the one of the VM on the agent the session was opened
+        on (``_vnc_lock_key``), so another agent's VM with the same
+        unique_id keeps its writer."""
+        # Drop the session and read which VM, on which agent, it was viewing.
+        sess = self.vnc_sessions.pop(session_id, None) or {}
+        key = self._vnc_lock_key(sess.get("agent_id"), sess.get("unique_id"))
         # Release the write lock if the departing session held it — the VM is
         # up for grabs again (the next opener becomes writer, or an explicit
         # takeover claims it). Remaining read-only viewers are NOT auto-
         # promoted, same as the serial console's PortChannel.detach().
         writers = self._vnc_writer_map()
         # Release the lock only if this session was the writer.
-        if unique_id and writers.get(unique_id) == session_id:
-            writers.pop(unique_id, None)
+        if key[1] and writers.get(key) == session_id:
+            writers.pop(key, None)
 
-    def vnc_attach(self, unique_id: str, session_id: str) -> bool:
-        """Register ``session_id`` as a viewer of ``unique_id``; the first
-        viewer (no current writer) becomes the writer. Returns True if this
-        session is (now) the writer."""
-        # First viewer of a VM becomes its writer.
+    def vnc_attach(self, unique_id: str, session_id: str, agent_id: str = "") -> bool:
+        """Register ``session_id`` as a viewer of ``unique_id`` on
+        ``agent_id``; the first viewer (no current writer) becomes the
+        writer. Returns True if this session is (now) the writer."""
+        # First viewer of a VM (on its agent) becomes its writer.
         writers = self._vnc_writer_map()
-        if unique_id not in writers:
-            writers[unique_id] = session_id
+        key = self._vnc_lock_key(agent_id, unique_id)
+        if key not in writers:
+            writers[key] = session_id
             return True
         # Otherwise report whether this session already is the writer.
-        return writers.get(unique_id) == session_id
+        return writers.get(key) == session_id
 
-    def vnc_is_writer(self, unique_id: str, session_id: str) -> bool:
-        """Return True if ``session_id`` currently holds the write lock for ``unique_id``."""
-        return self._vnc_writer_map().get(str(unique_id or "")) == session_id
+    def vnc_is_writer(self, unique_id: str, session_id: str, agent_id: str = "") -> bool:
+        """Return True if ``session_id`` currently holds the write lock for
+        ``unique_id`` on ``agent_id``."""
+        return self._vnc_writer_map().get(self._vnc_lock_key(agent_id, unique_id)) == session_id
 
-    def vnc_takeover(self, unique_id: str, session_id: str) -> Optional[str]:
-        """Forcibly make ``session_id`` the writer for ``unique_id``, evicting
-        whoever currently holds it. Returns the dispossessed session_id (None
-        if there was no prior writer, or the caller already held it)."""
+    def vnc_takeover(self, unique_id: str, session_id: str, agent_id: str = "") -> Optional[str]:
+        """Forcibly make ``session_id`` the writer for ``unique_id`` on
+        ``agent_id``, evicting whoever currently holds that VM's lock (never
+        the writer of another agent's VM with the same unique_id). Returns
+        the dispossessed session_id (None if there was no prior writer, or
+        the caller already held it)."""
         # Read the current writer; nothing to evict if the caller already holds it.
         writers = self._vnc_writer_map()
-        prev = writers.get(unique_id)
+        key = self._vnc_lock_key(agent_id, unique_id)
+        prev = writers.get(key)
         if prev == session_id:
             return None
         # Hand the lock to the caller and report who lost it.
-        writers[unique_id] = session_id
+        writers[key] = session_id
         return prev
 
     async def notify_vnc_downgraded(self, session_id: str) -> None:
@@ -324,26 +344,30 @@ class HubVncConsoleMixin:
         if sess is not None:
             await sess["queue"].put(("downgraded",))
 
-    def vnc_viewers(self, unique_id: str) -> list:
-        """Presence: the connected VNC viewers currently attached to ``unique_id``.
+    def vnc_viewers(self, unique_id: str, agent_id: str = "") -> list:
+        """Presence: the connected VNC viewers currently attached to
+        ``unique_id`` on ``agent_id`` (``_vnc_lock_key``), never the viewers
+        of another agent's VM that shares the unique_id.
 
         Each user opens their OWN VNC session (distinct session_id → its own
         Proxmox vncwebsocket); QEMU's VNC server natively multiplexes the clients
         so every viewer sees/controls the same screen. This lists who is attached
         so the UI can show a live viewer roster. Returns newest-first."""
         out = []
+        key = self._vnc_lock_key(agent_id, unique_id)
+        writer = self._vnc_writer_map().get(key)
         # Walk every VNC session and collect the connected ones viewing this VM.
         for sid, s in list(self.vnc_sessions.items()):
             if not s.get("connected"):
                 continue
-            if str(s.get("unique_id") or "") != str(unique_id or ""):
+            if self._vnc_lock_key(s.get("agent_id"), s.get("unique_id")) != key:
                 continue
             # Report who is viewing, whether they hold the write lock, and since when.
             out.append({
                 "session_id": sid,
                 "username": s.get("username") or "",
                 "tenant_id": s.get("tenant_id") or "",
-                "is_writer": self._vnc_writer_map().get(str(unique_id or "")) == sid,
+                "is_writer": writer == sid,
                 "since": s.get("connected_at") or 0,
             })
         # Newest viewers first.
