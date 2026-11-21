@@ -54,6 +54,8 @@ def _extract_public_cpu(stream, tree):
                 len(path.parts) == 3 and path.parts[:2] == ("lib", "ollama"))
             if not selected:
                 continue
+            if entry.isdir() and path.parts[:2] == ("lib", "ollama"):
+                continue
             target = tree.joinpath(*path.parts)
             target.parent.mkdir(parents=True, exist_ok=True)
             if entry.issym():

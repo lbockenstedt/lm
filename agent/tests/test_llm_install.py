@@ -118,6 +118,9 @@ def _public_release(entries):
             if kind == "link":
                 entry.type, entry.linkname = tarfile.SYMTYPE, value
                 archive.addfile(entry)
+            elif kind == "directory":
+                entry.type = tarfile.DIRTYPE
+                archive.addfile(entry)
             else:
                 entry.mode = 0o755
                 entry.size = len(value)
@@ -132,6 +135,8 @@ def test_public_release_extracts_cpu_libraries_and_safe_links_only(tmp_path):
         ("bin/ollama", "file", b"binary"),
         ("lib/ollama/libggml.so.0", "file", b"library"),
         ("lib/ollama/libggml.so", "link", "libggml.so.0"),
+        ("lib/ollama/cuda_v12/", "directory", None),
+        ("lib/ollama/cuda_v12/libcuda_alias.so", "link", "libcuda.so"),
         ("lib/ollama/cuda_v12/libcuda.so", "file", b"gpu"),
     ])
     llm_install._extract_public_cpu(archive, tmp_path)
