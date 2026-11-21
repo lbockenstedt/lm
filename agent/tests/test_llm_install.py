@@ -154,6 +154,7 @@ def test_public_release_refuses_unsafe_archive_paths_and_links(tmp_path, name, t
 def test_public_release_rejects_bad_digest_before_extraction(tmp_path, monkeypatch):
     """Unverified downloads cannot be unpacked or published."""
     monkeypatch.setattr(llm_install.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(llm_install, "_ensure_zstd", lambda: None)
     monkeypatch.setattr(llm_install.urllib.request, "build_opener",
                         lambda *_: type("Opener", (), {"open": lambda *_args, **_kw: io.BytesIO(b"bad")})())
     monkeypatch.setattr(llm_install.subprocess, "Popen", lambda *a, **k: pytest.fail("unverified extraction"))
@@ -161,6 +162,37 @@ def test_public_release_rejects_bad_digest_before_extraction(tmp_path, monkeypat
     with pytest.raises(ValueError, match="SHA-256 mismatch"):
         llm_install.stage_public_runtime(destination)
     assert not destination.exists()
+
+
+def test_missing_zstd_is_installed_before_runtime_download(tmp_path, monkeypatch):
+    """Fresh workers get the decompressor without attempting an unverified extraction."""
+    monkeypatch.setattr(llm_install.platform, "machine", lambda: "x86_64")
+    availability = iter([None, "/usr/bin/zstd"])
+    monkeypatch.setattr(llm_install.shutil, "which", lambda name: next(availability))
+    calls = []
+    monkeypatch.setattr(llm_install.subprocess, "run", lambda args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr(llm_install.urllib.request, "build_opener",
+                        lambda *_: type("Opener", (), {"open": lambda *_args, **_kw: io.BytesIO(b"bad")})())
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        llm_install.stage_public_runtime(tmp_path / "candidate")
+    assert calls[0][0] == ["apt-get", "-o", "DPkg::Lock::Timeout=600", "install", "-y", "-qq", "zstd"]
+    assert calls[0][1]["check"] is True
+
+
+def test_missing_zstd_install_failure_stops_before_download(tmp_path, monkeypatch):
+    """Package installation failure is reported rather than launching a download."""
+    monkeypatch.setattr(llm_install.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(llm_install.shutil, "which", lambda name: None)
+
+    def fail_install(*args, **kwargs):
+        """Simulate an unavailable package manager."""
+        raise FileNotFoundError("apt-get")
+
+    monkeypatch.setattr(llm_install.subprocess, "run", fail_install)
+    monkeypatch.setattr(llm_install.urllib.request, "build_opener",
+                        lambda *_: pytest.fail("download must not start"))
+    with pytest.raises(ValueError, match="zstd prerequisite"):
+        llm_install.stage_public_runtime(tmp_path / "candidate")
 
 
 def _activation_fixture(tmp_path, monkeypatch, model="test:cpu", content=b"model data"):

@@ -150,7 +150,10 @@ For a first Shared worker, **Prepare and test** selects an owner-approved public
 CPU candidate and downloads the pinned x86_64 Ollama 0.40.16 release and model
 on the worker, not through the hub. The worker needs access to GitHub's release
 assets and the Ollama registry, plus disk space for the 1.55 GB runtime archive,
-model download, and a second model copy during activation. Other architectures,
+model download, and a second model copy during activation. On a Debian-family
+worker missing `zstd`, preparation installs it through apt before downloading
+the runtime; the package manager and configured repositories must be usable.
+Other architectures,
 changed model tags, or an incompatible existing runtime fail instead of being
 silently substituted. The dashboard shows runtime, pull and fixture phases, not
 byte-level download progress. An interrupted preparation is retried after an

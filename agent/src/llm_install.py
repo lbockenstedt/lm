@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import platform
 import re
 import shutil
@@ -83,6 +84,20 @@ def _extract_public_cpu(stream, tree):
         raise ValueError("Ollama release has no executable CPU runtime")
 
 
+def _ensure_zstd():
+    """Install the archive decompressor only when it is absent on the worker."""
+    if shutil.which("zstd"):
+        return
+    try:
+        subprocess.run(["apt-get", "-o", "DPkg::Lock::Timeout=600", "install", "-y", "-qq", "zstd"],
+                       check=True, timeout=1200, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                       env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"})
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError("Could not install the zstd prerequisite") from exc
+    if not shutil.which("zstd"):
+        raise ValueError("The installed zstd executable is unavailable")
+
+
 def stage_public_runtime(destination):
     """Download and verify the owner-pinned Linux release without replacing a runtime."""
     spec = PUBLIC_RUNTIME.get(platform.machine())
@@ -94,6 +109,7 @@ def stage_public_runtime(destination):
                 and json.loads(marker.read_text(encoding="utf-8")) == {"sha256": spec["sha256"]}):
             return
         raise ValueError("An Ollama runtime already exists; provisioning will not replace it")
+    _ensure_zstd()
     with tempfile.TemporaryDirectory(dir=destination.parent) as temp:
         root = Path(temp)
         archive, tree = root / "release.tar.zst", root / "runtime"
