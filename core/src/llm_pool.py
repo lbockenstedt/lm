@@ -114,6 +114,7 @@ SAMPLING_LIMITS = {
     "temperature": 2.0, "top_p": 1.0, "top_k": 256,
     "repeat_penalty": 2.0, "num_ctx": 131072,
 }
+LEGACY_OPTIONS = {"temperature", "top_p"}
 INTEGER_OPTIONS = {"top_k", "num_ctx"}
 # A runtime download, model pull and CPU fixtures can take several hours.
 QUALIFY_TIMEOUT = 15000
@@ -569,7 +570,8 @@ class LlmPool:
         options = data.get("supported_options")
         self.worker_options[key] = (
             {name for name in options if isinstance(name, str) and name in SAMPLING_LIMITS}
-            if isinstance(options, list) and len(options) <= len(SAMPLING_LIMITS) else set()
+            if isinstance(options, list) and len(options) <= len(SAMPLING_LIMITS)
+            else LEGACY_OPTIONS.copy() if "supported_options" not in data else set()
         )
         version = data.get("version")
         if isinstance(version, str) and re.fullmatch(r"\d{1,5}\.\d{1,5}\.\d{1,5}", version):

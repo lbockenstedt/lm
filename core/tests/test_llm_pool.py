@@ -536,7 +536,8 @@ def test_task_profile_sampling_is_validated_forwarded_and_applied(monkeypatch):
             {**row, "temperature": 0.7, "top_p": 0.8}]}}).status_code == 200
 
     pool.hub.request_response.return_value = {"status": "SUCCESS", "text": "summary"}
-    assert asyncio.run(pool.complete("tenant-a", {"prompt": "fixture", "task": "summary"}))["code"] == "no_capacity"
+    assert asyncio.run(pool.complete("tenant-a", {"prompt": "fixture", "task": "summary"}))["status"] == "SUCCESS"
+    assert pool.hub.request_response.call_args.args[2]["options"] == {"temperature": 0.7, "top_p": 0.8}
     pool.report("a", pool.hub.active_connections["a"], {
         "status": "SUCCESS", "models": {JOB["model"]: DIGEST}, "available": True,
         "supported_options": ["temperature", "top_p"],

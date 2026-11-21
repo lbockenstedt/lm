@@ -129,6 +129,18 @@ def _atomic_catalog(path, content):
         temporary.unlink(missing_ok=True)
 
 
+def _remove_added_blobs(added):
+    """Remove only blobs still linked to the staged files we installed."""
+    for path, device, inode in reversed(added):
+        try:
+            current = path.lstat()
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != (device, inode):
+            raise ValueError("Serving blob changed during rollback")
+        path.unlink()
+
+
 def publish(candidate, expected_runtime_digest):
     """Stage verified model data and return an exact rollback record."""
     if EXTERNAL_CATALOG.exists() or EXTERNAL_CATALOG.is_symlink():
@@ -185,24 +197,32 @@ def publish(candidate, expected_runtime_digest):
             raise ValueError("Existing serving catalog conflicts with the selected model")
         after = (json.dumps({**catalog, candidate["model"]: candidate["digest"]}) + "\n").encode()
         destination = serving / "models"
-        for digest in blobs:
-            name = f"sha256-{digest}"
-            target = _store_path(destination, "blobs", name)
-            if target.exists() or target.is_symlink():
-                if _hash_file(target) != digest:
-                    raise ValueError("Existing serving blob digest mismatch")
-            else:
-                os.link(staged / "blobs" / name, target, follow_symlinks=False)
-        _mkdirs(destination, parts[:-1])
-        target = _store_path(destination, *parts)
-        added = not target.exists() and not target.is_symlink()
-        if added:
-            os.link(manifest_path, target, follow_symlinks=False)
-        elif _read_regular(target, MAX_MANIFEST) != manifest:
-            raise ValueError("Existing serving manifest conflicts with the selected model")
+        added_blobs = []
+        try:
+            for digest in blobs:
+                name = f"sha256-{digest}"
+                target = _store_path(destination, "blobs", name)
+                if target.exists() or target.is_symlink():
+                    if _hash_file(target) != digest:
+                        raise ValueError("Existing serving blob digest mismatch")
+                else:
+                    source = staged / "blobs" / name
+                    identity = source.stat()
+                    os.link(source, target, follow_symlinks=False)
+                    added_blobs.append((target, identity.st_dev, identity.st_ino))
+            _mkdirs(destination, parts[:-1])
+            target = _store_path(destination, *parts)
+            added = not target.exists() and not target.is_symlink()
+            if added:
+                os.link(manifest_path, target, follow_symlinks=False)
+            elif _read_regular(target, MAX_MANIFEST) != manifest:
+                raise ValueError("Existing serving manifest conflicts with the selected model")
+        except BaseException:
+            _remove_added_blobs(added_blobs)
+            raise
         return {"created": False, "before": before, "after": after,
                 "manifest": target, "manifest_bytes": manifest, "manifest_added": added,
-                "committed": False}
+                "added_blobs": added_blobs, "committed": False}
 
 
 def finalize(record):
@@ -232,3 +252,4 @@ def rollback(record):
         if _read_regular(target, MAX_MANIFEST) != record["manifest_bytes"]:
             raise ValueError("Serving manifest changed during rollback")
         target.unlink()
+    _remove_added_blobs(record["added_blobs"])

@@ -241,5 +241,37 @@ def test_additive_activation_rollback_preserves_existing_catalog(tmp_path, monke
     llm_activation.rollback(record)
     catalog = llm_activation.SERVING_RUNTIME / "llm-models.json"
     assert json.loads(catalog.read_text()) == {first["model"]: first["digest"]}
+    assert not (llm_activation.SERVING_RUNTIME / "models" / "blobs" / f"sha256-{digest}").exists()
+    assert len(list((llm_activation.SERVING_RUNTIME / "models" / "blobs").iterdir())) == 1
     assert not (llm_activation.SERVING_RUNTIME / "models" / "manifests" /
                 "registry.ollama.ai" / "library" / "second" / "cpu").exists()
+
+
+def test_additive_activation_cleans_blobs_when_publication_fails(tmp_path, monkeypatch):
+    """A failed manifest link must not strand the model blob."""
+    first = _activation_fixture(tmp_path, monkeypatch)
+    record = llm_activation.publish(first, "a" * 64)
+    llm_activation.finalize(record)
+    store = llm_activation.CANDIDATE_STORE
+    data = b"second model"
+    digest = hashlib.sha256(data).hexdigest()
+    (store / "blobs" / f"sha256-{digest}").write_bytes(data)
+    manifest = json.dumps({"config": {"digest": f"sha256:{digest}"}, "layers": []}).encode()
+    path = store / "manifests" / "registry.ollama.ai" / "library" / "second" / "cpu"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(manifest)
+    second = {"model": "second:cpu", "digest": hashlib.sha256(manifest).hexdigest()}
+    real_link = llm_activation.os.link
+
+    def fail_manifest_link(source, destination, **kwargs):
+        """Simulate a filesystem error after the new blob was linked."""
+        if Path(destination).name == "cpu":
+            raise OSError("synthetic link failure")
+        return real_link(source, destination, **kwargs)
+
+    monkeypatch.setattr(llm_activation.os, "link", fail_manifest_link)
+    with pytest.raises(OSError, match="synthetic link failure"):
+        llm_activation.publish(second, "a" * 64)
+    blobs = llm_activation.SERVING_RUNTIME / "models" / "blobs"
+    assert not (blobs / f"sha256-{digest}").exists()
+    assert len(list(blobs.iterdir())) == 1
