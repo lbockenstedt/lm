@@ -583,3 +583,124 @@ async def test_connect_push_stops_on_a_new_connection_or_a_confirmed_save(monkey
         hub.reply = {"status": "ERROR", "message": "spoke command queue full"}
         await LabManagerHub._push_nac_config_on_connect(hub, "cppm-a")
         assert slept == [30] and len(_updates(hub)) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_push_marks_the_connection_it_was_sent_on():
+    """A spoke counts as sent its config only on the connection the push ran
+    on: a reconnect is a new process on its default config until its own
+    push. A guid-primary rename keeps the connection, and with it the mark."""
+    from hub_spoke_registry import CONFIG_SENT, spoke_config_state
+
+    class _Sock:
+        """A socket stand-in that can be weakly referenced."""
+
+    hub = _make_hub([], "netbox-a", module_type="ipam")
+    hub.active_connections["netbox-a"] = first = _Sock()
+    assert spoke_config_state(hub, "netbox-a") == "pending"
+    await LabManagerHub.push_config_to_spoke(hub, "netbox-a")
+    assert spoke_config_state(hub, "netbox-a") == CONFIG_SENT
+    hub._alias["netbox-a"] = "guid-a"
+    hub.active_connections = {"guid-a": first}
+    assert spoke_config_state(hub, "netbox-a") == CONFIG_SENT
+    hub.active_connections["guid-a"] = _Sock()
+    assert spoke_config_state(hub, "netbox-a") == "pending"
+
+
+@pytest.mark.asyncio
+async def test_a_reconnect_during_the_push_is_not_marked_by_it():
+    """A spoke that reconnects while the hub is still pushing to its old
+    connection must stay unmarked: its new process holds only its default
+    config until its own connect push."""
+    from hub_spoke_registry import CONFIG_SENT, spoke_config_state
+
+    class _Sock:
+        """A socket stand-in that can be weakly referenced."""
+
+    hub = _make_hub([], "netbox-a", module_type="ipam")
+    hub.active_connections["netbox-a"] = _Sock()
+    send = hub.send_setup_to_spoke
+
+    async def _reconnect_then_send(msg):
+        """The spoke reconnects while the hub sends its hub secret."""
+        hub.active_connections["netbox-a"] = _Sock()
+        await send(msg)
+
+    hub.send_setup_to_spoke = _reconnect_then_send
+    await LabManagerHub.push_config_to_spoke(hub, "netbox-a")
+    assert spoke_config_state(hub, "netbox-a") == "pending"
+
+
+@pytest.mark.asyncio
+async def test_a_push_that_failed_is_not_counted_as_sent():
+    """A push that raised may have left the spoke on its default config, so
+    its connection is recorded as failed, not as sent."""
+    from hub_spoke_registry import CONFIG_FAILED, spoke_config_state
+
+    class _Sock:
+        """A socket stand-in that can be weakly referenced."""
+
+    hub = _make_hub([], "netbox-a", module_type="ipam")
+    hub.active_connections["netbox-a"] = _Sock()
+
+    async def _fail(msg):
+        """The hub-secret send fails."""
+        raise ConnectionError("send failed")
+
+    hub.send_setup_to_spoke = _fail
+    await LabManagerHub.push_config_to_spoke(hub, "netbox-a")
+    assert spoke_config_state(hub, "netbox-a") == CONFIG_FAILED
+
+
+@pytest.mark.asyncio
+async def test_any_delivered_update_config_counts_as_sent(tmp_path):
+    """A config save sends UPDATE_CONFIG straight through send_to_spoke, not
+    through push_config_to_spoke, so the real send_to_spoke records the
+    connection as sent; a later failed push does not undo that."""
+    import time
+    from hub_spoke_registry import (
+        CONFIG_FAILED, CONFIG_SENT, mark_spoke_config_pushed, spoke_config_state)
+    from main import Message, MessageHeader, MessagePayload
+    from security.key_manager import KeyManager, ManagedKey
+
+    class _WS:
+        """A socket stand-in that accepts any frame."""
+
+        async def send(self, wire):
+            """Accept the frame."""
+
+    class _Hub:
+        """Only what send_to_spoke touches."""
+
+        def __init__(self):
+            self.key_manager = KeyManager("k.json", "h.json")
+            self.key_manager.storage_path = str(tmp_path / "k.json")
+            self.key_manager.hub_secret_path = str(tmp_path / "h.json")
+            self.key_manager.keys["nb"] = ManagedKey(
+                key_id="k-1", secret="secret-abc", created_at=time.time(),
+                expires_at=time.time() + 3600)
+            self.active_connections = {"nb": _WS()}
+            self.active_connection_key_ids = {}
+            self.spoke_enc_capable = {}
+            self.bytes_count = self.message_count = 0
+
+        def _primary_key(self, spoke_id):
+            """No aliases."""
+            return spoke_id
+
+    def _msg(ptype):
+        """A hub message to the NetBox spoke."""
+        return Message(
+            header=MessageHeader(message_id="m", timestamp=time.time(),
+                                 sender_id="hub", destination_id="nb"),
+            payload=MessagePayload(type=ptype, data={"netbox_url": "x"}))
+
+    hub = _Hub()
+    ws = hub.active_connections["nb"]
+    mark_spoke_config_pushed(hub, ws, ok=False)
+    await LabManagerHub.send_to_spoke(hub, _msg("NETBOX_GET_DEVICES"))
+    assert spoke_config_state(hub, "nb") == CONFIG_FAILED
+    await LabManagerHub.send_to_spoke(hub, _msg("UPDATE_CONFIG"))
+    assert spoke_config_state(hub, "nb") == CONFIG_SENT
+    mark_spoke_config_pushed(hub, ws, ok=False)
+    assert spoke_config_state(hub, "nb") == CONFIG_SENT

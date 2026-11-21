@@ -2713,8 +2713,13 @@ def register(app, hub, ctx):
     def _le_guard_change(request, domain):
         """403 unless the caller may CHANGE this cert (admin, an owner, or a
         legacy ownerless cert). Shared-but-not-owned → deploy only, so blocked."""
-        # Block anyone who may not change this cert.
+        # Block anyone who may not change this cert. An AppBuilder-pinned
+        # name is admin-only: its key authorizes HUB_REQUEST over mTLS. The
+        # ledger key is the cert's full name list: the le spoke passes only
+        # ``-d <domain>`` to certbot (acme.issue_argv) and stores no other
+        # SANs, so splitting it on commas covers every name in the cert.
         sess = _session_user(request)
+        _le_guard_ab_pinned(sess, [domain])
         if not _lca.can_change(hub, sess, domain):
             raise HTTPException(
                 status_code=403,
@@ -2756,24 +2761,301 @@ def register(app, hub, ctx):
             lambda aid: hub.get_spoke_for_agent(aid, fallback_hypervisor=False) or "",
             _agent_tenant)
 
+    def _le_routed_target_tenant(module_type, identifier, spoke_id=None):
+        """The owning tenant of the spoke distribution will push this target's
+        certificate and key to, or "" when that is not the spoke the target
+        names.
+
+        Distribution picks the recipient with hub._cert_target_spoke(
+        module_type, identifier) and never reads ``spoke_id``. That function
+        falls back to another spoke when the named one is not a connected spoke
+        of that type: the first connected spoke of the type, or any
+        node-hosting spoke for an unindexed node or the "all nodes" target. So
+        ownership is taken from the actual recipient, and a target whose
+        recipient is a fallback is refused:
+        - a spoke-level target must route to its own ``identifier``;
+        - a per-node (hypervisor/simulation) target must route to the spoke
+          that owns the node (get_spoke_for_agent, no pxmx guess), and that
+          spoke must be shared or in the node's own tenant;
+        - a ``spoke_id``, if sent, must name that same spoke.
+        Each part must be a string with no surrounding whitespace: the le
+        spoke stores and distribution routes the raw value, so a check on a
+        trimmed copy would vouch for "nac-acme " while routing falls back to
+        another tenant's spoke."""
+        # Check exactly what is stored and routed; no identifier means a
+        # fallback recipient.
+        parts = (module_type, identifier, spoke_id)
+        if any(p is not None and (not isinstance(p, str) or p != p.strip())
+               for p in parts):
+            return ""
+        mt, ident, sid = (p or "" for p in parts)
+        if not ident:
+            return ""
+        routed = hub._cert_target_spoke(mt, ident) or ""
+        if not routed:
+            return ""
+        pk = hub._primary_key
+        # Agent-hosting: the recipient must be the node's own spoke.
+        if mt in ("hypervisor", "simulation"):
+            own = hub.get_spoke_for_agent(ident, fallback_hypervisor=False) or ""
+            if not own or pk(own) != pk(routed) or (sid and pk(sid) != pk(routed)):
+                return ""
+            # The node's tenant pin wins over its spoke's tenant, but the key
+            # is sent to that spoke. A shared (or unassigned) spoke is Global
+            # Admin infrastructure, like the hub that relays every key; a
+            # spoke owned by another tenant must not receive it.
+            node_tenant = _le_target_tenant(mt, ident, routed)
+            spoke_tenant = hub.state.get_spoke_tenant(pk(routed)) or ""
+            if (spoke_tenant and not access.tenant_is_shared(spoke_tenant)
+                    and not access.same_tenant(spoke_tenant, node_tenant)):
+                return ""
+            return node_tenant
+        # Other types: the recipient must be the named spoke itself.
+        if pk(routed) != pk(ident) or (sid and pk(sid) != pk(ident)):
+            return ""
+        return _le_target_tenant(mt, ident)
+
     def _le_guard_target(request, module_type, identifier, spoke_id=None):
         """403 unless the caller may deploy to this install TARGET. A Global Admin
         may target anything (incl. the hub + shared spokes). A tenant-admin may
         target ONLY a spoke/agent bound to one of their own tenants — never the
-        hub and never another tenant's (or an unattributable/shared) target."""
+        hub and never another tenant's (or an unattributable/shared) target.
+        Ownership follows the spoke distribution will push to
+        (_le_routed_target_tenant), not a caller-supplied spoke_id."""
         # Global admins may target anything.
         sess = _session_user(request)
         if _is_admin(sess):
             return
         # Otherwise the target must belong to one of the caller's tenants.
-        ttid = _le_target_tenant(module_type, identifier, spoke_id)
+        ttid = _le_routed_target_tenant(module_type, identifier, spoke_id)
         mine = [*_lca.user_tenants(sess), _lca.current_tenant(sess)]
         if not access.tenant_among(ttid, mine):
             raise HTTPException(
                 status_code=403,
-                detail="You can only deploy this certificate to targets in your "
-                       "own tenant. The hub and shared infrastructure are managed "
-                       "by a Global Admin.")
+                detail="You can only deploy this certificate to connected "
+                       "targets in your own tenant. The hub and shared "
+                       "infrastructure are managed by a Global Admin; a target "
+                       "that is offline can be used once it reconnects.")
+
+    def _le_target_allowed(request, t):
+        """True when the caller may deploy to target ``t`` (_le_guard_target)."""
+        try:
+            _le_guard_target(request, t.get("module_type"), t.get("identifier"),
+                             t.get("spoke_id"))
+            return True
+        except HTTPException:
+            return False
+
+    async def _le_guard_existing_targets(request, body):
+        """403 when a non-admin re-issues a cert that already has a target they
+        could not add. The le spoke carries the previous targets forward on a
+        re-issue and resets their push markers (le_spoke._issue), and this
+        route distributes to the list it returns, so the fresh key would be
+        pushed to the hub or another tenant's spoke at the tenant's request.
+        The ledger is read live: a target added in the last minutes may not be
+        in le_cache yet. The spoke keys its ledger by the raw ``domain``."""
+        # Admins pass; a request with no domain is refused by the spoke.
+        if _is_admin(_session_user(request)) or not body.get("domain"):
+            return
+        # The existing ledger entry for this exact domain, if any.
+        _, _, payload = await _le_request("LE_LIST_CERTS", {})
+        certs = _le_inner(payload).get("certs") or []
+        prev = next((c for c in certs if isinstance(c, dict)
+                     and c.get("domain") == body.get("domain")), {})
+        # Every carried-forward target must be one the caller could add.
+        if any(isinstance(t, dict) and not _le_target_allowed(request, t)
+               for t in prev.get("targets") or []):
+            raise HTTPException(
+                status_code=403,
+                detail="This certificate is installed on a target outside your "
+                       "tenant or one that is offline, so re-issuing it now "
+                       "could push the new key elsewhere. Retry once your "
+                       "targets are connected, or ask a Global Admin.")
+
+    async def _le_drop_foreign_targets(request, domain, raw):
+        """The targets in the spoke's returned list ``raw`` that the caller may
+        deploy to now; only those are pushed at once. A target owned by
+        another tenant (by its stored identifier, _le_target_tenant) is also
+        removed from the ledger, since distribution's sweep pushes to every
+        ledger target. One that is only unroutable now (its spoke offline or
+        reconnecting during the certbot run) or unattributable stays for the
+        sweep: deleting it would unlink the tenant's own device for good.
+        Removal is by index, highest first so earlier indexes stay valid."""
+        # Split the returned list by whether the caller may deploy to each.
+        raw = raw if isinstance(raw, list) else []
+        mine = [*_lca.user_tenants(_session_user(request)),
+                _lca.current_tenant(_session_user(request))]
+        skip, foreign = [], []
+        for i, t in enumerate(raw):
+            if not isinstance(t, dict) or _le_target_allowed(request, t):
+                continue
+            skip.append(i)
+            owner = _le_target_tenant(t.get("module_type"), t.get("identifier"))
+            if owner and not access.tenant_among(owner, mine):
+                foreign.append(i)
+        # Remove the foreign ones; a failure is logged so it can be cleaned up.
+        for i in reversed(foreign):
+            try:
+                await _le_request("LE_REMOVE_TARGET", {"domain": domain, "idx": i})
+            except Exception as e:  # noqa: BLE001
+                logger.error("le issue %s: could not remove target %d of another "
+                             "tenant: %s", domain, i, e)
+        if skip:
+            logger.warning("le issue %s: not pushing %d target(s) the caller "
+                           "cannot deploy to now; removed %d of another tenant",
+                           domain, len(skip), len(foreign))
+        return [t for i, t in enumerate(raw) if isinstance(t, dict) and i not in skip]
+
+    def _le_name(n):
+        """A DNS name as compared here: trimmed, lower case, no trailing dot."""
+        return str(n or "").strip().rstrip(".").lower()
+
+    def _le_split_names(values):
+        """Each DNS name in ``values``, splitting comma lists: the le spoke
+        passes ``domain`` to ``certbot -d``, which reads "a,b" as two names,
+        so checking the joined string would let a second name through."""
+        return [n for v in values for n in (_le_name(p) for p in str(v or "").split(","))
+                if n]
+
+    def _le_issue_names(body):
+        """Every name an issue request asks for (``domain`` plus ``domains``)."""
+        # The main domain, then any extra names.
+        extra = body.get("domains")
+        return _le_split_names([body.get("domain"), *(extra if isinstance(extra, list) else [])])
+
+    def _le_guard_ab_pinned(sess, names):
+        """403 for a non-admin touching an AppBuilder-pinned name. The hub
+        accepts HUB_REQUEST from any mTLS client whose cert carries one of
+        these names (main._hub_request_authorized), so a tenant who could
+        issue, re-target or deploy such a cert could get its key and act as
+        AppBuilder."""
+        # Admins pass; others may not touch a pinned name.
+        if _is_admin(sess):
+            return
+        pinned = _ab_pinned()
+        if any(n in pinned for n in _le_split_names(names)):
+            raise HTTPException(
+                status_code=403,
+                detail="This name is reserved for AppBuilder. Only a Global "
+                       "Admin can issue or change its certificate.")
+
+    async def _le_eligible_names(sess):
+        """(hosts, wildcards) to suggest to a caller: the A/AAAA
+        hostnames from their tenant's DNS, plus one ``*.<parent>`` wildcard per
+        parent domain. A non-admin gets only names in their own prefixes; an
+        admin gets all of them.
+
+        It feeds the issue dialog's domain suggestions only; it is not an
+        ownership check, because a tenant can add DNS records for any name
+        (_le_guard_issue). It scopes non-admins whether or not the ``le``
+        subnet filter is on. That filter only decides which existing certs a
+        tenant sees (_filter_le_certs) and defaults off; with it off, this list
+        used to hold every name in the fleet's DNS, including other tenants'
+        and the hub's."""
+        # Non-admins: only their own prefixes.
+        nets = own_nets = None
+        owners = ()
+        if not _is_admin(sess):
+            # Shared DNS sources match VRF-sliced prefixes; the user's own
+            # tenants' resolvers/firewalls match all of them (_dns_hosts).
+            nets = _dns_prefix_nets(await access.resolve_owned_prefixes(hub, sess, shared=True))
+            own_nets = _dns_prefix_nets(await access.resolve_owned_prefixes(hub, sess))
+            owners = tuple(access._session_tenants(sess)) if sess else ()
+        # The matching hostnames plus one wildcard per parent domain.
+        hosts, _any_source = await _dns_hosts(nets, own_nets, owners)
+        wildcards = {f"*.{h.split('.', 1)[1]}" for h in hosts if "." in h}
+        return hosts, wildcards
+
+    def _le_is_dns_challenge(body):
+        """True when the request asks for a DNS-01 challenge (the spellings
+        acme._normalize_challenge accepts)."""
+        return str(body.get("challenge") or "http").strip().lower() in ("dns", "dns-01", "dns01")
+
+    async def _le_guard_issue(request, body):
+        """403 unless a non-admin may issue what ``body`` asks for. Admins pass.
+
+        - ``webroot`` and ``dns_creds_ini`` are paths on the le box, so only
+          an admin may name one.
+        - An AppBuilder-pinned name is admin-only (_le_guard_ab_pinned).
+        - Each requested target must be in the caller's own tenant, as when a
+          target is added later (_le_guard_target).
+        - Only DNS-01 is allowed. It proves control of the zone with the
+          tenant's own credential (_le_guard_issue_dns_cred). HTTP-01 and
+          TLS-ALPN-01 prove only that the name's public DNS points at the
+          shared le box, which an admin set up, and nothing a tenant can
+          write proves it owns such a name: a tenant may add an internal
+          record for any name in its own prefix (e.g. the hub's), so a
+          check against its DNS names can be satisfied for a name it does
+          not own."""
+        # Admins pass.
+        sess = _session_user(request)
+        if _is_admin(sess):
+            return
+        # No server paths from a tenant.
+        if body.get("webroot") or body.get("dns_creds_ini"):
+            raise HTTPException(
+                status_code=403,
+                detail="A webroot or credentials-file path on the certificate "
+                       "server can only be set by a Global Admin.")
+        # No AppBuilder names.
+        names = _le_issue_names(body)
+        _le_guard_ab_pinned(sess, names)
+        # Every target must be the caller's own.
+        targets = body.get("targets")
+        targets = [] if targets is None else targets
+        if not isinstance(targets, list) or not all(isinstance(t, dict) for t in targets):
+            raise HTTPException(status_code=400, detail="targets must be a list of objects")
+        for t in targets:
+            _le_guard_target(request, t.get("module_type"), t.get("identifier"),
+                             t.get("spoke_id"))
+        # Only a DNS-01 challenge proves the tenant owns the name.
+        if not _le_is_dns_challenge(body):
+            raise HTTPException(
+                status_code=403,
+                detail="Use a DNS challenge with your own DNS credential. "
+                       "HTTP-01 and TLS-ALPN-01 certificates are issued by a "
+                       "Global Admin.")
+
+    def _le_guard_issue_dns_cred(request, body):
+        """403 when a non-admin's DNS-01 issue would run on credentials that
+        are not the tenant's own. Runs after the vault reference is resolved.
+
+        The le spoke fills any gap from the box's own credentials: a missing
+        HE login falls back to the admin's (its config, or the stored
+        he-login.ini), and certbot-dns-route53 reads the box's AWS
+        credentials, ignoring any INI. So the check follows the provider, not
+        just "some credential field is set"; otherwise a tenant could send
+        ``dns_provider: he-login`` with an unused ``dns_creds`` and change TXT
+        records in a zone it does not own."""
+        # Admins and non-DNS challenges pass.
+        if _is_admin(_session_user(request)) or not _le_is_dns_challenge(body):
+            return
+        inline = ("dns_provider", "dns_creds", "he_username", "he_password")
+        # A named credential is read from this tenant's own store on the
+        # spoke. Per-request fields would override parts of it there, so a
+        # named credential must come alone.
+        if body.get("dns_credential"):
+            if any(body.get(k) for k in inline):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Send either a saved DNS credential or the "
+                           "credential fields, not both.")
+            return
+        # Otherwise the request carries the credentials itself (inline, or
+        # resolved from the tenant's vault bucket); each provider needs its own.
+        provider = str(body.get("dns_provider") or "").strip().lower()
+        if provider == "he-login":
+            ok = bool(body.get("he_username") and body.get("he_password"))
+        elif provider == "route53":
+            # Only a saved credential carries AWS keys to the spoke.
+            ok = False
+        else:
+            ok = bool(provider and str(body.get("dns_creds") or "").strip())
+        if not ok:
+            raise HTTPException(
+                status_code=403,
+                detail="A DNS challenge needs your tenant's own DNS credential "
+                       "for this provider.")
 
     def _nw_device_tenant(device_id):
         """The owning tenant_id of an nw device (from global_config.nw_devices),
@@ -3369,25 +3651,15 @@ def register(app, hub, ctx):
 
     @app.get("/api/le/eligible-domains")
     async def le_eligible_domains(request: Request):
-        """Domains the caller can issue a cert for and still SEE it under the ``le``
-        subnet filter: the A/AAAA hostnames from their tenant's DNS (both the DNS
-        module and firewalls), plus a derived ``*.<domain>`` wildcard per parent
-        domain. Non-admin with the filter ON → only hostnames in their prefixes;
-        admin or filter OFF → all DNS hostnames. Feeds the issue-cert domain dropdown."""
-        # Non-admins with the filter on: only their own prefixes; otherwise no filter.
-        sess = _session_user(request)
-        nets = own_nets = None
-        owners = ()
-        if sess and not _is_admin(sess) and access.filter_enabled(hub, "le"):
-            # Shared DNS sources match VRF-sliced prefixes; the user's own
-            # tenants' resolvers/firewalls match all of them (_dns_hosts).
-            nets = _dns_prefix_nets(await access.resolve_owned_prefixes(hub, sess, shared=True))
-            own_nets = _dns_prefix_nets(await access.resolve_owned_prefixes(hub, sess))
-            owners = tuple(access._session_tenants(sess))
-        # The matching hostnames plus one wildcard per parent domain.
-        hosts, _src = await _dns_hosts(nets, own_nets, owners)
-        wildcards = sorted({f"*.{h.split('.', 1)[1]}" for h in hosts if "." in h})
-        return {"hosts": sorted(hosts), "wildcards": wildcards}
+        """Domain suggestions for the issue-cert dialog: the A/AAAA hostnames
+        from the caller's DNS (both the DNS module and every firewall's host
+        overrides) plus one wildcard per parent domain. A non-admin gets only
+        hostnames in their own prefixes, whatever the ``le`` filter says; an
+        admin gets all of them (_le_eligible_names). Suggestions only:
+        le_issue_cert does not check names against this list."""
+        # Scoped suggestions for the dialog.
+        hosts, wildcards = await _le_eligible_names(_session_user(request))
+        return {"hosts": sorted(hosts), "wildcards": sorted(wildcards)}
 
     @app.get("/api/le/inflight")
     async def le_inflight():
@@ -3426,8 +3698,12 @@ def register(app, hub, ctx):
                        if isinstance(body, dict) else None)
         if _req_domain and _lca.has_owners(app.state.hub, _req_domain):
             _le_guard_change(request, _req_domain)
+        # A tenant may issue only for its own names, targets and credentials.
+        await _le_guard_issue(request, body)
         # Turn a vault reference into inline DNS credentials, keeping the reference.
         await _le_resolve_vault_dns_cred(request, body)  # {bucket,name} → inline creds
+        _le_guard_issue_dns_cred(request, body)
+        await _le_guard_existing_targets(request, body)
         vault_ref = body.get("dns_vault_credential") if isinstance(body, dict) else None
         # Issue the cert (certbot can take minutes).
         hub, le_sid, payload = await _le_request("LE_ISSUE_CERT", body,
@@ -3435,7 +3711,12 @@ def register(app, hub, ctx):
         # The issued domain and its targets.
         inner = _le_inner(payload)
         domain = inner.get("domain")
-        targets = inner.get("targets") or []
+        targets = [t for t in (inner.get("targets") or []) if isinstance(t, dict)]
+        # Defence in depth for a non-admin: a target that reached the ledger
+        # after the check (certbot runs for minutes) is not pushed now, and
+        # is removed so the hourly sweep does not push the new key to it.
+        if not _is_admin(_session_user(request)):
+            targets = await _le_drop_foreign_targets(request, domain, inner.get("targets"))
         # Auto-assign the creator's current tenant as an owner of the new cert so
         # it is scoped to (and manageable by) their tenant from the start.
         if domain:
@@ -3800,9 +4081,9 @@ def register(app, hub, ctx):
         if sess and not _is_admin(sess):
             mine = [*_lca.user_tenants(sess), _lca.current_tenant(sess)]
             targets = [t for t in targets
-                       if access.tenant_among(_le_target_tenant(t.get("module_type"),
-                                                                t.get("identifier"),
-                                                                t.get("spoke_id")), mine)]
+                       if access.tenant_among(_le_routed_target_tenant(
+                           t.get("module_type"), t.get("identifier"),
+                           t.get("spoke_id")), mine)]
         return {"targets": targets}
 
     @app.get("/api/le/wildcard/eligibility")
@@ -4272,6 +4553,7 @@ def register(app, hub, ctx):
         # A shared cert may be deployed by any tenant to THEIR OWN devices; an
         # owned cert only by an owner/admin. Reject a deploy to a device that
         # isn't the caller's (unless they can change the cert outright).
+        _le_guard_ab_pinned(_session_user(request), [domain])
         dev_tenant = _nw_device_tenant(device_id)
         if not _lca.can_deploy(hub, _session_user(request), domain, dev_tenant):
             raise HTTPException(

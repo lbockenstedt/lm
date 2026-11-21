@@ -12,6 +12,8 @@ change — ``LabManagerHub`` inherits these exactly as before.
 import logging
 # time compares last-seen timestamps against the grace window.
 import time
+# weakref tracks which spoke sockets were sent their config.
+import weakref
 # Optional marks lookups that may find nothing.
 from typing import Optional
 
@@ -203,6 +205,70 @@ def nac_spoke_stale(hub, spoke_id) -> bool:
     # A record configures it: stale until it holds exactly that record.
     expected = nac_push_key(records[0])
     return expected is None or pushed != expected
+
+
+# What a spoke connection's config push came to (spoke_config_state).
+CONFIG_PENDING = "pending"  # connected, not yet sent its config
+CONFIG_SENT = "sent"        # sent it (or had none to get)
+CONFIG_FAILED = "failed"    # the push raised: it may still run its defaults
+
+
+def _config_push_outcomes(hub) -> "weakref.WeakKeyDictionary":
+    """The hub's map of spoke socket -> CONFIG_SENT / CONFIG_FAILED for the
+    connections it has pushed config to. Weak, so a closed socket drops out
+    by itself."""
+    outcomes = getattr(hub, "_spoke_config_push_ws", None)
+    if outcomes is None:
+        outcomes = hub._spoke_config_push_ws = weakref.WeakKeyDictionary()
+    return outcomes
+
+
+def spoke_socket(hub, spoke_id):
+    """The socket of ``spoke_id``'s current connection, or None."""
+    conns = getattr(hub, "active_connections", None)
+    return conns.get(hub._primary_key(spoke_id)) if isinstance(conns, dict) else None
+
+
+def mark_spoke_config_pushed(hub, ws, ok=True) -> None:
+    """Record how the config push to the connection on socket ``ws`` ended:
+    sent (or nothing to send) when ``ok``, else failed. A connection that was
+    already sent its config stays sent: a later push that fails (a re-push
+    after a config save) leaves the spoke on the config it holds.
+    ``send_to_spoke`` also marks a socket sent whenever it delivers an
+    UPDATE_CONFIG, so config saves that send it directly count too.
+
+    Keyed by the socket, not the spoke id: a reconnect is a new socket (a
+    new spoke process that holds only its default config until the push),
+    and a guid-primary rename keeps the socket. The caller passes the socket
+    it captured before pushing, so a reconnect during the push leaves the
+    new socket pending until its own connect push."""
+    if ws is None:
+        return
+    try:
+        outcomes = _config_push_outcomes(hub)
+        if ok or outcomes.get(ws) != CONFIG_SENT:
+            outcomes[ws] = CONFIG_SENT if ok else CONFIG_FAILED
+    except TypeError:  # not weak-referenceable: spoke_config_state passes it
+        pass
+
+
+def spoke_config_state(hub, spoke_id) -> str:
+    """CONFIG_PENDING while ``spoke_id`` is connected and its connection has
+    not yet been sent its config: it then runs its default config (a
+    reconnected NetBox spoke asks localhost:8000 for its first second), so a
+    call sent then fails without reaching the real server. CONFIG_FAILED
+    when that connection's push raised before it was ever sent its config,
+    so it may still run its defaults until an UPDATE_CONFIG reaches it (a
+    reconnect, approval, config save or admin re-push). CONFIG_SENT
+    otherwise, including when it can't be told (no such socket, or one that
+    can't be weakly referenced)."""
+    ws = spoke_socket(hub, spoke_id)
+    if ws is None:
+        return CONFIG_SENT
+    try:
+        return _config_push_outcomes(hub).get(ws, CONFIG_PENDING)
+    except TypeError:
+        return CONFIG_SENT
 
 
 def _nac_instance_owners(hub, spoke_id) -> set:

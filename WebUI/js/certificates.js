@@ -1343,6 +1343,12 @@ async function leIssuePopulateDomains() {
     } catch (e) { /* best-effort — the field is still free-text */ }
 }
 
+// True for a Global Admin: only they may issue with HTTP-01 / TLS-ALPN-01
+// (the hub refuses those for tenants, who issue with DNS-01).
+function _leIsAdmin() {
+    return (typeof isAdmin === 'function') && isAdmin();
+}
+
 async function showLeIssueModal(prefill) {
     _leIssueTargets = [];
     if (!window._leAvailableTargets || !window._leAvailableTargets.length) {
@@ -1372,10 +1378,9 @@ async function showLeIssueModal(prefill) {
                 <div class="flex flex-col">
                     <label class="text-xs text-slate-500 mb-1">Challenge type</label>
                     <select id="le-issue-challenge" onchange="leIssueToggleChallenge()" title="Select ACME challenge validation type" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
-                        <option value="http">HTTP-01 (standalone)</option>
-                        <option value="http-webroot">HTTP-01 (webroot)</option>
+                        ${_leIsAdmin() ? '<option value="http">HTTP-01 (standalone)</option><option value="http-webroot">HTTP-01 (webroot)</option>' : ''}
                         <option value="dns">DNS</option>
-                        <option value="tls-alpn">TLS-ALPN-01</option>
+                        ${_leIsAdmin() ? '<option value="tls-alpn">TLS-ALPN-01</option>' : ''}
                     </select>
                 </div>
                 <div class="flex flex-col">
@@ -1503,6 +1508,7 @@ async function showLeIssueModal(prefill) {
     leIssueUpdateDnsFields();
     leTgtMtChange('le-issue-tgt-mt', 'le-issue-tgt-id');  // seed device list for the first module
     if (prefill) await _leApplyIssuePrefill(prefill);
+    else leIssueToggleChallenge();  // a tenant's dialog opens on DNS
 }
 
 // Populate the Issue-certificate modal from a stored request body (used by the
@@ -1520,6 +1526,8 @@ async function _leApplyIssuePrefill(p) {
         // presence of webroot distinguishes the two HTTP modes on the way back.
         chSel.value = p.webroot ? 'http-webroot'
             : (p.challenge === 'dns' ? 'dns' : p.challenge === 'tls-alpn' ? 'tls-alpn' : 'http');
+        // HTTP and TLS-ALPN are admin-only, so a tenant's dialog offers DNS only.
+        if (!chSel.value) chSel.value = 'dns';
     }
     setV('le-issue-keytype', p.key_type);
     setV('le-issue-profile', p.profile || '');

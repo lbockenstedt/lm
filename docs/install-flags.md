@@ -62,7 +62,7 @@ Roles persist in `.env` `LOADED_ROLES` (durable across self-update restarts); on
 ## le
 
 ### `install_le.sh`
-`--hub`, `--id`/`--name`, `--secret`, `--hub-secret`, `--all-prereqs` (no-op). Default `SPOKE_ID=le-<hostname>`, `HUB_URL=auto` (mDNS/DNS auto-discovery — same as every other LM spoke; pass `--hub <url>` to pin). **No** `--tls-verify`/`--tls-ca-cert` (not wired).
+`--hub`, `--id`/`--name`, `--secret`, `--hub-secret`, `--tls-verify` (+ `--tls-ca-cert <path>`), `--all-prereqs` (no-op). Default `SPOKE_ID=le-<hostname>`, `HUB_URL=auto` (mDNS/DNS auto-discovery — same as every other LM spoke; pass `--hub <url>` to pin).
 
 ## netbox
 
