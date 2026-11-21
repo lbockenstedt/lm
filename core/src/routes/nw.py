@@ -7,6 +7,7 @@ import time
 
 import instance_vault
 import nw_seen_hosts
+from hub_spoke_registry import CONFIG_FAILED, CONFIG_PENDING, spoke_config_state
 from api import (
     HTTPException, Request, _hub_msg, _unwrap_spoke, access, get_spoke_or_503,
     logger, uuid,
@@ -82,6 +83,15 @@ def _nw_netbox_job(hub, key):
             # Not a NetBox call (say, right after a hub restart, before the
             # spoke reconnects), so it must not start the hourly floor.
             raise CacheSkipped("no NetBox spoke connected")
+        # Not yet sent its config (just reconnected), or its push failed: it
+        # would ask its default server, fail, and start the hourly floor with
+        # NetBox never asked. Skip until a push lands (the failed push is
+        # logged by push_config_to_spoke); the next tick then fetches.
+        state = spoke_config_state(hub, netbox)
+        if state == CONFIG_PENDING:
+            raise CacheSkipped("NetBox spoke not yet sent its config")
+        if state == CONFIG_FAILED:
+            raise CacheSkipped("NetBox spoke's config push failed")
         rows = _nb_rows(await hub.request_response(netbox, cmd, {}, timeout=60.0), key)
         if rows is None:
             raise RuntimeError(f"{cmd} failed")

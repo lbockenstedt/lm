@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from routes.net_services import register  # noqa: E402
+from hub_spoke_registry import SpokeRegistryMixin  # noqa: E402
 
 SPOKE_TENANTS = {"nac-acme": "ACME", "nac-other": "other"}
 
@@ -28,12 +29,18 @@ class FakeHub:
         self.spoke_module_types = {sid: "nac" for sid in SPOKE_TENANTS}
         self.spoke_module_types["le-1"] = "certificates"
         self.active_connections = set(self.spoke_module_types)
+        self.agent_info = {}
+        self.netbox_server_agents = set()
+        self.ldap_server_agents = set()
         self.pushed = []
         self.state = SimpleNamespace(system_state={"module_names": {}},
                                      get_spoke_tenant=lambda sid: SPOKE_TENANTS.get(sid, ""))
 
     def _primary_key(self, sid):
         return sid
+
+    # The real recipient picker, so the tests follow distribution's routing.
+    _cert_target_spoke = SpokeRegistryMixin._cert_target_spoke
 
     def get_all_spokes_by_type(self, module_type):
         return [s for s, t in self.spoke_module_types.items() if t == module_type]

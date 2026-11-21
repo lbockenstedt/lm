@@ -150,7 +150,7 @@ from hub_identity import HubIdentityMixin
 from hub_bug_store import HubBugStoreMixin
 from hub_spoke_registry import (
     SpokeRegistryMixin, nac_spoke_stale, instance_records_for_spoke, record_nac_push,
-    mark_nac_push_unknown, nac_legacy_record,
+    mark_nac_push_unknown, nac_legacy_record, mark_spoke_config_pushed, spoke_socket,
 )
 from hub_statuspage import StatusPageMixin
 
@@ -2023,6 +2023,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     f"Spoke {spoke_id} connection closed/blocked mid-send: {e}") from e
             # Count the sent message.
             self.message_count += 1
+            # Any delivered UPDATE_CONFIG (connect push, a config save, an
+            # admin re-push) means this connection now runs the hub's config.
+            if _ptype == "UPDATE_CONFIG":
+                mark_spoke_config_pushed(self, ws)
         else:
             # Not connected: fail the send.
             raise ConnectionError(f"Spoke {spoke_id} is not connected")
@@ -3345,6 +3349,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
     async def push_config_to_spoke(self, spoke_id: str):
         """Pushes the module-specific configuration from global state to the spoke."""
+        # The connection this push configures, captured before any send so a
+        # reconnect mid-push is not marked by this (older) push.
+        pushed_ws = spoke_socket(self, spoke_id)
+        push_ok = True
         # Every step is wrapped so one failure does not stop the others.
         try:
             # Always push the hub secret first so mutual auth works even when there
@@ -3761,7 +3769,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             logger.info(f"Pushed {module_key} config to {spoke_id}")
         except Exception as e:
             # Log any failure in the push.
+            push_ok = False
             logger.error(f"Failed to push config to {spoke_id}: {e}")
+        finally:
+            # Record how this connection's push ended: once sent (or with
+            # none to get), commands sent to it from now on run on the hub's
+            # config; after a failure it may still run its defaults.
+            mark_spoke_config_pushed(self, pushed_ws, ok=push_ok)
 
     async def push_nac_config(self, spoke_id: str) -> Optional[str]:
         """Send NAC spoke ``spoke_id`` its ClearPass config (UPDATE_CONFIG) and,

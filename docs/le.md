@@ -35,7 +35,7 @@ No listener. Spoke dials hub on **443** (`/ws/spoke`, wss). certbot transiently 
 
 ## Install flags
 
-`install_le.sh`: `--hub`, `--id`/`--name`, `--secret`, `--hub-secret`, `--all-prereqs` (no-op). Default `SPOKE_ID=le-<hostname>`, `HUB_URL=auto` (mDNS/DNS auto-discovery — same as every other LM spoke; the old `wss://localhost:443/ws/spoke` default is gone). Pass `--hub <url>` to pin. **No** `--tls-verify`/`--tls-ca-cert` (not wired in this installer).
+`install_le.sh`: `--hub`, `--id`/`--name`, `--secret`, `--hub-secret`, `--tls-verify` (+ `--tls-ca-cert <path>`; sets `LM_HUB_TLS_VERIFY=1` + `LM_HUB_CA_CERT` in `.env`), `--all-prereqs` (no-op). Default `SPOKE_ID=le-<hostname>`, `HUB_URL=auto` (mDNS/DNS auto-discovery — same as every other LM spoke; the old `wss://localhost:443/ws/spoke` default is gone). Pass `--hub <url>` to pin. The le repo README flag table lists the same flags (kept in step in a separate le-repo change).
 
 ## Key commands / handlers (`LESpoke.handle_command`, `src/le_spoke.py`)
 
@@ -67,6 +67,62 @@ HE.NET External-DNS module** — one vault entry serves both (see [henet.md](hen
 The legacy per-spoke `/etc/lm-le/dns-<provider>.ini` path still works for
 existing named credentials, but new ones should go in the vault.
 
+## Who may issue a certificate
+
+A Global Admin may issue any certificate. For everyone else, `POST
+/api/le/issue` (`_le_guard_issue`, `core/src/routes/net_services.py`)
+enforces these rules:
+
+- **Server paths are admin-only.** A request with `webroot` or
+  `dns_creds_ini` is refused (403). Both are paths on the le box. The issue
+  dialog offers the HTTP-01 (webroot) option only to admins.
+- **AppBuilder names are admin-only.** A name listed as an AppBuilder
+  identity is refused (403) for issue, for target changes and for deploys.
+  The hub trusts any mTLS client whose certificate carries one of these
+  names to act as AppBuilder.
+- **Targets must be your own.** Each entry in `targets` must belong to your
+  tenant, under the same check as adding a target later. Ownership follows
+  the spoke the certificate will actually be pushed to, which distribution
+  picks from the target's `identifier`. A spoke-level target must name a
+  connected spoke of that module type, a Proxmox node target must name a
+  node the hub can route to its own spoke, and a `spoke_id` that names a
+  different spoke is refused. A node pinned to your tenant counts as yours
+  only while the spoke hosting it is shared or also yours, because that
+  spoke receives the key. A target that distribution would send to a
+  fallback spoke is refused, and so is an id with leading or trailing
+  spaces (it would not match and would fall back). The "all nodes"
+  target is Global Admin only, because distribution can send it to any
+  node-hosting spoke. A `targets` value that is not a list of objects is
+  refused (400).
+- **A re-issue keeps the existing targets.** Re-issuing a certificate pushes
+  the new key to every target it already has, so a tenant can re-issue only
+  a certificate whose existing targets are all in their own tenant. One
+  installed on the hub or on another tenant's spoke is refused (403); ask a
+  Global Admin to re-issue it. A target of another tenant added while the
+  certificate was being issued is not pushed and is removed from it; your
+  own target whose spoke was offline at that moment is kept and gets the
+  certificate on the next hourly sweep.
+- **Tenants issue with DNS-01 only.** HTTP-01 and TLS-ALPN-01 are refused
+  (403), and the issue dialog offers only DNS to non-admins. Those
+  challenges prove only that the name's public DNS points at the shared le
+  box, and nothing a tenant can write proves it owns such a name: a tenant
+  may add an internal DNS record for any name in its own prefix, including
+  the hub's. A Global Admin issues HTTP-01 and TLS-ALPN-01 certificates.
+  The dialog's domain suggestions list only your own DNS names, whether or
+  not the Certificates (`le`) subnet filter is on.
+- **Each name is checked.** A comma-separated `domain` ("a,b") is checked
+  name by name, as certbot issues one certificate for every name in it.
+- **DNS-01 needs your own DNS credential.** The challenge proves control of
+  the zone, so the request must carry the tenant's
+  own credential for its provider. Otherwise the le box would fill the gap
+  with its own credentials (the admin's Hurricane Electric login, or its
+  AWS keys). Allowed: a saved DNS credential on its own (sending credential
+  fields with it is refused, 400); a vault reference; or inline credentials,
+  where `he-login` needs both the username and password and other providers
+  need the credentials INI. Route 53 works only through a saved DNS
+  credential, because certbot ignores an INI for it. Anything else is
+  refused (403).
+
 ## Key files
 
 `src/control_plane.py` (`LEControlPlane`, `run_hub_mode`), `src/le_spoke.py` (`LESpoke` + renewal loop), `src/acme.py` (certbot wrapper: `issue`/`renew`/`revoke`/`list_certs`/`read_material`/`expiring`), `src/ledger.py` (`Ledger` atomic JSON — `upsert_cert`/`add_target`/`remove_target`/`target_key`), `install_le.sh`, `tests/test_acme.py`, `tests/test_le_spoke.py`, `tests/test_ledger.py`, `requirements.txt`, `VERSION`.
@@ -74,7 +130,7 @@ existing named credentials, but new ones should go in the vault.
 ## Notable behaviors & gotchas
 
 - **README says "structured stubs" but current code wires real certbot** — the README is stale on that point.
-- **Simplest spoke** — no listener port, no `--tls-verify` installer flag, no FastAPI dep. ACME producer + ledger.
+- **Simplest spoke** — no listener port, no FastAPI dep. ACME producer + ledger. `--tls-verify`/`--tls-ca-cert` are wired like every other installer.
 - **Hub-side cert distribution** (`lm core cert_distribution.py`) is out of scope for the le repo; this spoke just produces + ledger-tracks cert material.
 
 ## How it works
