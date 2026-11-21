@@ -35,7 +35,7 @@ No listener. Spoke dials hub on **443** (`/ws/spoke`, wss). certbot transiently 
 
 ## Install flags
 
-`install_le.sh`: `--hub`, `--id`/`--name`, `--secret`, `--hub-secret`, `--all-prereqs` (no-op). Default `SPOKE_ID=le-<hostname>`, `HUB_URL=auto` (mDNS/DNS auto-discovery — same as every other LM spoke; the old `wss://localhost:443/ws/spoke` default is gone). Pass `--hub <url>` to pin. **No** `--tls-verify`/`--tls-ca-cert` (not wired in this installer).
+`install_le.sh`: `--hub`, `--id`/`--name`, `--secret`, `--hub-secret`, `--tls-verify` (+ `--tls-ca-cert <path>`; sets `LM_HUB_TLS_VERIFY=1` + `LM_HUB_CA_CERT` in `.env`), `--all-prereqs` (no-op). Default `SPOKE_ID=le-<hostname>`, `HUB_URL=auto` (mDNS/DNS auto-discovery — same as every other LM spoke; the old `wss://localhost:443/ws/spoke` default is gone). Pass `--hub <url>` to pin. The le repo README flag table lists the same flags (kept in step in a separate le-repo change).
 
 ## Key commands / handlers (`LESpoke.handle_command`, `src/le_spoke.py`)
 
@@ -130,7 +130,7 @@ enforces these rules:
 ## Notable behaviors & gotchas
 
 - **README says "structured stubs" but current code wires real certbot** — the README is stale on that point.
-- **Simplest spoke** — no listener port, no `--tls-verify` installer flag, no FastAPI dep. ACME producer + ledger.
+- **Simplest spoke** — no listener port, no FastAPI dep. ACME producer + ledger. `--tls-verify`/`--tls-ca-cert` are wired like every other installer.
 - **Hub-side cert distribution** (`lm core cert_distribution.py`) is out of scope for the le repo; this spoke just produces + ledger-tracks cert material.
 
 ## How it works
