@@ -13,7 +13,9 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from unittest import mock
 
 GITHUB_DIR = pathlib.Path(__file__).resolve().parent.parent
 SCRIPT = GITHUB_DIR / "hooks" / "ai_budget.py"
@@ -35,25 +37,31 @@ class GateTest(unittest.TestCase):
         self.home = pathlib.Path(tmp.name)
         self.db = self.home / "session-store.db"
         with sqlite3.connect(self.db) as con:
-            con.execute("CREATE TABLE assistant_usage_events (created_at TEXT, total_nano_aiu INTEGER)")
+            con.execute("CREATE TABLE assistant_usage_events (session_id TEXT, created_at TEXT, total_nano_aiu INTEGER)")
 
-    def spend(self, usd, days_ago=0):
-        """Log ``usd`` of cloud AI spend, ``days_ago`` days back."""
+    def spend(self, usd, days_ago=0, session="cloud"):
+        """Log one model call costing ``usd`` (None: a free local model), ``days_ago`` days back."""
         when = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days_ago)
         with sqlite3.connect(self.db) as con:
-            con.execute("INSERT INTO assistant_usage_events VALUES (?, ?)",
-                        (when.strftime("%Y-%m-%dT%H:%M:%S.000Z"), int(usd * 1e11)))
+            con.execute("INSERT INTO assistant_usage_events VALUES (?, ?, ?)",
+                        (session, when.strftime("%Y-%m-%dT%H:%M:%S.000Z"), None if usd is None else int(usd * 1e11)))
 
-    def run_script(self, *args, stdin=""):
+    def run_script(self, *args, stdin="", session_env=None):
         """Run the script as Copilot does; return (exit code, stdout)."""
         env = dict(os.environ, COPILOT_HOME=str(self.home))
+        env.pop("COPILOT_AGENT_SESSION_ID", None)
+        if session_env:
+            env["COPILOT_AGENT_SESSION_ID"] = session_env
         p = subprocess.run([sys.executable, str(SCRIPT), *args], input=stdin, env=env,
                            capture_output=True, text=True, timeout=30)
         return p.returncode, p.stdout
 
-    def check(self, tool, args):
+    def check(self, tool, args, session=None):
         """The preToolUse answer for one call: the deny reason, or None when allowed."""
-        code, out = self.run_script("check", stdin=json.dumps({"toolName": tool, "toolArgs": args}))
+        payload = {"toolName": tool, "toolArgs": args}
+        if session:
+            payload["sessionId"] = session
+        code, out = self.run_script("check", stdin=json.dumps(payload))
         self.assertEqual(code, 0)
         return json.loads(out)["permissionDecisionReason"] if out.strip() else None
 
@@ -69,6 +77,48 @@ class GateTest(unittest.TestCase):
         self.assertIsNotNone(self.check("bash", {"command": "python3 %s status; ls" % SCRIPT}))
         _, out = self.run_script("context", stdin="{}")
         self.assertIn("CLOSED", json.loads(out)["additionalContext"])
+
+    def test_local_session_keeps_working_past_the_gate(self):
+        """Past the gate a session whose calls today were all free keeps working,
+        without cloud sub-agents. A session with cloud spend today (its own or a
+        sub-agent's), no calls today yet or no session id is still refused."""
+        self.spend(GATE * 1.5)
+        self.spend(None, session="local")
+        self.spend(None, session="mixed")
+        self.spend(0.5, session="mixed")
+        self.spend(None, days_ago=2, session="yesterday")
+        cases = {"local": True, "cloud": False, "mixed": False, "yesterday": False, "unknown": False, None: False}
+        for session, allowed in cases.items():
+            self.assertEqual(self.check("bash", {"command": "ls"}, session) is None, allowed, session)
+        self.assertIsNone(self.check("task", {"agent_type": "local-coder"}, "local"))
+        self.assertIsNone(self.check("task", {"agent_type": "explore", "model": "llamacpp/dsv4"}, "local"))
+        self.assertIn("no new cloud sub-agents", self.check("task", {"agent_type": "explore"}, "local"))
+        self.assertIn("Only a person", self.check("bash", {"command": "python3 ai_budget.py continue"}, "local"))
+        # Without sessionId in the payload, the id comes from the hook's environment.
+        stdin = json.dumps({"toolName": "bash", "toolArgs": {"command": "ls"}})
+        self.assertEqual(self.run_script("check", stdin=stdin, session_env="local"), (0, ""))
+        self.assertIn("deny", self.run_script("check", stdin=stdin, session_env="cloud")[1])
+
+    def test_local_session_waits_for_its_first_call_to_be_logged(self):
+        """A session's first model call may be logged just after its first tool
+        call is checked, so a session with no calls yet is re-read for a moment."""
+        since = ai_budget.day_start()[1]
+        timer = threading.Timer(0.5, self.spend, (None,), {"session": "new"})
+        self.addCleanup(timer.cancel)
+        with mock.patch.dict(os.environ, {"COPILOT_HOME": str(self.home)}):
+            timer.start()
+            self.assertTrue(ai_budget.local_session("new", since))
+            self.assertFalse(ai_budget.local_session("never", since, wait_s=0.2))
+
+    def test_local_session_sees_a_delayed_paid_call_after_free_calls(self):
+        """Earlier free rows must not make a session local before a late paid row lands."""
+        since = ai_budget.day_start()[1]
+        self.spend(None, session="switch")
+        timer = threading.Timer(0.5, self.spend, (1,), {"session": "switch"})
+        self.addCleanup(timer.cancel)
+        with mock.patch.dict(os.environ, {"COPILOT_HOME": str(self.home)}):
+            timer.start()
+            self.assertFalse(ai_budget.local_session("switch", since))
 
     def test_spend_before_today_does_not_count(self):
         """Only today's spend counts towards the gate."""
@@ -109,6 +159,7 @@ class GateTest(unittest.TestCase):
         self.assertIsNotNone(decide("run_dynamic_workflow", {"name": "x"}, near, GATE, 25))
         self.assertIsNone(decide("task", {"agent_type": "local-coder"}, near, GATE, 25))
         self.assertIsNone(decide("task", {"agent_type": "explore", "model": "ollama/qwen"}, near, GATE, 25))
+        self.assertIsNone(decide("task", {"agent_type": "explore", "model": "llamacpp/dsv4"}, near, GATE, 25))
         self.assertIsNone(decide("bash", {"command": "ls"}, near, GATE, 25))
         self.assertIsNone(decide("task", {"agent_type": "explore"}, far, GATE, 25))
 
