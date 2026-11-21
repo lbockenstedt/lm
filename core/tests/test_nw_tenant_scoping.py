@@ -35,6 +35,7 @@ import api as api_mod
 import access as access_mod
 import cred_vault
 from nw_cache import NwCacheMixin
+from warm_cache import WarmCacheMixin
 
 
 # ── Fakes ────────────────────────────────────────────────────────────────────
@@ -64,8 +65,8 @@ class _NwState:
         return (self.tenant_state.get("tenants") or {}).get(tid)
 
 
-class _NwHub(NwCacheMixin):
-    """Fake hub: NwCacheMixin (real cache) + the registry + relay methods the
+class _NwHub(NwCacheMixin, WarmCacheMixin):
+    """Fake hub: NwCacheMixin + WarmCacheMixin (real caches) + the registry + relay methods the
     nw routes touch. ``request_response`` simulates per-tenant nw spokes
     (applying the Stage 1 spoke-side tenant filter) + an IPAM spoke returning
     the acme tenant's prefixes for subnet filtering. The two ``get_nw_spoke_*``
@@ -78,6 +79,7 @@ class _NwHub(NwCacheMixin):
         self.cache_dir = cache_dir
         self.state = _NwState(data_dir, system_state, tenant_state)
         self.nw_cache_init()
+        self.warm_cache_init()
         self.active_connections = set(spokes) | {"ipam-spoke"}
         self.approved_modules = {s: True for s in self.active_connections}
         self.spoke_module_types = {s: "nw" for s in spokes}

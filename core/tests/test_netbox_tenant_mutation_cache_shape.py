@@ -203,3 +203,31 @@ def test_a_string_id_in_the_cache_matches_an_integer_path_id(tmp_path):
     r = c.put("/api/netbox/prefixes/42", json={"description": "x"},
               cookies={"lm_session": tok})
     assert r.status_code == 200
+
+
+def test_a_device_or_ip_write_has_the_topology_map_reread_netbox_and_others_do_not(
+        tmp_path, monkeypatch):
+    """The topology map reads NetBox at most hourly. A device moved or
+    readdressed from LM's NetBox page must not wait that hour on another
+    tenant's map, so the write asks the map to re-read NetBox; a prefix
+    write changes the tenant's prefixes, which the map's digest already
+    checks on every load."""
+    import routes.netbox as nb_routes
+    asked = []
+    monkeypatch.setattr(nb_routes, "nw_topology_netbox_changed", asked.append)
+    c, hub = _build({}, tmp_path)
+    admin = {"lm_session": _mint_session(hub, "admin")}
+    assert c.put("/api/netbox/prefixes/42", json={"description": "x"},
+                 cookies=admin).status_code == 200
+    # Prefix allocate/delete also refresh netbox_ips, and the catalog seed
+    # refreshes netbox_devices; none of them changes a device row.
+    assert c.post("/api/netbox/prefixes", json={"prefix": "10.9.0.0/24"},
+                  cookies=admin).status_code == 200
+    assert c.delete("/api/netbox/prefixes/42", cookies=admin).status_code == 200
+    assert c.post("/api/netbox/seed-catalog", cookies=admin).status_code == 200
+    assert asked == []
+    assert c.delete("/api/netbox/devices/999", cookies=admin).status_code == 200
+    assert asked == [hub]
+    assert c.post("/api/netbox/ips", json={"address": "10.9.0.5/24"},
+                  cookies=admin).status_code == 200
+    assert asked == [hub, hub]
