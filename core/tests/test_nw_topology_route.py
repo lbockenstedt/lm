@@ -937,6 +937,57 @@ def test_a_map_built_before_the_netbox_spoke_connects_gets_its_gear_once_it_does
         assert "acme-oldpdu" not in load()
 
 
+def test_a_netbox_spoke_not_yet_sent_its_config_does_not_start_the_hourly_floor(
+        monkeypatch, tmp_path):
+    """A reconnected NetBox spoke runs its default config until the hub's
+    push lands, so a list call sent in that first second fails without
+    reaching NetBox (seen live after a hub restart). It must not start the
+    hourly floor, and nor must a push that failed: the lists are fetched on
+    the first tick after a push lands."""
+    import time
+    import access
+    from hub_spoke_registry import CONFIG_SENT, mark_spoke_config_pushed, spoke_config_state
+    c, hub = _build(monkeypatch, tmp_path)
+    hub.state.system_state["subnet_filter_modules"] = {"nw": True}
+    _with_netbox(hub, [{"name": "acme-pdu", "primary_ip": "10.0.0.50/24"}])
+    hub.active_connections = dict.fromkeys(hub.active_connections)
+    hub.active_connections["ipam-spoke"] = sock = type("Sock", (), {})()
+    calls = []
+    configured = hub.request_response
+
+    async def _rr(spoke_id, cmd, data, timeout=30.0):
+        """The spoke fails NetBox calls until its config is pushed."""
+        calls.append(cmd)
+        if cmd.startswith("NETBOX_GET_") and spoke_config_state(
+                hub, "ipam-spoke") != CONFIG_SENT:
+            return {"payload": {"data": {"status": "error", "message": "no NetBox"}}}
+        return await configured(spoke_id, cmd, data, timeout=timeout)
+
+    hub.request_response = _rr
+    tok = _mint(hub, "u", tenants=["acme"])
+
+    def tick():
+        """One refresher tick, run to the end."""
+        c.portal.call(hub.cache_refresh_tick)
+        c.portal.call(hub.cache_wait_idle)
+
+    with c:
+        hub.warm_cache.setdefault(access._PREFIX_FEED_NS, {})["acme"] = {
+            "data": {"prefixes": [{"prefix": "10.0.0.0/24"}]},
+            "fetched_at": time.time() + 3600, "tenants": ["acme"]}
+        tick()
+        body = c.get("/api/nw/topology?tenant=acme", cookies={"lm_session": tok}).json()
+        assert "acme-pdu" not in _names(body)
+        assert "NETBOX_GET_DEVICES" not in calls
+        mark_spoke_config_pushed(hub, sock, ok=False)
+        tick()
+        assert "NETBOX_GET_DEVICES" not in calls
+        mark_spoke_config_pushed(hub, sock)
+        tick()
+        body = c.get("/api/nw/topology?tenant=acme", cookies={"lm_session": tok}).json()
+        assert "acme-pdu" in _names(body)
+
+
 def test_the_feed_keeps_every_tenants_map_and_the_netbox_lists_warm(monkeypatch, tmp_path):
     from routes import nw as nw_routes
     _c, hub = _build(monkeypatch, tmp_path)
