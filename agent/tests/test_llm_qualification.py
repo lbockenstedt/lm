@@ -6,7 +6,10 @@ import json
 import pytest
 
 from agent.src import llm_qualification as qualification
+from agent.src import llm_activation
+from agent.src import llm_provisioning
 from agent.src import llm_spoke
+from core.src.llm_candidates import CANDIDATES
 
 
 @pytest.mark.parametrize(("pin", "running", "expected"), [
@@ -201,10 +204,279 @@ def test_watchdog_restarts_only_idle_runtime_after_repeated_failures(monkeypatch
 def test_unavailable_candidate_stops_only_its_isolated_service(monkeypatch):
     """A skipped systemd condition must not use some other process on the test port."""
     artifact = ("test:tag", "a" * 64, "0.40.16")
-    monkeypatch.setattr(qualification, "_candidate", lambda key: (artifact, artifact))
     actions = []
     monkeypatch.setattr(qualification, "_service",
                         lambda action: actions.append(action) or action != "is-active")
-    result = qualification._run_with_service("cpu", lambda *a, **kw: pytest.fail("unexpected probe"), {})
+    result = qualification._run_with_service(
+        "cpu", lambda *a, **kw: pytest.fail("unexpected probe"), {}, (artifact, artifact, None, False))
     assert result["code"] == "candidate_not_provisioned"
     assert actions == ["start", "is-active", "stop"]
+
+
+@pytest.mark.parametrize("bad_digest", [False, True])
+def test_bootstrap_smoke_uses_pinned_model_and_configured_options_without_baseline(tmp_path, monkeypatch, bad_digest):
+    """A first-worker smoke test never contacts a missing baseline or activates the candidate."""
+    digest = "b" * 64
+    options = {"num_ctx": 65536, "temperature": 0.7, "top_p": 0.8, "top_k": 64}
+    manifest = tmp_path / "qualification.json"
+    manifest.write_text(json.dumps({"cpu": {
+        "model": "test:new", "digest": digest, "version": "0.40.16",
+        "bootstrap": True, "options": options,
+    }}))
+    monkeypatch.setattr(qualification, "MANIFEST", manifest)
+    generated = []
+
+    def request(path, body=None, timeout=3, *, port):
+        """Only the isolated candidate runtime may be reached."""
+        assert port == qualification.PORT
+        if path == "/api/version":
+            return {"version": "0.40.16"}
+        if path == "/api/pull":
+            assert timeout == 7200
+            return {"status": "success"}
+        if path == "/api/tags":
+            return {"models": [{"name": "test:new", "digest": "c" * 64 if bad_digest else digest}]}
+        generated.append(body)
+        assert timeout == 900
+        return {"done": True, "done_reason": "stop", "model": "test:new",
+                "response": json.dumps(qualification.JSON_EXPECTED) if body.get("format")
+                else qualification.PYTHON_EXPECTED}
+
+    result = qualification._run("cpu", request, {})
+    if bad_digest:
+        assert result["code"] == "candidate_digest_mismatch"
+        assert not generated
+    else:
+        assert result["code"] == "bootstrap_smoke_passed"
+        assert result["options"] == options and "baseline" not in result
+        assert len(generated) == 2
+        assert all(body["think"] is False and body["options"] == {
+            **options, "num_gpu": 0, "num_predict": 1024} for body in generated)
+
+    for invalid in ({"num_ctx": 0}, {"num_ctx": 65536, "num_gpu": 1}, {}):
+        manifest.write_text(json.dumps({"cpu": {
+            "model": "test:new", "digest": digest, "version": "0.40.16",
+            "bootstrap": True, "options": invalid,
+        }}))
+        assert qualification._candidate("cpu") is None
+
+
+def test_bootstrap_job_does_not_require_serving_runtime(monkeypatch):
+    """A missing serving runtime cannot prevent the isolated bootstrap job."""
+    spec = (("test:new", "a" * 64, "0.40.16"), None, {"num_ctx": 65536}, True)
+    monkeypatch.setattr(qualification, "_candidate", lambda _key: spec)
+    monkeypatch.setattr(qualification, "_run_with_service",
+                        lambda _key, _request, approved, supplied, *_rest: {
+                            "status": "SUCCESS", "code": "bootstrap_smoke_passed"
+                        } if approved == {} and supplied == spec else pytest.fail("unexpected baseline"))
+
+    async def unavailable():
+        """A missing baseline must not be probed in bootstrap mode."""
+        pytest.fail("unexpected baseline probe")
+
+    result = asyncio.run(qualification.qualify("cpu", None, unavailable, False))
+    assert result["code"] == "bootstrap_smoke_passed"
+
+
+def test_candidate_accepts_dotted_public_model_names_without_registry_urls():
+    """Public Qwen tags are valid; arbitrary URLs and path traversal are not."""
+    spec = {"digest": "a" * 64, "version": "0.40.16"}
+    assert qualification._artifact({**spec, "model": "qwen3.6:35b-a3b-coding"})
+    assert qualification._artifact({**spec, "model": "qwen3.8:27b"})
+    for model in ("https://example.com/model:tag", "example.com/model:tag",
+                  "../model:tag", "host:80/model:tag"):
+        assert qualification._artifact({**spec, "model": model}) is None
+
+
+def test_comparison_uses_same_tuned_options_for_both_runtimes(monkeypatch):
+    """A timing comparison must not use a different context or sampling profile."""
+    candidate = ("test:new", "a" * 64, "0.40.16")
+    baseline = ("test:base", "b" * 64, "0.40.16")
+    options = {"num_ctx": 65536, "temperature": 0.6}
+    calls = []
+
+    def suite(_request, port, artifact, supplied):
+        """Return synthetic passing results while recording the effective profile."""
+        calls.append((port, supplied))
+        return {"model": artifact[0], "digest": artifact[1], "version": artifact[2],
+                "fixtures": [{"fixture": "json", "passed": True},
+                             {"fixture": "indentation", "passed": True}]}
+
+    def request(path, body=None, timeout=3, *, port):
+        """Respond to version and pull probes."""
+        return {"version": "0.40.16"} if path == "/api/version" else {"status": "success"}
+
+    monkeypatch.setattr(qualification, "_installed", lambda *_args: True)
+    monkeypatch.setattr(qualification, "_suite", suite)
+    result = qualification._run("cpu", request, {baseline[0]: baseline[1]},
+                                spec=(candidate, baseline, options, False))
+    assert result["code"] == "qualified"
+    assert calls == [(qualification.BASELINE_PORT, options), (qualification.PORT, options)]
+
+
+def test_prepare_uses_only_pinned_cpu_candidate_and_reports_install_failure(monkeypatch):
+    """The hub selects a catalog key, never a URL, digest or inference options."""
+    staged = []
+    specs = []
+    monkeypatch.setattr(llm_provisioning, "stage_public_runtime", lambda path: staged.append(path))
+    monkeypatch.setattr(llm_provisioning, "_run_with_service",
+                        lambda key, request, approved, spec, progress: specs.append(spec) or {"status": "SUCCESS"})
+    assert asyncio.run(llm_provisioning.prepare("missing", "0.40.16", None))["status"] == "ERROR"
+    assert asyncio.run(llm_provisioning.prepare("gemma4-12b", "0.41.0", None))["code"] == "runtime_version_mismatch"
+    assert not staged
+    assert asyncio.run(llm_provisioning.prepare("gemma4-12b", "0.40.16", None))["status"] == "SUCCESS"
+    candidate = CANDIDATES["gemma4-12b"]
+    assert specs == [((candidate["model"], candidate["digest"], "0.40.16"), None, candidate["options"], True)]
+
+    def failed(_path):
+        """Model an unavailable or untrusted release."""
+        raise ValueError("download failed")
+
+    monkeypatch.setattr(llm_provisioning, "stage_public_runtime", failed)
+    assert asyncio.run(llm_provisioning.prepare("gemma4-12b", "0.40.16", None))["code"] == "candidate_runtime_install_failed"
+
+
+def test_preparation_is_durable_and_duplicate_requests_join_the_same_job(tmp_path, monkeypatch):
+    """Reconnects and duplicate deliveries must not repeat a model download."""
+    monkeypatch.setattr(llm_provisioning, "STATE", tmp_path / "private" / "preparation.json")
+    started, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def prepare(key, version, request, progress):
+        """Hold the synthetic job until a duplicate request has attached."""
+        calls.append(key)
+        progress("pull")
+        started.set()
+        await release.wait()
+        return {"status": "SUCCESS", "code": "bootstrap_smoke_passed"}
+
+    monkeypatch.setattr(llm_provisioning, "prepare", prepare)
+    request = {"candidate": "gemma4-12b", "request_id": "a" * 32, "revision": 1}
+
+    async def exercise():
+        """A different request cannot overbook the same CPU slot."""
+        worker = llm_spoke.LlmSpoke("test-worker", {})
+        first = asyncio.create_task(worker.handle_command("LLM_PREPARE", request))
+        await started.wait()
+        assert llm_provisioning.load_state()["state"] == "running"
+        second = asyncio.create_task(worker.handle_command("LLM_PREPARE", request))
+        assert (await worker.handle_command(
+            "LLM_PREPARE", {**request, "request_id": "b" * 32, "revision": 2}))["code"] == "busy"
+        assert (await worker.handle_command(
+            "LLM_PREPARE", {**request, "request_id": "b" * 32}))["code"] == "preparation_superseded"
+        release.set()
+        assert (await first)["status"] == (await second)["status"] == "SUCCESS"
+        worker2 = llm_spoke.LlmSpoke("restarted", {})
+        assert (await worker2.handle_command("LLM_PREPARE", request))["status"] == "SUCCESS"
+        assert llm_provisioning.load_state()["state"] == "passed"
+
+    asyncio.run(exercise())
+    assert calls == ["gemma4-12b"]
+
+
+def test_preparation_journal_failure_does_not_start_download(tmp_path, monkeypatch):
+    """An unpersisted assignment cannot start a side effect."""
+    def failed(_data):
+        """Model a failing journal write."""
+        raise OSError("disk full")
+
+    monkeypatch.setattr(llm_provisioning, "STATE", tmp_path / "private" / "preparation.json")
+    monkeypatch.setattr(llm_provisioning, "save_state", failed)
+    monkeypatch.setattr(llm_provisioning, "prepare", lambda *_args: pytest.fail("unpersisted job ran"))
+    worker = llm_spoke.LlmSpoke("test-worker", {})
+    result = asyncio.run(worker.handle_command("LLM_PREPARE", {
+        "candidate": "gemma4-12b", "request_id": "a" * 32, "revision": 1,
+    }))
+    assert result["code"] == "preparation_state_failed"
+
+
+def test_interrupted_preparation_waits_for_authorized_retry(tmp_path, monkeypatch):
+    """Restart keeps the request, but cannot start it without a fresh hub command."""
+    monkeypatch.setattr(llm_provisioning, "STATE", tmp_path / "private" / "preparation.json")
+    request = {"candidate": "gemma4-12b", "request_id": "a" * 32, "revision": 1}
+    llm_provisioning.save_state({**request, "state": "running"})
+    calls = []
+
+    async def prepare(key, *_args):
+        """Return a synthetic result only after the hub retries."""
+        calls.append(key)
+        return {"status": "ERROR", "code": "candidate_digest_mismatch"}
+
+    monkeypatch.setattr(llm_provisioning, "prepare", prepare)
+
+    async def exercise():
+        """Loading the journal alone does not run the old job."""
+        worker = llm_spoke.LlmSpoke("test-worker", {})
+        assert await worker._load_preparation()
+        assert not calls and worker._job is None
+        assert (await worker.handle_command("LLM_PREPARE", request))["code"] == "candidate_digest_mismatch"
+        assert llm_provisioning.load_state()["state"] == "failed"
+
+    asyncio.run(exercise())
+    assert calls == ["gemma4-12b"]
+
+
+@pytest.mark.parametrize("fail_verify", [False, True])
+def test_activation_requires_worker_smoke_pass_and_rolls_back_on_failure(tmp_path, monkeypatch, fail_verify):
+    """Only the exact prepared artifact is published, and failed verification is undone."""
+    monkeypatch.setattr(llm_provisioning, "STATE", tmp_path / "private" / "preparation.json")
+    candidate = CANDIDATES["gemma4-12b"]
+    state = {"candidate": "gemma4-12b", "request_id": "a" * 32, "revision": 1, "state": "passed",
+             "result": {"status": "SUCCESS", "code": "bootstrap_smoke_passed", **candidate}}
+    llm_provisioning.save_state(state)
+    calls = []
+    monkeypatch.setattr(llm_activation, "publish",
+                        lambda model, digest: calls.append("publish") or {"created": True})
+    monkeypatch.setattr(llm_activation, "finalize", lambda record: calls.append("finalize"))
+    monkeypatch.setattr(llm_activation, "rollback", lambda record: calls.append("rollback"))
+    monkeypatch.setattr(llm_spoke.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(llm_spoke, "runtime_service", lambda action: calls.append(action) or True)
+    monkeypatch.setattr(llm_spoke, "ollama_request", lambda *_args, **_kw: {"version": "0.40.16"})
+    monkeypatch.setattr(qualification, "_installed", lambda *_args: True)
+    worker = llm_spoke.LlmSpoke("test-worker", {})
+
+    async def inventory():
+        """Return the approved artifact or simulate a catalog verification failure."""
+        if fail_verify:
+            raise ValueError("invalid catalog")
+        return {candidate["model"]: candidate["digest"]}
+
+    worker._available_models = inventory
+    result = asyncio.run(worker.handle_command("LLM_ACTIVATE", {"candidate": "gemma4-12b"}))
+    if fail_verify:
+        assert result["code"] == "activation_failed"
+        assert calls == ["publish", "start", "finalize", "stop", "rollback"]
+    else:
+        assert result["code"] == "activated"
+        assert calls == ["publish", "start", "finalize"]
+
+
+def test_activation_refuses_a_model_without_a_matching_smoke_pass(tmp_path, monkeypatch):
+    """A download or a different candidate is not an approval."""
+    monkeypatch.setattr(llm_provisioning, "STATE", tmp_path / "private" / "preparation.json")
+    worker = llm_spoke.LlmSpoke("test-worker", {})
+    result = asyncio.run(worker.handle_command("LLM_ACTIVATE", {"candidate": "gemma4-12b"}))
+    assert result["code"] == "candidate_not_smoke_tested"
+
+
+def test_activation_waits_for_an_inflight_runtime_start(tmp_path, monkeypatch):
+    """Activation must not race a separate service start or stop its runtime."""
+    monkeypatch.setattr(llm_provisioning, "STATE", tmp_path / "private" / "preparation.json")
+    candidate = CANDIDATES["gemma4-12b"]
+    llm_provisioning.save_state({
+        "candidate": "gemma4-12b", "request_id": "a" * 32, "revision": 1, "state": "passed",
+        "result": {"status": "SUCCESS", "code": "bootstrap_smoke_passed", **candidate},
+    })
+    worker = llm_spoke.LlmSpoke("test-worker", {})
+
+    async def exercise():
+        """A pending start keeps the candidate unmodified."""
+        worker._startup = asyncio.create_task(asyncio.sleep(60))
+        try:
+            result = await worker.handle_command("LLM_ACTIVATE", {"candidate": "gemma4-12b"})
+            assert result["code"] == "busy"
+        finally:
+            worker._startup.cancel()
+            await asyncio.gather(worker._startup, return_exceptions=True)
+
+    asyncio.run(exercise())

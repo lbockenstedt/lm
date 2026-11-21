@@ -19,8 +19,9 @@ function routingFields(fields, choices) {
     return fields.map(field => {
         const required = field.required ? safeHtml` required` : '';
         if (field.source) {
+            const action = field.name === 'artifact' ? safeHtml` data-action="selectArtifact"` : '';
             return safeHtml`<div><label for="llm-routing-${field.name}">${field.label}</label>
-                <select id="llm-routing-${field.name}" name="${field.name}"${required}>
+                <select id="llm-routing-${field.name}" name="${field.name}"${required}${action}>
                 <option value="">${field.placeholder}</option>
                 ${choices[field.source].map(({ value, label }) => safeHtml`<option value="${value}">${label}</option>`)}
                 </select></div>`;
@@ -50,7 +51,9 @@ function routingMarkup(config, models, tenants) {
         ${Object.entries(config.llm_task_models).map(([task, rows]) => rows.map((row, index) => safeHtml`
             <div>${task} — ${index + 1}. <span title="${row.digest}">${row.model}</span>
                 (${row.min_vcpus || 0} vCPUs, ${row.min_ram_bytes || 0} RAM bytes minimum;
-                temperature ${row.temperature ?? 'default'}, top-p ${row.top_p ?? 'default'})
+                temperature ${row.temperature ?? 'default'}, top-p ${row.top_p ?? 'default'},
+                top-k ${row.top_k ?? 'default'}, repeat penalty ${row.repeat_penalty ?? 'default'},
+                context ${row.num_ctx ?? 'default'})
                 <button type="button" data-action="removeModel" data-task="${task}" data-index="${index}" class="hpe-btn hpe-btn-secondary">Remove</button>
             </div>`))}
         <form data-submit="addModel" class="flex flex-wrap items-end gap-2">
@@ -75,6 +78,23 @@ function settingsMarkup(config, credentials, models, tenants) {
         <h3 class="font-bold">LLM Settings</h3>
         ${routingMarkup(config, models, tenants)}
         <h4 class="font-bold">Qualification candidates</h4>
+        <p>Prepare a pinned CPU candidate on a Shared test worker. A smoke pass is not certification.
+            Review the worker's test results before activating the model for use.</p>
+        <form data-submit="prepare" class="flex flex-wrap items-end gap-2">
+            <label>CPU candidate <select name="candidate" required title="Choose an owner-approved public CPU model">
+                <option value="">Select candidate</option>
+                ${config.public_candidates.map(c => safeHtml`<option value="${c.key}">${c.label} (${c.model})</option>`)}
+            </select></label>
+            <label>Shared test worker <select name="worker" required title="The worker downloads and tests the model locally">
+                <option value="">Select worker</option>
+                ${config.test_workers.map(w => safeHtml`<option value="${w.key}">${w.label}</option>`)}
+            </select></label>
+            <button type="submit" class="hpe-btn hpe-btn-primary" title="Download the pinned runtime and model and run synthetic CPU tests"
+                ${config.test_workers.length ? '' : safeHtml`disabled`}>Prepare and test</button>
+            <button type="button" data-action="activateCandidate" class="hpe-btn hpe-btn-secondary"
+                title="Activate the prepared model only after reviewing its worker test results"
+                ${config.test_workers.length ? '' : safeHtml`disabled`}>Activate</button>
+        </form>
         ${Object.entries(config.llm_qualification_candidates).map(([key, row]) => safeHtml`
             <div>${row.label} <button type="button" data-action="removeCandidate" data-key="${key}" class="hpe-btn hpe-btn-secondary">Remove</button></div>`)}
         <form data-submit="candidate" class="flex flex-wrap items-end gap-2">
@@ -142,9 +162,42 @@ async function openSettings(root, isCurrent, onSave, workers) {
                 saving = false;
             }
         }
+        // Start a synthetic preparation or explicit activation on a Shared worker.
+        async function candidateAction(form, action) {
+            if (saving || !form.reportValidity()) return;
+            saving = true;
+            try {
+                await apiJson(`/api/llm/admin/${action}`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ worker: form.elements.worker.value, candidate: form.elements.candidate.value }),
+                });
+                if (live()) {
+                    showToast(action === 'prepare' ? 'Candidate preparation started on the worker.'
+                        : 'Candidate activation started on the worker.', 'info');
+                    await onSave();
+                }
+            } catch (err) {
+                if (live()) showToast(err.message, 'error');
+            } finally {
+                saving = false;
+            }
+        }
         delegate(root, {
+            prepare: form => candidateAction(form, 'prepare'),
+            activateCandidate: button => candidateAction(button.closest('form'), 'activate'),
+            // Prefill the tested candidate settings only for its exact model digest.
+            selectArtifact: select => {
+                const model = select.value === '' ? null : models[Number(select.value)];
+                const candidate = model && config.public_candidates.find(
+                    c => c.model === model.name && c.digest === model.digest);
+                const fields = select.closest('form').elements;
+                for (const name of ['temperature', 'top_p', 'top_k', 'repeat_penalty', 'num_ctx']) {
+                    fields[name].value = candidate?.options[name] ?? '';
+                }
+            },
             addModel: form => save(() => {
-                const { task, artifact, vcpus, ram, temperature, top_p: topP } = form.elements;
+                const { task, artifact, vcpus, ram, temperature, top_p: topP,
+                    top_k: topK, repeat_penalty: repeatPenalty, num_ctx: numCtx } = form.elements;
                 const selected = artifact.value;
                 const model = selected && models[Number(selected)];
                 if (!model) throw new Error('Select a reported model.');
@@ -158,6 +211,9 @@ async function openSettings(root, isCurrent, onSave, workers) {
                     // Blank sampling fields keep Ollama's defaults for this artifact.
                     ...(temperature.value === '' ? {} : { temperature: Number(temperature.value) }),
                     ...(topP.value === '' ? {} : { top_p: Number(topP.value) }),
+                    ...(topK.value === '' ? {} : { top_k: Number(topK.value) }),
+                    ...(repeatPenalty.value === '' ? {} : { repeat_penalty: Number(repeatPenalty.value) }),
+                    ...(numCtx.value === '' ? {} : { num_ctx: Number(numCtx.value) }),
                 }] } };
             }),
             removeModel: button => save(() => {
@@ -264,6 +320,13 @@ function jobRow(j) {
         <td class="${tdM}">${j.elapsed_s != null ? (j.elapsed_s < 60 ? Math.round(j.elapsed_s * 10) / 10 + 's' : Math.round(j.elapsed_s / 60) + 'm') : '—'}</td>
         <td class="${td} text-slate-500" title="${j.resolution || (j.issues || []).map(issue => issue.resolution).join(' ')}">
             ${j.code || ''}
+            ${j.phase ? safeHtml`<div>Phase: ${j.phase}</div>` : ''}
+            ${j.mode === 'bootstrap' ? safeHtml`<div>Smoke test only; not certified.</div>` : ''}
+            ${j.options ? safeHtml`<div>Context ${j.options.num_ctx ?? 'default'}; temperature ${j.options.temperature ?? 'default'};
+                    top-p ${j.options.top_p ?? 'default'}; top-k ${j.options.top_k ?? 'default'};
+                    repeat penalty ${j.options.repeat_penalty ?? 'default'}</div>` : ''}
+            ${j.mode === 'bootstrap' ? (j.fixtures || []).map(fixture => safeHtml`<div>${fixture.fixture}:
+                    ${fixture.passed ? 'pass' : 'fail'} (${fixture.elapsed_s ?? '—'} s)</div>`) : ''}
             ${(j.fixture_deltas || []).map((delta, i) => safeHtml`<div>
                 ${delta.fixture}: ${j.baseline.fixtures[i].passed ? 'pass' : 'fail'}
                 to ${j.fixtures[i].passed ? 'pass' : 'fail'}
