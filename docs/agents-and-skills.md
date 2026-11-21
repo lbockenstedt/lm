@@ -23,9 +23,10 @@ skill says *exactly which files to touch, in what order*, and how to test.
 owns. On every lm `dev` push that changes them, `sync-fleet-files.yml` runs
 `.github/scripts/sync_fleet_files.py`, which:
 
-- copies `.github/fleet-rules.md`, `.github/agents/` and `.claude/skills/` into
-  each repo, removing files lm no longer has (except a repo's own
-  `<repo>-*` agents and skills);
+- copies `.github/fleet-rules.md`, `.github/agents/`, `.claude/skills/` and
+  the AI spend gate (`.github/hooks/`, `.github/ai-budget.json`) into each
+  repo, removing files lm no longer has (except a repo's own `<repo>-*`
+  agents and skills);
 - writes the rules into each repo's `AGENTS.md`, between the
   `fleet-rules:begin` and `fleet-rules:end` markers, so any tool that
   auto-loads `AGENTS.md` sees them. The rest of `AGENTS.md` holds that repo's
@@ -90,6 +91,73 @@ cites the commits that motivated its checklist.
 | `change-fleet-pipeline` | A workflow change made once in lm and rolled out. |
 | `ab-add-llm-provider` | An LLM provider or model in AppBuilder. |
 | `ab-add-fleet-rule` | Turning a recurring rework class into a `fleet_checks` rule. |
+
+## The daily AI spend gate
+
+Fleet rule 1.10 (`.github/fleet-rules.md`). The gate stops runaway sessions;
+it is not a budget, and a person can reopen it and keep going. Three
+fleet-owned files carry it, synced to every repo like the rules:
+
+- `.github/ai-budget.json`: the numbers;
+- `.github/hooks/fleet-hooks.json`: the Copilot CLI hooks;
+- `.github/hooks/ai_budget.py`: the script the hooks run (plain Python 3.9+,
+  no dependencies).
+
+The numbers in `.github/ai-budget.json`:
+
+- `gate_usd` (100): cloud AI spend in one local calendar day that closes the
+  gate;
+- `step_usd` (100): how much more `continue` allows by default;
+- `reserve_usd` (25): within this much of the gate, new cloud sub-agents are
+  refused;
+- `prices_usd_per_mtok`: USD per 1M tokens for each model, used by AB.
+
+Spend comes from Copilot CLI's own usage log on the machine,
+`$COPILOT_HOME/session-store.db` (default `~/.copilot`). It covers every CLI
+session and sub-agent on that machine; local Ollama models cost $0 in it.
+
+What the hooks do:
+
+- At session and sub-agent start, the agent is told today's spend and to
+  prefer local models.
+- Past the gate, every tool call is refused except `task_complete`,
+  `ask_user`, `stop_bash` and a shell call that only runs
+  `python3 .../ai_budget.py status`. The refusal tells the agent to stop and
+  tell the user.
+- Within `reserve_usd` of the gate, a `task` sub-agent on a cloud model is
+  refused (any model not named `ollama/*`; with no model given, any agent
+  type not named `local-*`), and so is a workflow run.
+- An agent's attempt to run `ai_budget.py continue`, or to change the state
+  file, is always refused.
+
+Commands for a person, from a terminal in the repo:
+
+- `python3 .github/hooks/ai_budget.py status`: today's spend and the gate.
+- `python3 .github/hooks/ai_budget.py continue [USD]`: reopens the gate for
+  USD more today (default `step_usd`). It is stored in
+  `$COPILOT_HOME/ai-budget-state.json` and ends at local midnight.
+- `python3 .github/hooks/ai_budget.py prices`: the per-model prices seen in
+  the last 30 days, in the format of `prices_usd_per_mtok`, to refresh the
+  table.
+
+Where it applies:
+
+- Copilot CLI sessions started in a fleet repo the CLI trusts
+  (`trustedFolders` in `~/.copilot/config.json`); the CLI skips repo hooks
+  in an untrusted folder. A session loads its hooks when it starts. In a
+  folder that is not a git repo, the CLI reads that folder's own
+  `.github/hooks`.
+- Copilot's cloud agent has no usage log there, so the gate stays open.
+  Other tools (Claude Code, Cursor) do not run these hooks, but rule 1.10
+  still applies to them.
+- It fails open: with no usage log, or on any error, the hook prints nothing
+  and exits 0, because Copilot refuses the tool call when a `preToolUse`
+  hook fails. It is a gate for agents that follow the rules, not a security
+  boundary.
+- AB reads the same `.github/ai-budget.json`, counts its own Copilot spend
+  per day, and stops calling Copilot at the gate until a person presses
+  Continue in AB (see `ab/docs/ab.md`). Each machine running Copilot CLI,
+  and AB, has its own gate.
 
 ## Adding or changing one
 

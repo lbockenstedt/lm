@@ -180,7 +180,9 @@ starts CI.
 ## Rules, agents and skills sync (`sync-fleet-files.yml`)
 
 On an lm `dev` push that changes `.github/fleet-rules.md`, `.github/agents/`,
-`.claude/skills/` or the `fleet` section of `twins.json`, this workflow runs
+`.claude/skills/`, the AI spend gate (`.github/hooks/`,
+`.github/ai-budget.json`) or the `fleet` section of `twins.json`, this
+workflow runs
 `.github/scripts/sync_fleet_files.py`. The script copies those files to every
 fleet repo's `dev` and writes the rules into each repo's `AGENTS.md`, between
 the `fleet-rules` markers. It pushes with `WORKFLOW_TOKEN`. The `fleet-rules`

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Copy the fleet-owned files from lm into every fleet repo (twins.json "fleet").
 
-lm holds the single copy people edit: the fleet rules, the fleet agents and
-the skills. Tools only read them from the repo they are working in, so each
+lm holds the single copy people edit: the fleet rules, the fleet agents, the
+skills and the AI spend gate (.github/hooks, .github/ai-budget.json). Tools only read them from the repo they are working in, so each
 repo carries a copy, and this script keeps those copies identical.
 
 - files:    copied as-is.
