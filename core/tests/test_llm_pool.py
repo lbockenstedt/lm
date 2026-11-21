@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from llm_pool import LlmPool
+from llm_candidates import CANDIDATES
 import llm_cloud
 from llm_cloud import PublicHTTPSConnection, valid_endpoint
 from log_redaction import _redact
@@ -59,6 +60,10 @@ def make_pool():
         ),
     )
     pool = LlmPool(hub)
+    hub.state.system_state["global_config"] = {}
+    hub.state.get_global_config = lambda: hub.state.system_state["global_config"]
+    hub.state.update_global_config = lambda value: hub.state.system_state["global_config"].update(value)
+    hub.state.save_state_now = AsyncMock()
     for key, socket in hub.active_connections.items():
         pool.report(key, socket, {
             "status": "SUCCESS", "models": {JOB["model"]: DIGEST}, "available": True,
@@ -77,8 +82,25 @@ def test_admin_llm_routes_reject_non_admin_before_using_pool():
     with TestClient(app) as client:
         assert client.get("/api/llm/admin/dashboard").status_code == 403
         assert client.post("/api/llm/admin/qualify", json={"candidate": "cpu"}).status_code == 403
+        assert client.post("/api/llm/admin/prepare", json={"worker": "c", "candidate": "gemma4-12b"}).status_code == 403
+        assert client.post("/api/llm/admin/activate", json={"worker": "c", "candidate": "gemma4-12b"}).status_code == 403
         assert client.get("/api/llm/admin/settings").status_code == 403
         assert client.post("/api/llm/admin/settings", json={"llm_cloud_profiles": []}).status_code == 403
+
+
+def test_admin_settings_supply_exact_candidate_options():
+    """Task forms can prefill settings only for the pinned model artifact."""
+    pool = make_pool()
+    app = FastAPI()
+    llm.register(app, pool.hub, SimpleNamespace(
+        _session_user=lambda request: {"role": "admin"}, _is_admin=lambda session: True))
+    with TestClient(app) as client:
+        candidates = client.get("/api/llm/admin/settings").json()["public_candidates"]
+    for candidate in candidates:
+        expected = CANDIDATES[candidate["key"]]
+        assert candidate["model"] == expected["model"]
+        assert candidate["digest"] == expected["digest"]
+        assert candidate["options"] == expected["options"]
 
 
 def test_admin_cloud_settings_persist_and_return_only_vault_reference(monkeypatch):
@@ -142,6 +164,168 @@ def test_qualification_reserves_only_shared_test_worker_and_handles_old_reply():
     assert pool.hub.request_response.call_args.args[:2] == ("c", "LLM_QUALIFY")
     assert pool.dashboard()["jobs"][0]["code"] == "unsupported_or_invalid_reply"
     assert not pool.reserved
+
+
+def test_bootstrap_smoke_can_run_on_shared_worker_without_serving_runtime():
+    """A first-worker smoke pass is distinct from comparative qualification."""
+    pool = make_pool()
+    pool.hub.state.get_global_config = lambda: {"llm_qualification_candidates": {
+        "cpu": {"worker": "c", "label": "CPU trial"},
+        "owned": {"worker": "a", "label": "Not shared"},
+    }}
+    pool.report("c", pool.hub.active_connections["c"], {
+        "status": "ERROR", "code": "runtime_not_started", "detail_code": "runtime_binary_missing",
+        "capabilities": {"mode": "cpu"},
+    })
+    pool.hub.request_response.return_value = {
+        "status": "SUCCESS", "code": "bootstrap_smoke_passed", "mode": "bootstrap",
+        "model": JOB["model"], "digest": DIGEST, "version": "0.40.16",
+        "options": {"num_ctx": 65536, "temperature": 0.7},
+        "fixtures": [{"fixture": "json", "passed": True, "elapsed_s": 1},
+                     {"fixture": "indentation", "passed": True, "elapsed_s": 2}],
+    }
+
+    async def exercise():
+        """Only the configured shared worker can be reserved."""
+        assert not pool.start_qualification("owned")
+        assert pool.start_qualification("cpu")
+        task = next(t for t in asyncio.all_tasks() if t.get_coro().__name__ == "_qualify")
+        await task
+
+    asyncio.run(exercise())
+    job = pool.dashboard()["jobs"][0]
+    assert job["code"] == "bootstrap_smoke_passed" and job["mode"] == "bootstrap"
+    assert job["options"]["num_ctx"] == 65536
+    assert job["resolution"] == "The synthetic smoke test passed; this is not model certification."
+    assert "baseline" not in job
+
+
+def test_public_candidate_only_prepares_on_an_approved_shared_worker():
+    """A global administrator cannot use this action on tenant-owned workers."""
+    pool = make_pool()
+    pool.report("c", pool.hub.active_connections["c"], {
+        "status": "ERROR", "code": "runtime_not_started", "detail_code": "runtime_binary_missing",
+        "capabilities": {"mode": "cpu"},
+    })
+    candidate = CANDIDATES["gemma4-12b"]
+    pool.hub.request_response.return_value = {
+        "status": "SUCCESS", "code": "bootstrap_smoke_passed", "mode": "bootstrap",
+        "model": candidate["model"], "digest": candidate["digest"], "version": "0.40.16",
+        "options": candidate["options"],
+        "fixtures": [{"fixture": "json", "passed": True}, {"fixture": "indentation", "passed": True}],
+    }
+
+    async def exercise():
+        """Check reservation, valid identity and the final diagnostic."""
+        assert not await pool.start_bootstrap("a", "gemma4-12b")
+        assert not await pool.start_bootstrap("c", "unapproved")
+        assert await pool.start_bootstrap("c", "gemma4-12b")
+        assert not await pool.start_bootstrap("c", "gemma4-12b")
+        task = next(t for t in asyncio.all_tasks() if t.get_coro().__name__ == "_qualify")
+        await task
+
+    asyncio.run(exercise())
+    assert pool.hub.request_response.call_args.args[:2] == ("c", "LLM_PREPARE")
+    sent = pool.hub.request_response.call_args.args[2]
+    saved = pool.hub.state.get_global_config()["llm_worker_preparations"]["c"]
+    assert sent == saved and sent["candidate"] == "gemma4-12b" and len(sent["request_id"]) == 32
+    pool.hub.state.save_state_now.assert_awaited_once()
+    assert pool.dashboard()["jobs"][0]["code"] == "bootstrap_smoke_passed"
+
+
+def test_public_candidate_reconnect_replays_same_persisted_request():
+    """A lost reply is resumed with the same id rather than starting a new download."""
+    pool = make_pool()
+    pool.hub.request_response.side_effect = [
+        ConnectionError("disconnected"),
+        {"status": "ERROR", "code": "candidate_digest_mismatch"},
+    ]
+
+    async def exercise():
+        """A new authenticated report reconnects the existing assignment."""
+        assert await pool.start_bootstrap("c", "gemma4-12b")
+        task = next(t for t in asyncio.all_tasks() if t.get_coro().__name__ == "_qualify")
+        await task
+        assert pool.dashboard()["jobs"][0]["code"] == "dispatch_outcome_unknown"
+        pool.bootstrap_retry_at["c"] = 0
+        pool.report("c", pool.hub.active_connections["c"], {
+            "status": "SUCCESS", "models": {}, "available": False,
+            "capabilities": {"mode": "cpu"},
+        })
+        task = next(t for t in asyncio.all_tasks() if t.get_coro().__name__ == "_qualify")
+        await task
+
+    asyncio.run(exercise())
+    assert pool.hub.request_response.call_args_list[0].args[2] == pool.hub.request_response.call_args_list[1].args[2]
+    assert pool.dashboard()["jobs"][0]["code"] == "candidate_digest_mismatch"
+    pool.hub.state.save_state_now.assert_awaited_once()
+
+
+def test_failed_preparation_save_does_not_dispatch_new_request():
+    """A failed save cannot be dispatched later by a status report."""
+    pool = make_pool()
+    pool.hub.state.save_state_now.side_effect = OSError("disk failure")
+
+    async def exercise():
+        """A failed durable write removes the pending in-memory selection."""
+        with pytest.raises(OSError):
+            await pool.start_bootstrap("c", "gemma4-12b")
+        pool.reconcile_bootstrap("c")
+        await asyncio.sleep(0)
+        assert not pool.hub.state.get_global_config()["llm_worker_preparations"]
+        assert not pool.reserved
+        pool.hub.request_response.assert_not_awaited()
+
+    asyncio.run(exercise())
+
+
+def test_activation_is_scoped_to_selected_shared_worker():
+    """Only the selected Shared worker may receive an explicit activation."""
+    pool = make_pool()
+    pool.hub.state.update_global_config({"llm_worker_preparations": {
+        "c": {"candidate": "gemma4-12b", "request_id": "a" * 32, "revision": 1},
+        "a": {"candidate": "gemma4-12b", "request_id": "b" * 32, "revision": 1},
+    }})
+    candidate = CANDIDATES["gemma4-12b"]
+    pool.hub.request_response.return_value = {"status": "SUCCESS", "code": "activated",
+                                              "model": candidate["model"], "digest": candidate["digest"]}
+
+    async def exercise():
+        """A tenant-owned worker is always excluded."""
+        assert not pool.start_activation("a", "gemma4-12b")
+        assert not pool.start_activation("c", "qwen38-scout")
+        assert pool.start_activation("c", "gemma4-12b")
+        task = next(t for t in asyncio.all_tasks() if t.get_coro().__name__ == "_activate")
+        await task
+
+    asyncio.run(exercise())
+    assert pool.hub.request_response.call_args.args[:3] == ("c", "LLM_ACTIVATE", {"candidate": "gemma4-12b"})
+    assert pool.dashboard()["jobs"][0]["code"] == "activated"
+
+
+@pytest.mark.parametrize("options", [{}, {"num_ctx": True}, {"num_ctx": 65536, "num_gpu": 1}])
+def test_bootstrap_rejects_success_with_missing_or_invalid_options(options):
+    """A malformed worker reply cannot claim a configured-settings smoke pass."""
+    pool = make_pool()
+    pool.hub.state.get_global_config = lambda: {"llm_qualification_candidates": {
+        "cpu": {"worker": "c", "label": "CPU trial"},
+    }}
+    pool.hub.request_response.return_value = {
+        "status": "SUCCESS", "code": "bootstrap_smoke_passed", "mode": "bootstrap",
+        "model": JOB["model"], "digest": DIGEST, "version": "0.40.16", "options": options,
+        "fixtures": [{"fixture": "json", "passed": True},
+                     {"fixture": "indentation", "passed": True}],
+    }
+
+    async def exercise():
+        """Wait for the malformed reply to be processed."""
+        assert pool.start_qualification("cpu")
+        task = next(t for t in asyncio.all_tasks() if t.get_coro().__name__ == "_qualify")
+        await task
+
+    asyncio.run(exercise())
+    job = pool.dashboard()["jobs"][0]
+    assert job["state"] == "failed" and job["code"] == "unsupported_or_invalid_reply"
 
 
 def test_pool_tries_second_own_worker_and_never_spills_to_shared():
@@ -352,6 +536,12 @@ def test_task_profile_sampling_is_validated_forwarded_and_applied(monkeypatch):
             {**row, "temperature": 0.7, "top_p": 0.8}]}}).status_code == 200
 
     pool.hub.request_response.return_value = {"status": "SUCCESS", "text": "summary"}
+    assert asyncio.run(pool.complete("tenant-a", {"prompt": "fixture", "task": "summary"}))["status"] == "SUCCESS"
+    assert pool.hub.request_response.call_args.args[2]["options"] == {"temperature": 0.7, "top_p": 0.8}
+    pool.report("a", pool.hub.active_connections["a"], {
+        "status": "SUCCESS", "models": {JOB["model"]: DIGEST}, "available": True,
+        "supported_options": ["temperature", "top_p"],
+    })
     asyncio.run(pool.complete("tenant-a", {"prompt": "fixture", "task": "summary"}))
     assert pool.hub.request_response.call_args.args[2]["options"] == {"temperature": 0.7, "top_p": 0.8}
     asyncio.run(pool.complete("tenant-a", JOB))
@@ -383,6 +573,50 @@ def test_task_profile_sampling_is_validated_forwarded_and_applied(monkeypatch):
         assert asyncio.run(worker.handle_command(
             "LLM_COMPLETE", {**job, "options": bad}))["code"] == "invalid_request"
     assert len(sent) == 2
+
+
+def test_context_and_sampling_require_support_and_reach_the_worker(monkeypatch):
+    """Keep the selected model settings intact, and do not send them to old peers."""
+    pool = make_pool()
+    options = {"num_ctx": 65536, "temperature": 0.6, "top_p": 0.95,
+               "top_k": 20, "repeat_penalty": 1.0}
+    row = {"model": JOB["model"], "digest": DIGEST, **options}
+    pool.hub.state.get_global_config = lambda: {"llm_task_models": {"coding": [row]}}
+    pool.hub.request_response.return_value = {"status": "SUCCESS", "text": "draft"}
+    job = {"task": "coding", "prompt": "fixture"}
+
+    assert asyncio.run(pool.complete("tenant-a", job))["code"] == "no_capacity"
+    pool.hub.request_response.assert_not_awaited()
+    pool.report("a", pool.hub.active_connections["a"], {
+        "status": "SUCCESS", "models": {JOB["model"]: DIGEST}, "available": True,
+        "supported_options": list(options),
+    })
+    assert asyncio.run(pool.complete("tenant-a", job))["status"] == "SUCCESS"
+    assert pool.hub.request_response.call_args.args[2]["options"] == options
+
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2]))
+    from agent.src import llm_spoke
+    sent = []
+
+    def request(path, body=None, timeout=None):
+        """Return synthetic runtime status and record the completion options."""
+        if path == "/api/version":
+            return {"version": "0.40.16"}
+        if path == "/api/tags":
+            return {"models": [{"name": JOB["model"], "digest": DIGEST}]}
+        sent.append(body)
+        return {"done": True, "done_reason": "stop", "model": JOB["model"], "response": "draft"}
+
+    monkeypatch.setattr(llm_spoke, "ollama_request", request)
+    worker = llm_spoke.LlmSpoke("test", {"models": {JOB["model"]: DIGEST}})
+    worker._service_started = True
+    assert asyncio.run(worker.handle_command("LLM_COMPLETE", {**JOB, "options": options}))["status"] == "SUCCESS"
+    assert sent[0]["think"] is False
+    assert sent[0]["options"] == {**options, "num_gpu": 0, "num_predict": 1024}
+    for bad in ({"num_ctx": 0}, {"num_ctx": 65536.5}, {"top_k": True},
+                {"repeat_penalty": 0}, {"top_k": 257}):
+        assert not llm_spoke.valid_sampling(bad)
+        assert llm.model_sampling({**row, **bad}) is None
 
 
 def test_certificate_bound_summary_only_falls_back_for_public_opt_in(monkeypatch):
@@ -537,6 +771,31 @@ def test_fixture_reports_semantic_indentation_corruption():
         assert result["code"] == "fixture_mismatch" and result["resolution"]
         assert "text" not in result
     assert "must not be forwarded" not in pool.hub.request_response.call_args.args[2]["prompt"]
+
+
+def test_fixture_uses_selected_task_profile_options():
+    """A synthetic task check measures the same options as a task job."""
+    pool = make_pool()
+    pool.hub.llm_pool = pool
+    options = {"num_ctx": 65536, "temperature": 0.6, "top_k": 20}
+    pool.hub.state.get_global_config = lambda: {
+        "llm_task_models": {"coding": [{"model": JOB["model"], "digest": DIGEST, **options}]}
+    }
+    pool.report("a", pool.hub.active_connections["a"], {
+        "status": "SUCCESS", "models": {JOB["model"]: DIGEST}, "available": True,
+        "supported_options": list(options),
+    })
+    pool.hub.request_response.return_value = {"status": "SUCCESS", "text": '{"items":[{"label":"CPU","count":2}]}'}
+    session = {"user": {"tenant_id": "tenant-a", "tenants": ["tenant-a"], "permissions": {"edit": True}}}
+    app = FastAPI()
+    llm.register(app, pool.hub, SimpleNamespace(_session_user=lambda request: session))
+    with TestClient(app) as client:
+        result = client.post("/api/llm/check", json={"task": "coding", "fixture": "json"}).json()
+        assert result["status"] == "SUCCESS"
+        assert client.post("/api/llm/check", json={
+            "task": "coding", "model": JOB["model"], "fixture": "json",
+        }).status_code == 400
+    assert pool.hub.request_response.call_args.args[2]["options"] == options
 
 
 @pytest.mark.parametrize(("response", "code"), [

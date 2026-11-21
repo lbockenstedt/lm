@@ -108,6 +108,8 @@ logger = logging.getLogger("BaseControlPlane")
 # instead of killing a genuinely-working request. Fast commands finish before
 # the first keepalive interval, so they never emit a frame.
 _KEEPALIVE_CMDS = {
+    "LLM_PREPARE",
+    "LLM_ACTIVATE",
     "LLM_QUALIFY",
     "GET_NODE_STATS", "PXMX_LIST_VMS", "GET_VM_LIST", "GET_VM_INFO",
     "GET_SYSTEM_STATS", "GET_AGENTS", "RUN_COMMAND", "SPOKE_RELAY",
