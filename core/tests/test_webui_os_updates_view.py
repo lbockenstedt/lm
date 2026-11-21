@@ -9,7 +9,7 @@ import os
 
 import pytest
 
-from test_webui_browser_smoke import hub_url_and_session  # noqa: F401 (fixture)
+from test_webui_browser_smoke import APP_READY, hub_url_and_session  # noqa: F401 (fixture)
 
 if os.environ.get("CI"):
     from playwright import sync_api
@@ -72,7 +72,7 @@ def test_os_updates_list_survives_polling(hub_url_and_session):  # noqa: F811
             page.goto(base + "/")
             # Login init ends with installClickFeedback(); setView('dashboard');
             # open OS Updates only after that.
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
             page.evaluate("setView('osupdates')")
             details = page.locator("#osu-body details.osu-pkgs")
             details.locator("summary").click()
@@ -173,7 +173,7 @@ def test_os_updates_groups_nodes_by_tenant_then_state(hub_url_and_session):  # n
             page.route("**/api/os-updates/cves/fleet", lambda r: r.fulfill(
                 content_type="application/json", body="[]"))
             page.goto(base + "/")
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
             page.evaluate("setView('osupdates')")
 
             # Needs-attention groups are open. app-01 has pending updates AND a reboot
@@ -235,7 +235,7 @@ def test_os_updates_lists_nothing_until_a_tenant_or_state_is_picked(hub_url_and_
             page.route("**/api/os-updates/cves/fleet", lambda r: r.fulfill(
                 content_type="application/json", body="[]"))
             page.goto(base + "/")
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
             page.evaluate("setView('osupdates')")
             body = page.locator("#osu-body")
             page.locator('#osu-body [data-action="pickTenant"]').first.wait_for()
@@ -344,7 +344,7 @@ def test_os_updates_failure_summary_names_only_nodes_the_pick_covers(hub_url_and
             page.route("**/api/os-updates/cves/fleet", lambda r: r.fulfill(
                 content_type="application/json", body="[]"))
             page.goto(base + "/")
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
             page.evaluate("setView('osupdates')")
             page.locator('#osu-body [data-action="pickTenant"]').first.wait_for()
 
@@ -408,7 +408,7 @@ def test_os_updates_ticks_and_cve_fixes_stay_on_listed_nodes(hub_url_and_session
             page.route("**/api/os-updates/cves/fleet", lambda r: r.fulfill(
                 content_type="application/json", body="[]"))
             page.goto(base + "/")
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
             page.evaluate("setView('osupdates')")
             page.locator('#osu-body [data-action="pickTenant"]').first.wait_for()
             cve = page.locator("#osu-cve-body")
@@ -474,7 +474,7 @@ def test_os_updates_run_results_are_not_mistaken_for_up_to_date(hub_url_and_sess
             page.route("**/api/os-updates/cves/fleet", lambda r: r.fulfill(
                 content_type="application/json", body="[]"))
             page.goto(base + "/")
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
             page.evaluate("setView('osupdates')")
             _pick(page, "Tenant", "tenant-acme")
 
@@ -548,7 +548,7 @@ def test_os_updates_a_run_that_is_over_leaves_no_node_patching(hub_url_and_sessi
             page.route("**/api/os-updates/cves/fleet", lambda r: r.fulfill(
                 content_type="application/json", body="[]"))
             page.goto(base + "/")
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
             page.evaluate("setView('osupdates')")
             page.locator("#osu-s-tenant-acme-attention").wait_for()
 
@@ -598,7 +598,7 @@ def test_os_updates_a_node_whose_reboot_did_not_finish_cleanly_needs_attention(h
             page.route("**/api/os-updates/cves/fleet", lambda r: r.fulfill(
                 content_type="application/json", body="[]"))
             page.goto(base + "/")
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
             page.evaluate("setView('osupdates')")
             _pick(page, "State", "attention")
 
@@ -645,7 +645,7 @@ def test_os_updates_a_node_rebooted_by_hand_stops_counting_as_needing_a_reboot(h
             page.route("**/api/os-updates/cves/fleet", lambda r: r.fulfill(
                 content_type="application/json", body="[]"))
             page.goto(base + "/")
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
             page.evaluate("setView('osupdates')")
             _pick(page, "State", "patching")
 
@@ -687,7 +687,7 @@ def test_os_updates_tenant_ids_never_merge_into_hub_unassigned_or_each_other(hub
             page.route("**/api/os-updates/cves/fleet", lambda r: r.fulfill(
                 content_type="application/json", body="[]"))
             page.goto(base + "/")
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
             page.evaluate("setView('osupdates')")
             page.locator('#osu-body [data-action="pickTenant"]').first.wait_for()
             chips = page.locator('#osu-body [data-action="pickTenant"]')
@@ -758,7 +758,7 @@ def test_os_updates_deploy_listed_covers_only_the_listed_nodes(hub_url_and_sessi
             page.route("**/api/os-updates/apply", lambda r: r.fulfill(
                 content_type="application/json", body=json.dumps({"queued": 1})))
             page.goto(base + "/")
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
             page.evaluate("setView('osupdates')")
             page.locator('#osu-body [data-action="pickTenant"]').first.wait_for()
             deploy = page.locator("#osu-apply")
@@ -822,7 +822,7 @@ def test_os_updates_deploy_listed_redraws_the_list_before_it_deploys(hub_url_and
             # Date.now() reads only what the test sets; the page's timers keep running.
             page.clock.set_fixed_time(t0)
             page.goto(base + "/")
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
             page.evaluate("setView('osupdates')")
             page.locator('#osu-body [data-action="pickState"]').first.wait_for()
             deploy = page.locator("#osu-apply")
@@ -911,7 +911,7 @@ def test_os_updates_a_redraw_classifies_every_node_at_one_time(hub_url_and_sessi
             # Date.now() reads window.__now (ms), which only the test moves.
             page.add_init_script(f"window.__now = {t0 * 1000}; Date.now = () => window.__now;")
             page.goto(base + "/")
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
             page.evaluate("setView('osupdates')")
             page.locator('#osu-body [data-action="pickState"]').first.wait_for()
             page.evaluate("""() => {
@@ -1023,7 +1023,7 @@ def test_os_updates_select_fixes_counts_the_list_as_drawn(hub_url_and_session): 
             # Date.now() reads window.__now (ms), which only the test moves.
             page.add_init_script(f"window.__now = {t0 * 1000}; Date.now = () => window.__now;")
             page.goto(base + "/")
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
             page.evaluate("setView('osupdates')")
             page.locator('#osu-body [data-action="pickState"]').first.wait_for()
             cve = page.locator("#osu-cve-body")

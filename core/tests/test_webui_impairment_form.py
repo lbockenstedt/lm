@@ -9,7 +9,7 @@ import os
 
 import pytest
 
-from test_webui_browser_smoke import hub_url_and_session  # noqa: F401 (fixture)
+from test_webui_browser_smoke import APP_READY, hub_url_and_session  # noqa: F401 (fixture)
 
 if os.environ.get("CI"):
     from playwright import sync_api
@@ -36,7 +36,7 @@ def test_impairment_bandwidth_over_4_gbit_is_refused_in_the_form(hub_url_and_ses
             page.route("**/api/firewall/fw-1/impair*", impair)
             _options(page)
             page.goto(base + "/")
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
             page.evaluate("_opnFirewalls = [{id: 'fw-1', name: 'fw'}]; showOpnsenseAddModal('Impairment')")
             page.wait_for_function("document.getElementById('add-opn-iface').value === 'lan'")
             page.fill("#add-opn-target", "192.0.2.5")
@@ -96,7 +96,7 @@ def test_impairment_alias_device_and_schedule_are_sent(hub_url_and_session):  # 
                 body=json.dumps({"devices": [{"name": "sw1", "primary_ip": "192.0.2.7/24"},
                                              {"name": "noip", "primary_ip": None}]})))
             page.goto(base + "/")
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
             page.evaluate("_opnFirewalls = [{id: 'fw-1', name: 'fw'}]; showOpnsenseAddModal('Impairment')")
             page.fill("#add-opn-delay", "50")
 
@@ -161,7 +161,7 @@ def test_impairment_list_shows_schedule_and_toggles(hub_url_and_session):  # noq
 
             page.route("**/api/firewall/fw-1/impair**", impair)
             page.goto(base + "/")
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
             texts = page.evaluate("""() => { const it = %s; _impairRow(it);
                 return [it.when, it.next_change, it.state]; }""" % json.dumps(row))
             assert texts[0] == "every 3 h for 15 min"
@@ -204,7 +204,7 @@ def test_impairment_interface_is_a_dropdown_from_the_firewall(hub_url_and_sessio
 
             page.route("**/api/firewall/fw-1/impair", impair)
             page.goto(base + "/")
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
             page.evaluate("_opnFirewalls = [{id: 'fw-1', name: 'fw'}]; showOpnsenseAddModal('Impairment')")
             page.wait_for_function("document.querySelectorAll('#add-opn-iface option').length === 2")
             texts = page.eval_on_selector_all("#add-opn-iface option", "os => os.map(o => [o.value, o.text])")
@@ -247,7 +247,7 @@ def test_impairment_interface_fallbacks_and_a_late_answer(hub_url_and_session): 
             page.route("**/api/firewall/fw-2/impair/options*", lambda r: r.fulfill(
                 status=400, content_type="application/json", body=json.dumps({"detail": "API key refused"})))
             page.goto(base + "/")
-            page.wait_for_function("window._lmClickFeedbackInstalled === true")
+            page.wait_for_function(APP_READY)
             page.evaluate("_opnFirewalls = [{id: 'fw-1', name: 'a'}, {id: 'fw-2', name: 'b'}, {id: 'fw-3', name: 'c'}];"
                           "showOpnsenseAddModal('Impairment')")
             page.wait_for_function("document.getElementById('add-opn-iface').tagName === 'INPUT'")
