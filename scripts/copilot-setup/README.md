@@ -22,7 +22,8 @@ the agents or the rules change. A file it changes is first backed up as
 | Coding agents `cloud-coder`, `cloud-coder-plus` | `agents/`, models from `.github/model-policy.json` | `~/.copilot/agents/` |
 | Coordinator model and effort, fleet skills | `.github/model-policy.json`, `.claude/skills` | `~/.copilot/settings.json` (other keys kept) |
 | Fleet rules and specialist agents for every repo | `.github/fleet-rules.md`, `.github/agents` | links `<fleet>/AGENTS.md`, `<fleet>/.github/agents` |
-| `--local`: local agents, provider list, proxy, statistics | `agents-local/`, `providers.json`, `ollama-proxy/`, `local-stats/` | `~/.copilot/...`, launchd `com.copilot.ollama-proxy` |
+| Model ledger: outcomes and cost per model and task | `local-stats/localstat.py` | `~/.copilot/local-stats/` |
+| `--local`: local agents, provider list, proxy | `agents-local/`, `providers.json`, `ollama-proxy/` | `~/.copilot/...`, launchd `com.copilot.ollama-proxy` |
 
 ## The spend gate
 
@@ -51,6 +52,18 @@ An agent can never reopen the gate itself. AB enforces the same numbers.
 AB is to read the same file (not wired yet; see the docs). Edit it only in lm; the fleet sync copies it to every
 repo. See `docs/agents-and-skills.md`, "The model policy", for the evidence.
 
+## The model ledger
+
+After reviewing any agent's result, the coordinator records it with
+`localstat.py outcome` (model, task, pass/fail, why, and the cost read from
+Copilot's usage log). `localstat.py report` turns the ledger into a cost per
+action matrix: for each task type and model, the pass rate, USD per try, USD
+per passing result (failed tries included), the top failure reasons, and the
+cheapest model that passes often enough. Use it to move a model up or down the
+ladder for a kind of work. `localstat.py import-bench FILE` adds benchmark
+runs (cloudbench.jsonl) to the same matrix. The ledger is per user, in
+`~/.copilot/local-stats/outcomes.jsonl`.
+
 ## Local models (`--local`)
 
 Optional and free. It needs [Ollama](https://ollama.com) and a GPU Mac with
@@ -60,5 +73,4 @@ thinking off, which Copilot cannot do. To share a model with another Ollama
 host, write `~/.copilot/ollama-proxy/pools.json`, e.g.
 `{"qwen3.8-27b-64k": [["192.0.2.10", 11434], ["127.0.0.1", 11434]]}`, and
 restart the proxy. Each local call is logged to
-`~/.copilot/local-stats/calls-YYYY-MM.jsonl`; record reviewed outcomes with
-`localstat.py outcome` (see `local-models.md`).
+`~/.copilot/local-stats/calls-YYYY-MM.jsonl`.

@@ -131,27 +131,12 @@ and which stay cloud, so missed offloads are visible.
 
 ### Record every outcome (statistics for tuning)
 The proxy logs every local call automatically to
-`~/.copilot/local-stats/calls-YYYY-MM.jsonl`. Only the reviewer knows whether
-the work was right, so after reviewing each local agent's result, record one
-outcome, including passes (the pass rate is the point):
-
-    python3 ~/.copilot/local-stats/localstat.py outcome --agent local-coder \
-        --task edit --result fail --reason corrupt_code --redo cloud \
-        --minutes 3 --repo lm --note "one line: what went wrong or what worked"
-
-- `--task`: search, trace, explain, edit, test, docs, summarize, commit_msg,
-  json, other. `--result`: pass, partial or fail.
-- `--reason` (needed unless pass; repeatable): corrupt_code, wrong_answer,
-  incomplete, off_spec, bad_citation, tool_misuse, loop_or_stall, timeout,
-  crash, too_slow, other. `--redo`: who redid the work (cloud, local, none).
-- `localstat.py report --days 30` shows failure rates by agent and task,
-  their causes, prompt size vs problems, and which task classes are ready to
-  offload more (90%+ pass over 5+ samples) or should stay in the cloud.
-  Check it before changing the routing table, and when asked how the local
-  models are doing. Put the exact model ID in `--note` when comparing models;
-  outcomes are grouped by agent/task, so a model switch otherwise mixes them.
-  Benchmark inputs and raw scores are preserved under
-  `~/.copilot/local-stats/benchmarks/2026-11-17/`, not just in `/tmp`.
+`~/.copilot/local-stats/calls-YYYY-MM.jsonl`. Record each reviewed local
+result in the same ledger as cloud ones (see "Record every agent outcome"),
+with `--model ollama/<id>`, including passes (the pass rate is the point).
+`localstat.py report` adds per-agent local call statistics: prompt size vs
+problems, and which task classes are ready to offload more (90%+ pass over
+5+ samples) or should stay in the cloud.
 
 ## Local model environment
 

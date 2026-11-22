@@ -108,17 +108,19 @@ json.dump(cfg, open(path, "w"), indent=2)
 print("settings.json: model %s, effort %s, skills %s" % (cfg["model"], cfg["effortLevel"], skills))
 EOF
 
-# 4. Fleet-wide links, so every repo under the fleet folder sees lm's rules
+# 4. The model ledger (every install): reviewed outcomes and their cost, per model
+put "$HERE/local-stats/localstat.py" "$C/local-stats/localstat.py"
+
+# 5. Fleet-wide links, so every repo under the fleet folder sees lm's rules
 [ -e "$FLEET/AGENTS.md" ] || ln -s lm/.github/fleet-rules.md "$FLEET/AGENTS.md"
 mkdir -p "$FLEET/.github"
 [ -e "$FLEET/.github/agents" ] || ln -s ../lm/.github/agents "$FLEET/.github/agents"
 
-# 5. Optional local models: agents, provider list, proxy, statistics
+# 6. Optional local models: agents, provider list, proxy, statistics
 if [ "$LOCAL" = 1 ]; then
   for a in "$HERE"/agents-local/*.agent.md; do put "$a" "$C/agents/$(basename "$a")"; done
   put "$HERE/providers.json" "$C/providers.json"
   put "$HERE/ollama-proxy/proxy.py" "$C/ollama-proxy/proxy.py"
-  put "$HERE/local-stats/localstat.py" "$C/local-stats/localstat.py"
   if [ "$(uname -s)" != Darwin ]; then
     echo "Not macOS: start the proxy yourself: python3 $C/ollama-proxy/proxy.py &"
   elif launchctl list | grep -q 'ollama-proxy'; then

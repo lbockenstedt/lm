@@ -39,6 +39,32 @@ Rules:
 - These rules are for the main session only. A sub-agent does its own task
   and never launches agents.
 
+## Record every agent outcome, with its model and cost
+
+Routing should follow data, not impressions. After reviewing any agent's
+result (cloud or local, pass or fail), record one outcome in the ledger:
+
+    python3 ~/.copilot/local-stats/localstat.py outcome --agent cloud-coder \
+        --task edit --result fail --reason off_spec --since 14:05 \
+        --redo cloud-coder-plus --repo lm --note "one line: what failed or worked"
+
+- `--model` defaults to the model the agent file pins; give it for any other
+  agent. `--since` is when you launched the agent (local time): the cost is
+  read from Copilot's usage log for that model's sub-agent calls. Run one
+  agent per model at a time when cost matters, or give `--usd` directly.
+  Local models cost 0.
+- `--task`: search, trace, explain, edit, fix, review, design, test, docs,
+  summarize, commit_msg, json, other. `--result`: pass, partial or fail.
+- `--reason` (needed unless pass; repeatable): corrupt_code, wrong_answer,
+  incomplete, off_spec, bad_citation, tool_misuse, loop_or_stall, timeout,
+  crash, too_slow, other. `--redo`: who redid the work.
+- `localstat.py report --days 30` prints the cost-per-action matrix (model x
+  task: pass rate, USD per try and per passing result, top failure reasons)
+  and the cheapest model that passes each task often enough. Check it before
+  changing the ladder; a model that keeps failing a task class drops off it
+  for that class. `localstat.py import-bench <cloudbench.jsonl>` loads
+  benchmark runs into the same matrix.
+
 ## Review like AB before every push
 
 AB's review panels catch what a single local review misses (state

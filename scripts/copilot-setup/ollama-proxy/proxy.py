@@ -147,6 +147,7 @@ def describe_request(req):
 def parse_response(raw):
     """Extract text, tool calls, finish reason and usage from an SSE stream or a JSON reply."""
     text, calls, finish, usage = "", {}, None, None
+    # A plain JSON reply is one chunk; an SSE stream is one chunk per data line.
     chunks = []
     if raw.lstrip().startswith(b"{"):
         chunks = [json.loads(raw)]
@@ -157,6 +158,7 @@ def parse_response(raw):
                     chunks.append(json.loads(line[6:]))
                 except ValueError:
                     pass
+    # Join the chunks: text and tool-call fragments are appended in order.
     for c in chunks:
         usage = c.get("usage") or usage
         for ch in c.get("choices") or []:
@@ -240,6 +242,7 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def _forward(self):
+        """Relay one request upstream (Ollama, a pool member or llama.cpp) and log it."""
         body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
         upstream, path = UPSTREAM, self.path
         llamacpp = path.startswith("/llamacpp/")
@@ -314,6 +317,7 @@ class Handler(BaseHTTPRequestHandler):
     do_GET = do_POST = do_DELETE = _forward
 
     def log_message(self, *args):
+        """Silence the per-request access log; calls are logged to JSON Lines instead."""
         pass
 
 
