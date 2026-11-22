@@ -181,7 +181,15 @@ only in lm) and synced to every repo with the rules.
   (`cloud-coder-plus`), then Opus 5.5. Climb one rung only when the tests
   still fail. On three real fleet fixes with a precise spec, Haiku passed 2
   (about $0.02 each), Opus and GPT-5.6-sol 1 each (about $0.40), and Sonnet
-  came closest on the hardest (37 of 39 tests).
+  came closest on the hardest (37 of 39 tests). Review findings are fixed
+  on the same ladder: the critique goes to `cloud-coder` (or to
+  `cloud-coder-plus` when it wrote the change), which climbs one rung when
+  the same finding comes back. The coordinator fixes only edits of 5 lines
+  or fewer, design, security, auth, tenant or credential code, or after
+  `cloud-coder-plus` failed on the finding. A fix that fails the tests is
+  recorded as a failed round at once and climbs.
+  Each fix round is recorded by model, result and cost (CLI: ledger
+  `--task fix`; AB: `fix_outcomes`, Settings → LLM).
 - **`review`**: adopted for local sessions (the `review` skill). Each panel
   gets one reviewer at a time: `mai-code-2-flash` first as a cheap filter,
   then the frontier model of a different vendor from the author
