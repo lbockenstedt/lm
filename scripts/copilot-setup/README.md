@@ -27,9 +27,12 @@ the agents or the rules change. A file it changes is first backed up as
 
 ## The spend gate
 
-Once a local day's cloud AI spend reaches `gate_usd` ($100) every agent
-stops: the hook refuses tool calls until a person reopens it. Within
-`reserve_usd` of the gate no new cloud sub-agents start.
+Once a local day's cloud AI spend reaches `gate_usd` ($100) no new work
+starts: the hook refuses cloud sub-agents, workflows, agent messages and
+`copilot -p` runs, and work already running finishes. At `gate_usd` plus
+`overrun_usd` ($25) it refuses every tool call of a cloud session, to stop a
+runaway, until a person reopens it. Within `reserve_usd` of the gate no new
+cloud sub-agents start.
 
 ```bash
 python3 ~/.copilot/ai-budget/hooks/ai_budget.py status          # today's spend

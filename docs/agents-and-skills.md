@@ -183,10 +183,11 @@ only in lm) and synced to every repo with the rules.
   (about $0.02 each), Opus and GPT-5.6-sol 1 each (about $0.40), and Sonnet
   came closest on the hardest (37 of 39 tests).
 - **`review`**: adopted for local sessions (the `review` skill). Each panel
-  gets one reviewer: `mai-code-2-flash` first, then the frontier model of a
-  different vendor from the author (`gpt-5.6-sol` for Anthropic-written code)
-  only when the cheap verdict is disputed with file evidence, below 0.80
-  confidence, or failed. The frontier verdict stands.
+  gets one reviewer at a time: `mai-code-2-flash` first as a cheap filter,
+  then the frontier model of a different vendor from the author
+  (`gpt-5.6-sol` for Anthropic-written code, else `claude-opus-5.5`). Only
+  the frontier verdict gates the push: Approve at 0.90 or more. A cheap
+  model's confidence never passes a panel.
 
 Who reads it:
 

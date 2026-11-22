@@ -36,6 +36,11 @@ Rules:
   costs more than the edit.
 - Keep the policy's effort (medium) for routine work. Use high only for hard
   design or diagnosis, and say so. Never use max.
+- Check the spend gate before dispatching work
+  (`python3 .github/hooks/ai_budget.py status` in a fleet repo). Once it is
+  closed, dispatch nothing new: let agents already running finish, review
+  their results, then stop and tell the user. Never stop work in flight
+  because of the gate.
 - These rules are for the main session only. A sub-agent does its own task
   and never launches agents.
 
@@ -75,9 +80,10 @@ the fleet `review` skill (lm/.claude/skills/review) and push only when both pane
 run, ship it with the open corner cases recorded, and review the
 follow-ups in a new commit once the system is back). Do not
 write your own review prompt: the skill uses AB's own prompts, rules and
-agents, so the two never drift. Each panel gets ONE reviewer, climbing the
-`review` ladder in `lm/.github/model-policy.json` (cheap first, a frontier
-model of another vendor only on a disputed or low-confidence verdict). When AB's review
+agents, so the two never drift. Each panel gets ONE reviewer at a time from the
+`review` section of `lm/.github/model-policy.json`: the cheap model first as a
+filter, then a frontier model of another vendor, whose Approve at 0.90 or
+more is the only verdict that lets you push. When AB's review
 changes, change it in ab (`pr_review.py`, `fix_engine.py`), not here.
 Fleet rules (`~/vscode/AGENTS.md`), agents (`~/vscode/.github/agents`)
 and skills are links/registrations of lm's files, never copies.
