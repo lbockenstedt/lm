@@ -74,8 +74,10 @@ the fleet `review` skill (lm/.claude/skills/review) and push only when both pane
 (except a live-outage fix under fleet rule 1.7: once both panels have
 run, ship it with the open corner cases recorded, and review the
 follow-ups in a new commit once the system is back). Do not
-write your own review prompt: the skill uses AB's own prompts, rules,
-agents and reviewer models, so the two never drift. When AB's review
+write your own review prompt: the skill uses AB's own prompts, rules and
+agents, so the two never drift. Each panel gets ONE reviewer, climbing the
+`review` ladder in `lm/.github/model-policy.json` (cheap first, a frontier
+model of another vendor only on a disputed or low-confidence verdict). When AB's review
 changes, change it in ab (`pr_review.py`, `fix_engine.py`), not here.
 Fleet rules (`~/vscode/AGENTS.md`), agents (`~/vscode/.github/agents`)
 and skills are links/registrations of lm's files, never copies.

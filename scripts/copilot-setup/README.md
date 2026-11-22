@@ -47,9 +47,10 @@ An agent can never reopen the gate itself. AB enforces the same numbers.
   commits, but does not code;
 - coding climbs `coding.ladder`, cheapest first, one rung each time the
   tests still fail;
-- the review ladder is proposed and not yet applied to AB.
+- reviews run one reviewer per panel on the review ladder (adopted for local
+  sessions by the review skill; AB's own panels are not changed yet).
 
-AB is to read the same file (not wired yet; see the docs). Edit it only in lm; the fleet sync copies it to every
+AB's fixes read `coding.ladder` from the same file; its review panels do not yet (see the docs). Edit it only in lm; the fleet sync copies it to every
 repo. See `docs/agents-and-skills.md`, "The model policy", for the evidence.
 
 ## The model ledger

@@ -182,9 +182,11 @@ only in lm) and synced to every repo with the rules.
   still fail. On three real fleet fixes with a precise spec, Haiku passed 2
   (about $0.02 each), Opus and GPT-5.6-sol 1 each (about $0.40), and Sonnet
   came closest on the hardest (37 of 39 tests).
-- **`review`**: `proposed`, not yet applied to AB. A cheap first pass, then
-  one frontier seat from a different vendor than the author, in sequence,
-  stopping at the first Reject.
+- **`review`**: adopted for local sessions (the `review` skill). Each panel
+  gets one reviewer: `mai-code-2-flash` first, then the frontier model of a
+  different vendor from the author (`gpt-5.6-sol` for Anthropic-written code)
+  only when the cheap verdict is disputed with file evidence, below 0.80
+  confidence, or failed. The frontier verdict stands.
 
 Who reads it:
 
@@ -192,11 +194,11 @@ Who reads it:
   and effort into `~/.copilot/settings.json` and each rung's model into the
   `cloud-coder*` agents, and installs the coordinator rules
   (`scripts/copilot-setup/README.md`). Re-run it after the policy changes.
-- **AB**: not wired yet. AB still picks fix models with its own allowlist
-  and cost-tier picker (`fix_engine.DEFAULT_FIX_ALLOWLIST`), which cannot
-  express this ladder: its model registry caps Haiku at `medium` complexity
-  while every fix asks for `large`, and Sonnet and Opus share one cost tier.
-  Making AB walk `coding.ladder` is a separate AB change.
+- **AB**: fixes walk `coding.ladder` (Settings → Fix model ladder,
+  `FIX_MODEL_LADDER`, on by default; see `ab/docs/ab.md`, "Fix model
+  ladder"). AB's review panels still seat several reviewers through
+  `fix_engine.panel_verdict`; moving them to the `review` ladder is a
+  separate AB change.
 
 The same installer sets up the daily AI spend gate below as a personal hook,
 so it covers every session on the machine, not only those started in a
