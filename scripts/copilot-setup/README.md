@@ -1,29 +1,51 @@
 # Copilot setup for the Lab Manager fleet
 
-One command sets up GitHub Copilot CLI the way the fleet owner works, so
-every person and AppBuilder (AB) follow the same model policy and spend gate.
+The cloud setup needs no installer. A Copilot CLI session started inside any
+fleet repo (lm or any repo the fleet sync covers) reads everything from the
+repo itself:
+
+- `AGENTS.md`: the fleet rules;
+- `.github/copilot-instructions.md`: the coordinator, coding ladder, spend
+  gate and model ledger rules;
+- `.github/agents`: the specialist agents and the `cloud-coder` /
+  `cloud-coder-plus` coding agents;
+- `.claude/skills`: the skills, including `review` and `model-ledger`;
+- `.github/hooks/fleet-hooks.json`: the spend gate hook (it runs once the
+  folder is trusted).
+
+A new user clones lm (or any fleet repo) and starts `copilot` in it. Or, in
+any Copilot session, ask it to pull the Lab Manager development rules: it
+clones or pulls `lbockenstedt/lm` and works from there. These files are
+edited only in lm; `sync-fleet-files.yml` copies them to every fleet repo.
+
+Why not a Copilot plugin: a plugin cannot set up Ollama, the thinking-off
+proxy or `providers.json`, and the repo already delivers the rest.
+
+## The optional installer
+
+`install.sh` adds only what a repo cannot:
 
 ```bash
-bash <fleet>/lm/scripts/copilot-setup/install.sh            # Copilot cloud models only
-bash <fleet>/lm/scripts/copilot-setup/install.sh --local    # plus local Ollama agents
+bash <fleet>/lm/scripts/copilot-setup/install.sh                  # links and settings
+bash <fleet>/lm/scripts/copilot-setup/install.sh --gate           # also the user-wide spend gate
+bash <fleet>/lm/scripts/copilot-setup/install.sh --local          # also the local-model setup
+bash <fleet>/lm/scripts/copilot-setup/install.sh --local --models # also pull the Ollama models
 ```
 
 Run it from an lm checkout that stays put (not a temporary worktree), then
-restart Copilot CLI. Re-run it after `git pull` whenever the policy, the gate,
-the agents or the rules change. A file it changes is first backed up as
-`<file>.bak-<timestamp>`.
+restart Copilot CLI. A file it changes is first backed up as
+`<file>.bak-<timestamp>`. It never deletes anything. When it finds an old
+installed copy of the fleet rules (`~/.copilot/copilot-instructions.md`) or
+of the `cloud-coder` agents (`~/.copilot/agents/`), it prints a note:
+remove them, because they now load from the repo.
 
-## What it installs
-
-| Piece | Source in lm | Installed to |
+| Option | Piece | Installed to |
 |---|---|---|
-| Daily AI spend gate (fleet rule 1.10) | `.github/hooks/ai_budget.py`, `.github/ai-budget.json` | `~/.copilot/ai-budget/`, hook `~/.copilot/hooks/ai-budget.json` |
-| Coordinator and ladder rules | `copilot-instructions.md` (+ `local-models.md` with `--local`) | `~/.copilot/copilot-instructions.md` |
-| Coding agents `cloud-coder`, `cloud-coder-plus` | `agents/`, models from `.github/model-policy.json` | `~/.copilot/agents/` |
-| Coordinator model and effort, fleet skills | `.github/model-policy.json`, `.claude/skills` | `~/.copilot/settings.json` (other keys kept) |
-| Fleet rules and specialist agents for every repo | `.github/fleet-rules.md`, `.github/agents` | links `<fleet>/AGENTS.md`, `<fleet>/.github/agents` |
-| Model ledger: outcomes and cost per model and task | `local-stats/localstat.py` | `~/.copilot/local-stats/` |
-| `--local`: local agents, provider list, proxy | `agents-local/`, `providers.json`, `ollama-proxy/` | `~/.copilot/...`, launchd `com.copilot.ollama-proxy` |
+| default | Fleet rules, agents and Copilot instructions for a session started in the fleet folder itself (not inside a repo) | links `<fleet>/AGENTS.md`, `<fleet>/.github/agents`, `<fleet>/.github/copilot-instructions.md` |
+| default | Coordinator model and effort (from `.github/model-policy.json`), lm's skills folder | `~/.copilot/settings.json` (other keys kept) |
+| `--gate` | Daily AI spend gate (fleet rule 1.10) as a user-wide hook, so it also covers sessions outside fleet repos | `~/.copilot/ai-budget/`, hook `~/.copilot/hooks/ai-budget.json` |
+| `--local` | Local agents, provider list, thinking-off proxy, local-model rules | `~/.copilot/agents/`, `~/.copilot/providers.json`, `~/.copilot/ollama-proxy/`, `~/.copilot/instructions/local-models.instructions.md`, launchd `com.copilot.ollama-proxy` |
+| `--models` | The three Ollama models and their 64k-context aliases | Ollama |
 
 ## The spend gate
 
@@ -33,6 +55,9 @@ starts: the hook refuses cloud sub-agents, workflows, agent messages and
 `overrun_usd` ($25) it refuses every tool call of a cloud session, to stop a
 runaway, until a person reopens it. Within `reserve_usd` of the gate no new
 cloud sub-agents start.
+
+Inside a fleet repo the same script is `.github/hooks/ai_budget.py`; the
+paths below are the `--gate` install.
 
 ```bash
 python3 ~/.copilot/ai-budget/hooks/ai_budget.py status          # today's spend
@@ -65,8 +90,11 @@ action matrix: for each task type and model, the pass rate, USD per try, USD
 per passing result (failed tries included), the top failure reasons, and the
 cheapest model that passes often enough. Use it to move a model up or down the
 ladder for a kind of work. `localstat.py import-bench FILE` adds benchmark
-runs (cloudbench.jsonl) to the same matrix. The ledger is per user, in
-`~/.copilot/local-stats/outcomes.jsonl`.
+runs (cloudbench.jsonl) to the same matrix. The script is the `model-ledger`
+skill (`lm/.claude/skills/model-ledger/localstat.py`); the ledger is per
+user, in `~/.copilot/local-stats/outcomes.jsonl`. For a `copilot -p` run (a
+reviewer, say), pass `--usage-output-file F` to copilot and `--usage-file F`
+to `localstat.py outcome`, so the run's cost is recorded.
 
 ## Local models (`--local`)
 

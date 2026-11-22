@@ -24,9 +24,9 @@ owns. On every lm `dev` push that changes them, `sync-fleet-files.yml` runs
 `.github/scripts/sync_fleet_files.py`, which:
 
 - copies `.github/fleet-rules.md`, `.github/agents/`, `.claude/skills/` and
-  the AI spend gate (`.github/hooks/`, `.github/ai-budget.json`) and the
-  model policy (`.github/model-policy.json`) into each
-  repo, removing files lm no longer has (except a repo's own `<repo>-*`
+  the AI spend gate (`.github/hooks/`, `.github/ai-budget.json`), the
+  model policy (`.github/model-policy.json`) and the Copilot instructions
+  (`.github/copilot-instructions.md`) into each repo, removing files lm no longer has (except a repo's own `<repo>-*`
   agents and skills);
 - writes the rules into each repo's `AGENTS.md`, between the
   `fleet-rules:begin` and `fleet-rules:end` markers, so any tool that
@@ -191,19 +191,23 @@ only in lm) and synced to every repo with the rules.
 
 Who reads it:
 
-- **CLI**: `scripts/copilot-setup/install.sh` stamps the coordinator model
-  and effort into `~/.copilot/settings.json` and each rung's model into the
-  `cloud-coder*` agents, and installs the coordinator rules
-  (`scripts/copilot-setup/README.md`). Re-run it after the policy changes.
+- **CLI**: straight from the repo, with no installer. The coordinator rules
+  are `.github/copilot-instructions.md`, and the `cloud-coder*` agents in
+  `.github/agents` pin each rung's model (`.github/tests/test_model_policy.py`
+  checks they match the policy). Both are fleet-owned and synced like the
+  rules. The optional `scripts/copilot-setup/install.sh` copies only the
+  coordinator model and effort into `~/.copilot/settings.json`
+  (`scripts/copilot-setup/README.md`).
 - **AB**: fixes walk `coding.ladder` (Settings → Fix model ladder,
   `FIX_MODEL_LADDER`, on by default; see `ab/docs/ab.md`, "Fix model
   ladder"). AB's review panels still seat several reviewers through
   `fix_engine.panel_verdict`; moving them to the `review` ladder is a
   separate AB change.
 
-The same installer sets up the daily AI spend gate below as a personal hook,
-so it covers every session on the machine, not only those started in a
-fleet repo.
+Inside a fleet repo the daily AI spend gate below runs from the repo's
+`.github/hooks/fleet-hooks.json`. `install.sh --gate` also installs it as a
+personal hook, so it covers every session on the machine, not only those
+started in a fleet repo.
 
 ## Adding or changing one
 

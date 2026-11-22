@@ -2,7 +2,7 @@
 """Model statistics, local and cloud: record task outcomes and their cost, and
 report which model is worth sending which kind of work to.
 
-Two JSON Lines logs live in this folder:
+Two JSON Lines logs live in ~/.copilot/local-stats (LOCAL_STATS_DIR):
 - calls-YYYY-MM.jsonl: written by ~/.copilot/ollama-proxy/proxy.py, one line per
   chat call to a local model (agent, prompt size, speed, tool calls, errors and
   corruption signals). Automatic.
@@ -37,6 +37,9 @@ from collections import Counter, defaultdict
 DIR = os.path.expanduser(os.environ.get("LOCAL_STATS_DIR", "~/.copilot/local-stats"))
 OUTCOMES = os.path.join(DIR, "outcomes.jsonl")
 COPILOT = os.path.expanduser(os.environ.get("COPILOT_HOME", "~/.copilot"))
+# The repo this script is in (<repo>/.claude/skills/model-ledger/localstat.py): its
+# .github/agents and .github/hooks are found before personal copies in COPILOT.
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 # Known agents; any other name is accepted too (a new agent needs no code change).
 AGENTS = ["local-coder", "local-scout", "local-summarizer", "local-docs", "local-big",
           "cloud-coder", "cloud-coder-plus", "coordinator", "direct"]
@@ -62,13 +65,17 @@ def read_jsonl(paths, since):
 
 
 def agent_model(agent):
-    """The model an installed agent file pins (``model:`` line), or ""."""
-    try:
-        with open(os.path.join(COPILOT, "agents", agent + ".agent.md")) as f:
-            m = re.search(r"(?m)^model:\s*(\S+)", f.read())
-        return m.group(1) if m else ""
-    except OSError:
-        return ""
+    """The model an agent file pins (``model:`` line): the repo's .github/agents first, then personal agents; or ""."""
+    for path in (os.path.join(REPO, ".github", "agents", agent + ".agent.md"),
+                 os.path.join(COPILOT, "agents", agent + ".agent.md")):
+        try:
+            with open(path) as f:
+                m = re.search(r"(?m)^model:\s*(\S+)", f.read())
+        except OSError:
+            continue
+        if m:
+            return m.group(1)
+    return ""
 
 
 def since_utc(text):
@@ -85,11 +92,14 @@ def since_utc(text):
 def subagent_usd(model, since):
     """USD the usage log shows for sub-agent calls on ``model`` since ``since``.
 
-    The usage log is read through the spend gate's ``usage_log()`` (every
-    install has the gate), so only one script opens Copilot's database."""
-    # Load the spend gate's script, which knows where Copilot's usage log is.
-    gate = os.path.join(COPILOT, "ai-budget", "hooks", "ai_budget.py")
-    if not os.path.isfile(gate):
+    The usage log is read through the spend gate's ``usage_log()`` (the
+    repo's copy, else the user-wide install), so only one script opens Copilot's database."""
+    # Load the spend gate's script, which knows where Copilot's usage log is: the
+    # repo's copy is tried first, then the user-wide install.
+    gate = next((p for p in (os.path.join(REPO, ".github", "hooks", "ai_budget.py"),
+                             os.path.join(COPILOT, "ai-budget", "hooks", "ai_budget.py"))
+                 if os.path.isfile(p)), None)
+    if gate is None:
         return None
     spec = importlib.util.spec_from_file_location("ai_budget", gate)
     ai_budget = importlib.util.module_from_spec(spec)
@@ -151,6 +161,7 @@ def cmd_import_bench(a):
             if o.get("source") == "benchmark":
                 seen.add((o.get("bench_id"), o.get("model")))
     added = 0
+    os.makedirs(DIR, exist_ok=True)
     with open(a.file) as f, open(OUTCOMES, "a") as out:
         for line in f:
             try:

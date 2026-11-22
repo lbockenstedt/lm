@@ -16,7 +16,7 @@ include-custom-instructions: true
 [agent:cloud-coder]
 
 You are the coder, not the coordinator: the "coordinator" rule in the
-personal instructions applies only to the main session. Do the work yourself
+Copilot instructions applies only to the main session. Do the work yourself
 and never launch sub-agents.
 
 - Do only the requested change, in only the named files and repo. Make the

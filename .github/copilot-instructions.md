@@ -1,15 +1,16 @@
 # Copilot rules for the Lab Manager fleet (all repos)
 
-<!-- Installed to ~/.copilot/copilot-instructions.md by
-     lm/scripts/copilot-setup/install.sh. Edit the copy in lm, then re-run the
-     installer; a hand edit to the installed copy is lost on the next run. -->
+<!-- Fleet-owned: edit only lm/.github/copilot-instructions.md.
+     sync-fleet-files.yml copies it into every fleet repo, where Copilot reads
+     it straight from the repo; no installer is needed. -->
 
 ## The main session coordinates; cheap agents code
 
 Models and effort come from the fleet policy, `lm/.github/model-policy.json`.
 AB is to read the same file, so CLI sessions and AB climb one ladder. The
-installer stamps the policy's models into `settings.json` and the cloud coding
-agents; re-run it after the policy changes.
+cloud coding agents in `.github/agents` pin the policy's models (a test
+checks they match); the optional installer only copies the coordinator model
+and effort into `settings.json`.
 
 The main session is the coordinator (the policy's `coordinator` model, at the
 policy's `effort`). It keeps: design and planning, root-cause diagnosis,
@@ -49,7 +50,7 @@ Rules:
 Routing should follow data, not impressions. After reviewing any agent's
 result (cloud or local, pass or fail), record one outcome in the ledger:
 
-    python3 ~/.copilot/local-stats/localstat.py outcome --agent cloud-coder \
+    python3 <fleet>/lm/.claude/skills/model-ledger/localstat.py outcome --agent cloud-coder \
         --task edit --result fail --reason off_spec --since 14:05 \
         --redo cloud-coder-plus --repo lm --note "one line: what failed or worked"
 
@@ -57,6 +58,9 @@ result (cloud or local, pass or fail), record one outcome in the ledger:
   agent. `--since` is when you launched the agent (local time): the cost is
   read from Copilot's usage log for that model's sub-agent calls. Run one
   agent per model at a time when cost matters, or give `--usd` directly.
+  A `copilot -p` run (a reviewer, say) is its own session, so `--since`
+  cannot see it: run it with `--usage-output-file <file>` and pass
+  `--usage-file <file>`.
   Local models cost 0.
 - `--task`: search, trace, explain, edit, fix, review, design, test, docs,
   summarize, commit_msg, json, other. `--result`: pass, partial or fail.

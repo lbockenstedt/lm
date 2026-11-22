@@ -61,7 +61,7 @@ _pins = {}  # conversation key -> (host, last seen)
 _lock = threading.Lock()
 
 # Statistics: one JSON line per chat call, in a monthly file, so failure rates and
-# their causes can be analysed later (see ~/.copilot/local-stats/localstat.py).
+# their causes can be analysed later (see the model-ledger skill, lm/.claude/skills/model-ledger/localstat.py).
 STATS_DIR = os.path.expanduser(os.environ.get("LOCAL_STATS_DIR", "~/.copilot/local-stats"))
 CAPTURE_MAX = 4 * 1024 * 1024  # response bytes kept for analysis; the client still gets everything
 EDIT_TOOLS = ("edit", "create", "apply_patch", "write")
