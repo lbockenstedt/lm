@@ -52,6 +52,10 @@ def test_unified_spokes_and_agents_table_contract():
     assert 'title="${escapeHtml(id)}"' not in fleet_src
     assert "${stat('Total', total)}" in content
     assert "${stat('Offline', down," in content
+    assert 'title="${escapeHtml(r.sub_spoke_id' not in fleet_src
+    assert "resetSpokeSecret" in fleet_src
+    assert "unapproveSpoke" in fleet_src
+    assert "_isUuid" in fleet_src
 
 
 def test_js_syntax_valid():

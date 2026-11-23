@@ -298,7 +298,7 @@ function lmToggleSpokeAgentActionMenu(triggerEl, itemKey) {
         });
     }
 
-    // Approval / Revoke
+    // Approval / Revoke / Secret
     if (!item.approved) {
         actions.push({
             label: 'Approve',
@@ -308,13 +308,28 @@ function lmToggleSpokeAgentActionMenu(triggerEl, itemKey) {
                 ? approveAgent(item.id, item.spokeId)
                 : approveSpoke(item.id)
         });
-    } else if (item.kind === 'pxmx-agent' && !item.isOffline) {
-        actions.push({
-            label: 'Un-approve (Revoke)',
-            icon: '✕',
-            cls: 'text-red-600 hover:bg-red-50',
-            execute: () => revokeAgent(item.id)
-        });
+    } else {
+        if (item.kind === 'spoke') {
+            actions.push({
+                label: 'Reset Secret',
+                icon: '🔑',
+                cls: 'text-slate-700 hover:bg-slate-50',
+                execute: () => resetSpokeSecret(item.id)
+            });
+            actions.push({
+                label: 'Un-approve (Revoke)',
+                icon: '✕',
+                cls: 'text-red-600 hover:bg-red-50',
+                execute: () => unapproveSpoke(item.id)
+            });
+        } else if (item.kind === 'pxmx-agent' && !item.isOffline) {
+            actions.push({
+                label: 'Un-approve (Revoke)',
+                icon: '✕',
+                cls: 'text-red-600 hover:bg-red-50',
+                execute: () => revokeAgent(item.id)
+            });
+        }
     }
 
     // Decommission / Restore / Force Delete
@@ -469,10 +484,16 @@ async function _renderUnifiedSpokesAndAgentsTable(container, trueSpokes, generic
         };
     });
 
+    // Helper to test if a string is a raw UUID (fleet rule 7.3: no UUIDs on screen)
+    const _isUuid = s => /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(String(s || '').trim());
+
     // Normalize pxmx agents
     const pxmxAgentItems = (pxmxAgents || []).map(a => {
         const aid = a.agent_id;
-        const label = _nodeLabel(a.display_name || a.hostname || aid, _tenantOf(a));
+        const rawDn = a.display_name && !_isUuid(a.display_name) ? a.display_name : '';
+        const rawHost = a.hostname && !_isUuid(a.hostname) ? a.hostname : '';
+        const baseName = rawDn || rawHost || 'Node Agent';
+        const label = _nodeLabel(baseName, _tenantOf(a));
         const isPending = a._status === 'pending';
         const isOffline = a._status === 'offline';
         const extras = _diagTelemetryExtras(_normalizePxmxAgent(a), {
@@ -486,8 +507,13 @@ async function _renderUnifiedSpokesAndAgentsTable(container, trueSpokes, generic
         const dot = (extras && !isPending) ? extras.dot : (isPending ? 'bg-amber-400' : 'bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.5)]');
         const rowTenant = (a.client_simulation?.tenant_id || a.tenant_id || '').trim();
         const tenantShared = !!a.tenant_shared || (!!rowTenant && !!window._sharedTenantId && rowTenant === window._sharedTenantId);
-        const spokeNameById = new Map((trueSpokes || []).map(s => [s.spoke_id, _spokeName(s) || s.display_name || s.name || 'Spoke']));
-        const parentSpokeLabel = a.spoke_name || spokeNameById.get(a.spoke_id) || 'pxmx';
+        const spokeNameById = new Map((trueSpokes || []).map(s => {
+            const raw = _spokeName(s) || s.display_name || s.name || '';
+            const safe = raw && !_isUuid(raw) ? raw : (s.hostname || 'Spoke');
+            return [s.spoke_id, safe];
+        }));
+        const rawParent = a.spoke_name || spokeNameById.get(a.spoke_id) || '';
+        const parentSpokeLabel = rawParent && !_isUuid(rawParent) ? rawParent : 'pxmx';
 
         return {
             kind: 'pxmx-agent',
@@ -605,7 +631,9 @@ async function _renderUnifiedSpokesAndAgentsTable(container, trueSpokes, generic
         // Tenant cell
         let tenantCell = '';
         if (it.tenantId) {
-            tenantCell = `<span class="font-mono text-xs text-slate-700">${escapeHtml(it.tenantId)}</span>`;
+            const tMapName = window._saTenantsMap?.get(it.tenantId);
+            const tDisp = tMapName || (it.tenantName ? it.tenantName : (_isUuid(it.tenantId) ? 'Assigned' : it.tenantId));
+            tenantCell = `<span class="font-medium text-xs text-slate-700">${escapeHtml(tDisp)}</span>`;
             if (it.tenantShared) {
                 tenantCell += ` <span class="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 align-middle" title="Shared tenant — visible to all tenants">shared</span>`;
             }
@@ -693,7 +721,7 @@ async function _renderUnifiedSpokesAndAgentsTable(container, trueSpokes, generic
             const active = (roleState && roleState.active) || [];
             const parts = [];
             if (Array.isArray(active) && active.length > 0) {
-                parts.push(...active.map(r => `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-blue-100 text-blue-700" title="${escapeHtml(r.sub_spoke_id || '')}">${escapeHtml((AGENT_ROLES[r.role] || {}).name || r.role)}</span>`));
+                parts.push(...active.map(r => `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-blue-100 text-blue-700" title="${escapeHtml((AGENT_ROLES[r.role] || {}).name || r.role)}">${escapeHtml((AGENT_ROLES[r.role] || {}).name || r.role)}</span>`));
             }
             const deps = Array.isArray(ds && ds.deploys) ? ds.deploys
                        : (ds && ds.deploy ? [ds.deploy] : []);
