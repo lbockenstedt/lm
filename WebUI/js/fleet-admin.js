@@ -3499,7 +3499,7 @@ async function showLoadRoleModal(spokeId) {
     list.innerHTML = rows || '<p class="text-xs text-slate-500 italic col-span-3">All available roles are already loaded.</p>';
     const loadedControls = document.getElementById('loaded-role-controls');
     // Deploy roles that own a background service (stop = Unload, purge = Uninstall).
-    const SERVICE_DEPLOY_ROLES = ['dns-server', 'dhcp-server', 'zabbix-server', 'zbxproxy', 'zbxagent', 'syslog-collector', 'syslog-graylog'];
+    const SERVICE_DEPLOY_ROLES = ['dns-server', 'dhcp-server', 'zabbix-server', 'zbxproxy', 'zbxagent', 'syslog-collector', 'syslog-graylog', 'ab'];
     // The management module a server's Unload waits for (default: drop "-server").
     const SERVER_MODULE = { 'syslog-collector': 'syslog' };
     const serverModule = id => SERVER_MODULE[id] || id.replace(/-server$/, '');
