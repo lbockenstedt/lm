@@ -21,6 +21,7 @@ GITHUB_DIR = pathlib.Path(__file__).resolve().parent.parent
 SCRIPT = GITHUB_DIR / "hooks" / "ai_budget.py"
 POLICY = json.loads((GITHUB_DIR / "ai-budget.json").read_text())
 GATE = POLICY["gate_usd"]
+OVERRUN = POLICY.get("overrun_usd", 25)
 
 _spec = importlib.util.spec_from_file_location("ai_budget", SCRIPT)
 ai_budget = importlib.util.module_from_spec(_spec)
@@ -65,9 +66,9 @@ class GateTest(unittest.TestCase):
         self.assertEqual(code, 0)
         return json.loads(out)["permissionDecisionReason"] if out.strip() else None
 
-    def test_closed_gate_refuses_work_but_lets_the_agent_stop(self):
-        """Past the gate every call is refused, except stopping and checking status."""
-        self.spend(GATE * 1.5)
+    def test_overrun_refuses_every_call_but_lets_the_agent_stop(self):
+        """Past the gate plus the overrun every call is refused, except stopping and checking status."""
+        self.spend(GATE + OVERRUN + 10)
         reason = self.check("bash", {"command": "ls"})
         self.assertIn("gate closed", reason)
         self.assertIn("continue", reason)
@@ -75,8 +76,55 @@ class GateTest(unittest.TestCase):
         self.assertIsNone(self.check("task_complete", {"summary": "stopped"}))
         self.assertIsNone(self.check("bash", {"command": "python3 %s status" % SCRIPT}))
         self.assertIsNotNone(self.check("bash", {"command": "python3 %s status; ls" % SCRIPT}))
+        self.assertIsNone(self.check("write_bash", {"shellId": "s", "input": "python3 %s status\n" % SCRIPT}))
         _, out = self.run_script("context", stdin="{}")
         self.assertIn("CLOSED", json.loads(out)["additionalContext"])
+        self.assertIn("overrun used up", json.loads(out)["additionalContext"])
+        self.assertIn("overrun used up", self.run_script("status")[1])
+
+    def test_closed_gate_refuses_new_work_only(self):
+        """Past the gate, before the overrun, work already running continues and only new work is refused."""
+        self.spend(GATE + 5)
+        self.assertIsNone(self.check("bash", {"command": "ls"}))
+        self.assertIsNone(self.check("view", {"path": "/tmp/x"}))
+        self.assertIsNone(self.check("edit", {"path": "/tmp/x"}))
+        reason = self.check("task", {"agent_type": "explore"})
+        self.assertIn("gate closed", reason)
+        self.assertIn("continue", reason)
+        self.assertIsNotNone(self.check("run_dynamic_workflow", {"name": "x"}))
+        self.assertIsNotNone(self.check("write_agent", {"agent_id": "a", "message": "more"}))
+        self.assertIsNotNone(self.check("bash", {"command": "copilot -p hi --model gpt-5.6-sol -s"}))
+        self.assertIsNotNone(self.check("bash", {"command": "cd x && perl -e 'alarm 9; exec @ARGV' copilot -p \"hi\" --model mai-code-2-flash"}))
+        self.assertIsNone(self.check("bash", {"command": "copilot -p hi --model ollama/qwen3.6"}))
+        self.assertIsNotNone(self.check("bash", {"command": "copilot -p a --model ollama/q && copilot -p b --model gpt-5.6-sol"}))
+        self.assertIsNotNone(self.check("bash", {"command": "copilot -p a --model gpt-5.6-sol; echo --model ollama/q"}))
+        self.assertIsNotNone(self.check("bash", {"command": "copilot \\\n  -p review \\\n  --model gpt-5.6-sol"}))
+        self.assertIsNone(self.check("bash", {"command": "copilot \\\n  -p review \\\n  --model ollama/q"}))
+        self.assertIsNotNone(self.check("bash", {"command": "copilot `\n  -p review `\n  --model gpt-5.6-sol"}))
+        self.assertIsNotNone(self.check("write_bash", {"shellId": "s", "input": "copilot -p hi --model gpt-5.6-sol\n"}))
+        # A prompt that only mentions a local model is still a cloud run; a quoted separator is not one.
+        self.assertIsNotNone(self.check("bash", {"command": "copilot -p 'use --model ollama/q' --model gpt-5.6-sol"}))
+        self.assertIsNotNone(self.check("bash", {"command": "copilot -p 'try --model ollama/q'"}))
+        self.assertIsNone(self.check("bash", {"command": "copilot -p 'a; b | c' --model=ollama/q -s"}))
+        self.assertIsNotNone(self.check("bash", {"command": "copilot -p hi --agent local-coder"}))
+        self.assertIsNotNone(self.check("bash", {"command": "copilot -p 'unclosed --model ollama/q"}))
+        self.assertIsNotNone(self.check("bash", {"command": "bash -c 'copilot -p hi --model gpt-5.6-sol'"}))
+        self.assertIsNone(self.check("bash", {"command": "bash -c 'copilot -p hi --model ollama/q'"}))
+        self.assertIsNone(self.check("bash", {"command": "copilot -p 'see: copilot -p x --model gpt-5.6-sol' --model ollama/q"}))
+        self.assertIsNotNone(self.check("bash", {"command": "copilot '-p' hi --model gpt-5.6-sol"}))
+        self.assertIsNotNone(self.check("bash", {"command": "c'o'pilot \\-p hi --model gpt-5.6-sol"}))
+        self.assertIsNone(self.check("bash", {"command": "echo \"don't stop\""}))
+        self.assertIsNotNone(self.check("powershell", {"command": "copilot `-p hi --model gpt-5.6-sol"}))
+        self.assertIsNotNone(self.check("bash", {"command": "echo 'copilot -p hi --model gpt-5.6-sol'"}))
+        self.assertIsNone(self.check("bash", {"command": "env X=1 copilot --version && echo 'copilot docs'"}))
+        self.assertIsNone(self.check("bash", {"command": "copilot --version"}))
+        self.assertIsNone(self.check("task", {"agent_type": "local-coder"}))
+        _, out = self.run_script("context", stdin="{}")
+        text = json.loads(out)["additionalContext"]
+        self.assertIn("CLOSED", text)
+        self.assertIn("Let work already running finish", text)
+        self.assertNotIn("overrun used up", text)
+        self.assertIn("CLOSED to new work", self.run_script("status")[1])
 
     def test_local_session_keeps_working_past_the_gate(self):
         """Past the gate a session whose calls today were all free keeps working,
@@ -162,6 +210,9 @@ class GateTest(unittest.TestCase):
         self.assertIsNone(decide("task", {"agent_type": "explore", "model": "llamacpp/dsv4"}, near, GATE, 25))
         self.assertIsNone(decide("bash", {"command": "ls"}, near, GATE, 25))
         self.assertIsNone(decide("task", {"agent_type": "explore"}, far, GATE, 25))
+        self.assertIsNotNone(decide("bash", {"command": "copilot -p x --model claude-haiku-5.5"}, near, GATE, 25))
+        self.assertIsNone(decide("bash", {"command": "copilot -p x --model claude-haiku-5.5"}, far, GATE, 25))
+        self.assertIsNone(decide("bash", {"command": "copilot --version"}, near, GATE, 25))
 
     def test_fails_open(self):
         """No usage log, an unreadable one or bad input lets the call run, never an error exit."""

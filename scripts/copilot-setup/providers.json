@@ -1,0 +1,46 @@
+{
+  "providers": [
+    {
+      "name": "ollama",
+      "type": "openai",
+      "baseUrl": "http://127.0.0.1:11435/v1"
+    },
+    {
+      "name": "llamacpp",
+      "type": "openai",
+      "baseUrl": "http://127.0.0.1:11435/llamacpp/v1"
+    }
+  ],
+  "models": [
+    {
+      "id": "gemma4-12b-64k",
+      "provider": "ollama",
+      "maxPromptTokens": 57344,
+      "maxOutputTokens": 8192
+    },
+    {
+      "id": "qwen3.8-27b-64k",
+      "provider": "ollama",
+      "maxPromptTokens": 57344,
+      "maxOutputTokens": 8192
+    },
+    {
+      "id": "qwen3.6-35b-coding-64k",
+      "provider": "ollama",
+      "maxPromptTokens": 57344,
+      "maxOutputTokens": 8192
+    },
+    {
+      "id": "dsv4-flash-q2",
+      "provider": "llamacpp",
+      "maxPromptTokens": 57344,
+      "maxOutputTokens": 8192
+    },
+    {
+      "id": "qwen38-flash-next-iq4",
+      "provider": "llamacpp",
+      "maxPromptTokens": 57344,
+      "maxOutputTokens": 8192
+    }
+  ]
+}
