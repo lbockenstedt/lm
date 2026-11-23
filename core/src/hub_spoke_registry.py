@@ -1388,11 +1388,21 @@ class SpokeRegistryMixin:
         spoke bound to a different tenant. When tenant_id is None (admin/global
         view) any connected spoke is fine.
         """
-        # Connected Client-Sim spokes; fall back to legacy "simulation" type for
+        # Connected Client-Sim spokes; union with legacy "simulation" type for
         # older combined-spoke builds that haven't adopted "Client-Sim" yet.
-        cands = self.get_all_spokes_by_type("Client-Sim") or self.get_all_spokes_by_type("simulation")
+        raw_cands = (self.get_all_spokes_by_type("Client-Sim") or []) + (self.get_all_spokes_by_type("simulation") or [])
+        cands = list(dict.fromkeys(raw_cands))
         # Only approved spokes carry cached telemetry (unapproved frames are dropped).
-        cands = [sid for sid in cands if self.approved_modules.get(sid, False)]
+        def _approved(sid):
+            if self.approved_modules.get(sid, False):
+                return True
+            if hasattr(self, "_primary_key"):
+                try:
+                    return bool(self.approved_modules.get(self._primary_key(sid), False))
+                except Exception:
+                    pass
+            return False
+        cands = [sid for sid in cands if _approved(sid)]
         if not cands:
             return None
         # Tenant-scoped request: look for spokes bound to that tenant.
@@ -1474,9 +1484,19 @@ class SpokeRegistryMixin:
         connected, approved Client-Sim spoke is returned so an admin push
         reaches the whole fleet, not just ``cands[0]``.
         """
-        cands = self.get_all_spokes_by_type("Client-Sim") or self.get_all_spokes_by_type("simulation")
+        raw_cands = (self.get_all_spokes_by_type("Client-Sim") or []) + (self.get_all_spokes_by_type("simulation") or [])
+        cands = list(dict.fromkeys(raw_cands))
         # Only approved spokes carry cached telemetry (unapproved frames are dropped).
-        cands = [sid for sid in cands if self.approved_modules.get(sid, False)]
+        def _approved(sid):
+            if self.approved_modules.get(sid, False):
+                return True
+            if hasattr(self, "_primary_key"):
+                try:
+                    return bool(self.approved_modules.get(self._primary_key(sid), False))
+                except Exception:
+                    pass
+            return False
+        cands = [sid for sid in cands if _approved(sid)]
         # None connected and approved: nothing to push to.
         if not cands:
             return []
