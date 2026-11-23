@@ -41,6 +41,19 @@ def test_pxmx_agent_tenant_filter_prefers_the_agents_own_effective_tenant():
     assert "_saMatch(_spokeTenantById.get(a.spoke_id) ?? a.tenant_id)" not in content
 
 
+def test_unified_spokes_and_agents_table_contract():
+    """Unified single-table view contract: composite keying, scope toggle,
+    no raw UUID tooltip on row name, and Total/Offline stat card labels."""
+    content = _content()
+    fleet_src = (Path(__file__).resolve().parents[2] / "WebUI" / "js" / "fleet-admin.js").read_text(encoding="utf-8")
+    assert "function _renderUnifiedSpokesAndAgentsTable(" in content
+    assert "function setSaScopeFilter(" in content
+    assert "data-sa-action-id=" in content
+    assert 'title="${escapeHtml(id)}"' not in fleet_src
+    assert "${stat('Total', total)}" in content
+    assert "${stat('Offline', down," in content
+
+
 def test_js_syntax_valid():
     if not shutil.which("node"):
         import pytest
