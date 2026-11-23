@@ -262,6 +262,7 @@ class RepoSyncMixin:
                 os.path.join(os.path.dirname(__file__), "../../"))
             prov_dir = os.path.join(hub_root, "provisioning_repos")
             if os.path.isdir(prov_dir):
+                pull_targets = []
                 for entry in sorted(os.listdir(prov_dir)):
                     # Only directories.
                     sub = os.path.join(prov_dir, entry)
@@ -272,8 +273,18 @@ class RepoSyncMixin:
                                              "message": "not a git repo",
                                              "changed": False})
                         continue
-                    # Pull it and record the result.
-                    repo_results.append(await self._git_pull_repo(sub))
+                    pull_targets.append(sub)
+                if pull_targets:
+                    pull_outcomes = await asyncio.gather(
+                        *(self._git_pull_repo(sub) for sub in pull_targets),
+                        return_exceptions=True,
+                    )
+                    for res in pull_outcomes:
+                        if isinstance(res, dict):
+                            repo_results.append(res)
+                        elif isinstance(res, Exception):
+                            repo_results.append({"name": "unknown", "status": "error",
+                                                 "message": str(res)[:300], "changed": False})
         # A scan failure is logged and the cycle continues.
         except Exception as e:  # noqa: BLE001 — best-effort, never fatal
             logger.warning("[sync-error] repo_sync provisioning_repos scan failed: %s", e)
@@ -298,7 +309,7 @@ class RepoSyncMixin:
         # toggle (checked inside). Off-loop, concurrent, best-effort — never
         # blocks /setup/diagnostics and never raises.
         try:
-            await self._refresh_all_module_versions()
+            asyncio.create_task(self._refresh_all_module_versions())
         except Exception as e:  # noqa: BLE001 — best-effort, never fatal
             logger.debug("repo_sync module-version refresh failed: %s", e)
 

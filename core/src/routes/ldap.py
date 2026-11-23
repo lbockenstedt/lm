@@ -35,7 +35,7 @@ _OLD_SPOKE_DETAIL = ("The directory spoke does not support this yet; "
                      "update the directory spoke and try again.")
 
 # Directory health check: reuse a result this long (s); give the spoke this long.
-HEALTH_TTL_S = 15
+HEALTH_TTL_S = 60
 HEALTH_TIMEOUT_S = 15
 
 def ou_path_arg(value, field: str) -> list:
