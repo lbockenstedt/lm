@@ -632,7 +632,6 @@ async function _populateSaTenantFilter() {
         const _tdata = await res.json();
         window._sharedTenantId = _tdata.shared_tenant_id || null;  // for the shared badge / gate
         const tenants = _tdata.tenants || [];
-        window._saTenantsMap = new Map((tenants || []).map(t => [t.id, t.name || t.id]));
         sel.innerHTML =
             tenants.map(t => `<option value="${esc(t.id)}">${esc(t.name || t.id)}</option>`).join('') +
             '<option value="__unassigned__">Unassigned</option>' +
