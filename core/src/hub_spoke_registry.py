@@ -349,6 +349,20 @@ def _admin_view(tenant_id) -> bool:
     return not tenant_id or same_tenant(tenant_id, ADMIN_TENANT_ID)
 
 
+def _is_module_approved(hub, sid: str) -> bool:
+    """Return True if module sid (or its primary key) is approved on hub."""
+    # 1. Direct approval lookup.
+    if getattr(hub, "approved_modules", {}).get(sid, False):
+        return True
+    # 2. Primary key fallback lookup if available.
+    if hasattr(hub, "_primary_key"):
+        try:
+            return bool(hub.approved_modules.get(hub._primary_key(sid), False))
+        except Exception:
+            pass
+    return False
+
+
 class SpokeRegistryMixin:
     """Read-only spoke/agent registry lookups mixed into ``LabManagerHub``."""
 
@@ -1388,11 +1402,12 @@ class SpokeRegistryMixin:
         spoke bound to a different tenant. When tenant_id is None (admin/global
         view) any connected spoke is fine.
         """
-        # Connected Client-Sim spokes; fall back to legacy "simulation" type for
+        # Connected Client-Sim spokes; union with legacy "simulation" type for
         # older combined-spoke builds that haven't adopted "Client-Sim" yet.
-        cands = self.get_all_spokes_by_type("Client-Sim") or self.get_all_spokes_by_type("simulation")
+        raw_cands = (self.get_all_spokes_by_type("Client-Sim") or []) + (self.get_all_spokes_by_type("simulation") or [])
+        cands = list(dict.fromkeys(raw_cands))
         # Only approved spokes carry cached telemetry (unapproved frames are dropped).
-        cands = [sid for sid in cands if self.approved_modules.get(sid, False)]
+        cands = [sid for sid in cands if _is_module_approved(self, sid)]
         if not cands:
             return None
         # Tenant-scoped request: look for spokes bound to that tenant.
@@ -1474,9 +1489,10 @@ class SpokeRegistryMixin:
         connected, approved Client-Sim spoke is returned so an admin push
         reaches the whole fleet, not just ``cands[0]``.
         """
-        cands = self.get_all_spokes_by_type("Client-Sim") or self.get_all_spokes_by_type("simulation")
+        raw_cands = (self.get_all_spokes_by_type("Client-Sim") or []) + (self.get_all_spokes_by_type("simulation") or [])
+        cands = list(dict.fromkeys(raw_cands))
         # Only approved spokes carry cached telemetry (unapproved frames are dropped).
-        cands = [sid for sid in cands if self.approved_modules.get(sid, False)]
+        cands = [sid for sid in cands if _is_module_approved(self, sid)]
         # None connected and approved: nothing to push to.
         if not cands:
             return []

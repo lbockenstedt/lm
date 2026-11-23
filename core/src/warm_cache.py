@@ -76,7 +76,7 @@ logger = logging.getLogger("Hub")
 ACTIVE_INTERVAL_S = 60.0       # refresh period while a viewer is logged in
 IDLE_INTERVAL_S = 300.0        # refresh period while nobody who can see it is
 STALE_AFTER_S = 600.0          # badge "stale" after this age
-INVALIDATED_WAIT_S = 10.0      # how long a read waits for a post-write refresh
+INVALIDATED_WAIT_S = 3.0       # how long a read waits for a post-write refresh
 TICK_S = 10.0                  # refresher loop period
 JITTER_S = 10.0                # spreads refreshes so keys don't fire in lockstep
 LANE_CONCURRENCY = 2           # parallel refreshes per spoke/module
@@ -814,7 +814,9 @@ class WarmCacheMixin:
         for ns, entries in self.warm_cache.items():
             for k in list(entries):
                 e = entries[k]
-                if (ns, k) in feed_keys or not isinstance(e, dict) or not e.get("detail"):
+                if (ns, k) in feed_keys or not isinstance(e, dict):
+                    continue
+                if not e.get("detail") and ns not in ("nw_topology", "nw_topology_off"):
                     continue
                 last = e.get("read_at") or e.get("fetched_at") or e.get("stale_from") or 0
                 if now - last >= DETAIL_EVICT_S:
