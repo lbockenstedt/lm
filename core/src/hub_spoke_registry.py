@@ -349,6 +349,20 @@ def _admin_view(tenant_id) -> bool:
     return not tenant_id or same_tenant(tenant_id, ADMIN_TENANT_ID)
 
 
+def _is_module_approved(hub, sid: str) -> bool:
+    """Return True if module sid (or its primary key) is approved on hub."""
+    # 1. Direct approval lookup.
+    if getattr(hub, "approved_modules", {}).get(sid, False):
+        return True
+    # 2. Primary key fallback lookup if available.
+    if hasattr(hub, "_primary_key"):
+        try:
+            return bool(hub.approved_modules.get(hub._primary_key(sid), False))
+        except Exception:
+            pass
+    return False
+
+
 class SpokeRegistryMixin:
     """Read-only spoke/agent registry lookups mixed into ``LabManagerHub``."""
 
@@ -1393,16 +1407,7 @@ class SpokeRegistryMixin:
         raw_cands = (self.get_all_spokes_by_type("Client-Sim") or []) + (self.get_all_spokes_by_type("simulation") or [])
         cands = list(dict.fromkeys(raw_cands))
         # Only approved spokes carry cached telemetry (unapproved frames are dropped).
-        def _approved(sid):
-            if self.approved_modules.get(sid, False):
-                return True
-            if hasattr(self, "_primary_key"):
-                try:
-                    return bool(self.approved_modules.get(self._primary_key(sid), False))
-                except Exception:
-                    pass
-            return False
-        cands = [sid for sid in cands if _approved(sid)]
+        cands = [sid for sid in cands if _is_module_approved(self, sid)]
         if not cands:
             return None
         # Tenant-scoped request: look for spokes bound to that tenant.
@@ -1487,16 +1492,7 @@ class SpokeRegistryMixin:
         raw_cands = (self.get_all_spokes_by_type("Client-Sim") or []) + (self.get_all_spokes_by_type("simulation") or [])
         cands = list(dict.fromkeys(raw_cands))
         # Only approved spokes carry cached telemetry (unapproved frames are dropped).
-        def _approved(sid):
-            if self.approved_modules.get(sid, False):
-                return True
-            if hasattr(self, "_primary_key"):
-                try:
-                    return bool(self.approved_modules.get(self._primary_key(sid), False))
-                except Exception:
-                    pass
-            return False
-        cands = [sid for sid in cands if _approved(sid)]
+        cands = [sid for sid in cands if _is_module_approved(self, sid)]
         # None connected and approved: nothing to push to.
         if not cands:
             return []
