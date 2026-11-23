@@ -520,6 +520,7 @@ _DEPLOY_ROLE_UNITS = {
     "zbxagent": ("zabbix-agent2",),
     "syslog-collector": ("rsyslog",),
     "syslog-graylog": ("graylog-server", "opensearch", "mongod"),
+    "ab": ("ab", "ab-watchdog"),
 }
 
 # Units a cluster deploy ALSO leaves behind. They are stopped on unload but are
@@ -598,6 +599,21 @@ _DEPLOY_ROLE_PURGE = {
         "packages": ("graylog-server",),
         "unit_files": (),
         "paths": ("/etc/graylog", "/etc/lm-syslog"),
+    },
+    "ab": {
+        "packages": (),
+        "unit_files": ("ab.service", "ab-watchdog.service"),
+        "paths": (
+            "/opt/ab",
+            "/etc/ab",
+            "/var/log/ab.log",
+            "/etc/logrotate.d/ab",
+            "/etc/sudoers.d/ab",
+            "/usr/local/bin/ab-self-restart",
+            "/usr/local/bin/ab-sandbox",
+            "/usr/local/bin/ab-ollama-setup",
+            "/usr/local/bin/ab-claude-install",
+        ),
     },
 }
 

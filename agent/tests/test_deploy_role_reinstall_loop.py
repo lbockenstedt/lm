@@ -229,4 +229,5 @@ def test_unit_backed_deploy_roles_still_stop_their_units():
     """Not vacuous: dns-server/dhcp-server keep the stop-and-disable path."""
     assert "dns-server" in _DEPLOY_ROLE_UNITS
     assert "dhcp-server" in _DEPLOY_ROLE_UNITS
+    assert "ab" in _DEPLOY_ROLE_UNITS
     assert "netbox-server" not in _DEPLOY_ROLE_UNITS
