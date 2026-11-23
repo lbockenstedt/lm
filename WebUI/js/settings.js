@@ -427,6 +427,31 @@ const _SETUP_CLS = {
 };
 
 
+// Current scope filter for Spokes & Agents ('all', 'spokes', or 'agents').
+let _saScopeFilter = 'all';
+
+// Switch the active scope filter between All, Spokes, and Agents.
+function setSaScopeFilter(scope) {
+    _saScopeFilter = scope;
+    const btnAll = document.getElementById('sa-scope-all');
+    const btnSpokes = document.getElementById('sa-scope-spokes');
+    const btnAgents = document.getElementById('sa-scope-agents');
+    if (btnAll && btnSpokes && btnAgents) {
+        [btnAll, btnSpokes, btnAgents].forEach(b => {
+            b.className = 'px-2.5 py-1 rounded text-slate-600 hover:text-navy transition-all';
+        });
+        const active = scope === 'spokes' ? btnSpokes : (scope === 'agents' ? btnAgents : btnAll);
+        active.className = 'px-2.5 py-1 rounded bg-white text-navy shadow-xs font-bold transition-all';
+    }
+    const spokesWrap = document.getElementById('spokes-table-wrap');
+    if (spokesWrap && typeof _renderUnifiedSpokesAndAgentsTable === 'function' && typeof _saCachedTrueSpokes !== 'undefined' && _saCachedTrueSpokes) {
+        _renderUnifiedSpokesAndAgentsTable(spokesWrap, _saCachedTrueSpokes, _saCachedGenericAgents, _saCachedPxmxAgents, _saCachedDiagBy);
+    } else if (typeof loadSpokesAndAgents === 'function') {
+        loadSpokesAndAgents();
+    }
+}
+
+// Render the Setup -> Spokes & Agents administration tile.
 function _renderSetupSpokesTile(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
     // Compact card variant for this tile only — the shared _SETUP_CLS.card uses
@@ -434,36 +459,30 @@ function _renderSetupSpokesTile(content) {
     // where each row is already a dense mgmt card. Don't change the shared
     // constant (it drives Tenant/User/Firewalls tiles too).
     const saCard = 'hpe-card rounded-lg p-5 shadow-sm space-y-3';
-    // Spokes + Agents side-by-side on wide screens (xl:grid-cols-2) so the page
-    // height tracks the taller column instead of stacking both fully — halves
-    // the scrolling for fleets with many spokes and agents. Stacks on narrower
-    // viewports. items-start keeps each card top-aligned and prevents the
-    // shorter card from stretching to match the taller one's height (which
-    // would re-introduce empty space below its last row).
     content.innerHTML = `
-            <div id="spokes-summary" class="flex flex-wrap items-center gap-3 text-xs"></div>
-            <div class="flex items-center gap-2 text-xs mb-1">
-                <label for="sa-tenant-filter" class="font-bold text-slate-500">Tenant</label>
-                <select id="sa-tenant-filter" onchange="_onSaTenantFilterChange()" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-green-500">
-                    <option value="default">ADMIN</option>
-                    <option value="__unassigned__">Unassigned</option>
-                    <option value="__all__" selected>All tenants</option>
-                </select>
-                <span class="text-xs text-slate-500 italic">show spokes &amp; agents for this tenant (Unassigned = not yet bound to one; All tenants = every spoke/agent incl. offline)</span>
-            </div>
-            <div class="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
-                <div class="${saCard}">
-                    <div class="flex justify-between items-center mb-2">
-                        <h3 class="text-sm font-bold text-slate-500">Spokes ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+            <div id="spokes-summary" class="flex flex-wrap items-center gap-3 text-xs mb-2"></div>
+            <div class="${saCard}">
+                <div class="flex flex-wrap justify-between items-center gap-3 mb-2">
+                    <div class="flex items-center gap-2">
+                        <h3 class="text-base font-semibold text-navy">Spokes &amp; Agents ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     </div>
-                    <div id="spokes-table-wrap"><p class="text-xs text-slate-500 italic animate-pulse">Loading…</p></div>
-                </div>
-                <div class="${saCard}">
-                    <div class="flex justify-between items-center mb-2">
-                        <h3 class="text-sm font-bold text-slate-500">Agents ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <div class="flex flex-wrap items-center gap-3 text-xs">
+                        <div class="flex items-center gap-1.5">
+                            <label for="sa-tenant-filter" class="font-bold text-slate-500">Tenant:</label>
+                            <select id="sa-tenant-filter" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-xs text-slate-700 outline-none focus:ring-2 focus:ring-green-500">
+                                <option value="default">ADMIN</option>
+                                <option value="__unassigned__">Unassigned</option>
+                                <option value="__all__" selected>All tenants</option>
+                            </select>
+                        </div>
+                        <div class="inline-flex rounded-md shadow-xs border border-slate-200 bg-slate-100 p-0.5 text-xs font-semibold" id="sa-scope-filter-group">
+                            <button type="button" data-sa-scope="all" id="sa-scope-all" class="px-2.5 py-1 rounded bg-white text-navy shadow-xs font-bold transition-all">All</button>
+                            <button type="button" data-sa-scope="spokes" id="sa-scope-spokes" class="px-2.5 py-1 rounded text-slate-600 hover:text-navy transition-all">Spokes</button>
+                            <button type="button" data-sa-scope="agents" id="sa-scope-agents" class="px-2.5 py-1 rounded text-slate-600 hover:text-navy transition-all">Agents</button>
+                        </div>
                     </div>
-                    <div id="agents-table-wrap"><p class="text-xs text-slate-500 italic animate-pulse">Loading…</p></div>
                 </div>
+                <div id="spokes-table-wrap"><p class="text-xs text-slate-500 italic animate-pulse">Loading…</p></div>
             </div>
             <div class="${saCard}">
                 <div class="flex justify-between items-center mb-1">
@@ -477,6 +496,11 @@ function _renderSetupSpokesTile(content) {
             </div>
             ${_spokesAgentsLegend()}`;
     _populateSaTenantFilter();
+    document.getElementById('sa-tenant-filter')?.addEventListener('change', _onSaTenantFilterChange);
+    document.getElementById('sa-scope-filter-group')?.addEventListener('click', e => {
+        const btn = e.target.closest('button[data-sa-scope]');
+        if (btn) setSaScopeFilter(btn.dataset.saScope);
+    });
     loadSpokesAndAgents();
     loadSaHubUrl();
     // Auto-save on change — exact-id allowlist so the tenant filter (sa-tenant-
