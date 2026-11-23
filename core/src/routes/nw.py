@@ -54,7 +54,8 @@ _NW_TOPO_REFRESH_S = 3600.0
 # nw device fields that change what the map draws (never credentials).
 _NW_TOPO_DEV_FIELDS = ("id", "tenant_id", "spoke_id", "name", "hostname", "address",
                        "ip", "mgmt_ip", "mac", "base_mac", "object_type", "model",
-                       "site", "role", "serial")
+                       "site", "role", "serial", "chassis", "primary_ip", "manual",
+                       "remote_chassis", "remote_name", "remote_mgmt_ip", "remote_port")
 
 
 def _nb_rows(resp, key):
@@ -316,14 +317,17 @@ async def _nw_topology_build_for(hub, tid, infer):
                                         fresh_netbox=True, nb_used=used)
     graph["_authz"] = authz
     graph["_nb_behind"] = _nw_netbox_behind(used)
+    graph["_source_at"] = min([at for at in used.values() if at] or [time.time()])
     return graph
 
 
 def _nw_topology_job(hub, tid, infer=True):
     """Hub-cache job for tenant ``tid``'s pre-built map."""
+    detail = not (tid in _nw_topology_tenants(hub))
     return CacheJob(_nw_topo_ns(infer), tid,
                     lambda: _nw_topology_build_for(hub, tid, infer),
-                    (tid,), lane=_NW_TOPO_NS, refresh_s=_NW_TOPO_REFRESH_S)
+                    (tid,), lane=_NW_TOPO_NS, refresh_s=_NW_TOPO_REFRESH_S,
+                    detail=detail)
 
 
 def nw_topology_rebuild(hub, tid):
@@ -358,11 +362,22 @@ def _nw_topology_rebuild_off(hub, tid):
 
 def _nw_topology_tenants(hub):
     """Every tenant with a pre-built map: ADMIN (often no stored record, so
-    added by name) and every stored tenant."""
+    added by name) and every stored tenant and tenant group."""
     seen = []
     for tid in [access.ADMIN_TENANT_ID] + access.all_tenant_ids(hub):
         if tid and tid not in seen:
             seen.append(tid)
+    try:
+        tenants = (getattr(hub, "state", None) and hub.state.tenant_state.get("tenants")) or {}
+        for tid, cfg in tenants.items():
+            if isinstance(cfg, dict) and cfg.get("is_tenant_group"):
+                slug = str(cfg.get("netbox_tenant_group_slug") or cfg.get("tenant_group_slug") or "").strip()
+                if slug:
+                    gid = f"{access.TENANT_GROUP_PREFIX}{slug}"
+                    if gid not in seen:
+                        seen.append(gid)
+    except Exception:
+        pass
     return seen
 
 
@@ -1698,6 +1713,8 @@ def register(app, hub, ctx):
             hub.cache_refresh(ns, (key,), exact=True)
             return None
         out = {k: v for k, v in graph.items() if k not in ("_authz", "_nb_behind")}
+        if "_source_at" in graph:
+            out["source_at"] = graph["_source_at"]
         return hub.cache_annotate(out, ns, key)
 
     @app.get("/api/nw/topology")
@@ -1796,7 +1813,7 @@ def register(app, hub, ctx):
                 # Only devices with a spoke whose cache is older than the window.
                 if not spoke_by_id.get(did):
                     continue
-                if time.time() - hub.nw_cache_device_fetched_at(did) <= _NW_SERVE_MAX_AGE_S:
+                if time.time() - hub.nw_cache_device_fetched_at(did) <= _NW_TOPO_REFRESH_S:
                     continue
                 # Refresh each stale endpoint, sending the device's tenant along.
                 payload = {"device_id": did}

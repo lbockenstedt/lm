@@ -11927,8 +11927,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             times = self._edge_probe_reports.setdefault(spoke_id or node, [])
             times[:] = [t for t in times if t > now - window]
             if len(times) >= self._EDGE_PROBE_MAX:
-                logger.warning("HTTP_PROBE_REPORT rate cap hit for reporter %s "
-                               "(%d/%ds) — dropping", spoke_id, self._EDGE_PROBE_MAX, int(window))
+                if len(times) == self._EDGE_PROBE_MAX:
+                    logger.warning("HTTP_PROBE_REPORT rate cap hit for reporter %s "
+                                   "(%d/%ds) — dropping", spoke_id, self._EDGE_PROBE_MAX, int(window))
+                else:
+                    logger.debug("HTTP_PROBE_REPORT rate cap exceeded for reporter %s — dropping", spoke_id)
                 return
             # Record this report.
             times.append(now)

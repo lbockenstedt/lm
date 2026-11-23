@@ -575,6 +575,8 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=404, detail=f"Tenant {clean} not found")
         for user_id in detached:
             _invalidate_user_sessions(hub, user_id)
+        if hasattr(hub, "warm_drop"):
+            hub.warm_drop("nw_topology", (clean,), exact=False)
         await hub.state.save_state_now()
         _after_tenant_write(hub, before)
         return {"status": "ok", "message": f"Tenant {clean} deleted."}
