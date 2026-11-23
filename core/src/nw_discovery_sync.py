@@ -2063,9 +2063,14 @@ class NwDiscoverySyncMixin:
         if not netbox:
             return {"status": "ERROR", "message": "NetBox (ipam) spoke not connected"}
 
-        # Fetch all NetBox devices; tolerate a missing or malformed list.
-        rr = await self.request_response(netbox, "NETBOX_GET_DEVICES", {}, timeout=60.0)
-        data = unwrap_spoke(rr) if isinstance(rr, dict) else {}
+        # Fetch all NetBox devices; reuse warm cache to avoid redundant ~60s full-fleet pulls.
+        cached = self.warm_get("nb_devices", "_all_")
+        data = None
+        if isinstance(cached, dict) and isinstance(cached.get("devices"), list):
+            data = cached
+        if not data:
+            rr = await self.request_response(netbox, "NETBOX_GET_DEVICES", {}, timeout=60.0)
+            data = unwrap_spoke(rr) if isinstance(rr, dict) else {}
         devices = data.get("devices") if isinstance(data, dict) else []
         if not isinstance(devices, list):
             devices = []
