@@ -70,12 +70,13 @@ def nb_cache_job(hub, module_key: str, scope: dict, slice_query: dict = None) ->
         return _unwrap_netbox(await hub.request_response(spoke_id, cmd, payload, timeout=20.0))
 
     # Who may see this entry: its hub tenant, or every admin for "_all_".
-    tenants = (owner,) if owner else (ALL_SCOPE,)
+    tenants = (owner,) if owner and base != "_all_" else (ALL_SCOPE,)
     # Namespace "nb_devices" etc. (module key without its "netbox_" prefix).
     ns = "nb_" + module_key[len("netbox_"):] if module_key.startswith("netbox_") else f"nb_{module_key}"
     # Slice-filtered reads are "detail" jobs; full lists are the regular feed.
+    refresh_s = NB_DEVICES_REFRESH_S if module_key == "netbox_devices" else NB_LIST_REFRESH_S
     return CacheJob(ns, key, fetch, tenants, lane="netbox", detail=bool(slice_sig),
-                    refresh_s=NB_LIST_REFRESH_S)
+                    refresh_s=refresh_s)
 
 
 def filter_autorack_report(res: dict, scope: dict) -> dict:
@@ -99,6 +100,9 @@ def filter_autorack_report(res: dict, scope: dict) -> dict:
 
 # NetBox lists are big paged pulls; background refresh no faster than 5 min.
 NB_LIST_REFRESH_S = 300.0
+# The device list (~9,500 devices, 19 pages) takes ~60 s to fetch from NetBox;
+# refresh at most once every 15 minutes to eliminate upstream spam (issue #2054).
+NB_DEVICES_REFRESH_S = 900.0
 
 
 def nb_cache_feed(hub):
@@ -106,14 +110,18 @@ def nb_cache_feed(hub):
     # (namespace, key) pairs already yielded, so shared entries are produced once.
     seen = set()
     # None is the admin view (it resolves to the hub's active tenant), then the
-    # built-in Admin tenant, then every stored tenant. The Admin tenant often
-    # has no stored record, so all_tenant_ids misses it, yet the Common VRFs
-    # card and the common-VRF inference read its prefixes from this feed.
+    # built-in Admin tenant, then every stored tenant.
     for tid in [None, ADMIN_TENANT_ID] + all_tenant_ids(hub):
         # Resolve the tenant's NetBox scope; a tenant that cannot be resolved is skipped.
         try:
             scope = netbox_tenant_scope(hub, tid)
         except Exception:  # noqa: BLE001
+            continue
+        # Unscoped whole-fleet reads are queued for None only.
+        # Custom tenants without their own NetBox slug/group share the
+        # unscoped cache; running a redundant ~9,500 device query per slug-less
+        # tenant every cycle is what caused LM-NETBOX overload (issue #2054).
+        if tid is not None and not scope.get("tenant") and not scope.get("tenant_group"):
             continue
         # One job per list dataset for this scope.
         for module_key in NB_LIST_CMDS:
