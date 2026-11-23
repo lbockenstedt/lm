@@ -631,8 +631,13 @@ async function _renderUnifiedSpokesAndAgentsTable(container, trueSpokes, generic
         // Tenant cell
         let tenantCell = '';
         if (it.tenantId) {
-            const tMapName = window._saTenantsMap?.get(it.tenantId);
-            const tDisp = tMapName || (it.tenantName ? it.tenantName : (_isUuid(it.tenantId) ? 'Assigned' : it.tenantId));
+            let tDisp = it.tenantId;
+            const sel = document.getElementById('sa-tenant-filter');
+            if (sel) {
+                const opt = sel.querySelector(`option[value="${CSS.escape(it.tenantId)}"]`);
+                if (opt && opt.textContent) tDisp = opt.textContent;
+            }
+            if (_isUuid(tDisp)) tDisp = 'Assigned';
             tenantCell = `<span class="font-medium text-xs text-slate-700">${escapeHtml(tDisp)}</span>`;
             if (it.tenantShared) {
                 tenantCell += ` <span class="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 align-middle" title="Shared tenant — visible to all tenants">shared</span>`;
