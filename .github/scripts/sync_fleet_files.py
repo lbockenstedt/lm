@@ -2,7 +2,7 @@
 """Copy the fleet-owned files from lm into every fleet repo (twins.json "fleet").
 
 lm holds the single copy people edit: the fleet rules, the fleet agents, the
-skills and the AI spend gate (.github/hooks, .github/ai-budget.json). Tools only read them from the repo they are working in, so each
+skills, the AI spend gate (.github/hooks, .github/ai-budget.json) and the model policy (.github/model-policy.json). Tools only read them from the repo they are working in, so each
 repo carries a copy, and this script keeps those copies identical.
 
 - files:    copied as-is.
