@@ -666,28 +666,34 @@ async function _renderUnifiedSpokesAndAgentsTable(container, trueSpokes, generic
             <button type="button" data-sa-action-id="${eKey}" class="px-2.5 py-1 rounded text-xs font-semibold bg-slate-100 text-slate-700 hover:bg-slate-200 border border-slate-300 transition-colors" title="Actions menu">⋯ Actions ▾</button>`;
 
         return `<tr class="hover:bg-slate-50 transition-colors">
-            <td class="px-4 py-3 whitespace-nowrap">${nameCell}</td>
-            <td class="px-4 py-3 text-xs whitespace-nowrap">${it.spokeDisplay}</td>
-            <td class="px-4 py-3 text-xs whitespace-nowrap">${tenantCell}</td>
-            <td class="px-4 py-3 text-xs">${rolesCell}</td>
-            <td class="px-4 py-3 text-right whitespace-nowrap">${actionsCell}</td>
+            <td class="px-4 pt-3 pb-1 whitespace-nowrap">${nameCell}</td>
+            <td class="px-4 pt-3 pb-1 text-xs whitespace-nowrap">${it.spokeDisplay}</td>
+            <td class="px-4 pt-3 pb-1 text-xs whitespace-nowrap">${tenantCell}</td>
+            <td class="px-4 pt-3 pb-1 text-right whitespace-nowrap">${actionsCell}</td>
+        </tr>
+        <tr class="border-b border-slate-200 hover:bg-slate-50 transition-colors">
+            <td colspan="4" class="px-4 pt-0 pb-2.5 text-xs text-slate-600">
+                <div class="flex items-center gap-2 pl-5">
+                    <span class="text-[10px] font-bold uppercase tracking-wider text-slate-400">Roles:</span>
+                    ${rolesCell}
+                </div>
+            </td>
         </tr>`;
     }).join('');
 
     container.innerHTML = `
         ${statCards}
         <div class="overflow-x-auto overflow-hidden rounded-md border border-slate-200 bg-white">
-            <table class="w-full text-left text-sm">
+            <table class="w-full table-fixed text-left text-sm">
                 <thead class="bg-slate-100 text-slate-600 text-xs uppercase tracking-wider">
                     <tr>
-                        <th class="px-4 py-3">NAME</th>
-                        <th class="px-4 py-3">SPOKE</th>
-                        <th class="px-4 py-3">TENANT</th>
-                        <th class="px-4 py-3">ROLES</th>
-                        <th class="px-4 py-3 text-right">ACTIONS</th>
+                        <th class="px-4 py-3 w-2/5">NAME</th>
+                        <th class="px-4 py-3 w-1/4">SPOKE</th>
+                        <th class="px-4 py-3 w-1/4">TENANT</th>
+                        <th class="px-4 py-3 text-right w-28">ACTIONS</th>
                     </tr>
                 </thead>
-                <tbody class="divide-y divide-slate-200">${rowsHtml}</tbody>
+                <tbody class="divide-y-0">${rowsHtml}</tbody>
             </table>
         </div>`;
 

@@ -56,6 +56,9 @@ def test_unified_spokes_and_agents_table_contract():
     assert "resetSpokeSecret" in fleet_src
     assert "unapproveSpoke" in fleet_src
     assert "_isUuid" in fleet_src
+    assert 'colspan="4"' in fleet_src
+    assert "Roles:" in fleet_src
+    assert "w-full table-fixed" in fleet_src
 
 
 def test_js_syntax_valid():
