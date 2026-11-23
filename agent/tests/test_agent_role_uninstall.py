@@ -361,3 +361,17 @@ def test_dns_recipe_purges_unbound_and_its_lm_sidecar():
     assert "unbound" in spec["packages"]
     assert "/etc/unbound" in spec["paths"]
     assert "lm-dns-worker.service" in spec["unit_files"]
+
+
+def test_ab_recipe_purges_appbuilder():
+    """AppBuilder purge recipe removes service units, directories, and helpers."""
+    spec = agent_spoke._DEPLOY_ROLE_PURGE["ab"]
+    assert "ab.service" in spec["unit_files"]
+    assert "ab-watchdog.service" in spec["unit_files"]
+    assert "/opt/ab" in spec["paths"]
+    assert "/etc/ab" in spec["paths"]
+    assert "/usr/local/bin/ab-self-restart" in spec["paths"]
+    assert "/usr/local/bin/ab-sandbox" in spec["paths"]
+    assert "/usr/local/bin/ab-ollama-setup" in spec["paths"]
+    assert "/usr/local/bin/ab-claude-install" in spec["paths"]
+
