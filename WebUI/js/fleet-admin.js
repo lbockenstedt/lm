@@ -198,399 +198,577 @@ function _mgmtEntryCard(o) {
     </div>`;
 }
 
-// _renderSpokesTable() — renders the Spokes half of the Setup → Spokes & Agents
-// admin view. Extracted from loadSpokesAndAgents; the fetch + split preamble
-// stays in the caller. `diagBy` (Map<spoke_id, /setup/diagnostics entry>) folds
-// the former Diagnostics tile's telemetry into each row — heartbeat/version/
-// skew/recovery/alert badges, the status-text + last-error lines, Reset Secret
-// / Delete / Recovery Pause / Events actions, and the expandable events panel —
-// via _diagTelemetryExtras. Missing telemetry (diag fetch failed for this id)
-// degrades gracefully to the approval-only row.
-function _renderSpokesTable(spokesWrap, trueSpokes, diagBy) {
-    if (!spokesWrap) return;
-    const { btnCls, tblCls, thCls, tdCls } = _SPOKES_TBL_CLS;
+// ── Spoke/Agent unified Actions dropdown singleton & toggle ─────────────────
+let _lmSaMenuEl = null;
+let _saMenuScrollBound = false;
+let _saCachedTrueSpokes = null;
+let _saCachedGenericAgents = null;
+let _saCachedPxmxAgents = null;
+let _saCachedDiagBy = null;
+let _saLoadGen = 0;
 
-    // LDAP (directory), DNS, and DHCP are lightweight service modules rather
-    // than full infrastructure products — surface them as Type "Module" in the
-    // table; everything else stays "Spoke".
+// Return the shared singleton action menu element for spokes and agents.
+function _lmSpokeAgentActionMenuEl() {
+    if (_lmSaMenuEl && document.body.contains(_lmSaMenuEl)) return _lmSaMenuEl;
+    let menu = document.getElementById('lm-spoke-agent-action-menu');
+    if (!menu) {
+        menu = document.createElement('div');
+        menu.id = 'lm-spoke-agent-action-menu';
+        menu.className = 'hidden fixed z-50 bg-white border border-slate-200 rounded-md shadow-lg py-1 text-xs min-w-[160px] max-w-[240px]';
+        menu.addEventListener('click', e => {
+            const itemBtn = e.target.closest('button[data-sa-menu-idx]');
+            if (!itemBtn) return;
+            e.stopPropagation();
+            menu.classList.add('hidden');
+            const idx = parseInt(itemBtn.dataset.saMenuIdx, 10);
+            const act = menu._actions?.[idx];
+            if (act && typeof act.execute === 'function') {
+                act.execute();
+            }
+        });
+        document.body.appendChild(menu);
+        document.addEventListener('click', () => menu.classList.add('hidden'));
+    }
+    if (!_saMenuScrollBound) {
+        window.addEventListener('scroll', () => { if (_lmSaMenuEl) _lmSaMenuEl.classList.add('hidden'); }, true);
+        window.addEventListener('resize', () => { if (_lmSaMenuEl) _lmSaMenuEl.classList.add('hidden'); });
+        _saMenuScrollBound = true;
+    }
+    _lmSaMenuEl = menu;
+    return menu;
+}
+
+// Stored row items mapped by composite key `${kind}:${id}` for Actions menu execution.
+let _lmSpokeAgentItemMap = new Map();
+
+// Toggle the floating Actions dropdown menu for a spoke or agent row.
+function lmToggleSpokeAgentActionMenu(triggerEl, itemKey) {
+    if (!triggerEl) return;
+    const item = _lmSpokeAgentItemMap?.get(itemKey);
+    if (!item) return;
+
+    const menu = _lmSpokeAgentActionMenuEl();
+    const wasOpenForThis = menu.dataset.forId === itemKey && !menu.classList.contains('hidden');
+    menu.classList.add('hidden');
+    if (wasOpenForThis) return;
+
+    const actions = [];
+
+    // Edit action
+    if (item.kind === 'spoke' || item.kind === 'generic-agent') {
+        actions.push({
+            label: 'Edit Metadata',
+            icon: '✎',
+            execute: () => openSpokeMetadataModal(item.id, item.displayName || item.name || item.id, item.approved)
+        });
+        actions.push({
+            label: 'Assign Tenant',
+            icon: '🏢',
+            execute: () => item.kind === 'generic-agent'
+                ? openSpokeAssignModal(item.id, item.tenantId || '', 'Agent')
+                : openSpokeAssignModal(item.id, item.tenantId || '')
+        });
+    } else if (item.kind === 'pxmx-agent') {
+        actions.push({
+            label: 'Edit Configuration',
+            icon: '✎',
+            execute: () => openAgentConfigModal(item.id, item.displayName || item.name || item.id)
+        });
+        actions.push({
+            label: 'Assign Tenant',
+            icon: '🏢',
+            execute: () => openAgentAssignModal(item.id, item.tenantId || '')
+        });
+    }
+
+    // Role Actions
+    if (item.kind === 'generic-agent' && item.approved) {
+        actions.push({
+            label: 'Load Role…',
+            icon: '＋',
+            execute: () => showLoadRoleModal(item.id)
+        });
+    }
+    if (item.roleName && item.roleParent) {
+        actions.push({
+            label: 'Unload Role',
+            icon: '✕',
+            cls: 'text-amber-700 hover:bg-amber-50',
+            execute: () => unloadRole(item.roleParent, item.roleName)
+        });
+    }
+
+    // Approval / Revoke / Secret
+    if (!item.approved) {
+        actions.push({
+            label: 'Approve',
+            icon: '✓',
+            cls: 'text-blue-600 font-bold hover:bg-blue-50',
+            execute: () => item.kind === 'pxmx-agent'
+                ? approveAgent(item.id, item.spokeId)
+                : approveSpoke(item.id)
+        });
+    } else {
+        if (item.kind === 'spoke') {
+            actions.push({
+                label: 'Reset Secret',
+                icon: '🔑',
+                cls: 'text-slate-700 hover:bg-slate-50',
+                execute: () => resetSpokeSecret(item.id)
+            });
+            actions.push({
+                label: 'Un-approve (Revoke)',
+                icon: '✕',
+                cls: 'text-red-600 hover:bg-red-50',
+                execute: () => unapproveSpoke(item.id)
+            });
+        } else if (item.kind === 'pxmx-agent' && !item.isOffline) {
+            actions.push({
+                label: 'Un-approve (Revoke)',
+                icon: '✕',
+                cls: 'text-red-600 hover:bg-red-50',
+                execute: () => revokeAgent(item.id)
+            });
+        }
+    }
+
+    // Decommission / Restore / Force Delete
+    if (item.decommissioned) {
+        actions.push({
+            label: 'Restore',
+            icon: '↺',
+            cls: 'text-green-600 hover:bg-green-50',
+            execute: () => item.kind === 'pxmx-agent'
+                ? restoreAgent(item.id)
+                : restoreSpoke(item.id)
+        });
+        actions.push({
+            label: 'Force Delete',
+            icon: '🗑',
+            cls: 'text-red-600 hover:bg-red-50',
+            execute: () => item.kind === 'pxmx-agent'
+                ? deleteAgent(item.id)
+                : deleteSpoke(item.id)
+        });
+    } else {
+        if (item.approved) {
+            actions.push({
+                label: 'Decommission',
+                icon: '⏻',
+                cls: 'text-slate-600 hover:bg-slate-50',
+                execute: () => item.kind === 'pxmx-agent'
+                    ? decommissionAgent(item.id)
+                    : decommissionSpoke(item.id)
+            });
+        }
+        actions.push({
+            label: 'Force Delete',
+            icon: '🗑',
+            cls: 'text-red-600 hover:bg-red-50',
+            execute: () => item.kind === 'pxmx-agent'
+                ? deleteAgent(item.id)
+                : deleteSpoke(item.id)
+        });
+    }
+
+    menu._actions = actions;
+    menu.innerHTML = actions.map((act, idx) =>
+        `<button type="button" data-sa-menu-idx="${idx}" class="w-full text-left px-3 py-1.5 hover:bg-slate-50 font-medium text-slate-700 flex items-center gap-2 ${act.cls || ''}">
+            <span class="w-4 text-center text-slate-400 font-mono">${act.icon || '•'}</span>
+            <span>${escapeHtml(act.label)}</span>
+        </button>`
+    ).join('');
+
+    const r = triggerEl.getBoundingClientRect();
+    menu.style.visibility = 'hidden';
+    menu.classList.remove('hidden');
+    const menuH = menu.offsetHeight || 220;
+    const menuW = menu.offsetWidth || 180;
+    menu.style.visibility = '';
+
+    let top = r.bottom + 4;
+    if (top + menuH > window.innerHeight && r.top > menuH + 8) {
+        top = Math.max(8, r.top - menuH - 4);
+    }
+    const left = Math.max(8, Math.min(r.right - menuW, window.innerWidth - menuW - 10));
+    menu.style.top = top + 'px';
+    menu.style.left = left + 'px';
+    menu.dataset.forId = itemKey;
+    menu.classList.remove('hidden');
+}
+
+// Render the unified Spokes and Agents table matching NW Network Overview layout.
+async function _renderUnifiedSpokesAndAgentsTable(container, trueSpokes, genericAgents, pxmxAgents, diagBy) {
+    if (!container) return;
+    const agentsWrap = container;
+
+    _lmSpokeAgentItemMap = new Map();
+
     const MODULE_KIND_TYPES = new Set(['directory', 'dns', 'dhcp']);
     const spokeKind = mt => MODULE_KIND_TYPES.has(mt) ? 'Module' : 'Spoke';
 
-    try {
-        if (trueSpokes.length === 0) {
-            spokesWrap.innerHTML = `<p class="py-8 text-center text-slate-500 italic text-xs">No spokes have connected yet.</p>`;
-        } else {
-            spokesWrap.innerHTML = `<div class="space-y-1.5">${trueSpokes.map(s => {
-                const sid = s.spoke_id;
-                const name = _spokeName(s);
-                const approved = s.approved;
-                const mtRaw = String(s.module_type || '').toLowerCase();
-                const modLabel = moduleLabel(mtRaw);
-                const kindLabel = spokeKind(mtRaw);
-                const hostname = s.hostname || '';
-                const ic = s.identity_change;
-                const eSid = sid.replace(/'/g, "\\'");
-                const eName = escJsAttr(name);
-                const ackClick = `_ackIdentityChange('/setup/spokes/${encodeURIComponent(sid)}/ack-change')`;
-                // Telemetry extras from the diagnostics endpoint. The heartbeat-
-                // aware dot overrides the approval dot ONLY when the spoke is
-                // approved (a pending spoke keeps amber; an approved-but-silent
-                // spoke goes red). No diag entry → null → approval-only row.
-                const extras = diagBy && diagBy.has(sid) ? _diagTelemetryExtras(diagBy.get(sid)) : null;
-                const dot = (extras && approved) ? extras.dot
-                          : (approved ? 'bg-green-500' : 'bg-yellow-400');
-                // Tenant binding: any spoke can be assigned to a tenant (not just
-                // cs, and not just from Simulations → Spoke Management, which only
-                // ever surfaced this for cs spokes). Agent-hosting spokes (cs/pxmx)
-                // seed newly-approved agents from this binding — see
-                // approve_agent_under_spoke in api.py.
-                const tenantId = s.tenant_id || '';
-                const eTenant = tenantId.replace(/'/g, "\\'");
-                // Revoked chip for the management card: an auto-revoke
-                // (threat_auto) means the node tripped a recon/scan signature and
-                // was hard-revoked by the tenant-side threat response; an admin
-                // revoke shows the same way with its reason. Admin Approve (on the
-                // row for any non-approved node) is the re-approval path.
-                const _revChip = s.revoked
-                    ? (() => {
-                        const _auto = s.revoked_by === 'threat_auto';
-                        const _when = s.revoked_ts ? new Date(s.revoked_ts * 1000).toLocaleString() : '';
-                        const _t = `Revoked${_auto ? ' automatically (tenant-side threat response)' : ' by admin'}`
-                            + (s.revoke_reason ? ` — ${s.revoke_reason}` : '')
-                            + (_when ? ` (${_when})` : '') + '. Approve to re-instate.';
-                        return `<span class="font-bold ${_auto ? 'text-red-700' : 'text-red-600'}" title="${escapeHtml(_t)}">⛔ ${_auto ? 'Auto-Revoked' : 'Revoked'}</span>`;
-                    })()
-                    : '';
-                // A spoke bound to the SHARED tenant is visible to every tenant.
-                // The server stamps `tenant_shared` per row (setup._aggregate_spokes);
-                // fall back to the cached shared-tenant id so the badge still shows
-                // if that field is ever absent. Mirrors the resource-chip badge.
-                const _tenantShared = !!s.tenant_shared
-                    || (!!tenantId && !!window._sharedTenantId && tenantId === window._sharedTenantId);
-                // Role sub-spoke → its own row carries an "Unload Role" action
-                // that removes the role from the parent agent (annotated in
-                // loadSpokesAndAgents). Uniform with "Add role" on the agent.
-                const eRoleParent = (s._roleParent || '').replace(/'/g, "\\'");
-                const eRoleName = (s._roleName || '').replace(/'/g, "\\'");
-                return _mgmtEntryCard({
-                    dot,
-                    name: escapeHtml(name), sid,
-                    identityBanner: _identityChangeBanner(ic, ackClick),
-                    metaLines: [
-                        // host + tenant + Online/Offline status on ONE flex-wrap
-                        // line (was three stacked divs) to save vertical space.
-                        `<div class="flex items-center gap-x-3 gap-y-0.5 flex-wrap text-xs pl-6">`
-                          + (hostname ? `<span class="font-mono text-slate-500">host: ${escapeHtml(hostname)}</span>` : '')
-                          + `<span class="text-slate-500">tenant: ${tenantId ? `<span class="font-mono text-slate-700">${escapeHtml(tenantId)}</span>${_tenantShared ? ` <span class="text-xs px-1.5 py-0.5 rounded-full font-bold bg-amber-100 text-amber-800 align-middle" title="Shared tenant — its spokes are visible to all tenants">shared</span>` : ''}` : '<span class="italic text-slate-500">unassigned</span>'}</span>`
-                          + (extras && extras.status ? `<span class="font-bold ${extras.status.tone}">${escapeHtml(extras.status.text)}</span>` : '')
-                          + `</div>`,
-                        ...(extras ? extras.metaLines : []),
-                    ],
-                    cardTone: extras ? extras.cardTone : '',
-                    metaInline: _quietMeta([
-                        escapeHtml(kindLabel),
-                        (modLabel && modLabel !== '—') ? escapeHtml(modLabel) : '',
-                        ...(extras ? extras.metaParts : []),
-                        _revChip,
-                        approved ? '' : '<span class="text-amber-600 font-semibold">Pending approval</span>',
-                    ]),
-                    actions: [
-                        // Edit now hosts Reset Secret + Un-approve (moved off the
-                        // row to declutter); pass `approved` so the modal shows
-                        // Un-approve only for an already-approved spoke.
-                        _mgmtBtn('Edit', `openSpokeMetadataModal('${eSid}','${eName}',${approved})`, 'bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand'),
-                        _mgmtBtn('Tenant', `openSpokeAssignModal('${eSid}','${eTenant}')`, 'bg-white hover:bg-slate-50 text-primary-text border border-brand'),
-                        // Approve stays on the row (primary action for a pending
-                        // spoke); Un-approve lives inside Edit for approved ones.
-                        ...(approved ? [] : [_mgmtBtn('Approve', `approveSpoke('${eSid}')`, 'bg-blue-600 hover:bg-blue-700 text-white')]),
-                        ...(s._roleName ? [_mgmtBtn('Unload Role', `unloadRole('${eRoleParent}','${eRoleName}')`, 'bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-200')] : []),
-                    ],
-                    // Decommission / Force Delete (+ Restore for a retired spoke)
-                    // drop to their own line — matches the Agents table so the
-                    // destructive actions never wrap into the primary buttons.
-                    // With diagnostics telemetry present, reuse its action set;
-                    // otherwise build the same buttons from the row's own
-                    // approved/decommissioned flags so a spoke with no diag entry
-                    // is still deletable (was: no action row at all).
-                    actionsSecondary: extras ? extras.actions
-                        : _mgmtDeleteActions({ eSid, approved, decommissioned: !!s.decommissioned }),
-                    cornerActions: extras ? extras.eventsActions : [],
-                }) + (extras ? extras.eventsPanel : '');
-            }).join('')}</div>`;
-        }
-    } catch (err) {
-        spokesWrap.innerHTML = `<p class="py-6 text-center text-red-400 italic text-xs">Error: ${err.message}</p>`;
-    }
-}
+    const scope = (typeof _saScopeFilter !== 'undefined') ? _saScopeFilter : 'all';
 
-// _renderAgentsTable() — renders the Agents half (generic Hub-direct agents +
-// Proxmox node agents). Extracted from loadSpokesAndAgents; pxmxAgents are
-// fetched by the caller and passed in. The Active Role column + Load Role
-// action for generic agents were folded in from the former Setup → Generic
-// Nodes tile so generic nodes are managed entirely from Spokes & Agents.
-async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy) {
-    if (!agentsWrap) return;
-    const { btnCls, tblCls, thCls, tdCls } = _SPOKES_TBL_CLS;
-
-    // Generic Hub-direct agents come from /setup/pending_spokes (module_type
-    // "agent"); they approve through the standard spoke-approval path.
-    const hubAgents = genericAgents.map(s => {
+    // Normalize spokes
+    const spokeItems = (trueSpokes || []).map(s => {
         const sid = s.spoke_id;
-        const dn = _spokeName(s);
-        // The Module column names the product the agent runs. AppBuilder is the
-        // canonical generic hub agent; any other generic agent falls back to
-        // its display name so the column still shows something meaningful.
-        const module = /ab/i.test(sid) || /ab/i.test(dn) ? 'AppBuilder' : dn;
+        const name = _spokeName(s);
+        const approved = !!s.approved;
+        const mtRaw = String(s.module_type || '').toLowerCase();
+        const modLabel = moduleLabel(mtRaw);
+        const kindLabel = spokeKind(mtRaw);
+        const extras = diagBy && diagBy.has(sid) ? _diagTelemetryExtras(diagBy.get(sid)) : null;
+        const isUp = extras ? extras.dot?.includes('green') : approved;
+        const isPending = !approved;
+        const dot = (extras && approved) ? extras.dot : (approved ? 'bg-green-500' : 'bg-yellow-400');
+        const tenantId = (s.tenant_id || '').trim();
+        const tenantShared = !!s.tenant_shared || (!!tenantId && !!window._sharedTenantId && tenantId === window._sharedTenantId);
+
         return {
-            agent_id: sid,
-            display_name: dn,
+            kind: 'spoke',
+            id: sid,
+            name,
+            displayName: name,
             hostname: s.hostname || '',
-            identity_change: s.identity_change || null,
-            tenant_id: s.tenant_id || '',
-            _status: s.approved ? 'connected' : 'pending',
-            _decommissioned: !!s.decommissioned,
-            _kind: 'spoke',
-            _module_type: String(s.module_type || '').toLowerCase(),
-            _module: module,
+            approved,
+            decommissioned: !!s.decommissioned,
+            revoked: !!s.revoked,
+            revokedBy: s.revoked_by,
+            revokedTs: s.revoked_ts,
+            revokeReason: s.revoke_reason,
+            identityChange: s.identity_change,
+            tenantId,
+            tenantShared,
+            spokeDisplay: `<span class="font-medium text-slate-700">${escapeHtml(modLabel && modLabel !== '—' ? modLabel : kindLabel)}</span>`
+                + (mtRaw ? ` <span class="text-slate-500 font-mono text-[11px]">(${escapeHtml(mtRaw)})</span>` : ''),
+            roleName: s._roleName || '',
+            roleParent: s._roleParent || '',
+            spokeId: sid,
+            dot,
+            statusCategory: isPending ? 'pending' : (isUp ? 'up' : 'down'),
+            extras
         };
     });
 
-    // pxmxAgents were fetched up front (to scope the Spokes table); reuse
-    // them here rather than re-fetching.
-    const all = [...hubAgents, ...pxmxAgents];
-    // Sort the Agents tile by display name (case-insensitive) so generic
-    // Hub-direct agents and Proxmox node agents interleave by name, not by
-    // fetch order. Falls back to hostname, then agent_id.
-    all.sort((a, b) =>
-        (a.display_name || a.hostname || a.agent_id || '').localeCompare(
-            (b.display_name || b.hostname || b.agent_id || ''), undefined, { sensitivity: 'base' }));
+    // Normalize generic agents
+    const hubAgentItems = (genericAgents || []).map(s => {
+        const sid = s.spoke_id;
+        const dn = _spokeName(s);
+        const approved = !!s.approved;
+        const extras = diagBy && diagBy.has(sid) ? _diagTelemetryExtras(diagBy.get(sid)) : null;
+        const isUp = extras ? extras.dot?.includes('green') : approved;
+        const isPending = !approved;
+        const dot = (extras && !isPending) ? extras.dot : (isPending ? 'bg-amber-400' : 'bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.5)]');
+        const tenantId = (s.tenant_id || '').trim();
+        const tenantShared = !!s.tenant_shared || (!!tenantId && !!window._sharedTenantId && tenantId === window._sharedTenantId);
 
-    // Active Role column (folded in from the former Generic Nodes tile):
-    // each connected generic agent hosts 0..N role sub-spokes, surfaced via
-    // GET_AVAILABLE_ROLES on the generic relay. We paint the table immediately
-    // with a per-row "loading roles…" placeholder, then fill each agent's cell
-    // as its round-trip resolves — NO Promise.all barrier, so one sluggish
-    // agent can't stall the rest (mirrors the progressive-render approach the
-    // standalone Generic Nodes tile used). The role cell is keyed by agent_id;
-    // a reload that rebuilt the table while a fetch was outstanding still
-    // writes to the right cell if the agent is still listed, and silently
-    // skips (querySelector returns null) if it has since dropped off.
+        return {
+            kind: 'generic-agent',
+            id: sid,
+            name: dn,
+            displayName: dn,
+            hostname: s.hostname || '',
+            approved,
+            decommissioned: !!s.decommissioned,
+            revoked: false,
+            identityChange: s.identity_change,
+            tenantId,
+            tenantShared,
+            spokeDisplay: `<span class="px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-700">Hub Direct</span>`,
+            roleName: '',
+            roleParent: '',
+            spokeId: sid,
+            dot,
+            statusCategory: isPending ? 'pending' : (isUp ? 'up' : 'down'),
+            extras
+        };
+    });
 
-    if (all.length === 0) {
-        agentsWrap.innerHTML = `<p class="py-6 text-center text-slate-500 italic text-xs">No agents connected yet. Install the agent on a node (it appears here to be approved, then load a role) or install the agent on a Proxmox node to begin.</p>`;
-    } else {
-        agentsWrap.innerHTML = `<div class="space-y-1.5">${all.map(a => {
-            const aid = a.agent_id;
-            const label = _nodeLabel(a.display_name || a.hostname || aid, _tenantOf(a));
-            const isPending = a._status === 'pending';
-            const isOffline = a._status === 'offline';
-            const isSpokeKind = a._kind === 'spoke';
-            // Every card here is an agent. Type distinguishes the two flavors:
-            // generic Hub-direct agents (module_type "agent", now shown here
-            // only once they have a role loaded — idle ones sit in the Generic
-            // Agents tile) vs Proxmox node agents relayed through the pxmx
-            // spoke. The Module badge names what each one runs.
-            const typeLabel = isSpokeKind ? 'Agent' : 'PXMX AGENT';
-            const moduleLabelCell = a._module || '—';
-            const statusLabel = isPending ? 'Pending' : (isSpokeKind ? 'Approved' : 'Connected');
-            const eAid = aid.replace(/'/g, "\\'");
-            const eLabel = label.replace(/'/g, "\\'");
-            // Tenant binding, surfaced + editable per agent to mirror the Spokes
-            // table. Generic agents ARE agent-type spokes so their binding lives
-            // on tenant_id (set via the same approve_spoke path); Proxmox node
-            // agents carry it in client_simulation.tenant_id (per-agent config).
-            const rowTenant = isSpokeKind ? (a.tenant_id || '') : (a.client_simulation?.tenant_id || '');
-            const eTenant = rowTenant.replace(/'/g, "\\'");
-            // The owning spoke is already known on the rendered row (pxmx agents
-            // carry spoke_id — see get_pxmx_agents). Pass it straight to Approve
-            // so it never has to re-resolve via a tenant-scoped fetch, which
-            // silently dropped the agent when its owning spoke was bound to a
-            // different tenant than the picker (approval dead-ended with "could
-            // not determine which spoke owns this agent").
-            const eSpoke = String(a.spoke_id || '').replace(/'/g, "\\'");
-            // Shared-tenant badge: `tenant_shared` is stamped by the server for
-            // spoke-kind agents; for pxmx agents (no server flag) compare against
-            // the cached shared-tenant id. Mirrors the spoke-row badge.
-            const _rowTenantShared = !!a.tenant_shared
-                || (!!rowTenant && !!window._sharedTenantId && rowTenant === window._sharedTenantId);
-            // Active Role line: a keyed placeholder for connected generic agents
-            // that is filled async after paint (no barrier). Proxmox node agents
-            // have no roles; pending generic agents show an em-dash.
-            let rolesLine;
-            if (!isSpokeKind) {
-                rolesLine = '';
-            } else if (isPending) {
-                rolesLine = `<div class="text-xs text-slate-500 pl-6">roles: <span class="text-slate-500 italic">—</span></div>`;
-            } else {
-                rolesLine = `<div class="text-xs text-slate-500 pl-6">roles: <span class="lm-agent-role-cell text-slate-500 italic" data-role-cell="${escapeHtml(aid)}">loading…</span></div>`;
-            }
-            // Telemetry extras folded in from the former Diagnostics tile.
-            // Generic Hub-direct agents pull their entry from diagBy (the
-            // /setup/diagnostics map); Proxmox node agents are normalized into
-            // the same shape from the pxmx agent object itself (they connect
-            // through the pxmx spoke, so the hub has no direct diag entry).
-            // pxmx agents suppress Reset Secret (revokeAgent is already the
-            // Un-approve button here) and Recovery Pause (watchdog is spoke-
-            // scoped). The heartbeat dot overrides the approval dot only when
-            // the agent is connected/approved — pending keeps amber.
-            const extras = isSpokeKind
-                ? (diagBy && diagBy.has(aid) ? _diagTelemetryExtras(diagBy.get(aid)) : null)
-                : _diagTelemetryExtras(_normalizePxmxAgent(a), { resetFn: 'revokeAgent', deleteFn: 'deleteAgent', decommissionFn: 'decommissionAgent', restoreFn: 'restoreAgent', allowRecoveryPause: false, allowReset: false });
-            const editFn = isSpokeKind ? 'openSpokeMetadataModal' : 'openAgentConfigModal';
-            const approveFnName = isSpokeKind ? 'approveSpoke' : 'approveAgent';
-            const unapproveFnName = isSpokeKind ? 'unapproveSpoke' : 'revokeAgent';
-            const ic = a.identity_change || null;
-            const ackEndpoint = isSpokeKind
-                ? `/setup/spokes/${encodeURIComponent(aid)}/ack-change`
-                : `/api/pxmx/agents/${encodeURIComponent(aid)}/ack-change`;
-            const ackClick = `_ackIdentityChange('${ackEndpoint}')`;
-            const nameWithCs = `${escapeHtml(label)}${a.client_simulation?.enabled ? ' <span class="ml-1 px-1.5 py-0.5 rounded-full text-xs font-bold bg-green-100 text-green-700 align-middle" title="Client Simulation mode">CS</span>' : ''}`;
-            const dot = (extras && !isPending) ? extras.dot
-                      : (isPending ? 'bg-amber-400' : 'bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.5)]');
-            return _mgmtEntryCard({
-                dot,
-                name: nameWithCs, sid: aid,
-                identityBanner: _identityChangeBanner(ic, ackClick),
-                metaLines: [
-                    // host + tenant + Online/Offline status on ONE flex-wrap line
-                    // (was three stacked divs) to save vertical space. rolesLine
-                    // stays its own line below it.
-                    `<div class="flex items-center gap-x-3 gap-y-0.5 flex-wrap text-xs pl-6">`
-                      + (a.hostname ? `<span class="font-mono text-slate-500">host: ${escapeHtml(a.hostname)}</span>` : '')
-                      + `<span class="text-slate-500">tenant: ${rowTenant ? `<span class="font-mono text-slate-700">${escapeHtml(rowTenant)}</span>${_rowTenantShared ? ` <span class="text-xs px-1.5 py-0.5 rounded-full font-bold bg-amber-100 text-amber-800 align-middle" title="Shared tenant — its spokes are visible to all tenants">shared</span>` : ''}` : '<span class="italic text-slate-500">unassigned</span>'}</span>`
-                      + (extras && extras.status ? `<span class="font-bold ${extras.status.tone}">${escapeHtml(extras.status.text)}</span>` : '')
-                      + `</div>`,
-                    rolesLine,
-                    ...(extras ? extras.metaLines : []),
-                ],
-                cardTone: extras ? extras.cardTone : '',
-                metaInline: _quietMeta([
-                    escapeHtml(typeLabel),
-                    a._module ? escapeHtml(String(a._module)) : '',
-                    ...(extras ? extras.metaParts : []),
-                    isPending ? '<span class="text-amber-600 font-semibold">Pending approval</span>' : '',
-                ]),
-                actions: [
-                    // Spoke-kind agents route Edit → openSpokeMetadataModal, which
-                    // now hosts Reset Secret + Un-approve; pass approved (=!isPending)
-                    // so the modal shows Un-approve. pxmx Edit (openAgentConfigModal)
-                    // ignores the extra arg.
-                    _mgmtBtn('Edit', `${editFn}('${eAid}','${eLabel}'${isSpokeKind ? ',' + (!isPending) : ''})`, 'bg-brand/10 hover:bg-brand/20 text-primary-text border border-brand'),
-                    // Dedicated Tenant button, mirroring the Spokes table. Generic
-                    // agents reuse the spoke assign modal (they bind via
-                    // approve_spoke); Proxmox node agents get their own modal that
-                    // writes client_simulation.tenant_id via the agent config API.
-                    _mgmtBtn('Tenant',
-                        isSpokeKind ? `openSpokeAssignModal('${eAid}','${eTenant}','Agent')` : `openAgentAssignModal('${eAid}','${eTenant}')`,
-                        'bg-white hover:bg-slate-50 text-primary-text border border-brand'),
-                    (isSpokeKind && !isPending)
-                        ? _mgmtBtn('Load Role', `showLoadRoleModal('${eAid}')`, 'bg-white hover:bg-slate-50 text-primary-text border border-brand')
-                        : '',
-                    isPending
-                        ? _mgmtBtn('Approve', isSpokeKind ? `${approveFnName}('${eAid}')` : `${approveFnName}('${eAid}','${eSpoke}')`, 'bg-blue-600 hover:bg-blue-700 text-white')
-                        // Spoke-kind agents move Un-approve into Edit; pxmx agents
-                        // keep revoke on the row (its Edit is a separate config modal).
-                        // An OFFLINE agent has nothing to un-approve (no live link) —
-                        // only Delete is meaningful, so drop the revoke button.
-                        : ((isSpokeKind || isOffline) ? '' : _mgmtBtn('Un-approve', `${unapproveFnName}('${eAid}')`, 'bg-red-50 hover:bg-red-100 text-red-600 border border-red-200')),
-                ],
-                // Decommission / Force Delete (+ Restore for a retired agent) drop
-                // to their own line — the Agents rows carry more primary buttons
-                // (Edit, Tenant, Load Role, Approve) than the Spokes rows, so
-                // keeping the destructive actions inline made the row wrap. When a
-                // spoke-kind agent has no diagnostics entry, fall back to the same
-                // buttons built from its own approved/decommissioned flags so it is
-                // still deletable (pxmx agents always carry a synthesized extras).
-                actionsSecondary: extras ? extras.actions
-                    : (isSpokeKind ? _mgmtDeleteActions({ eSid: eAid, approved: !isPending, decommissioned: !!a._decommissioned }) : []),
-                cornerActions: extras ? extras.eventsActions : [],
-            }) + (extras ? extras.eventsPanel : '');
-        }).join('')}</div>`;
-        // Trickle: fill each connected generic agent's Active Role line as its
-        // GET_AVAILABLE_ROLES resolves. No barrier, so a slow agent never delays
-        // the others. Looks the cell up by data-role-cell each time so a reload
-        // that rebuilt the tile mid-flight still targets the right agent (and
-        // silently skips one that has since dropped off the list).
-        all.forEach(a => {
-            if (a._kind !== 'spoke' || a._status !== 'connected') return;
-            const aid = a.agent_id;
-            // Fetch hosted roles, durable deploy-role markers AND live deploy
-            // status together so the cell reflects all three. A deploy role like
-            // dns-server/dhcp-server/netbox-server hosts NO sub-role and its live
-            // status is cleared on agent reload, so without the durable markers
-            // this always read "none (idle)" with no sign it deployed anything.
-            Promise.all([fetchAgentRoleState(aid), fetchDeployStatus(aid)]).then(([roleState, ds]) => {
-                const cell = agentsWrap.querySelector(`.lm-agent-role-cell[data-role-cell="${CSS.escape(aid)}"]`);
-                if (!cell) return;
-                const active = (roleState && roleState.active) || [];
-                const parts = [];
-                if (Array.isArray(active) && active.length > 0) {
-                    parts.push(...active.map(r => `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-blue-100 text-blue-700" title="${escapeHtml(r.sub_spoke_id || '')}">${escapeHtml((AGENT_ROLES[r.role] || {}).name || r.role)}</span>`));
-                }
-                // Live deploy-role badges (ephemeral — cleared on agent reload).
-                // Render one badge PER tracked deploy role (ds.deploys), not just
-                // the single most-recent one — a singular ds.deploy previously
-                // meant loading a second deploy role (e.g. dhcp-server after
-                // dns-server) hid the first one's badge entirely.
-                const deps = Array.isArray(ds && ds.deploys) ? ds.deploys
-                           : (ds && ds.deploy ? [ds.deploy] : []);
-                const shownDeploy = new Set();
-                for (const dep of deps) {
-                    if (!dep || !dep.role || !dep.state) continue;
-                    shownDeploy.add(dep.role);
-                    const st = dep.state;
-                    const cls = st === 'completed' ? 'bg-green-100 text-green-700'
-                              : st === 'failed' || st === 'error' ? 'bg-red-100 text-red-700'
-                              : 'bg-amber-100 text-amber-700';
-                    const word = st === 'running' ? 'deploying…' : st;
-                    // "running" can't be cleared (nothing to acknowledge yet);
-                    // every settled state gets an × so a stuck badge (most
-                    // often "failed") doesn't linger forever with no way to
-                    // dismiss it — clearing only forgets the in-memory status,
-                    // it never touches the installed service itself.
-                    const clearBtn = st === 'running' ? '' :
-                        `<button onclick="clearDeployStatus('${escapeHtml(aid)}','${escapeHtml(dep.role)}')" class="ml-1 font-bold leading-none hover:opacity-70" title="Clear this status">×</button>`;
-                    parts.push(`<span class="px-2 py-0.5 rounded-full text-xs font-bold ${cls} inline-flex items-center" title="deploy role">${escapeHtml((AGENT_ROLES[dep.role] || {}).name || dep.role)}: ${escapeHtml(word)}${clearBtn}</span>`);
-                }
-                // Durable deploy-role badges. A deploy role (dns-server,
-                // dhcp-server, …) is an INSTALL, not a hosted sub-spoke, so it
-                // never shows up in `active`; and ds.deploys is in-memory on the
-                // agent, so it is empty after any agent restart. Without this the
-                // tile read "none (idle)" for a node that is demonstrably running
-                // Unbound/Kea — while the Roles dialog, which reads these same
-                // durable markers, correctly listed them as loaded. Read the
-                // marker (installed_deploy_roles) and the unit state
-                // (active_deploy_roles) so the two views agree.
-                const installedDeploy = (roleState && roleState.installed_deploy_roles) || [];
-                const enabledDeploy = new Set((roleState && roleState.active_deploy_roles) || []);
-                for (const role of installedDeploy) {
-                    // netbox-server has its own dedicated badge + knob below.
-                    if (role === 'netbox-server' || shownDeploy.has(role)) continue;
-                    const on = enabledDeploy.has(role);
-                    const cls = on ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-600';
-                    const word = on ? 'installed' : 'installed (stopped)';
-                    parts.push(`<span class="px-2 py-0.5 rounded-full text-xs font-bold ${cls}" title="deploy role — installed on this node">${escapeHtml((AGENT_ROLES[role] || {}).name || role)}: ${word}</span>`);
-                }
-                // Durable NetBox-server marker + reset-admin-password knob.
-                // installed_deploy_roles is the tenant-admin-visible fallback:
-                // fetchDeployStatus is Global-Admin-only and returns null for
-                // tenant admins, which used to hide the badge from them.
-                if ((ds && ds.netbox_installed) || installedDeploy.includes('netbox-server')) {
-                    parts.push(`<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-600" title="NetBox application deployed on this node">NetBox</span>`);
-                    parts.push(`<button onclick="resetNetboxAdmin('${escapeHtml(aid)}')" class="px-2 py-0.5 rounded-full text-xs font-bold bg-white text-primary-text border border-brand hover:bg-green-50 transition-colors" title="Reset the NetBox admin password">Reset admin pw</button>`);
-                }
-                cell.outerHTML = parts.length
-                    ? `<span class="inline-flex flex-wrap items-center gap-1">${parts.join(' ')}</span>`
-                    : '<span class="text-slate-500 italic">none (idle)</span>';
-            });
+    // Helper to test if a string is a raw UUID (fleet rule 7.3: no UUIDs on screen)
+    const _isUuid = s => /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(String(s || '').trim());
+
+    // Normalize pxmx agents
+    const pxmxAgentItems = (pxmxAgents || []).map(a => {
+        const aid = a.agent_id;
+        const rawDn = a.display_name && !_isUuid(a.display_name) ? a.display_name : '';
+        const rawHost = a.hostname && !_isUuid(a.hostname) ? a.hostname : '';
+        const baseName = rawDn || rawHost || 'Node Agent';
+        const label = _nodeLabel(baseName, _tenantOf(a));
+        const isPending = a._status === 'pending';
+        const isOffline = a._status === 'offline';
+        const extras = _diagTelemetryExtras(_normalizePxmxAgent(a), {
+            resetFn: 'revokeAgent',
+            deleteFn: 'deleteAgent',
+            decommissionFn: 'decommissionAgent',
+            restoreFn: 'restoreAgent',
+            allowRecoveryPause: false,
+            allowReset: false
         });
+        const dot = (extras && !isPending) ? extras.dot : (isPending ? 'bg-amber-400' : 'bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.5)]');
+        const rowTenant = (a.client_simulation?.tenant_id || a.tenant_id || '').trim();
+        const tenantShared = !!a.tenant_shared || (!!rowTenant && !!window._sharedTenantId && rowTenant === window._sharedTenantId);
+        const spokeNameById = new Map((trueSpokes || []).map(s => {
+            const raw = _spokeName(s) || s.display_name || s.name || '';
+            const safe = raw && !_isUuid(raw) ? raw : (s.hostname || 'Spoke');
+            return [s.spoke_id, safe];
+        }));
+        const rawParent = a.spoke_name || spokeNameById.get(a.spoke_id) || '';
+        const parentSpokeLabel = rawParent && !_isUuid(rawParent) ? rawParent : 'pxmx';
+
+        return {
+            kind: 'pxmx-agent',
+            id: aid,
+            name: label,
+            displayName: label,
+            hostname: a.hostname || '',
+            approved: !isPending,
+            isOffline,
+            decommissioned: !!a._decommissioned,
+            revoked: false,
+            identityChange: a.identity_change,
+            tenantId: rowTenant,
+            tenantShared,
+            spokeDisplay: `<span class="font-medium text-slate-700">${escapeHtml(parentSpokeLabel)}</span> <span class="text-slate-500 font-mono text-[11px]">(pxmx)</span>`,
+            roleName: '',
+            roleParent: '',
+            spokeId: a.spoke_id || '',
+            isCs: !!a.client_simulation?.enabled,
+            dot,
+            statusCategory: isPending ? 'pending' : (isOffline ? 'down' : 'up'),
+            extras
+        };
+    });
+
+    // Combined all items for stats
+    const allItems = [...spokeItems, ...hubAgentItems, ...pxmxAgentItems];
+    const total = allItems.length;
+    const up = allItems.filter(it => it.statusCategory === 'up').length;
+    const pending = allItems.filter(it => it.statusCategory === 'pending').length;
+    const down = allItems.filter(it => it.statusCategory === 'down').length;
+
+    // Filter by Scope
+    let itemsToRender = [];
+    if (scope === 'all') {
+        itemsToRender = allItems;
+    } else if (scope === 'spokes') {
+        itemsToRender = spokeItems;
+    } else if (scope === 'agents') {
+        itemsToRender = [...hubAgentItems, ...pxmxAgentItems];
     }
+
+    // Sort case-insensitively by displayName / hostname / id
+    itemsToRender.sort((a, b) =>
+        (a.displayName || a.hostname || a.id || '').localeCompare(
+            (b.displayName || b.hostname || b.id || ''), undefined, { sensitivity: 'base' }
+        )
+    );
+
+    // Stash in map for action dropdown
+    itemsToRender.forEach(it => {
+        _lmSpokeAgentItemMap.set(`${it.kind}:${it.id}`, it);
+    });
+
+    // Stat cards (mirroring _renderNwOverview in nw.js)
+    const stat = (label, n, valueCls) => `
+        <div class="bg-white rounded-lg border border-slate-200 px-3 py-2">
+            <p class="text-xs font-bold text-slate-500">${label}</p>
+            <p class="text-xl font-bold ${valueCls || 'text-navy'}">${n}</p>
+        </div>`;
+    const statCards = `<div class="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
+        ${stat('Total', total)}
+        ${stat('Connected', up, 'text-green-600')}
+        ${stat('Pending Approval', pending, 'text-amber-500')}
+        ${stat('Offline', down, 'text-red-500')}
+    </div>`;
+
+    if (itemsToRender.length === 0) {
+        container.innerHTML = `
+            ${statCards}
+            <div class="py-12 text-center text-slate-500 italic bg-white rounded-md border border-slate-200 text-xs">
+                No spokes or agents match this filter.
+            </div>`;
+        return;
+    }
+
+    const rowsHtml = itemsToRender.map(it => {
+        const id = it.id;
+        const itemKey = `${it.kind}:${id}`;
+        const eKey = escJsAttr(itemKey);
+
+        // Name cell
+        let subTitle = '';
+        if (it.hostname && it.hostname !== it.displayName) {
+            subTitle = `<div class="text-[11px] font-mono font-normal text-slate-500 mt-0.5">${escapeHtml(it.hostname)}</div>`;
+        }
+        let revChip = '';
+        if (it.revoked) {
+            const _auto = it.revokedBy === 'threat_auto';
+            revChip = `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold ${_auto ? 'bg-red-100 text-red-800' : 'bg-red-100 text-red-700'}">⛔ Revoked</span>`;
+        }
+        const csBadge = it.isCs ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-green-100 text-green-700 align-middle">CS</span>' : '';
+        const pendingBadge = !it.approved ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 align-middle">Pending</span>' : '';
+
+        const ackClick = it.kind === 'pxmx-agent'
+            ? `_ackIdentityChange('/api/pxmx/agents/${encodeURIComponent(id)}/ack-change')`
+            : `_ackIdentityChange('/setup/spokes/${encodeURIComponent(id)}/ack-change')`;
+        const identityHtml = _identityChangeBanner(it.identityChange, ackClick);
+
+        const nameCell = `
+            <div class="flex items-center gap-2.5">
+                <div class="w-2.5 h-2.5 rounded-full ${it.dot} shrink-0"></div>
+                <div class="min-w-0">
+                    <div class="flex items-center gap-1.5 flex-wrap">
+                        <span class="font-semibold text-slate-800 text-xs">${escapeHtml(it.displayName)}</span>
+                        ${pendingBadge}
+                        ${revChip}
+                        ${csBadge}
+                    </div>
+                    ${subTitle}
+                    ${identityHtml}
+                </div>
+            </div>`;
+
+        // Tenant cell
+        let tenantCell = '';
+        if (it.tenantId) {
+            let tDisp = it.tenantId;
+            const sel = document.getElementById('sa-tenant-filter');
+            if (sel) {
+                const opt = sel.querySelector(`option[value="${CSS.escape(it.tenantId)}"]`);
+                if (opt && opt.textContent) tDisp = opt.textContent;
+            }
+            if (_isUuid(tDisp)) tDisp = 'Assigned';
+            tenantCell = `<span class="font-medium text-xs text-slate-700">${escapeHtml(tDisp)}</span>`;
+            if (it.tenantShared) {
+                tenantCell += ` <span class="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 align-middle" title="Shared tenant — visible to all tenants">shared</span>`;
+            }
+        } else {
+            tenantCell = `<span class="italic text-slate-400 text-xs font-sans">unassigned</span>`;
+        }
+
+        // Roles cell
+        let rolesCell = '';
+        if (it.kind === 'generic-agent') {
+            if (!it.approved) {
+                rolesCell = '<span class="text-slate-400 italic text-xs">—</span>';
+            } else {
+                rolesCell = `<span class="lm-agent-role-cell text-slate-500 italic text-xs" data-role-cell="${escapeHtml(id)}">loading…</span>`;
+            }
+        } else if (it.kind === 'spoke' && it.roleName) {
+            const rName = (AGENT_ROLES[it.roleName] || {}).name || it.roleName;
+            rolesCell = `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-blue-100 text-blue-700" title="Hosted role">${escapeHtml(rName)}</span>`;
+        } else {
+            rolesCell = '<span class="text-slate-400 italic text-xs">—</span>';
+        }
+
+        // Actions cell
+        const actionsCell = `
+            <button type="button" data-sa-action-id="${eKey}" class="px-2.5 py-1 rounded text-xs font-semibold bg-slate-100 text-slate-700 hover:bg-slate-200 border border-slate-300 transition-colors" title="Actions menu">⋯ Actions ▾</button>`;
+
+        return `<tr class="hover:bg-slate-50 transition-colors">
+            <td class="px-4 py-3 whitespace-nowrap">${nameCell}</td>
+            <td class="px-4 py-3 text-xs whitespace-nowrap">${it.spokeDisplay}</td>
+            <td class="px-4 py-3 text-xs whitespace-nowrap">${tenantCell}</td>
+            <td class="px-4 py-3 text-xs">${rolesCell}</td>
+            <td class="px-4 py-3 text-right whitespace-nowrap">${actionsCell}</td>
+        </tr>`;
+    }).join('');
+
+    container.innerHTML = `
+        ${statCards}
+        <div class="overflow-x-auto overflow-hidden rounded-md border border-slate-200 bg-white">
+            <table class="w-full text-left text-sm">
+                <thead class="bg-slate-100 text-slate-600 text-xs uppercase tracking-wider">
+                    <tr>
+                        <th class="px-4 py-3">NAME</th>
+                        <th class="px-4 py-3">SPOKE</th>
+                        <th class="px-4 py-3">TENANT</th>
+                        <th class="px-4 py-3">ROLES</th>
+                        <th class="px-4 py-3 text-right">ACTIONS</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-200">${rowsHtml}</tbody>
+            </table>
+        </div>`;
+
+    // Event delegation for table container
+    if (!container._saEventsAttached) {
+        container.addEventListener('click', e => {
+            const actBtn = e.target.closest('button[data-sa-action-id]');
+            if (actBtn) {
+                e.stopPropagation();
+                lmToggleSpokeAgentActionMenu(actBtn, actBtn.dataset.saActionId);
+                return;
+            }
+            const clrBtn = e.target.closest('button[data-clear-aid]');
+            if (clrBtn) {
+                clearDeployStatus(clrBtn.dataset.clearAid, clrBtn.dataset.clearRole);
+                return;
+            }
+            const nbBtn = e.target.closest('button[data-reset-netbox-aid]');
+            if (nbBtn) {
+                resetNetboxAdmin(nbBtn.dataset.resetNetboxAid);
+                return;
+            }
+        });
+        container._saEventsAttached = true;
+    }
+
+    // Trickle: fill each connected generic agent's Active Role line as its
+    // GET_AVAILABLE_ROLES resolves. No barrier, so a slow agent never delays
+    // the others.
+    itemsToRender.forEach(it => {
+        if (it.kind !== 'generic-agent' || !it.approved) return;
+        const aid = it.id;
+        Promise.all([fetchAgentRoleState(aid), fetchDeployStatus(aid)]).then(([roleState, ds]) => {
+            const cell = agentsWrap.querySelector(`.lm-agent-role-cell[data-role-cell="${CSS.escape(aid)}"]`);
+            if (!cell) return;
+            const active = (roleState && roleState.active) || [];
+            const parts = [];
+            if (Array.isArray(active) && active.length > 0) {
+                parts.push(...active.map(r => `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-blue-100 text-blue-700" title="${escapeHtml((AGENT_ROLES[r.role] || {}).name || r.role)}">${escapeHtml((AGENT_ROLES[r.role] || {}).name || r.role)}</span>`));
+            }
+            const deps = Array.isArray(ds && ds.deploys) ? ds.deploys
+                       : (ds && ds.deploy ? [ds.deploy] : []);
+            const shownDeploy = new Set();
+            for (const dep of deps) {
+                if (!dep || !dep.role || !dep.state) continue;
+                shownDeploy.add(dep.role);
+                const st = dep.state;
+                const cls = st === 'completed' ? 'bg-green-100 text-green-700'
+                          : st === 'failed' || st === 'error' ? 'bg-red-100 text-red-700'
+                          : 'bg-amber-100 text-amber-700';
+                const word = st === 'running' ? 'deploying…' : st;
+                const clearBtn = st === 'running' ? '' :
+                    `<button type="button" data-clear-aid="${escapeHtml(aid)}" data-clear-role="${escapeHtml(dep.role)}" class="ml-1 font-bold leading-none hover:opacity-70" title="Clear this status">×</button>`;
+                parts.push(`<span class="px-2 py-0.5 rounded-full text-xs font-bold ${cls} inline-flex items-center" title="deploy role">${escapeHtml((AGENT_ROLES[dep.role] || {}).name || dep.role)}: ${escapeHtml(word)}${clearBtn}</span>`);
+            }
+            const installedDeploy = (roleState && roleState.installed_deploy_roles) || [];
+            const enabledDeploy = new Set((roleState && roleState.active_deploy_roles) || []);
+            for (const role of installedDeploy) {
+                if (role === 'netbox-server' || shownDeploy.has(role)) continue;
+                const on = enabledDeploy.has(role);
+                const cls = on ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-600';
+                const word = on ? 'installed' : 'installed (stopped)';
+                parts.push(`<span class="px-2 py-0.5 rounded-full text-xs font-bold ${cls}" title="deploy role — installed on this node">${escapeHtml((AGENT_ROLES[role] || {}).name || role)}: ${word}</span>`);
+            }
+            if ((ds && ds.netbox_installed) || installedDeploy.includes('netbox-server')) {
+                parts.push(`<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-600" title="NetBox application deployed on this node">NetBox</span>`);
+                parts.push(`<button type="button" data-action="resetNetboxAdmin" data-reset-netbox-aid="${escapeHtml(aid)}" class="px-2 py-0.5 rounded-full text-xs font-bold bg-white text-primary-text border border-brand hover:bg-green-50 transition-colors" title="Reset the NetBox admin password">Reset admin pw</button>`);
+            }
+            cell.outerHTML = parts.length
+                ? `<span class="inline-flex flex-wrap items-center gap-1">${parts.join(' ')}</span>`
+                : '<span class="text-slate-500 italic">none (idle)</span>';
+        }).catch(err => {
+            console.error('Failed to load agent roles for', aid, err);
+        });
+    });
 }
 
-
+// Load spokes, agents, and diagnostics data and render the unified table.
 async function loadSpokesAndAgents() {
     const spokesWrap = document.getElementById('spokes-table-wrap');
-    const agentsWrap = document.getElementById('agents-table-wrap');
+    const currentGen = ++_saLoadGen;
 
     // Fetch the full known-module list once and split it by module_type.
     // Treated as agents (shown in the Agents/Generic Agents sections, not
@@ -628,6 +806,8 @@ async function loadSpokesAndAgents() {
         (async () => fetch(_agentsUrl, { credentials: 'same-origin' }))(),
         (async () => setupFetch('/setup/diagnostics'))(),
     ]);
+
+    if (currentGen !== _saLoadGen) return;
 
     if (spokesRes.status === 'fulfilled') {
         try {
@@ -787,14 +967,12 @@ async function loadSpokesAndAgents() {
     const genericAgentsF = genericAgents.filter(s => _saMatch(s.tenant_id));
     const pxmxAgentsF    = pxmxAgents.filter(a => _saMatch(_tenantOf(a) || _spokeTenantById.get(a.spoke_id)));
 
+    _saCachedTrueSpokes = trueSpokesF;
+    _saCachedGenericAgents = genericAgentsF;
+    _saCachedPxmxAgents = pxmxAgentsF;
+    _saCachedDiagBy = diagBy;
 
-    _renderSpokesTable(spokesWrap, trueSpokesF, diagBy);
-    // An agent is an agent — idle (no role yet) and active (role-loaded) generic
-    // agents both render in the single Agents table alongside the Proxmox node
-    // agents. (The former separate "Generic Agents" tile was removed — splitting
-    // by idle/active gave no useful signal and just hid freshly-onboarded agents
-    // in a second card.) Load Role + Approve affordances live in _renderAgentsTable.
-    await _renderAgentsTable(agentsWrap, genericAgentsF, pxmxAgentsF, diagBy);
+    await _renderUnifiedSpokesAndAgentsTable(spokesWrap, trueSpokesF, genericAgentsF, pxmxAgentsF, diagBy);
 }
 
 // _renderSpokesSummary(diagData) — the spoke-update recovery-count bar that sat
@@ -3499,7 +3677,7 @@ async function showLoadRoleModal(spokeId) {
     list.innerHTML = rows || '<p class="text-xs text-slate-500 italic col-span-3">All available roles are already loaded.</p>';
     const loadedControls = document.getElementById('loaded-role-controls');
     // Deploy roles that own a background service (stop = Unload, purge = Uninstall).
-    const SERVICE_DEPLOY_ROLES = ['dns-server', 'dhcp-server', 'zabbix-server', 'zbxproxy', 'zbxagent', 'syslog-collector', 'syslog-graylog'];
+    const SERVICE_DEPLOY_ROLES = ['dns-server', 'dhcp-server', 'zabbix-server', 'zbxproxy', 'zbxagent', 'syslog-collector', 'syslog-graylog', 'ab'];
     // The management module a server's Unload waits for (default: drop "-server").
     const SERVER_MODULE = { 'syslog-collector': 'syslog' };
     const serverModule = id => SERVER_MODULE[id] || id.replace(/-server$/, '');
