@@ -349,7 +349,7 @@ def register(app, hub, ctx):
                 except ValueError as e:
                     raise _ConfigValidationError(f"{COMMON_VRF_SETTING} {e}")
             if config.keys() & {"llm_cloud_profiles", "llm_task_models", "llm_ab_pr_repos",
-                                "llm_qualification_candidates"}:
+                                "llm_qualification_candidates", "llm_queue_wait_s"}:
                 from routes.llm import validate_cloud_profiles, validate_pool_config
                 session = ctx._session_user(request)
                 if not ctx._is_admin(session):

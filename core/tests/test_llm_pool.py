@@ -748,7 +748,8 @@ def test_slow_cpu_reply_is_advisory_not_failure(monkeypatch):
     import llm_pool
 
     start = pool.inventory["a"][0]
-    clock = iter((start, start, start, start + 700, start + 700))
+    # The first value serves the pre-dispatch queue-capability probe.
+    clock = iter((start, start, start, start, start + 700, start + 700))
     monkeypatch.setattr(llm_pool, "time", SimpleNamespace(monotonic=lambda: next(clock)))
     pool.hub.request_response.return_value = {"status": "SUCCESS", "text": "preserved"}
     result = asyncio.run(pool.complete("tenant-a", JOB))
@@ -952,3 +953,347 @@ def test_runtime_start_retries_only_recoverable_failures(detail_code, expected, 
             "b", "LLM_START_RUNTIME", {}, timeout=25)
     else:
         pool.hub.request_response.assert_not_awaited()
+
+
+def report_all(pool, model, digest, keys="abcd"):
+    """Report every listed worker as idle with the model and all sampling options."""
+    for key in keys:
+        pool.report(key, pool.hub.active_connections[key], {
+            "status": "SUCCESS", "models": {model: digest}, "available": True,
+            "supported_options": list(llm_pool.SAMPLING_LIMITS),
+        })
+
+
+def test_default_task_map_is_used_and_operator_entry_overrides_it():
+    """A task works with no configuration; an operator entry still wins."""
+    from llm_candidates import default_task_models
+    gemma = CANDIDATES["gemma4-12b"]
+    pool = make_pool()
+    report_all(pool, gemma["model"], gemma["digest"])
+    pool.hub.request_response.return_value = {"status": "SUCCESS", "text": "ok"}
+    result = asyncio.run(pool.complete("tenant-a", {"prompt": "fixture", "task": "docs"}))
+    assert result["model"] == gemma["model"]
+    assert pool.hub.request_response.call_args.args[2]["options"] == {
+        "num_ctx": 65536, "temperature": 0.7, "top_p": 0.8, "top_k": 64}
+    assert [row["model"] for row in default_task_models("coding")] == [
+        CANDIDATES["qwen36-coding"]["model"], CANDIDATES["qwen38-scout"]["model"]]
+    assert default_task_models("nope") == []
+    pool.hub.state.system_state["global_config"]["llm_task_models"] = {
+        "docs": [{"model": JOB["model"], "digest": DIGEST}]}
+    report_all(pool, JOB["model"], DIGEST)
+    assert asyncio.run(pool.complete("tenant-a", {"prompt": "fixture", "task": "docs"}))[
+        "model"] == JOB["model"]
+    assert asyncio.run(pool.complete("tenant-a", {"prompt": "fixture", "task": "nope"}))[
+        "code"] == "invalid_request"
+
+
+def test_least_recently_dispatched_idle_worker_goes_first():
+    """Never-used workers win, then the one idle longest; ties break by key."""
+    pool = make_pool()
+    pool.hub.request_response.return_value = {"status": "SUCCESS", "text": "ok"}
+    pool.last_dispatch["a"] = 5.0
+    for _ in range(3):
+        asyncio.run(pool.complete("tenant-a", JOB))
+    assert [call.args[0] for call in pool.hub.request_response.call_args_list] == ["b", "a", "b"]
+
+
+def run_queued(pool, release_after, monkeypatch, wait=60):
+    """Run one job while both tenant workers are busy; free them after a short delay."""
+    monkeypatch.setattr(llm_pool, "QUEUE_POLL_S", 0.01)
+    monkeypatch.setattr(llm_pool, "queue_wait", lambda config: wait)
+    pool.hub.request_response.return_value = {"status": "SUCCESS", "text": "ok"}
+    pool.reserved.update("ab")
+    states = []
+
+    async def scenario():
+        """Start the job, record its dashboard state while waiting, then free a worker."""
+        task = asyncio.create_task(pool.complete("tenant-a", JOB))
+        await asyncio.sleep(release_after)
+        states.extend(job["state"] for job in pool.dashboard()["jobs"])
+        pool.reserved.discard("b")
+        return await task
+
+    return asyncio.run(scenario()), states
+
+
+def test_queued_job_completes_when_a_worker_frees_up(monkeypatch):
+    """A busy pool queues the job, shows it as queued, then runs it once."""
+    pool = make_pool()
+    result, states = run_queued(pool, 0.05, monkeypatch)
+    assert result["status"] == "SUCCESS" and states == ["queued"]
+    assert pool.hub.request_response.call_args.args[0] == "b"
+    assert pool.queued == 0 and not pool.active_jobs
+    # One attempt, one terminal row: no no_capacity row or metric from the first pass.
+    assert [row["state"] for row in pool.jobs] == ["passed"]
+    assert all(row["no_capacity"] == 0 for row in pool.metric_rows.values())
+    assert pool.hub.request_response.call_count == 1
+
+
+def test_queue_times_out_to_no_capacity(monkeypatch):
+    """When no worker frees up before the deadline, the existing error returns."""
+    pool = make_pool()
+    monkeypatch.setattr(llm_pool, "QUEUE_POLL_S", 0.01)
+    monkeypatch.setattr(llm_pool, "queue_wait", lambda config: 0.1)
+    pool.reserved.update("ab")
+    result = asyncio.run(pool.complete("tenant-a", JOB))
+    assert result["code"] == "no_capacity" and result["retryable"] is True
+    assert pool.queued == 0 and not pool.active_jobs
+    assert [row["state"] for row in pool.jobs] == ["no_capacity"]
+    assert [row["no_capacity"] for row in pool.metric_rows.values()] == [1]
+    pool.hub.request_response.assert_not_called()
+
+
+def test_cancelled_queued_job_cleans_up(monkeypatch):
+    """Cancelling a waiting job releases its slot and records it once."""
+    pool = make_pool()
+    monkeypatch.setattr(llm_pool, "QUEUE_POLL_S", 0.01)
+    monkeypatch.setattr(llm_pool, "queue_wait", lambda config: 60)
+    pool.reserved.update("ab")
+
+    async def scenario():
+        """Cancel the job while it is waiting."""
+        task = asyncio.create_task(pool.complete("tenant-a", JOB))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert pool.queued == 0 and not pool.active_jobs
+    # A caller going away is not a capacity shortage: its row says so and no metric moves.
+    assert pool.jobs[-1]["state"] == "cancelled"
+    assert all(row["no_capacity"] == 0 for row in pool.metric_rows.values())
+
+
+def test_cancel_during_a_queued_dispatch_keeps_the_ambiguous_outcome(monkeypatch):
+    """A cancel after the request went out is not "never ran": history and metrics agree."""
+    pool = make_pool()
+    monkeypatch.setattr(llm_pool, "QUEUE_POLL_S", 0.01)
+    monkeypatch.setattr(llm_pool, "queue_wait", lambda config: 60)
+    pool.reserved.update("ab")
+
+    async def hang(*args, **kwargs):
+        """Never answer, so the dispatch is in flight when the caller cancels."""
+        await asyncio.sleep(60)
+
+    pool.hub.request_response.side_effect = hang
+
+    async def scenario():
+        """Free a worker, let the dispatch start, then cancel the caller."""
+        task = asyncio.create_task(pool.complete("tenant-a", JOB))
+        await asyncio.sleep(0.03)
+        pool.reserved.discard("b")
+        await asyncio.sleep(0.1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert pool.jobs[-1]["state"] == "failed" and pool.jobs[-1]["code"] == "dispatch_outcome_unknown"
+    assert [row["failed"] for row in pool.metric_rows.values()] == [1]
+
+
+def test_a_new_request_cannot_take_a_worker_an_older_waiter_could_use(monkeypatch):
+    """Waiters are served oldest first: a late arrival does not jump a freed worker."""
+    pool = make_pool()
+    monkeypatch.setattr(llm_pool, "QUEUE_POLL_S", 0.2)
+    waits = iter([60, 0.05])
+    monkeypatch.setattr(llm_pool, "queue_wait", lambda config: next(waits))
+    pool.hub.request_response.return_value = {"status": "SUCCESS", "text": "ok"}
+    pool.reserved.update("ab")
+
+    async def scenario():
+        """Queue an older job, free a worker between its polls, then submit a newer job."""
+        older = asyncio.create_task(pool.complete("tenant-a", JOB))
+        await asyncio.sleep(0.05)
+        pool.reserved.discard("b")
+        newer = await pool.complete("tenant-a", JOB)
+        assert pool.hub.request_response.call_count == 0  # the newer job did not take it
+        return newer, await older
+
+    newer, older = asyncio.run(scenario())
+    assert newer["code"] == "no_capacity" and older["status"] == "SUCCESS"
+    assert pool.hub.request_response.call_count == 1 and not pool.waiters
+
+
+def test_queued_row_is_finished_by_a_fallback_artifact_after_the_first_misses():
+    """The one queued row records the outcome whichever artifact finally dispatches."""
+    pool = make_pool()
+    calls = []
+
+    async def dispatch(tenant, prompt, model, *args):
+        """Miss on the first artifact, serve the second."""
+        calls.append(model)
+        return None if len(calls) == 1 else {"status": "SUCCESS", "text": "ok", "metrics": {}, "issues": []}
+
+    pool._dispatch = dispatch
+    row = {"kind": "inference", "state": "queued", "model": "first:m", "digest": "1" * 64, "tier": "local"}
+    artifacts = [("first:m", "1" * 64, (0, 0), ()), ("second:m", "2" * 64, (0, 0), ())]
+    result = asyncio.run(pool._try_artifacts("tenant-a", "x", artifacts, "text", quiet=True, queued_job=row))
+    assert result["status"] == "SUCCESS" and calls == ["first:m", "second:m"]
+    assert [(r["state"], r["model"]) for r in pool.jobs] == [("passed", "second:m")] and pool.jobs[0] is row
+
+
+def test_a_one_second_wait_still_polls_before_its_deadline(monkeypatch):
+    """With the default 2 s poll, a 1 s wait must still dispatch to a worker freed within it."""
+    pool = make_pool()
+    monkeypatch.setattr(llm_pool, "queue_wait", lambda config: 1)
+    pool.hub.request_response.return_value = {"status": "SUCCESS", "text": "ok"}
+    pool.reserved.update("ab")
+
+    async def scenario():
+        """Free a worker 0.1 s into the wait."""
+        task = asyncio.create_task(pool.complete("tenant-a", JOB))
+        await asyncio.sleep(0.1)
+        pool.reserved.discard("b")
+        return await task
+
+    assert asyncio.run(scenario())["status"] == "SUCCESS"
+
+
+def test_queue_never_dispatches_after_the_deadline(monkeypatch):
+    """A worker that frees up while the wait sleeps through its deadline is not used."""
+    pool = make_pool()
+    monkeypatch.setattr(llm_pool, "QUEUE_POLL_S", 0.1)
+    monkeypatch.setattr(llm_pool, "queue_wait", lambda config: 0.4)
+    pool.hub.request_response.return_value = {"status": "SUCCESS", "text": "ok"}
+    pool.reserved.update("ab")
+
+    async def scenario():
+        """Free a worker just before the deadline; the last poll then lands on it."""
+        task = asyncio.create_task(pool.complete("tenant-a", JOB))
+        await asyncio.sleep(0.36)
+        pool.reserved.discard("b")
+        return await task
+
+    result = asyncio.run(scenario())
+    assert result["code"] == "no_capacity"
+    pool.hub.request_response.assert_not_called()
+    assert [row["state"] for row in pool.jobs] == ["no_capacity"]
+
+
+def test_no_queueing_when_no_worker_holds_the_model(monkeypatch):
+    """A busy pool without the model, or no connected worker, fails at once."""
+    pool = make_pool()
+    monkeypatch.setattr(llm_pool, "queue_wait", lambda config: 60)
+    pool.reserved.update("ab")
+    other = {"model": "other:latest", "digest": "c" * 64, "prompt": "x"}
+    assert asyncio.run(pool.complete("tenant-a", other))["code"] == "no_capacity"
+    for key in "ab":
+        pool.hub.active_connections.pop(key)
+    assert asyncio.run(pool.complete("tenant-a", JOB))["code"] == "no_capacity"
+    assert pool.queued == 0
+
+
+def test_queue_is_capped_and_wait_setting_is_clamped(monkeypatch):
+    """The 65th waiter fails immediately; llm_queue_wait_s is clamped with a safe default."""
+    pool = make_pool()
+    pool.reserved.update("ab")
+    pool.queued = llm_pool.MAX_QUEUED
+    assert asyncio.run(pool.complete("tenant-a", JOB))["code"] == "no_capacity"
+    assert pool.jobs[-1]["state"] == "no_capacity"
+    for value, expected in ((None, 600), ("5", 600), (True, 600), (-5, 0), (99999, 3600), (30, 30)):
+        config = {} if value is None else {"llm_queue_wait_s": value}
+        assert llm_pool.queue_wait(config) == expected
+
+
+def test_queue_admission_is_rechecked_when_the_cap_fills_after_the_first_check(monkeypatch):
+    """complete()'s cap check can be stale after its dispatch awaited; _queue must not exceed 64."""
+    pool = make_pool()
+    pool.reserved.update("ab")
+    pool.queued = llm_pool.MAX_QUEUED
+    first = (JOB["model"], JOB["digest"], None, None)
+    result = asyncio.run(pool._queue("tenant-a", "x", [first], first, None, 60))
+    assert result is None and pool.queued == llm_pool.MAX_QUEUED
+    assert pool.jobs[-1]["state"] == "no_capacity" and not pool.active_jobs
+
+
+def test_ab_pr_summary_routes_to_default_model_with_no_operator_map():
+    """The pr_summary task the hub submits itself needs no llm_task_models entry."""
+    gemma = CANDIDATES["gemma4-12b"]
+    pool = make_pool()
+    report_all(pool, gemma["model"], gemma["digest"])
+    pool.hub.state.system_state["global_config"]["llm_ab_pr_repos"] = {
+        "owner/repo": {"tenant": "tenant-a", "certificate": "ab-client"}}
+    pool.hub.request_response.return_value = {"status": "SUCCESS", "text": "summary"}
+    result = asyncio.run(pool.ab_pr_summary(
+        {"repository": "owner/repo", "prompt": "diff"}, ("ab-client",)))
+    assert result["status"] == "SUCCESS" and result["model"] == gemma["model"]
+    assert pool.hub.request_response.call_args.args[0] in ("a", "b")
+
+
+def test_queue_wait_setting_validates_and_round_trips():
+    """llm_queue_wait_s saves only as an integer 0..3600 and is returned with its default."""
+    pool = make_pool()
+    state = pool.hub.state
+    state._mark_dirty = lambda: None
+    app = FastAPI()
+    llm.register(app, pool.hub, SimpleNamespace(
+        _session_user=lambda request: {"role": "admin"}, _is_admin=lambda session: True))
+    with TestClient(app) as client:
+        path = "/api/llm/admin/settings"
+        assert client.get(path).json()["llm_queue_wait_s"] == 600
+        for bad in (-1, 3601, "30", 1.5, True, None):
+            assert client.post(path, json={"llm_queue_wait_s": bad}).status_code == 400
+        assert client.post(path, json={"llm_queue_wait_s": 45}).status_code == 200
+        assert client.get(path).json()["llm_queue_wait_s"] == 45
+        assert client.post(path, json={"llm_queue_wait_s": 0}).status_code == 200
+        assert client.get(path).json()["llm_queue_wait_s"] == 0
+
+
+def test_queue_attributes_its_row_to_the_fallback_artifact_that_can_serve():
+    """Only the fallback's model is held by a busy worker, so the one row is its."""
+    pool = make_pool()
+    pool.hub.state.system_state["global_config"]["llm_task_models"] = {"summary": [
+        {"model": "preferred:latest", "digest": "b" * 64},
+        {"model": JOB["model"], "digest": DIGEST}]}
+    pool.hub.request_response.return_value = {"status": "SUCCESS", "text": "ok"}
+    pool.reserved.update("ab")
+    seen = []
+
+    async def scenario():
+        """Record the queued row, then free a worker."""
+        task = asyncio.create_task(pool.complete("tenant-a", {"prompt": "x", "task": "summary"}))
+        await asyncio.sleep(0.05)
+        seen.extend((j["state"], j["model"], j["digest"]) for j in pool.dashboard()["jobs"])
+        pool.reserved.discard("a")
+        return await task
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(llm_pool, "QUEUE_POLL_S", 0.01)
+        result = asyncio.run(scenario())
+    assert seen == [("queued", JOB["model"], DIGEST)]
+    assert result["model"] == JOB["model"]
+    assert [(row["state"], row["model"]) for row in pool.jobs] == [("passed", JOB["model"])]
+    assert all(row["no_capacity"] == 0 for row in pool.metric_rows.values())
+
+
+def test_queue_timeout_row_belongs_to_the_queue_capable_fallback(monkeypatch):
+    """An expired wait leaves one no_capacity row and metric, for the fallback artifact."""
+    pool = make_pool()
+    pool.hub.state.system_state["global_config"]["llm_task_models"] = {"summary": [
+        {"model": "preferred:latest", "digest": "b" * 64},
+        {"model": JOB["model"], "digest": DIGEST}]}
+    monkeypatch.setattr(llm_pool, "QUEUE_POLL_S", 0.01)
+    monkeypatch.setattr(llm_pool, "queue_wait", lambda config: 0.1)
+    pool.reserved.update("ab")
+    result = asyncio.run(pool.complete("tenant-a", {"prompt": "x", "task": "summary"}))
+    assert result["code"] == "no_capacity"
+    assert [(row["state"], row["model"], row["digest"]) for row in pool.jobs] == [
+        ("no_capacity", JOB["model"], DIGEST)]
+    assert [(key[0], row["no_capacity"]) for key, row in pool.metric_rows.items()] == [
+        (JOB["model"], 1)]
+
+
+def test_no_capable_worker_still_records_no_capacity_per_artifact(monkeypatch):
+    """With nothing to wait for, each artifact's miss is recorded as before."""
+    pool = make_pool()
+    pool.hub.state.system_state["global_config"]["llm_task_models"] = {"summary": [
+        {"model": "preferred:latest", "digest": "b" * 64},
+        {"model": "other:latest", "digest": "c" * 64}]}
+    monkeypatch.setattr(llm_pool, "queue_wait", lambda config: 60)
+    pool.reserved.update("ab")
+    result = asyncio.run(pool.complete("tenant-a", {"prompt": "x", "task": "summary"}))
+    assert result["code"] == "no_capacity"
+    assert [(row["state"], row["model"]) for row in pool.jobs] == [
+        ("no_capacity", "preferred:latest"), ("no_capacity", "other:latest")]

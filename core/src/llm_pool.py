@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from access import same_tenant, tenant_is_shared
 import instance_vault
 import llm_cloud
-from llm_candidates import CANDIDATES
+from llm_candidates import CANDIDATES, default_task_models
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +177,20 @@ QUALIFICATION_GUIDANCE = {
 
 
 MAX_METRIC_ROWS = 500
+# A job waits for a busy pool instead of failing: poll this often, hold at most
+# MAX_QUEUED waiters, and give up after llm_queue_wait_s (default and clamp below).
+QUEUE_POLL_S = 2
+MAX_QUEUED = 64
+QUEUE_WAIT_DEFAULT = 600
+QUEUE_WAIT_MAX = 3600
+
+
+def queue_wait(config):
+    """Return the operator's llm_queue_wait_s clamped to 0..3600; bad values use the default."""
+    value = config.get("llm_queue_wait_s", QUEUE_WAIT_DEFAULT)
+    if type(value) is not int:
+        return QUEUE_WAIT_DEFAULT
+    return max(0, min(QUEUE_WAIT_MAX, value))
 
 
 class LlmPool:
@@ -191,7 +205,9 @@ class LlmPool:
         self.cloud_busy = set()
         self.cloud_cooldown = {}
         self.reserved = set()
-        self.sequence = 0
+        self.waiters = []  # queued-job tickets, oldest first; fairness is enforced per worker claim
+        self.last_dispatch = {}
+        self.queued = 0
         self.jobs = deque(maxlen=200)
         # Per-model performance totals outlive the job rows, so clearing rows keeps them.
         self.metric_rows = {}
@@ -260,6 +276,13 @@ class LlmPool:
 
     def _finish(self, job):
         """Record a terminal job row and fold it into the per-model metrics."""
+        if job["state"] == "queued":
+            # A cancelled or expired wait never ran; history rows are always terminal.
+            job.update(state="no_capacity", code="no_capacity")
+        if job["state"] == "cancelled":
+            # The caller went away while queued; that is not a capacity shortage.
+            self.jobs.append(job)
+            return
         if job["state"] == "running":
             # An unexpected exception left it unresolved; history rows are always terminal.
             job.update(state="failed", code="dispatch_outcome_unknown")
@@ -814,14 +837,40 @@ class LlmPool:
         artifacts = self._job_models(data)
         if not artifacts:
             return {"status": "ERROR", "code": "invalid_request"}
-        for model, digest, minimums, sampling in artifacts:
+        # Decide before dispatching, without recording anything, which artifacts
+        # could be served by a connected worker that is merely busy. Only then is
+        # a miss worth waiting for; otherwise no_capacity is recorded as usual.
+        wait = queue_wait(self.hub.state.get_global_config())
+        capable = ([a for a in artifacts if self._could_serve_soon(tenant, [a])]
+                   if wait and self.queued < MAX_QUEUED else [])
+        result = await self._try_artifacts(
+            tenant, prompt, artifacts, output_format, quiet=bool(capable))
+        if result is not None:
+            return result
+        if capable:
+            result = await self._queue(tenant, prompt, artifacts, capable[0], output_format, wait)
+            if result is not None:
+                return result
+        return {"status": "ERROR", **diagnostic("no_capacity"), "retryable": True}
+
+    async def _try_artifacts(self, tenant, prompt, artifacts, output_format,
+                             quiet=False, queued_job=None, ticket=None):
+        """Try each artifact once in order; return the first result or None for no capacity.
+
+        quiet leaves a no-capacity miss unrecorded, because the caller will queue
+        the request and record one row for it later. queued_job is that row: it
+        becomes the first attempt's running row instead of a new one.
+        """
+        for index, (model, digest, minimums, sampling) in enumerate(artifacts):
             started = time.monotonic()
-            job = {"kind": "inference", "state": "running", "model": model,
-                   "digest": digest, "tier": "local"}
+            reused = queued_job is not None  # a missed attempt hands the row back, so any artifact may own it
+            job = queued_job if reused else {"kind": "inference", "tier": "local"}
+            queued_identity = (job.get("model"), job.get("digest"))
+            job.update(state="running", model=model, digest=digest)
             self.active_jobs[id(job)] = job
             try:
                 result = await self._dispatch(
-                    tenant, prompt, model, digest, output_format, job, minimums, sampling)
+                    tenant, prompt, model, digest, output_format, job, minimums, sampling, ticket)
                 if result is not None:
                     job.update(state="passed" if result["status"] == "SUCCESS" else "failed",
                                code=result.get("code"), metrics=result.get("metrics", {}),
@@ -832,9 +881,103 @@ class LlmPool:
                 self.active_jobs.pop(id(job), None)
                 if job["state"] == "running":
                     job.update(state="failed", code="dispatch_outcome_unknown")
+                if job["state"] == "no_capacity" and quiet:
+                    if reused:  # hand the waiting row back untouched
+                        job.update(state="queued", model=queued_identity[0], digest=queued_identity[1])
+                        job.pop("code", None)
+                else:
+                    job["elapsed_s"] = round(time.monotonic() - started, 3)
+                    self._finish(job)
+        return None
+
+    async def _queue(self, tenant, prompt, artifacts, first, output_format, wait):
+        """Hold one "queued" row for the first queue-capable artifact; None when the wait expires.
+
+        The row becomes "running" when a worker frees up and is finished once,
+        by the dispatch, with its real outcome; an expired wait is finished here once as
+        no_capacity, a cancelled one as cancelled (not counted as a capacity shortage).
+        """
+        job = {"kind": "inference", "state": "queued", "model": first[0],
+               "digest": first[1], "tier": "local"}
+        if self.queued >= MAX_QUEUED:
+            # Admission is re-checked here, with no await before the increment below,
+            # because complete()'s earlier check can be stale after its dispatch awaited.
+            job.update(state="no_capacity", code="no_capacity", elapsed_s=0)
+            self._finish(job)
+            return None
+        started = time.monotonic()
+        deadline = started + wait
+        self.active_jobs[id(job)] = job
+        self.queued += 1
+        ticket = {"tenant": tenant, "artifacts": artifacts, "deadline": deadline, "waiting": True}
+        self.waiters.append(ticket)
+        step = min(QUEUE_POLL_S, wait / 4)  # a short wait still gets several polls before its deadline
+        waiting = True  # False once a dispatch attempt owns the row's final record
+        try:
+            while time.monotonic() < deadline:
+                # asyncio.sleep keeps the event loop free; cancellation propagates.
+                await asyncio.sleep(max(0, min(step, deadline - time.monotonic())))
+                if time.monotonic() >= deadline:
+                    break  # the wait expired while sleeping; never dispatch after the deadline
+                if not self._could_serve_soon(tenant, artifacts):
+                    break  # the pool lost its last capable worker; waiting is pointless
+                idle = [a for a in artifacts if self._has_idle_worker(tenant, a)]
+                if not idle:
+                    continue
+                waiting = ticket["waiting"] = False
+                result = await self._try_artifacts(
+                    tenant, prompt, idle, output_format, quiet=True, queued_job=job, ticket=ticket)
+                if result is not None:
+                    return result  # never replay after a dispatched or ambiguous result
+                waiting = ticket["waiting"] = True
+                self.active_jobs[id(job)] = job  # lost a race; keep waiting
+            return None
+        except asyncio.CancelledError:
+            if waiting:  # once a dispatch owns the row, its outcome is ambiguous and recorded there
+                job.update(state="cancelled", code="cancelled")
+            raise
+        finally:
+            self.queued -= 1
+            self.waiters.remove(ticket)
+            self.active_jobs.pop(id(job), None)
+            if waiting:
                 job["elapsed_s"] = round(time.monotonic() - started, 3)
-                self._finish(job)
-        return {"status": "ERROR", **diagnostic("no_capacity"), "retryable": True}
+                self._finish(job)  # records an expired wait as no_capacity and a cancelled one as cancelled
+
+    def _older_waiter_wants(self, key, ticket):
+        """True when a queued job older than ``ticket`` (any, for a new request) could use worker ``key``.
+
+        Checked at each worker claim so waiters are served oldest first, while a
+        younger job may still use a worker no older waiter can use. A ticket whose
+        dispatch is in flight is not waiting and blocks nobody.
+        """
+        if not self.waiters:
+            return False
+        now = time.monotonic()
+        for other in self.waiters:
+            if other is ticket:
+                break
+            if (other["waiting"] and other["deadline"] > now
+                    and any(self._eligible(key, other["tenant"], model, digest, minimums, sampling)
+                            for model, digest, minimums, sampling in other["artifacts"])):
+                return True
+        return False
+
+    def _has_idle_worker(self, tenant, artifact):
+        """True when some tenant worker can take this artifact right now."""
+        model, digest, minimums, sampling = artifact
+        return any(self._eligible(key, tenant, model, digest, minimums, sampling)
+                   for key in self._tenant_workers(tenant))
+
+    def _could_serve_soon(self, tenant, artifacts):
+        """True when a connected approved worker holds an artifact but is busy or provisioning.
+
+        A role being unloaded closes its hub socket before it drains (agent_spoke._stop_role),
+        and eligibility requires the live socket, so a stopping worker never counts here.
+        """
+        return any(self._eligible(key, tenant, model, digest, minimums, sampling, busy_ok=True)
+                   for model, digest, minimums, sampling in artifacts
+                   for key in self._tenant_workers(tenant))
 
     def _job_models(self, data):
         """Resolve an exact request or the operator's ordered local task profile."""
@@ -845,7 +988,11 @@ class LlmPool:
         if not isinstance(task, str) or "model" in data or "digest" in data:
             return []
         profiles = self.hub.state.get_global_config().get("llm_task_models")
-        approved = profiles.get(task) if isinstance(profiles, dict) else None
+        # The operator's entry, when present, wins; otherwise use the built-in default map.
+        if isinstance(profiles, dict) and task in profiles:
+            approved = profiles[task]
+        else:
+            approved = default_task_models(task)
         if not isinstance(approved, list):
             return []
         return list(dict.fromkeys((row["model"], row["digest"], minimums, sampling)
@@ -855,21 +1002,23 @@ class LlmPool:
                                   and (minimums := model_minimums(row)) is not None
                                   and (sampling := model_sampling(row)) is not None))
 
-    async def _dispatch(self, tenant, prompt, model, digest, output_format, job, minimums, sampling=()):
+    async def _dispatch(self, tenant, prompt, model, digest, output_format, job, minimums,
+                        sampling=(), ticket=None):
         """Try one artifact across its eligible workers, or return no capacity."""
         request = {"prompt": prompt, "model": model, "digest": digest, "format": output_format}
         if sampling:
             request["options"] = dict(sampling)
-        # Rotate the starting point, but recheck all claims before each dispatch.
-        workers = self._tenant_workers(tenant)
-        offset = self.sequence % len(workers) if workers else 0
-        self.sequence += 1
-        for key in workers[offset:] + workers[:offset]:
-            if not self._eligible(key, tenant, model, digest, minimums, sampling):
-                continue
+        # Least-recently-dispatched first (never-used = 0), so idle workers win and
+        # load spreads; recheck all claims before each dispatch.
+        workers = sorted(self._tenant_workers(tenant),
+                         key=lambda key: (self.last_dispatch.get(key, 0), key))
+        for key in workers:
+            if (not self._eligible(key, tenant, model, digest, minimums, sampling)
+                    or self._older_waiter_wants(key, ticket)):
+                continue  # no await between this check and the reservation below
             job["version"] = self.runtime_versions.get(key)
             self.reserved.add(key)
-            started = time.monotonic()
+            started = self.last_dispatch[key] = time.monotonic()
             try:
                 # A lost response is ambiguous. Do not replay on another worker.
                 reply = await asyncio.wait_for(self.hub.request_response(
@@ -906,10 +1055,14 @@ class LlmPool:
             return {"status": "ERROR", **diagnostic(code)}
         return None
 
-    def _eligible(self, key, tenant, model, digest, minimums=(0, 0), sampling=()):
-        """Use fresh live status only; a stale snapshot cannot authorize routing."""
+    def _eligible(self, key, tenant, model, digest, minimums=(0, 0), sampling=(), busy_ok=False):
+        """Use fresh live status only; a stale snapshot cannot authorize routing.
+
+        busy_ok ignores only the busy/reserved/provisioning state, to ask whether
+        the worker could serve the job once it frees up.
+        """
         status = self.inventory.get(key)
-        if not status or key in self.reserved or key not in self._tenant_workers(tenant):
+        if not status or (key in self.reserved and not busy_ok) or key not in self._tenant_workers(tenant):
             return False
         # Older workers may ignore options; never silently lose context or sampling.
         required = {name for name, _ in sampling}
@@ -922,7 +1075,7 @@ class LlmPool:
                     or any(hardware[2].get(field, 0) < minimum
                            for field, minimum in zip(HARDWARE_LIMITS, minimums))):
                 return False
-        return (available and time.monotonic() - seen < 75
+        return ((available or busy_ok) and time.monotonic() - seen < 75
                 and self.hub.active_connections.get(key) is websocket
                 and self.hub.spoke_module_types.get(key) == "llm"
                 and not self.hub.is_draining(key)
