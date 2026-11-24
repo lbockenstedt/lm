@@ -1,6 +1,6 @@
 // LLM → Dashboard: global-admin view of workers, jobs, and metrics.
 // An ES module: the main nav opens it through lmViews.llm(container).
-// Fetches GET /api/llm/admin/dashboard and POST /api/llm/admin/qualify.
+// Fetches GET /api/llm/admin/dashboard and POST /api/llm/admin/qualify and /api/llm/admin/jobs/clear.
 import { safeHtml } from '../core/safe-html.js';
 import { createView, delegate } from '../core/view.js';
 
@@ -387,9 +387,12 @@ function renderWorkersSection(workers) {
 
 // Keep active jobs visible alongside recent terminal outcomes.
 function renderJobsSection(jobs) {
+    // Offer the clear control only when a row is terminal; running rows are never cleared.
+    const finished = jobs.some(job => job.state !== 'running');
+    const clear = safeHtml`<button data-action="clearJobs" type="button" class="hpe-btn hpe-btn-secondary"${finished ? '' : safeHtml` disabled`}>Clear finished jobs</button>`;
     if (!jobs.length) {
         return safeHtml`<div class="mb-4">
-            <h3 class="text-sm font-bold text-slate-600 mb-2">Jobs</h3>
+            <div class="flex items-center justify-between mb-2"><h3 class="text-sm font-bold text-slate-600">Jobs</h3>${clear}</div>
             <div class="border border-slate-200 rounded-md overflow-x-auto">
                 <table class="w-full text-left">
                     <thead><tr class="border-b border-slate-200">
@@ -400,7 +403,7 @@ function renderJobsSection(jobs) {
         </div>`;
     }
     return safeHtml`<div class="mb-4">
-        <h3 class="text-sm font-bold text-slate-600 mb-2">Jobs</h3>
+        <div class="flex items-center justify-between mb-2"><h3 class="text-sm font-bold text-slate-600">Jobs</h3>${clear}</div>
         <div class="border border-slate-200 rounded-md overflow-x-auto">
             <table class="w-full text-left">
                 <thead><tr class="border-b border-slate-200">
@@ -505,6 +508,24 @@ async function renderLlmDashboard(container) {
                         body: JSON.stringify({ candidate: key }),
                     });
                     status = { type: 'success', message: 'Qualification scheduled. Refresh to check progress.' };
+                } catch (e) {
+                    status = { type: 'error', message: e.message || String(e) };
+                } finally {
+                    loading = false;
+                }
+                if (!isCurrent()) return;
+                el.disabled = false;
+                showToast(status.message, status.type);
+                await load();
+            },
+            // Clear finished history on the hub, then show a toast and reload the snapshot.
+            clearJobs: async (el) => {
+                if (loading) return;
+                el.disabled = true;
+                loading = true;
+                try {
+                    const data = await apiJson('/api/llm/admin/jobs/clear', { method: 'POST' });
+                    status = { type: 'success', message: `Cleared ${data.removed} finished job${data.removed === 1 ? '' : 's'}.` };
                 } catch (e) {
                     status = { type: 'error', message: e.message || String(e) };
                 } finally {

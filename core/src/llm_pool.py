@@ -176,6 +176,9 @@ QUALIFICATION_GUIDANCE = {
 }
 
 
+MAX_METRIC_ROWS = 500
+
+
 class LlmPool:
     """Keep only volatile worker metadata and in-flight reservations."""
 
@@ -190,6 +193,8 @@ class LlmPool:
         self.reserved = set()
         self.sequence = 0
         self.jobs = deque(maxlen=200)
+        # Per-model performance totals outlive the job rows, so clearing rows keeps them.
+        self.metric_rows = {}
         self.qualification_jobs = {}
         self.active_jobs = {}
         self.runtime_versions = {}
@@ -248,25 +253,43 @@ class LlmPool:
                                        for name, digest in (report[2].items() if fresh else ())]})
         jobs = (list(self.qualification_jobs.values()) + list(self.active_jobs.values())
                 + list(reversed(self.jobs)))
-        metrics = {}
-        for job in self.jobs:
-            if job.get("model") is None:
-                continue
-            key = (job["model"], job["tier"], job.get("digest"), job.get("version"), job["kind"])
-            row = metrics.setdefault(key, {"model": key[0], "tier": key[1], "completed": 0,
-                                           "digest": key[2], "version": key[3], "kind": key[4],
-                                           "failed": 0, "no_capacity": 0, "mean_elapsed_s": 0.0})
-            if job["state"] == "no_capacity":
-                row["no_capacity"] += 1
-                continue
-            count = row["completed"] + row["failed"]
-            counter = "completed" if job["state"] == "passed" else "failed"
-            row[counter] += 1
-            row["mean_elapsed_s"] += (job["elapsed_s"] - row["mean_elapsed_s"]) / (count + 1)
-        return {"workers": workers, "jobs": jobs, "metrics": list(metrics.values()),
+        return {"workers": workers, "jobs": jobs, "metrics": [dict(row) for row in self.metric_rows.values()],
                 "candidates": [{"key": key, "label": label,
                                 "worker": self.hub.state.get_module_name(pk)}
                                for key, (pk, label) in candidates.items()]}
+
+    def _finish(self, job):
+        """Record a terminal job row and fold it into the per-model metrics."""
+        if job["state"] == "running":
+            # An unexpected exception left it unresolved; history rows are always terminal.
+            job.update(state="failed", code="dispatch_outcome_unknown")
+        self.jobs.append(job)
+        if job.get("model") is None:
+            return
+        key = (job["model"], job["tier"], job.get("digest"), job.get("version"), job["kind"])
+        if key not in self.metric_rows and len(self.metric_rows) >= MAX_METRIC_ROWS:
+            return  # caller-chosen model/digest values must not grow memory without bound
+        row = self.metric_rows.setdefault(key, {
+            "model": key[0], "tier": key[1], "completed": 0, "digest": key[2],
+            "version": key[3], "kind": key[4], "failed": 0, "no_capacity": 0,
+            "mean_elapsed_s": 0.0})
+        if job["state"] == "no_capacity":
+            row["no_capacity"] += 1
+            return
+        count = row["completed"] + row["failed"]
+        row["completed" if job["state"] == "passed" else "failed"] += 1
+        row["mean_elapsed_s"] += (job["elapsed_s"] - row["mean_elapsed_s"]) / (count + 1)
+
+    def clear_finished_jobs(self):
+        """Empty the finished-job history and return how many rows were removed.
+
+        Only `self.jobs` (terminal attempts) is cleared. Running qualification and
+        active jobs live in their own dicts, so they are never touched, and the
+        per-model metrics are kept in `metric_rows`, so they survive the clear.
+        """
+        removed = len(self.jobs)
+        self.jobs.clear()
+        return removed
 
     def start_qualification(self, key):
         """Schedule a synthetic job only on its configured Shared worker."""
@@ -431,7 +454,7 @@ class LlmPool:
             self.reserved.discard(worker)
             self.qualification_jobs.pop(worker, None)
             job["elapsed_s"] = round(time.monotonic() - started, 3)
-            self.jobs.append(job)
+            self._finish(job)
 
     async def _qualify(self, worker, socket, key, job, bootstrap=False, request_id=None, revision=None):
         """Store only validated qualification results from the reserved socket."""
@@ -516,7 +539,7 @@ class LlmPool:
             self.reserved.discard(worker)
             self.qualification_jobs.pop(worker, None)
             job["elapsed_s"] = round(time.monotonic() - start, 3)
-            self.jobs.append(job)
+            self._finish(job)
 
 
     def report(self, key, websocket, data):
@@ -756,7 +779,7 @@ class LlmPool:
             if job["state"] == "running":
                 job.update(state="failed", code="dispatch_outcome_unknown")
             job["elapsed_s"] = round(time.monotonic() - started, 3)
-            self.jobs.append(job)
+            self._finish(job)
 
     def _tenant_workers(self, tenant):
         """Select the tenant's own pool even if it is entirely disconnected."""
@@ -810,7 +833,7 @@ class LlmPool:
                 if job["state"] == "running":
                     job.update(state="failed", code="dispatch_outcome_unknown")
                 job["elapsed_s"] = round(time.monotonic() - started, 3)
-                self.jobs.append(job)
+                self._finish(job)
         return {"status": "ERROR", **diagnostic("no_capacity"), "retryable": True}
 
     def _job_models(self, data):
