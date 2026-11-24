@@ -353,6 +353,12 @@ def test_manifest_rewritten_by_the_client_is_bound_to_the_pinned_registry_manife
     path.write_bytes(json.dumps(tampered).encode())
     with pytest.raises(ValueError, match="digest mismatch"):
         llm_activation._manifest(candidate)
+    # A repeated layer is rejected too, not collapsed into the original.
+    duplicated = json.loads(stored)
+    duplicated["layers"].append(original["layers"][0])
+    path.write_bytes(json.dumps(duplicated).encode())
+    with pytest.raises(ValueError, match="digest mismatch"):
+        llm_activation._manifest(candidate)
     # A changed registry blob no longer hashes to the pin.
     path.write_bytes(stored)
     (tmp_path / "models/blobs" / f"sha256-{candidate['digest']}").write_bytes(b"{}")

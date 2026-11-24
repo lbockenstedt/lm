@@ -8,6 +8,7 @@ import shutil
 import stat
 import tempfile
 import uuid
+from collections import Counter
 from pathlib import Path
 
 CANDIDATE_RUNTIME = Path("/opt/lm-llm-candidate")
@@ -61,12 +62,12 @@ def _mkdirs(root, parts):
 
 
 def _pairs(manifest):
-    """Return the (digest, size) pairs of a manifest's config and layers."""
-    pairs = set()
+    """Count the (digest, size) pairs of a manifest's config and layers, duplicates included."""
+    pairs = Counter()
     for record in [manifest.get("config"), *manifest.get("layers", [])]:
         if not isinstance(record, dict):
             raise ValueError("Invalid candidate manifest")
-        pairs.add((record.get("digest"), record.get("size")))
+        pairs[(record.get("digest"), record.get("size"))] += 1
     return pairs
 
 
@@ -78,8 +79,8 @@ def _check_rewritten(manifest, pinned):
     bytes no longer hash to the pinned registry digest. Such a manifest is
     accepted only when it references the pinned registry manifest, that blob in
     the store hashes to the pin, and every config and layer of the registry
-    manifest appears in it with the same digest and size, with nothing added
-    beyond the two manifest references.
+    manifest appears in it with the same digest and size, with nothing added or
+    repeated beyond the registry manifest reference and an optional manifest list.
     """
     entries = [row for row in manifest["layers"] if isinstance(row, dict)
                and row.get("mediaType") in REFERENCE_TYPES]
@@ -93,7 +94,7 @@ def _check_rewritten(manifest, pinned):
     original = json.loads(registry)
     if not isinstance(original, dict) or not isinstance(original.get("layers"), list):
         raise ValueError("Invalid candidate manifest")
-    references = {(row.get("digest"), row.get("size")) for row in entries}
+    references = Counter((row.get("digest"), row.get("size")) for row in entries)
     if _pairs(manifest) - references != _pairs(original):
         raise ValueError("Candidate manifest digest mismatch")
 
