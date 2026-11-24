@@ -15,7 +15,7 @@ from llm_pool import HARDWARE_LIMITS, QUEUE_WAIT_MAX, queue_wait, SAMPLING_LIMIT
 
 
 POOL_SETTINGS = ("llm_task_models", "llm_ab_pr_repos", "llm_qualification_candidates",
-                 "llm_queue_wait_s", "llm_cloud_profiles")
+                 "llm_queue_wait_s", "llm_auto_provision", "llm_cloud_profiles")
 TASK_KEY = r"[A-Za-z0-9_\-]{1,64}"
 REPO_KEY = r"[A-Za-z0-9_.\-]{1,100}/[A-Za-z0-9_.\-]{1,100}"
 SAN_LIMIT = 255
@@ -83,6 +83,8 @@ def validate_pool_config(hub, config):
         # Reject rather than clamp on save; queue_wait still clamps stored values at use.
         if type(wait) is not int or not 0 <= wait <= QUEUE_WAIT_MAX:
             raise HTTPException(400, f"Queue wait must be a whole number of seconds, 0 to {QUEUE_WAIT_MAX}")
+    if "llm_auto_provision" in config and type(config["llm_auto_provision"]) is not bool:
+        raise HTTPException(400, "Auto-provision must be true or false")
     if "llm_ab_pr_repos" in config:
         repos = config["llm_ab_pr_repos"]
         if not isinstance(repos, dict) or len(repos) > 256 or any(
@@ -156,8 +158,9 @@ def register(app, hub, ctx):
         workers = hub.state.system_state.get("module_metadata", {})
         # The queue wait is a scalar: report the effective value, defaults included.
         return {**{key: config.get(key, {}) for key in POOL_SETTINGS[:-1]
-                   if key != "llm_queue_wait_s"},
+                   if key not in ("llm_queue_wait_s", "llm_auto_provision")},
                 "llm_queue_wait_s": queue_wait(config),
+                "llm_auto_provision": config.get("llm_auto_provision", True) is not False,
                 "routing_form_schema": ROUTING_FORM_SCHEMA,
                 "public_candidates": [{"key": key, "label": row["label"], "model": row["model"],
                                        "digest": row["digest"], "options": row["options"]}
@@ -208,20 +211,20 @@ def register(app, hub, ctx):
 
     @app.post("/api/llm/admin/prepare", status_code=202)
     async def prepare(request: Request, data: dict):
-        """Stage a public CPU candidate only on an approved Shared test worker."""
+        """Stage a public CPU candidate only on an approved, idle Shared-tenant LLM worker."""
         require_admin(request)
         if data.keys() != {"worker", "candidate"} or not await hub.llm_pool.start_bootstrap(
                 data.get("worker"), data.get("candidate")):
-            raise HTTPException(409, "Candidate or Shared test worker is unavailable")
+            raise HTTPException(409, "Candidate or LLM worker is unavailable")
         return {"status": "accepted"}
 
     @app.post("/api/llm/admin/activate", status_code=202)
     async def activate(request: Request, data: dict):
-        """Explicitly activate a previously prepared candidate on a Shared worker."""
+        """Explicitly activate a previously prepared candidate on a Shared-tenant LLM worker."""
         require_admin(request)
         if data.keys() != {"worker", "candidate"} or not hub.llm_pool.start_activation(
                 data.get("worker"), data.get("candidate")):
-            raise HTTPException(409, "Candidate or Shared test worker is unavailable")
+            raise HTTPException(409, "Candidate or LLM worker is unavailable")
         return {"status": "accepted"}
 
     def scoped_tenant(request, tenant, run=False):
