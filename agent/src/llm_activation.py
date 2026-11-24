@@ -15,6 +15,8 @@ CANDIDATE_STORE = Path("/var/lib/lm-llm-candidate/models")
 SERVING_RUNTIME = Path("/opt/lm-llm")
 EXTERNAL_CATALOG = Path("/etc/lm/llm-models.json")
 MAX_MANIFEST = 4 * 1024 * 1024
+REFERENCE_TYPES = ("application/vnd.docker.distribution.manifest.v2+json",
+                   "application/vnd.ollama.manifest.list.v2+json")
 
 
 def _read_regular(path, maximum=None):
@@ -58,17 +60,55 @@ def _mkdirs(root, parts):
             current.chmod(0o755)
 
 
+def _pairs(manifest):
+    """Return the (digest, size) pairs of a manifest's config and layers."""
+    pairs = set()
+    for record in [manifest.get("config"), *manifest.get("layers", [])]:
+        if not isinstance(record, dict):
+            raise ValueError("Invalid candidate manifest")
+        pairs.add((record.get("digest"), record.get("size")))
+    return pairs
+
+
+def _check_rewritten(manifest, pinned):
+    """Accept a manifest the Ollama client rewrote on pull, bound to the pinned one.
+
+    Newer Ollama clients store a manifest of their own (extra fields plus
+    entries that reference the registry manifest and its manifest list), so its
+    bytes no longer hash to the pinned registry digest. Such a manifest is
+    accepted only when it references the pinned registry manifest, that blob in
+    the store hashes to the pin, and every config and layer of the registry
+    manifest appears in it with the same digest and size, with nothing added
+    beyond the two manifest references.
+    """
+    entries = [row for row in manifest["layers"] if isinstance(row, dict)
+               and row.get("mediaType") in REFERENCE_TYPES]
+    registry_rows = [row for row in entries if row["mediaType"] == REFERENCE_TYPES[0]]
+    list_rows = [row for row in entries if row["mediaType"] == REFERENCE_TYPES[1]]
+    if [row.get("digest") for row in registry_rows] != [f"sha256:{pinned}"] or len(list_rows) > 1:
+        raise ValueError("Candidate manifest digest mismatch")
+    registry = _read_regular(_store_path(CANDIDATE_STORE, "blobs", f"sha256-{pinned}"), MAX_MANIFEST)
+    if hashlib.sha256(registry).hexdigest() != pinned:
+        raise ValueError("Candidate manifest digest mismatch")
+    original = json.loads(registry)
+    if not isinstance(original, dict) or not isinstance(original.get("layers"), list):
+        raise ValueError("Invalid candidate manifest")
+    references = {(row.get("digest"), row.get("size")) for row in entries}
+    if _pairs(manifest) - references != _pairs(original):
+        raise ValueError("Candidate manifest digest mismatch")
+
+
 def _manifest(candidate):
     """Verify the exact public manifest and enumerate only its pinned blobs."""
     model, tag = candidate["model"].split(":", 1)
     namespace, name = model.split("/", 1) if "/" in model else ("library", model)
     parts = ("manifests", "registry.ollama.ai", namespace, name, tag)
     raw = _read_regular(_store_path(CANDIDATE_STORE, *parts), MAX_MANIFEST)
-    if hashlib.sha256(raw).hexdigest() != candidate["digest"]:
-        raise ValueError("Candidate manifest digest mismatch")
     manifest = json.loads(raw)
     if not isinstance(manifest, dict) or not isinstance(manifest.get("layers"), list):
         raise ValueError("Invalid candidate manifest")
+    if hashlib.sha256(raw).hexdigest() != candidate["digest"]:
+        _check_rewritten(manifest, candidate["digest"])
     records = [manifest.get("config"), *manifest["layers"]]
     digests = []
     for record in records:

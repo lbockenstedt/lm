@@ -312,3 +312,57 @@ def test_additive_activation_cleans_blobs_when_publication_fails(tmp_path, monke
     blobs = llm_activation.SERVING_RUNTIME / "models" / "blobs"
     assert not (blobs / f"sha256-{digest}").exists()
     assert len(list(blobs.iterdir())) == 1
+
+
+def _store(tmp_path, monkeypatch, rewrite):
+    """Build a candidate store holding a registry manifest, optionally as the client rewrote it."""
+    store = tmp_path / "models"
+    (store / "blobs").mkdir(parents=True)
+    layer = hashlib.sha256(b"weights").hexdigest()
+    original = {"schemaVersion": 2, "config": {"digest": "sha256:" + "1" * 64, "size": 2},
+                "layers": [{"mediaType": "model", "digest": f"sha256:{layer}", "size": 7}]}
+    registry = json.dumps(original, separators=(",", ":")).encode()
+    pinned = hashlib.sha256(registry).hexdigest()
+    stored = registry
+    if rewrite:
+        rewritten = json.loads(registry)
+        rewritten["layers"] += [
+            {"mediaType": llm_activation.REFERENCE_TYPES[1], "digest": "sha256:" + "2" * 64, "size": 9},
+            {"mediaType": llm_activation.REFERENCE_TYPES[0], "digest": f"sha256:{pinned}",
+             "size": len(registry)}]
+        rewritten["runner"] = "llamacpp"
+        stored = json.dumps(rewritten, indent=2).encode()
+        (store / "blobs" / f"sha256-{pinned}").write_bytes(registry)
+    path = store / "manifests/registry.ollama.ai/library/demo/tag"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(stored)
+    monkeypatch.setattr(llm_activation, "CANDIDATE_STORE", store)
+    return {"model": "demo:tag", "digest": pinned}, stored, original
+
+
+def test_manifest_rewritten_by_the_client_is_bound_to_the_pinned_registry_manifest(tmp_path, monkeypatch):
+    """An Ollama-rewritten manifest passes only while it still carries the pinned manifest's contents."""
+    candidate, stored, original = _store(tmp_path, monkeypatch, rewrite=True)
+    _, raw, digests = llm_activation._manifest(candidate)
+    assert raw == stored
+    assert original["layers"][0]["digest"][7:] in digests
+    # A layer outside the pinned manifest is rejected.
+    path = tmp_path / "models/manifests/registry.ollama.ai/library/demo/tag"
+    tampered = json.loads(stored)
+    tampered["layers"].append({"mediaType": "model", "digest": "sha256:" + "3" * 64, "size": 1})
+    path.write_bytes(json.dumps(tampered).encode())
+    with pytest.raises(ValueError, match="digest mismatch"):
+        llm_activation._manifest(candidate)
+    # A changed registry blob no longer hashes to the pin.
+    path.write_bytes(stored)
+    (tmp_path / "models/blobs" / f"sha256-{candidate['digest']}").write_bytes(b"{}")
+    with pytest.raises(ValueError, match="digest mismatch"):
+        llm_activation._manifest(candidate)
+
+
+def test_unmodified_manifest_still_matches_by_its_own_digest(tmp_path, monkeypatch):
+    """A manifest stored byte-for-byte keeps the original exact-digest check."""
+    candidate, _, _ = _store(tmp_path, monkeypatch, rewrite=False)
+    assert llm_activation._manifest(candidate)[0][-1] == "tag"
+    with pytest.raises(ValueError, match="digest mismatch"):
+        llm_activation._manifest({**candidate, "digest": "0" * 64})
