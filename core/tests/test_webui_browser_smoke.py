@@ -111,17 +111,18 @@ def test_uuid_check_sees_visible_text_only():
             browser.close()
 
 
-def test_llm_dashboard_uses_reported_model_and_launches_qualification(hub_url_and_session):
-    """Exercise the actual LLM page and its delegated settings/qualification actions."""
-    from routes.llm import ROUTING_FORM_SCHEMA
-
+def test_llm_dashboard_shows_worker_status_badges_and_tooltips(hub_url_and_session):
+    """Exercise the actual LLM page: worker status mapping, tooltips, and no Settings/Qualify controls."""
     base, token = hub_url_and_session
     digest = "a" * 64
-    config = {"llm_task_models": {}, "llm_ab_pr_repos": {}, "routing_form_schema": ROUTING_FORM_SCHEMA,
-              "llm_qualification_candidates": {}, "llm_cloud_profiles": [], "test_workers": [],
-              "public_candidates": [{"key": "trial", "label": "Trial", "model": "trial:cpu",
-                                     "digest": digest, "options": {"num_ctx": 65536, "temperature": 0.6,
-                                                                   "top_p": 0.95, "top_k": 20}}]}
+    workers = [
+        {"name": "W Ready", "state": "ready", "capabilities": {"vcpus": 16}, "models": [{"name": "trial:cpu", "digest": digest}]},
+        {"name": "W Busy", "state": "busy"},
+        {"name": "W Prov", "state": "provisioning", "detail": "gemma"},
+        {"name": "W Off", "state": "no_fresh_report"},
+        {"name": "W Attn", "state": "unavailable", "issues": [{"code": "runtime_unit_missing"}]},
+        {"name": "W Odd", "state": "weird"},
+    ]
     with sync_api.sync_playwright() as p:
         browser = p.chromium.launch()
         try:
@@ -129,18 +130,9 @@ def test_llm_dashboard_uses_reported_model_and_launches_qualification(hub_url_an
             context.add_cookies([{"name": "lm_session", "value": token, "url": base}])
             page = context.new_page()
             page.route("**/api/llm/admin/dashboard", lambda route: route.fulfill(json={
-                "workers": [{"name": "CPU Worker", "state": "ready", "capabilities": {"vcpus": 16},
-                             "models": [{"name": "trial:cpu", "digest": digest}]}],
-                "candidates": [{"key": "trial", "label": "Candidate", "worker": "Test VM"}],
+                "workers": workers,
+                "jobs": [{"kind": "inference", "state": "queued", "model": "trial:cpu", "tier": "shared"}],
             }))
-            page.route("**/api/llm/admin/settings", lambda route: route.fulfill(
-                json=config if route.request.method == "GET" else {"status": "ok"}))
-            page.route("**/api/llm/admin/qualify",
-                       lambda route: route.fulfill(status=202, json={"status": "accepted"}))
-            page.route("**/setup/tenants", lambda route: route.fulfill(json={"tenants": [
-                {"id": "test-tenant", "name": "Test Tenant"},
-                {"id": "shared", "name": "Shared", "shared": True},
-            ]}))
             page.goto(base + "/")
             page.wait_for_function("window.lmCoreLoaded && typeof currentUser !== 'undefined' && !!currentUser")
             # The nav entry is a button: it must carry its icon and span the nav like its div siblings.
@@ -151,40 +143,23 @@ def test_llm_dashboard_uses_reported_model_and_launches_qualification(hub_url_an
             assert nav.locator("svg").count() == 1
             assert nav.bounding_box()["width"] == page.locator("#nav-security").bounding_box()["width"]
             nav.click()
-            page.get_by_text("CPU Worker", exact=True).wait_for()
-            with page.expect_request(lambda req: req.url.endswith("/admin/qualify")) as qualification:
-                page.get_by_role("button", name="Qualify", exact=True).click()
-            assert qualification.value.post_data_json == {"candidate": "trial"}
-            page.get_by_role("button", name="Settings", exact=True).click()
-            page.get_by_label("Task", exact=True).fill("pr_summary")
-            page.get_by_label("Approved model").select_option("0")
-            assert page.get_by_label("Context tokens", exact=False).input_value() == "65536"
-            assert page.get_by_label("Temperature", exact=False).input_value() == "0.6"
-            page.get_by_label("Minimum vCPUs").fill("16")
-            page.get_by_label("Temperature", exact=False).fill("0.7")
-            with page.expect_request(lambda req: req.url.endswith("/admin/settings")
-                                     and req.method == "POST") as save:
-                page.get_by_role("button", name="Add model", exact=True).click()
-            assert save.value.post_data_json == {"llm_task_models": {"pr_summary": [
-                {"model": "trial:cpu", "digest": digest, "min_vcpus": 16, "min_ram_bytes": 0,
-                 "temperature": 0.7, "top_p": 0.95, "top_k": 20, "num_ctx": 65536},
-            ]}}
-            page.get_by_text("16 vCPUs, 0 RAM bytes minimum", exact=False).wait_for()
-            page.get_by_text("temperature 0.7, top-p 0.95", exact=False).wait_for()
-            page.get_by_label("Repository", exact=True).fill("not-a-repository")
-            repository = page.get_by_label("Repository", exact=True)
-            assert repository.evaluate("(input) => input.validity.patternMismatch")
-            repository.fill("test-org/test-repo")
-            tenant = page.get_by_label("Tenant", exact=True)
-            assert tenant.get_by_role("option", name="Shared").count() == 0
-            tenant.select_option(label="Test Tenant")
-            page.get_by_label("AppBuilder certificate SAN").fill("ab.test")
-            with page.expect_request(lambda req: req.url.endswith("/admin/settings")
-                                     and req.method == "POST") as binding:
-                page.get_by_role("button", name="Save repository", exact=True).click()
-            assert binding.value.post_data_json == {"llm_ab_pr_repos": {
-                "test-org/test-repo": {"tenant": "test-tenant", "certificate": "ab.test",
-                                       "allow_public_cloud": False},
-            }}
+            page.get_by_text("W Ready", exact=True).wait_for()
+            # Each raw API state maps to its badge label; unknown states show their raw text.
+            badges = {name: page.locator(f"tr:has-text('{name}') td:nth-child(2)") for name in
+                      ("W Ready", "W Busy", "W Prov", "W Off", "W Attn", "W Odd")}
+            assert badges["W Ready"].inner_text() == "Ready"
+            assert badges["W Busy"].inner_text() == "Busy"
+            assert badges["W Prov"].inner_text() == "Provisioning: gemma"
+            assert badges["W Off"].inner_text() == "Offline"
+            assert badges["W Attn"].inner_text() == "Needs attention"
+            assert badges["W Odd"].inner_text() == "weird"
+            # Details live in the tooltip, not in extra columns.
+            ready_tip = badges["W Ready"].get_attribute("title")
+            assert "16 vCPUs" in ready_tip and "trial:cpu" in ready_tip
+            assert "runtime_unit_missing" in badges["W Attn"].get_attribute("title")
+            page.get_by_text("Queued", exact=True).wait_for()
+            # The Settings panel and Qualify controls are gone.
+            assert page.get_by_role("button", name="Settings", exact=True).count() == 0
+            assert page.get_by_role("button", name="Qualify", exact=True).count() == 0
         finally:
             browser.close()
