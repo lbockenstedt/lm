@@ -182,6 +182,12 @@ def register(app, hub, ctx):
         response.headers["Cache-Control"] = "no-store"
         return hub.llm_pool.dashboard()
 
+    @app.post("/api/llm/admin/jobs/clear")
+    async def clear_jobs(request: Request):
+        """Remove finished job rows; running jobs and the per-model metrics are kept."""
+        require_admin(request)
+        return {"status": "cleared", "removed": hub.llm_pool.clear_finished_jobs()}
+
     @app.post("/api/llm/admin/qualify", status_code=202)
     async def start_qualification(request: Request, data: dict):
         """Start qualification only on its configured Shared worker."""
