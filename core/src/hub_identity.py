@@ -114,8 +114,9 @@ def _hub_derived_name(meta: dict, candidates: set) -> bool:
 def _previous_auto_names(old_host: str, hostname: str, role: str) -> set:
     """Return old names that may have been derived by the hub.
 
-    The caller must also check the persisted auto-name marker; these values
-    alone cannot distinguish an operator name that happens to match a host.
+    The caller must also check the persisted name marker (see
+    ``_hub_derived_name``); these values alone cannot distinguish an operator
+    name that happens to match a host.
     The set holds:
       * the last recorded hostname, bare or ``{old}-{role}``;
       * for a role sub-spoke, the bare current hostname (the legacy seed
