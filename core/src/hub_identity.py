@@ -95,6 +95,22 @@ def _auto_display_name(hostname: str, role: str) -> str:
     return f"{hostname}-{role}" if role else hostname
 
 
+def _hub_derived_name(meta: dict, candidates: set) -> bool:
+    """True when a stored display name is one the hub derived from a hostname.
+
+    Rows marked ``auto`` match exactly. Rows from before provenance was
+    recorded (no marker) match ignoring case: the owner confirmed those names
+    were seeded from the install-time hostname and must follow a host rename.
+    A name marked ``operator`` (or any other source) never matches.
+    """
+    name = meta.get("display_name") or ""
+    if meta.get("display_name_source") == "auto":
+        return name in candidates
+    if meta.get("display_name_source") is None:
+        return name.lower() in {c.lower() for c in candidates}
+    return False
+
+
 def _previous_auto_names(old_host: str, hostname: str, role: str) -> set:
     """Return old names that may have been derived by the hub.
 
@@ -713,15 +729,14 @@ class HubIdentityMixin:
             # the hub derived from an older hostname (or the legacy bare-hostname
             # sub-spoke seed). Without (2) a renamed host raised hostname_changed
             # but kept its old name everywhere in the UI. An unmarked legacy
-            # name is ambiguous: an operator may have chosen the hostname
-            # itself, so only explicit auto provenance can move it.
+            # name that matches the old hostname (ignoring case) moves too, as
+            # the owner directed; an operator-marked name never does.
             if _cur is None:
                 _persist["display_name"] = _auto
                 _persist["display_name_source"] = "auto"
-            elif (_cur.get("display_name_source") == "auto"
+            elif (_cur.get("display_name_source") in ("auto", None)
                   and _cur.get("display_name") != _auto
-                  and _cur.get("display_name") in
-                  _previous_auto_names(_old_host, hostname, _role)):
+                  and _hub_derived_name(_cur, _previous_auto_names(_old_host, hostname, _role))):
                 _persist["display_name"] = _auto
                 _persist["display_name_source"] = "auto"
         # Save the metadata (update_module_metadata also syncs module_names).
