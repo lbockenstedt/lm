@@ -23,4 +23,10 @@ CANDIDATES = {
         "options": {"num_ctx": 65536, "temperature": 1.0, "top_p": 0.95,
                     "top_k": 20, "repeat_penalty": 1.0},
     },
+    "deepseek-r1-70b": {
+        "label": "DeepSeek R1 70B — reasoning",
+        "model": "deepseek-r1:70b",
+        "digest": "d37b54d01a76512a5adbaa9da4ee1c00833bf2dfefb0d4cc54351ba529e0f4da",
+        "options": {"num_ctx": 65536, "temperature": 0.6, "top_p": 0.95},
+    },
 }
