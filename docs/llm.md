@@ -53,11 +53,27 @@ of serving with an unapproved version.
   optional `format` (`text`, `json`, or `python`). JSON must be an object or
   array. Python drafts are syntax-checked but never executed. Outputs are
   advisory, not verified for correctness.
-- Alternatively, supply `task` instead of `model` and `digest`. The hub's
-  `llm_task_models` setting in `POST /setup/config` maps task names to ordered
-  lists of `{model, digest}` records. The hub tries the next approved artifact
-  only when the preferred one cannot accept the job. No task is enabled by
-  default.
+- Alternatively, supply `task` instead of `model` and `digest`. With no
+  configuration the hub uses a built-in task map: `summary` and `docs` →
+  Gemma 4 12B; `pr_summary` → Gemma 4 12B, then Qwen 3.8 scout; `coding` → Qwen 3.6 coding, then Qwen 3.8 scout; `scout` →
+  Qwen 3.8 scout; `reasoning` → DeepSeek R1 70B, then Qwen 3.8 scout. Each
+  entry carries the candidate's pinned digest and sampling options. The
+  optional `llm_task_models` setting in `POST /setup/config` overrides it per
+  task with ordered lists of `{model, digest}` records; an operator entry for
+  a task replaces that task's default. The hub tries the next artifact only
+  when the preferred one cannot accept the job. A task with neither an
+  override nor a default is rejected as `invalid_request`.
+- **Routing.** Among the tenant's workers that can take the job, the hub picks
+  the one dispatched to least recently (workers never used go first), so idle
+  workers win and load spreads. When no worker is free but a connected,
+  approved worker holds the model and is only busy or provisioning, the job
+  waits in state `queued` (visible in the jobs list) and is retried every 2
+  seconds, then becomes `running` when dispatched. It waits up to
+  `llm_queue_wait_s` seconds (an integer 0–3600, default 600, set through
+  `POST /api/llm/admin/settings` or `POST /setup/config`, both global-admin
+  only; it has no dashboard field because the Settings panel is removed by the simplified-dashboard change (owner decision: routing is automatic); 0 disables waiting), then returns `no_capacity`. Waiting jobs are served oldest first: each worker claim is refused to a newer job while an older waiter could use that worker, but a job no older waiter can serve is not held back. At most 64 jobs wait at
+  once; more get `no_capacity` immediately. A job returns `no_capacity`
+  immediately, without waiting, when no connected worker could ever serve it.
 - `POST /api/llm/check?tenant=…` accepts either an exact `model` and `digest`
   or a `task`, plus a `fixture` (`json` or `indentation`). A task check uses
   the task's configured model order and options. It runs a synthetic pool smoke test,
@@ -80,7 +96,7 @@ written to the pool's metadata or offline mailbox.
 Opt advisory PR summaries in by listing exact `owner/repo` names in AB's
 `pr_review_lm_summary_repos` setting. In hub `POST /setup/config`, map each
 repository under `llm_ab_pr_repos` to its `tenant` and pinned AB SAN
-(`certificate`), and define the ordered `pr_summary` task in `llm_task_models`.
+(`certificate`). The `pr_summary` task uses the built-in default map unless `llm_task_models` overrides it.
 This does not change validation, final review, builds, or log triage. An
 unavailable hub summary is omitted rather than sent through AB's own providers.
 

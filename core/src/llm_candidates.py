@@ -30,3 +30,26 @@ CANDIDATES = {
         "options": {"num_ctx": 65536, "temperature": 0.6, "top_p": 0.95},
     },
 }
+
+
+# Task -> ordered CANDIDATES keys, used when the operator sets no llm_task_models
+# entry for a task, so routing works with no configuration.
+DEFAULT_TASK_MODELS = {
+    "summary": ["gemma4-12b"],
+    "docs": ["gemma4-12b"],
+    "pr_summary": ["gemma4-12b", "qwen38-scout"],  # submitted by LlmPool.ab_pr_summary
+    "coding": ["qwen36-coding", "qwen38-scout"],
+    "scout": ["qwen38-scout"],
+    "reasoning": ["deepseek-r1-70b", "qwen38-scout"],
+}
+
+
+def default_task_models(task):
+    """Return the default ordered rows for a task, shaped like operator profile rows.
+
+    The candidate's sampling options use the same key names model_sampling()
+    reads, so the pool validates them with its one rule set. No hardware minima.
+    """
+    return [{"model": CANDIDATES[key]["model"], "digest": CANDIDATES[key]["digest"],
+             **CANDIDATES[key]["options"]}
+            for key in DEFAULT_TASK_MODELS.get(task, ())]
