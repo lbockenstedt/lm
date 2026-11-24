@@ -8,7 +8,6 @@ import shutil
 import stat
 import tempfile
 import uuid
-from collections import Counter
 from pathlib import Path
 
 CANDIDATE_RUNTIME = Path("/opt/lm-llm-candidate")
@@ -75,9 +74,9 @@ def _check_rewritten(manifest, pinned):
     entries that reference the registry manifest and its manifest list), so its
     bytes no longer hash to the pinned registry digest. Such a manifest is
     accepted only when it references the pinned registry manifest, that blob in
-    the store hashes to the pin, and every config and layer of the registry
-    manifest appears in it with the same digest and size, with nothing added or
-    repeated beyond the registry manifest reference and an optional manifest list.
+    the store hashes to the pin, and its config and its layers, once the
+    registry manifest reference and an optional manifest list are removed, equal
+    the registry manifest's exactly (same media type, digest and size, same order).
     """
     entries = [row for row in manifest["layers"] if isinstance(row, dict)
                and row.get("mediaType") in REFERENCE_TYPES]
@@ -91,12 +90,10 @@ def _check_rewritten(manifest, pinned):
     original = json.loads(registry)
     if not isinstance(original, dict) or not isinstance(original.get("layers"), list):
         raise ValueError("Invalid candidate manifest")
-    # The config and each layer keep their role and media type, duplicates included.
-    layers = Counter(_descriptor(row) for row in manifest["layers"])
-    layers.subtract(Counter(_descriptor(row) for row in entries))
+    # The config and the remaining layers keep their role, media type and order.
+    layers = [_descriptor(row) for row in manifest["layers"] if row not in entries]
     if (_descriptor(manifest.get("config")) != _descriptor(original.get("config"))
-            or +layers != Counter(_descriptor(row) for row in original["layers"])
-            or any(count < 0 for count in layers.values())):
+            or layers != [_descriptor(row) for row in original["layers"]]):
         raise ValueError("Candidate manifest digest mismatch")
 
 
