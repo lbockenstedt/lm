@@ -597,8 +597,9 @@ def test_role_sub_spokes_get_distinct_display_names(tmp_path):
     assert state.system_state["module_names"] == names
 
 
-def test_legacy_sub_spoke_name_without_provenance_is_preserved(tmp_path):
-    """A pre-marker hostname-like label may be operator-owned; do not guess."""
+def test_legacy_name_without_provenance_follows_host_rename_but_operator_names_stay(tmp_path):
+    """A pre-marker name equal to the old hostname (any case) follows a host
+    rename; a name the operator set explicitly stays put."""
     state = _fresh_state(tmp_path)
     hub = _ReconcileHub(state, _make_km())
     u = str(_uuid.uuid4())
@@ -606,12 +607,18 @@ def test_legacy_sub_spoke_name_without_provenance_is_preserved(tmp_path):
     pk = hub._primary_key("lrb-agent-proxy")
     # Simulate a row persisted before display_name_source was introduced.
     state.system_state["module_metadata"][pk].pop("display_name_source")
-    state.update_module_metadata(pk, {"display_name": "lrb-agent"})
+    state.update_module_metadata(pk, {"display_name": "LRB-AGENT"})
     reconcile(hub, "lrb-agent-proxy", u, "renamed-host")
-    assert state.system_state["module_metadata"][pk]["display_name"] == "lrb-agent"
+    assert state.system_state["module_metadata"][pk]["display_name"] == "renamed-host"
+    assert state.system_state["module_metadata"][pk]["display_name_source"] == "auto"
+    # An unmarked name unrelated to the old hostname is left alone.
+    state.system_state["module_metadata"][pk].pop("display_name_source")
+    state.update_module_metadata(pk, {"display_name": "Rack 4 Console"})
+    reconcile(hub, "lrb-agent-proxy", u, "renamed-again")
+    assert state.system_state["module_metadata"][pk]["display_name"] == "Rack 4 Console"
     # New operator edits are explicitly marked and remain stable too.
     state.set_module_name(pk, "Console Lab")
-    reconcile(hub, "lrb-agent-proxy", u, "renamed-again")
+    reconcile(hub, "lrb-agent-proxy", u, "renamed-third")
     assert state.system_state["module_metadata"][pk]["display_name"] == "Console Lab"
 
 
