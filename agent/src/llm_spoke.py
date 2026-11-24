@@ -187,7 +187,7 @@ class LlmSpoke(BaseSpoke):
 
     async def _activate_candidate(self, candidate):
         """Publish a smoke-tested candidate and verify the serving inventory."""
-        from agent.src.llm_activation import finalize, publish, rollback
+        from agent.src.llm_activation import finalize, prune_candidate, publish, rollback
         from agent.src.llm_install import PUBLIC_RUNTIME
         from agent.src.llm_qualification import _installed
         release = PUBLIC_RUNTIME.get(platform.machine())
@@ -224,6 +224,12 @@ class LlmSpoke(BaseSpoke):
             models = await self._available_models()
             if models.get(candidate["model"]) != candidate["digest"]:
                 raise ValueError("Published model is not approved by the serving catalog")
+            # Approved: the serving store has its own copy, so free the candidate's.
+            # Best effort and outside the failure path, so it can never trigger rollback.
+            try:
+                await asyncio.to_thread(prune_candidate, candidate)
+            except Exception as exc:  # best effort: activation is already committed
+                logger.warning("LLM candidate prune failed: %s", exc)
             return {"status": "SUCCESS", "code": "activated",
                     "model": candidate["model"], "digest": candidate["digest"]}
         except (OSError, ValueError, http.client.HTTPException, subprocess.TimeoutExpired) as exc:
