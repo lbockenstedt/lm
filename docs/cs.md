@@ -92,6 +92,19 @@ not saved NetworkManager profile changes.
 Requires the companion client implementation in **cs#257**; deploy the LM
 catalog before the cs changes. See [Rogue DNS configuration and recovery](alert-generation.md#rogue-dns-static-ip--fixed-dns--rogue_dns).
 
+## Rogue DNS burst
+
+`rogue_dns_burst` is a default-off Linux/Windows wireless simulation copied
+from `rogue_dns` (same DHCP → static → DHCP cycle, same recovery state file
+`rogue_dns_burst.state`). During the static phase it also sends a steady DNS
+query load to the rogue server, round-robin over `rogue_dns_burst_domains`.
+It is an exclusive failure sim; clients keep their IP, so it is excluded from
+no-IP dongle shedding via `QT_EXCLUDE_NONISOLATING_SIMS`. The load uses the
+shared DNS ceiling and gateway breaker. Config keys and behaviour:
+[Rogue DNS burst](alert-generation.md#rogue-dns-burst-static-ip--fixed-dns--query-load--rogue_dns_burst).
+Requires the companion client implementation in **cs#284**; deploy the LM
+catalog before the cs changes.
+
 ## WWW Discover - Network Diagnostics
 
 `www_discover` is a Linux/Windows steady-traffic simulation cloned from
