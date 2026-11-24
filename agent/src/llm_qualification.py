@@ -81,7 +81,8 @@ def _run_case(request, port, model, fixture, prompt, options=None):
 
 def _installed(request, port, model, digest):
     """Verify the selected local artifact, rejecting remote-model redirects."""
-    inventory = request("/api/tags", port=port).get("models")
+    # A freshly pulled multi-GB model can keep Ollama busy well past the default 3 s.
+    inventory = request("/api/tags", timeout=120, port=port).get("models")
     return isinstance(inventory, list) and any(
         isinstance(row, dict) and row.get("name") == model and row.get("digest") == digest
         and not row.get("remote_host") and not row.get("remote_model") for row in inventory)

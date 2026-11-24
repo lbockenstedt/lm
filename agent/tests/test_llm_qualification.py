@@ -480,3 +480,24 @@ def test_activation_waits_for_an_inflight_runtime_start(tmp_path, monkeypatch):
             await asyncio.gather(worker._startup, return_exceptions=True)
 
     asyncio.run(exercise())
+
+
+def test_post_pull_inventory_check_allows_a_busy_runtime_to_answer(monkeypatch):
+    """The inventory check after a large pull must outlast a briefly busy runtime."""
+    candidate = ("test:new", "a" * 64, "0.40.16")
+    timeouts = {}
+
+    def request(path, body=None, timeout=3, *, port):
+        """Record each probe's timeout and answer as a healthy runtime."""
+        timeouts[path] = timeout
+        if path == "/api/version":
+            return {"version": "0.40.16"}
+        if path == "/api/tags":
+            return {"models": [{"name": candidate[0], "digest": candidate[1]}]}
+        return {"status": "success"}
+
+    monkeypatch.setattr(qualification, "_suite", lambda *_a: {
+        "model": candidate[0], "digest": candidate[1], "version": candidate[2],
+        "fixtures": [{"fixture": "json", "passed": True}, {"fixture": "indentation", "passed": True}]})
+    qualification._run("cpu", request, {}, spec=(candidate, None, {"num_ctx": 4096}, True))
+    assert timeouts["/api/tags"] >= 120
