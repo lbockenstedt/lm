@@ -11,10 +11,11 @@ from access import (read_scope, request_effective_tenant, safe_external_url, sam
 import instance_vault
 from llm_cloud import TOKEN_LIMIT_FIELDS, valid_endpoint
 from llm_candidates import CANDIDATES
-from llm_pool import HARDWARE_LIMITS, SAMPLING_LIMITS, diagnostic, model_minimums, model_sampling, valid_model
+from llm_pool import HARDWARE_LIMITS, QUEUE_WAIT_MAX, queue_wait, SAMPLING_LIMITS, diagnostic, model_minimums, model_sampling, valid_model
 
 
-POOL_SETTINGS = ("llm_task_models", "llm_ab_pr_repos", "llm_qualification_candidates", "llm_cloud_profiles")
+POOL_SETTINGS = ("llm_task_models", "llm_ab_pr_repos", "llm_qualification_candidates",
+                 "llm_queue_wait_s", "llm_cloud_profiles")
 TASK_KEY = r"[A-Za-z0-9_\-]{1,64}"
 REPO_KEY = r"[A-Za-z0-9_.\-]{1,100}/[A-Za-z0-9_.\-]{1,100}"
 SAN_LIMIT = 255
@@ -77,6 +78,11 @@ def validate_pool_config(hub, config):
                        for row in models)
                 for task, models in tasks.items()):
             raise HTTPException(400, "Task profiles require ordered lists of pinned model artifacts")
+    if "llm_queue_wait_s" in config:
+        wait = config["llm_queue_wait_s"]
+        # Reject rather than clamp on save; queue_wait still clamps stored values at use.
+        if type(wait) is not int or not 0 <= wait <= QUEUE_WAIT_MAX:
+            raise HTTPException(400, f"Queue wait must be a whole number of seconds, 0 to {QUEUE_WAIT_MAX}")
     if "llm_ab_pr_repos" in config:
         repos = config["llm_ab_pr_repos"]
         if not isinstance(repos, dict) or len(repos) > 256 or any(
@@ -148,7 +154,10 @@ def register(app, hub, ctx):
         config = hub.state.get_global_config()
         cloud = config.get("llm_cloud_profiles")
         workers = hub.state.system_state.get("module_metadata", {})
-        return {**{key: config.get(key, {}) for key in POOL_SETTINGS[:-1]},
+        # The queue wait is a scalar: report the effective value, defaults included.
+        return {**{key: config.get(key, {}) for key in POOL_SETTINGS[:-1]
+                   if key != "llm_queue_wait_s"},
+                "llm_queue_wait_s": queue_wait(config),
                 "routing_form_schema": ROUTING_FORM_SCHEMA,
                 "public_candidates": [{"key": key, "label": row["label"], "model": row["model"],
                                        "digest": row["digest"], "options": row["options"]}
