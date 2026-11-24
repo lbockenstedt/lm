@@ -163,7 +163,10 @@ authorized hub reconnect. It runs two synthetic fixtures with thinking disabled;
 passing them is **not certification**. After inspecting the result, use
 **Activate** to publish that exact artifact. An operator-managed catalog or
 role catalog override blocks automatic activation. Activation does not configure
-or enable a task profile.
+or enable a task profile. Once the serving catalog confirms the model, the worker
+removes that model's copy from the candidate store to avoid doubling disk use
+(blobs shared with another candidate model are kept); to activate it again,
+run **Prepare and test** to pull it again.
 
 The public candidates use a 65,536-token context. Gemma 4 12B uses temperature
 0.7, top-p 0.8 and top-k 64; Qwen 3.6 coding uses 0.6, 0.95, 20 and repeat

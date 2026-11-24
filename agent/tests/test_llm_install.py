@@ -402,3 +402,169 @@ def test_unmodified_manifest_still_matches_by_its_own_digest(tmp_path, monkeypat
     assert llm_activation._manifest(candidate)[0][-1] == "tag"
     with pytest.raises(ValueError, match="digest mismatch"):
         llm_activation._manifest({**candidate, "digest": "0" * 64})
+
+
+def _add_model(store, model, blobs):
+    """Write a manifest (config is blobs[0], the rest are layers) and its blob files."""
+    name, tag = model.split(":")
+    digests = []
+    for content in blobs:
+        digest = hashlib.sha256(content).hexdigest()
+        (store / "blobs" / f"sha256-{digest}").write_bytes(content)
+        digests.append(digest)
+    manifest = json.dumps({"config": {"digest": f"sha256:{digests[0]}"},
+                           "layers": [{"digest": f"sha256:{d}"} for d in digests[1:]]}).encode()
+    path = store / "manifests" / "registry.ollama.ai" / "library" / name / tag
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(manifest)
+    return {"model": model, "digest": hashlib.sha256(manifest).hexdigest()}, digests
+
+
+def _blob_names(store):
+    """List blob file names currently in the store."""
+    return {p.name for p in (store / "blobs").iterdir()}
+
+
+def test_prune_removes_the_model_manifest_and_its_blobs(tmp_path, monkeypatch):
+    """After activation the candidate copy of the model is gone."""
+    first = _activation_fixture(tmp_path, monkeypatch)
+    store = llm_activation.CANDIDATE_STORE
+    freed = llm_activation.prune_candidate(first)
+    assert freed == len(b"model data") + len(json.dumps(
+        {"config": {"digest": "sha256:" + hashlib.sha256(b"model data").hexdigest()}, "layers": []}))
+    assert _blob_names(store) == set()
+    assert not (store / "manifests" / "registry.ollama.ai" / "library" / "test" / "cpu").exists()
+
+
+def test_prune_keeps_a_blob_shared_with_another_manifest(tmp_path, monkeypatch):
+    """Ollama shares blobs between models; only unshared ones are deleted."""
+    _activation_fixture(tmp_path, monkeypatch)
+    store = llm_activation.CANDIDATE_STORE
+    one, one_blobs = _add_model(store, "one:cpu", [b"cfg", b"shared", b"only-one"])
+    _two, two_blobs = _add_model(store, "two:cpu", [b"cfg2", b"shared"])
+    llm_activation.prune_candidate(one)
+    names = _blob_names(store)
+    assert f"sha256-{one_blobs[2]}" not in names
+    assert f"sha256-{one_blobs[0]}" not in names
+    assert f"sha256-{one_blobs[1]}" in names and f"sha256-{two_blobs[0]}" in names
+
+
+def test_prune_deletes_no_blob_when_another_manifest_is_unparseable(tmp_path, monkeypatch):
+    """A manifest that cannot be read might share blobs, so every blob stays."""
+    _activation_fixture(tmp_path, monkeypatch)
+    store = llm_activation.CANDIDATE_STORE
+    one, _blobs = _add_model(store, "one:cpu", [b"cfg", b"layer"])
+    bad = store / "manifests" / "registry.ollama.ai" / "library" / "bad" / "cpu"
+    bad.parent.mkdir(parents=True)
+    bad.write_text("{not json")
+    before = _blob_names(store)
+    llm_activation.prune_candidate(one)
+    assert _blob_names(store) == before
+    assert (store / "manifests" / "registry.ollama.ai" / "library" / "one" / "cpu").exists()
+
+
+@pytest.mark.parametrize("body", [
+    '{"layers": 1}', '{"config": 1, "layers": "x"}', "[1]", '{"layers": [{"digest": "bad"}]}',
+    '{"layers": [1]}', '{"layers": [{}]}', '{"config": {"digest": 5}, "layers": []}'])
+def test_prune_deletes_nothing_for_a_malformed_manifest_and_never_raises(tmp_path, monkeypatch, body):
+    """Valid JSON of the wrong shape is unsafe: keep everything, no exception."""
+    _activation_fixture(tmp_path, monkeypatch)
+    store = llm_activation.CANDIDATE_STORE
+    one, _blobs = _add_model(store, "one:cpu", [b"cfg", b"layer"])
+    bad = store / "manifests" / "registry.ollama.ai" / "library" / "bad" / "cpu"
+    bad.parent.mkdir(parents=True)
+    bad.write_text(body)
+    before = _blob_names(store)
+    assert llm_activation.prune_candidate(one) == 0
+    assert _blob_names(store) == before
+    assert (store / "manifests" / "registry.ollama.ai" / "library" / "one" / "cpu").exists()
+
+
+def test_prune_does_not_follow_a_symlinked_blob(tmp_path, monkeypatch):
+    """A symlink in the blob store is unlinked; its target survives."""
+    _activation_fixture(tmp_path, monkeypatch)
+    store = llm_activation.CANDIDATE_STORE
+    target = tmp_path / "outside"
+    target.write_bytes(b"precious")
+    cfg = hashlib.sha256(b"cfg").hexdigest()
+    manifest = json.dumps({"config": {"digest": f"sha256:{cfg}"}, "layers": []}).encode()
+    (store / "blobs" / f"sha256-{cfg}").symlink_to(target)
+    path = store / "manifests" / "registry.ollama.ai" / "library" / "link" / "cpu"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(manifest)
+    freed = llm_activation.prune_candidate({"model": "link:cpu", "digest": hashlib.sha256(manifest).hexdigest()})
+    assert target.read_bytes() == b"precious"
+    assert freed == len(manifest)
+
+
+def test_prune_ignores_an_unverifiable_candidate(tmp_path, monkeypatch):
+    """A digest mismatch means nothing is deleted."""
+    first = _activation_fixture(tmp_path, monkeypatch)
+    before = _blob_names(llm_activation.CANDIDATE_STORE)
+    assert llm_activation.prune_candidate({**first, "digest": "f" * 64}) == 0
+    assert _blob_names(llm_activation.CANDIDATE_STORE) == before
+
+
+def test_prune_deletes_nothing_when_a_manifest_directory_cannot_be_listed(tmp_path, monkeypatch):
+    """A directory that cannot be walked may hide a manifest, so the keep-set is unknown."""
+    _activation_fixture(tmp_path, monkeypatch)
+    store = llm_activation.CANDIDATE_STORE
+    one, _blobs = _add_model(store, "one:cpu", [b"cfg", b"layer"])
+    real_walk = llm_activation.os.walk
+
+    def walk(top, onerror=None, **kwargs):
+        """Report a listing failure the way os.walk does for an unreadable folder."""
+        if onerror:
+            onerror(PermissionError("denied"))
+        return real_walk(top, onerror=onerror, **kwargs)
+
+    monkeypatch.setattr(llm_activation.os, "walk", walk)
+    before = _blob_names(store)
+    assert llm_activation.prune_candidate(one) == 0
+    assert _blob_names(store) == before
+    assert (store / "manifests" / "registry.ollama.ai" / "library" / "one" / "cpu").exists()
+
+
+def test_prune_survives_a_deeply_nested_manifest(tmp_path, monkeypatch):
+    """json.loads can hit the recursion limit; that must keep everything, not raise."""
+    _activation_fixture(tmp_path, monkeypatch)
+    store = llm_activation.CANDIDATE_STORE
+    one, _blobs = _add_model(store, "one:cpu", [b"cfg", b"layer"])
+    bad = store / "manifests" / "registry.ollama.ai" / "library" / "deep" / "cpu"
+    bad.parent.mkdir(parents=True)
+    bad.write_text("[" * 100000)
+    before = _blob_names(store)
+    assert llm_activation.prune_candidate(one) == 0
+    assert _blob_names(store) == before
+
+
+def test_prune_keeps_everything_when_a_manifest_directory_is_a_symlink(tmp_path, monkeypatch):
+    """os.walk never enters a symlinked directory, so its manifests are unverifiable."""
+    _activation_fixture(tmp_path, monkeypatch)
+    store = llm_activation.CANDIDATE_STORE
+    one, _blobs = _add_model(store, "one:cpu", [b"cfg", b"layer"])
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (store / "manifests" / "registry.ollama.ai" / "linked").symlink_to(outside, target_is_directory=True)
+    before = _blob_names(store)
+    assert llm_activation.prune_candidate(one) == 0
+    assert _blob_names(store) == before
+
+
+def test_prune_keeps_blobs_when_the_manifest_cannot_be_deleted(tmp_path, monkeypatch):
+    """A manifest that stays behind must keep its blobs, or the store is corrupted."""
+    _activation_fixture(tmp_path, monkeypatch)
+    store = llm_activation.CANDIDATE_STORE
+    one, _blobs = _add_model(store, "one:cpu", [b"cfg", b"layer"])
+    real_unlink = llm_activation.Path.unlink
+
+    def unlink(self, *args, **kwargs):
+        """Refuse to delete manifests, as a read-only or immutable file would."""
+        if "manifests" in self.parts:
+            raise PermissionError("denied")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(llm_activation.Path, "unlink", unlink)
+    before = _blob_names(store)
+    assert llm_activation.prune_candidate(one) == 0
+    assert _blob_names(store) == before

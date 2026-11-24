@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -9,6 +10,8 @@ import stat
 import tempfile
 import uuid
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 CANDIDATE_RUNTIME = Path("/opt/lm-llm-candidate")
 CANDIDATE_STORE = Path("/var/lib/lm-llm-candidate/models")
@@ -135,6 +138,94 @@ def _manifest(candidate):
     if not digests or len(digests) > 256:
         raise ValueError("Invalid candidate blob count")
     return parts, raw, list(dict.fromkeys(digests))
+
+
+def _referenced_digests(skip):
+    """Return every blob digest named by a manifest other than ``skip``.
+
+    Returns None when any manifest cannot be read, parsed or has an unexpected
+    shape: the caller then deletes nothing, because a blob we cannot prove
+    unused might be shared.
+    """
+    store = _store_path(CANDIDATE_STORE, "manifests")
+    found = set()
+    def unreadable(error):
+        """Fail closed: a directory we cannot list may hide a manifest."""
+        raise error
+
+    for folder, dirs, files in os.walk(store, onerror=unreadable, followlinks=False):
+        # os.walk lists a symlinked directory but never enters it; its manifests are unverifiable.
+        if any(os.path.islink(os.path.join(folder, d)) for d in dirs):
+            return None
+        for name in files:
+            path = Path(folder) / name
+            if path == skip:
+                continue
+            try:
+                manifest = json.loads(_read_regular(path, MAX_MANIFEST))
+            except (OSError, ValueError, RecursionError):
+                return None
+            layers = manifest.get("layers") if isinstance(manifest, dict) else None
+            config = manifest.get("config") if isinstance(manifest, dict) else None
+            if not isinstance(layers, list) or not (config is None or isinstance(config, dict)):
+                return None
+            for row in [config, *layers]:
+                if row is None:
+                    continue
+                digest = row.get("digest") if isinstance(row, dict) else None
+                # A descriptor we cannot read as a sha256 digest might hide a shared blob.
+                if not isinstance(digest, str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
+                    return None
+                found.add(digest[7:])
+    return found
+
+
+def _unlink_counted(path):
+    """Delete one regular file or symlink (never its target); return bytes freed.
+
+    A file that is already missing frees 0 bytes; any other failure raises, so
+    the caller can tell "gone" from "still there".
+    """
+    try:
+        size = 0 if path.is_symlink() else path.lstat().st_size
+        path.unlink()
+    except FileNotFoundError:
+        return 0
+    return size
+
+
+def prune_candidate(candidate):
+    """Remove an activated model from the candidate store; return bytes freed.
+
+    The serving store now holds its own verified copy, so keeping this one
+    would store every model twice. Best effort and never raises: a model that
+    cannot be verified, or any other manifest that cannot be parsed, deletes
+    nothing. Blobs that another remaining manifest uses are kept, since Ollama
+    shares blobs between models. Symlinks are unlinked, never followed.
+    """
+    try:
+        # Step 1: re-verify the candidate; never delete what we cannot identify.
+        parts, _raw, digests = _manifest(candidate)
+        manifest_path = _store_path(CANDIDATE_STORE, *parts)
+        # Step 2: validate every other manifest BEFORE deleting anything.
+        keep = _referenced_digests(manifest_path)
+        if keep is None:
+            logger.warning("LLM candidate prune skipped: a candidate manifest could not be validated")
+            return 0
+        # Step 3: drop the manifest; if that fails, stop before touching any blob.
+        freed = _unlink_counted(manifest_path)
+        # Step 4: delete only the blobs nothing else uses (best effort, per file).
+        for digest in digests:
+            if digest in keep:
+                continue
+            try:
+                freed += _unlink_counted(_store_path(CANDIDATE_STORE, "blobs", f"sha256-{digest}"))
+            except OSError as exc:
+                logger.warning("LLM candidate prune left a blob behind: %s", exc)
+        return freed
+    except Exception as exc:  # best effort by contract: pruning must never fail an activation
+        logger.warning("LLM candidate prune failed, nothing more deleted: %s", exc)
+        return 0
 
 
 def _copy_blob(digest, target):
