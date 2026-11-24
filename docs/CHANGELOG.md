@@ -94,8 +94,9 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 - **Renamed hosts show their new name.** When a spoke's or agent's host is
   renamed, a display name marked as hub-derived follows the new hostname.
-  Operator names are preserved even when they match the hostname; ambiguous
-  legacy names and suffixes inferred from pinned `agent-` ids are kept. A role
+  Operator names are preserved even when they match the hostname; legacy
+  names without provenance that equal the old hostname (any case) follow the
+  rename too, while other names and suffixes inferred from pinned `agent-` ids are kept. A role
   sub-spoke of a generic agent is named `<host>-<role>` instead of repeating
   its parent's name. See [architecture-topology.md](architecture-topology.md).
 - **Failover no longer doubles up a spoke.** A NAC, IPAM or directory
