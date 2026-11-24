@@ -165,7 +165,8 @@ or enable a task profile.
 
 The public candidates use a 65,536-token context. Gemma 4 12B uses temperature
 0.7, top-p 0.8 and top-k 64; Qwen 3.6 coding uses 0.6, 0.95, 20 and repeat
-penalty 1; Qwen 3.8 scouting uses 1, 0.95, 20 and repeat penalty 1. The Gemma
+penalty 1; Qwen 3.8 scouting uses 1, 0.95, 20 and repeat penalty 1; DeepSeek R1 70B
+(`deepseek-r1:70b`, a ~42 GB download) uses 0.6 and 0.95 only. The Gemma
 values include the tested proxy overrides; Qwen values are observed alias
 defaults, not verified per-request overrides. These public artifacts are
 candidates, not necessarily the same weights or format tested on the Macs.
