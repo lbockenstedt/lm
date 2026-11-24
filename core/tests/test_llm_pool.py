@@ -12,6 +12,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import llm_pool
 from llm_pool import LlmPool
 from llm_candidates import CANDIDATES
 import llm_cloud
@@ -69,6 +70,63 @@ def make_pool():
             "status": "SUCCESS", "models": {JOB["model"]: DIGEST}, "available": True,
         })
     return pool
+
+
+def test_clear_finished_jobs_keeps_running_jobs_and_returns_count():
+    """Clearing removes only terminal history rows, and reports how many went."""
+    pool = make_pool()
+    pool.jobs.extend([{"state": "passed"}, {"state": "failed"}])
+    pool.active_jobs["run"] = {"state": "running"}
+    pool.qualification_jobs["qual"] = {"state": "running"}
+    assert pool.clear_finished_jobs() == 2
+    assert len(pool.jobs) == 0
+    assert set(pool.active_jobs) == {"run"}
+    assert set(pool.qualification_jobs) == {"qual"}
+
+
+def test_metrics_accumulate_per_model_and_survive_clearing_job_rows():
+    """Performance totals are kept for evaluation when the finished rows are cleared."""
+    pool = make_pool()
+    base = {"model": "m", "tier": "local", "digest": "d", "version": "1", "kind": "inference"}
+    pool._finish({**base, "state": "passed", "elapsed_s": 10.0})
+    pool._finish({**base, "state": "failed", "elapsed_s": 30.0})
+    pool._finish({**base, "state": "no_capacity"})
+    assert pool.clear_finished_jobs() == 3
+    (row,) = pool.metric_rows.values()
+    assert (row["completed"], row["failed"], row["no_capacity"]) == (1, 1, 1)
+    assert row["mean_elapsed_s"] == 20.0
+
+
+def test_finish_never_leaves_a_running_row_in_history():
+    """A job that ends unresolved is recorded as failed so Clear can remove it."""
+    pool = make_pool()
+    job = {"state": "running", "model": "m", "tier": "local", "kind": "qualification", "elapsed_s": 1.0}
+    pool._finish(job)
+    assert pool.jobs[0]["state"] == "failed"
+
+
+def test_metric_rows_are_bounded():
+    """Unique model/digest values cannot grow the metrics table past its cap."""
+    pool = make_pool()
+    for i in range(llm_pool.MAX_METRIC_ROWS + 20):
+        pool._finish({"state": "passed", "model": f"m{i}", "tier": "local", "kind": "inference", "elapsed_s": 1.0})
+    assert len(pool.metric_rows) == llm_pool.MAX_METRIC_ROWS
+
+
+def test_clear_jobs_route_requires_admin_and_returns_removed_count():
+    """The clear route is admin-only and reports the pool's removed count."""
+    app = FastAPI()
+    pool = SimpleNamespace(clear_finished_jobs=lambda: 3)
+    session = {"role": "tenant_admin"}
+    ctx = SimpleNamespace(_session_user=lambda request: session,
+                          _is_admin=lambda user: user["role"] == "global_admin")
+    llm.register(app, SimpleNamespace(llm_pool=pool), ctx)
+    with TestClient(app) as client:
+        assert client.post("/api/llm/admin/jobs/clear").status_code == 403
+        session["role"] = "global_admin"
+        response = client.post("/api/llm/admin/jobs/clear")
+        assert response.status_code == 200
+        assert response.json() == {"status": "cleared", "removed": 3}
 
 
 def test_admin_llm_routes_reject_non_admin_before_using_pool():
