@@ -327,8 +327,12 @@ def _store(tmp_path, monkeypatch, rewrite):
     stored = registry
     if rewrite:
         rewritten = json.loads(registry)
+        listing = json.dumps({"manifests": [{"digest": f"sha256:{pinned}"}]}).encode()
+        listed = hashlib.sha256(listing).hexdigest()
+        (store / "blobs" / f"sha256-{listed}").write_bytes(listing)
         rewritten["layers"] += [
-            {"mediaType": llm_activation.REFERENCE_TYPES[1], "digest": "sha256:" + "2" * 64, "size": 9},
+            {"mediaType": llm_activation.REFERENCE_TYPES[1], "digest": f"sha256:{listed}",
+             "size": len(listing)},
             {"mediaType": llm_activation.REFERENCE_TYPES[0], "digest": f"sha256:{pinned}",
              "size": len(registry)}]
         rewritten["runner"] = "llamacpp"
@@ -358,6 +362,14 @@ def test_manifest_rewritten_by_the_client_is_bound_to_the_pinned_registry_manife
     duplicated = json.loads(stored)
     duplicated["layers"].append(original["layers"][0])
     path.write_bytes(json.dumps(duplicated).encode())
+    with pytest.raises(ValueError, match="digest mismatch"):
+        llm_activation._manifest(candidate)
+    # A manifest list that does not name the pinned manifest is rejected.
+    unrelated = json.loads(stored)
+    bogus = json.dumps({"manifests": []}).encode()
+    (tmp_path / "models/blobs" / f"sha256-{hashlib.sha256(bogus).hexdigest()}").write_bytes(bogus)
+    unrelated["layers"][-2].update(digest=f"sha256:{hashlib.sha256(bogus).hexdigest()}", size=len(bogus))
+    path.write_bytes(json.dumps(unrelated).encode())
     with pytest.raises(ValueError, match="digest mismatch"):
         llm_activation._manifest(candidate)
     # Reordering layers is rejected.

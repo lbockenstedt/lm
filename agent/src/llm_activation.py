@@ -67,6 +67,20 @@ def _descriptor(record):
     return (record.get("mediaType"), record.get("digest"), record.get("size"))
 
 
+def _check_manifest_list(row, pinned):
+    """Require the referenced manifest list to be genuine and to name the pinned manifest."""
+    digest = row.get("digest")
+    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
+        raise ValueError("Candidate manifest digest mismatch")
+    raw = _read_regular(_store_path(CANDIDATE_STORE, "blobs", f"sha256-{digest[7:]}"), MAX_MANIFEST)
+    listing = json.loads(raw)
+    if (hashlib.sha256(raw).hexdigest() != digest[7:] or len(raw) != row.get("size")
+            or not isinstance(listing, dict) or not isinstance(listing.get("manifests"), list)
+            or not any(isinstance(item, dict) and item.get("digest") == f"sha256:{pinned}"
+                       for item in listing["manifests"])):
+        raise ValueError("Candidate manifest digest mismatch")
+
+
 def _check_rewritten(manifest, pinned):
     """Accept a manifest the Ollama client rewrote on pull, bound to the pinned one.
 
@@ -75,7 +89,8 @@ def _check_rewritten(manifest, pinned):
     bytes no longer hash to the pinned registry digest. Such a manifest is
     accepted only when it references the pinned registry manifest, that blob in
     the store hashes to the pin, and its config and its layers, once the
-    registry manifest reference and an optional manifest list are removed, equal
+    registry manifest reference and an optional manifest list (which must hash
+    to its digest and name the pinned manifest) are removed, equal
     the registry manifest's exactly (same media type, digest and size, same order).
     """
     entries = [row for row in manifest["layers"] if isinstance(row, dict)
@@ -84,6 +99,8 @@ def _check_rewritten(manifest, pinned):
     list_rows = [row for row in entries if row["mediaType"] == REFERENCE_TYPES[1]]
     if [row.get("digest") for row in registry_rows] != [f"sha256:{pinned}"] or len(list_rows) > 1:
         raise ValueError("Candidate manifest digest mismatch")
+    if list_rows:
+        _check_manifest_list(list_rows[0], pinned)
     registry = _read_regular(_store_path(CANDIDATE_STORE, "blobs", f"sha256-{pinned}"), MAX_MANIFEST)
     if hashlib.sha256(registry).hexdigest() != pinned:
         raise ValueError("Candidate manifest digest mismatch")
