@@ -1,6 +1,7 @@
 """Exercise side-by-side qualification without downloading a real model."""
 
 import asyncio
+from pathlib import Path
 import json
 
 import pytest
@@ -501,3 +502,83 @@ def test_post_pull_inventory_check_allows_a_busy_runtime_to_answer(monkeypatch):
         "fixtures": [{"fixture": "json", "passed": True}, {"fixture": "indentation", "passed": True}]})
     qualification._run("cpu", request, {}, spec=(candidate, None, {"num_ctx": 4096}, True))
     assert timeouts["/api/tags"] >= 120
+
+
+@pytest.mark.parametrize("scenario", ["ok", "prune_raises", "prune_type_error", "verify_fails"])
+def test_activation_prunes_the_candidate_only_after_success(tmp_path, monkeypatch, scenario):
+    """Pruning follows approval, never breaks the reply and never runs on failure."""
+    monkeypatch.setattr(llm_provisioning, "STATE", tmp_path / "private" / "preparation.json")
+    candidate = CANDIDATES["gemma4-12b"]
+    llm_provisioning.save_state({
+        "candidate": "gemma4-12b", "request_id": "a" * 32, "revision": 1, "state": "passed",
+        "result": {"status": "SUCCESS", "code": "bootstrap_smoke_passed", **candidate},
+    })
+    calls = []
+
+    def prune(model):
+        """Record the call, optionally failing like a read-only disk."""
+        calls.append("prune")
+        if scenario == "prune_raises":
+            raise OSError("read-only")
+        if scenario == "prune_type_error":
+            raise TypeError("malformed")
+
+    monkeypatch.setattr(llm_activation, "publish", lambda model, digest: {"created": True})
+    monkeypatch.setattr(llm_activation, "finalize", lambda record: None)
+    monkeypatch.setattr(llm_activation, "rollback", lambda record: None)
+    monkeypatch.setattr(llm_activation, "prune_candidate", prune)
+    monkeypatch.setattr(llm_spoke.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(llm_spoke, "runtime_service", lambda action: True)
+    monkeypatch.setattr(llm_spoke, "ollama_request", lambda *_a, **_kw: {"version": "0.40.16"})
+    monkeypatch.setattr(qualification, "_installed", lambda *_a: True)
+    worker = llm_spoke.LlmSpoke("test-worker", {})
+
+    async def inventory():
+        """Approve the artifact, or fail the catalog check."""
+        return {} if scenario == "verify_fails" else {candidate["model"]: candidate["digest"]}
+
+    worker._available_models = inventory
+    result = asyncio.run(worker.handle_command("LLM_ACTIVATE", {"candidate": "gemma4-12b"}))
+    if scenario == "verify_fails":
+        assert result["code"] == "activation_failed" and calls == []
+    else:
+        assert result["code"] == "activated" and calls == ["prune"]
+
+
+def test_activation_reply_survives_a_malformed_candidate_store(tmp_path, monkeypatch):
+    """The real prune on a store with a malformed manifest deletes nothing and the reply stays activated."""
+    from agent.tests.test_llm_install import _add_model
+    monkeypatch.setattr(llm_provisioning, "STATE", tmp_path / "private" / "preparation.json")
+    candidate = CANDIDATES["gemma4-12b"]
+    llm_provisioning.save_state({
+        "candidate": "gemma4-12b", "request_id": "a" * 32, "revision": 1, "state": "passed",
+        "result": {"status": "SUCCESS", "code": "bootstrap_smoke_passed", **candidate},
+    })
+    store = tmp_path / "store"
+    (store / "blobs").mkdir(parents=True)
+    entry, blobs = _add_model(store, "gemma4:12b", [b"cfg", b"layer"])
+    # The pinned registry digest is not reproducible here; let the real prune get past verification.
+    parts = ("manifests", "registry.ollama.ai", "library", "gemma4", "12b")
+    monkeypatch.setattr(llm_activation, "_manifest", lambda _c: (parts, b"", blobs))
+    bad = store / "manifests" / "registry.ollama.ai" / "library" / "bad" / "cpu"
+    bad.parent.mkdir(parents=True)
+    bad.write_text('{"layers": 1}')
+    monkeypatch.setattr(llm_activation, "CANDIDATE_STORE", store)
+    monkeypatch.setattr(llm_activation, "publish", lambda model, digest: {"created": True})
+    monkeypatch.setattr(llm_activation, "finalize", lambda record: None)
+    monkeypatch.setattr(llm_spoke.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(llm_spoke, "runtime_service", lambda action: True)
+    monkeypatch.setattr(llm_spoke, "ollama_request", lambda *_a, **_kw: {"version": "0.40.16"})
+    monkeypatch.setattr(qualification, "_installed", lambda *_a: True)
+    worker = llm_spoke.LlmSpoke("test-worker", {})
+
+    async def inventory():
+        """Approve the artifact."""
+        return {candidate["model"]: candidate["digest"]}
+
+    worker._available_models = inventory
+    before = sorted(p.name for p in (store / "blobs").iterdir())
+    result = asyncio.run(worker.handle_command("LLM_ACTIVATE", {"candidate": "gemma4-12b"}))
+    assert result["code"] == "activated"
+    assert sorted(p.name for p in (store / "blobs").iterdir()) == before
+    assert (store / Path(*parts)).exists()
