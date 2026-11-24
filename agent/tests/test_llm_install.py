@@ -319,7 +319,7 @@ def _store(tmp_path, monkeypatch, rewrite):
     store = tmp_path / "models"
     (store / "blobs").mkdir(parents=True)
     layer = hashlib.sha256(b"weights").hexdigest()
-    original = {"schemaVersion": 2, "config": {"digest": "sha256:" + "1" * 64, "size": 2},
+    original = {"schemaVersion": 2, "config": {"mediaType": "cfg", "digest": "sha256:" + "1" * 64, "size": 2},
                 "layers": [{"mediaType": "model", "digest": f"sha256:{layer}", "size": 7}]}
     registry = json.dumps(original, separators=(",", ":")).encode()
     pinned = hashlib.sha256(registry).hexdigest()
@@ -357,6 +357,17 @@ def test_manifest_rewritten_by_the_client_is_bound_to_the_pinned_registry_manife
     duplicated = json.loads(stored)
     duplicated["layers"].append(original["layers"][0])
     path.write_bytes(json.dumps(duplicated).encode())
+    with pytest.raises(ValueError, match="digest mismatch"):
+        llm_activation._manifest(candidate)
+    # Swapping roles or changing a media type is rejected.
+    swapped = json.loads(stored)
+    swapped["config"], swapped["layers"][0] = swapped["layers"][0], swapped["config"]
+    path.write_bytes(json.dumps(swapped).encode())
+    with pytest.raises(ValueError, match="digest mismatch"):
+        llm_activation._manifest(candidate)
+    retyped = json.loads(stored)
+    retyped["layers"][0]["mediaType"] = "other"
+    path.write_bytes(json.dumps(retyped).encode())
     with pytest.raises(ValueError, match="digest mismatch"):
         llm_activation._manifest(candidate)
     # A changed registry blob no longer hashes to the pin.

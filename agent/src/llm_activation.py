@@ -61,14 +61,11 @@ def _mkdirs(root, parts):
             current.chmod(0o755)
 
 
-def _pairs(manifest):
-    """Count the (digest, size) pairs of a manifest's config and layers, duplicates included."""
-    pairs = Counter()
-    for record in [manifest.get("config"), *manifest.get("layers", [])]:
-        if not isinstance(record, dict):
-            raise ValueError("Invalid candidate manifest")
-        pairs[(record.get("digest"), record.get("size"))] += 1
-    return pairs
+def _descriptor(record):
+    """Return the identifying (mediaType, digest, size) of one manifest descriptor."""
+    if not isinstance(record, dict):
+        raise ValueError("Invalid candidate manifest")
+    return (record.get("mediaType"), record.get("digest"), record.get("size"))
 
 
 def _check_rewritten(manifest, pinned):
@@ -94,8 +91,12 @@ def _check_rewritten(manifest, pinned):
     original = json.loads(registry)
     if not isinstance(original, dict) or not isinstance(original.get("layers"), list):
         raise ValueError("Invalid candidate manifest")
-    references = Counter((row.get("digest"), row.get("size")) for row in entries)
-    if _pairs(manifest) - references != _pairs(original):
+    # The config and each layer keep their role and media type, duplicates included.
+    layers = Counter(_descriptor(row) for row in manifest["layers"])
+    layers.subtract(Counter(_descriptor(row) for row in entries))
+    if (_descriptor(manifest.get("config")) != _descriptor(original.get("config"))
+            or +layers != Counter(_descriptor(row) for row in original["layers"])
+            or any(count < 0 for count in layers.values())):
         raise ValueError("Candidate manifest digest mismatch")
 
 
