@@ -948,6 +948,27 @@ class LlmPool:
             return await self._public_cloud_summary(tenant, request["prompt"], result)
         return result
 
+    async def ab_complete(self, request, certificate_names):
+        """Run an allowlisted AppBuilder task on the pool, using the presented certificate.
+
+        The tenant, certificate SAN and task allowlist come only from the
+        server-side llm_ab_work setting, never from the caller.
+        """
+        rule = self.hub.state.get_global_config().get("llm_ab_work")
+        task = request.get("task")
+        if (not isinstance(rule, dict) or not isinstance(task, str)
+                or task not in (rule.get("tasks") or ())
+                or rule.get("certificate") not in (certificate_names or ())):
+            return {"status": "ERROR", "code": "not_configured"}
+        tenant = rule.get("tenant")
+        if (not isinstance(tenant, str) or not tenant or tenant_is_shared(tenant)
+                or not self.hub.state.get_tenant(tenant)):
+            return {"status": "ERROR", "code": "not_configured"}
+        return await self.complete(tenant, {
+            "task": task, "prompt": request.get("prompt"),
+            "format": request.get("format", "text"),
+        })
+
     async def _public_cloud_summary(self, tenant, prompt, unavailable):
         """Try eligible cloud capacity only for a trusted public PR summary."""
         profiles = self.hub.state.get_global_config().get("llm_cloud_profiles")

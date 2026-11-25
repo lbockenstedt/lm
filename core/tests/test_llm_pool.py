@@ -1226,6 +1226,28 @@ def test_ab_pr_summary_routes_to_default_model_with_no_operator_map():
     assert pool.hub.request_response.call_args.args[0] in ("a", "b")
 
 
+def test_ab_complete_requires_certificate_and_allowlisted_task():
+    """AB work runs only for the pinned certificate, an allowed task and the configured tenant."""
+    qwen = CANDIDATES["qwen38-scout"]
+    pool = make_pool()
+    report_all(pool, qwen["model"], qwen["digest"])
+    pool.hub.request_response.return_value = {"status": "SUCCESS", "text": "[]"}
+    request = {"task": "scout", "prompt": "list files"}
+    assert asyncio.run(pool.ab_complete(request, ("ab-client",)))["code"] == "not_configured"
+    pool.hub.state.system_state["global_config"]["llm_ab_work"] = {
+        "tenant": "tenant-a", "certificate": "ab-client", "tasks": ["scout", "review"]}
+    assert asyncio.run(pool.ab_complete(request, ("other",)))["code"] == "not_configured"
+    assert asyncio.run(pool.ab_complete({**request, "task": "coding"}, ("ab-client",)))["code"] == "not_configured"
+    ok = asyncio.run(pool.ab_complete(request, ("ab-client",)))
+    assert ok["status"] == "SUCCESS" and ok["model"] == qwen["model"]
+    # Pass 1 review is Qwen; pass 2 is DeepSeek only and never falls back to Qwen.
+    review = asyncio.run(pool.ab_complete({**request, "task": "review"}, ("ab-client",)))
+    assert review["status"] == "SUCCESS" and review["model"] == qwen["model"]
+    pool.hub.state.system_state["global_config"]["llm_ab_work"]["tasks"].append("review_deep")
+    deep = asyncio.run(pool.ab_complete({**request, "task": "review_deep"}, ("ab-client",)))
+    assert deep["status"] == "ERROR" and deep["code"] == "no_capacity"
+
+
 def test_queue_wait_setting_validates_and_round_trips():
     """llm_queue_wait_s saves only as an integer 0..3600 and is returned with its default."""
     pool = make_pool()
