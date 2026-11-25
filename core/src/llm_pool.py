@@ -153,7 +153,9 @@ def qualification_result(data):
         if (not isinstance(row, dict) or row.get("fixture") != expected
                 or not isinstance(row.get("passed"), bool)):
             return None
-        results.append({"fixture": expected, "passed": row["passed"], **{
+        results.append({"fixture": expected, "passed": row["passed"],
+                        **({"done_reason": row["done_reason"]}
+                           if row.get("done_reason") in ("stop", "length", "load", "unload") else {}), **{
             name: row[name] for name in ("elapsed_s", "eval_count", "eval_duration", "load_duration")
             if type(row.get(name)) in (int, float) and 0 <= row[name] < 2**53
         }})
@@ -947,6 +949,27 @@ class LlmPool:
                 and rule.get("allow_public_cloud") is True):
             return await self._public_cloud_summary(tenant, request["prompt"], result)
         return result
+
+    async def ab_complete(self, request, certificate_names):
+        """Run an allowlisted AppBuilder task on the pool, using the presented certificate.
+
+        The tenant, certificate SAN and task allowlist come only from the
+        server-side llm_ab_work setting, never from the caller.
+        """
+        rule = self.hub.state.get_global_config().get("llm_ab_work")
+        task = request.get("task")
+        if (not isinstance(rule, dict) or not isinstance(task, str)
+                or task not in (rule.get("tasks") or ())
+                or rule.get("certificate") not in (certificate_names or ())):
+            return {"status": "ERROR", "code": "not_configured"}
+        tenant = rule.get("tenant")
+        if (not isinstance(tenant, str) or not tenant or tenant_is_shared(tenant)
+                or not self.hub.state.get_tenant(tenant)):
+            return {"status": "ERROR", "code": "not_configured"}
+        return await self.complete(tenant, {
+            "task": task, "prompt": request.get("prompt"),
+            "format": request.get("format", "text"),
+        })
 
     async def _public_cloud_summary(self, tenant, prompt, unavailable):
         """Try eligible cloud capacity only for a trusted public PR summary."""
