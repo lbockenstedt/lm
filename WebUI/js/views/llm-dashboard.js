@@ -63,12 +63,29 @@ function workerTooltip(w) {
 }
 
 // One worker row: name and status badge with the details in its tooltip.
-function workerRow(w) {
+function workerRow(w, jobs = []) {
     const { label, cls } = workerStatus(w);
     return safeHtml`<tr class="${ROW}">
         <td class="${td} font-medium">${w.name || '—'}</td>
         <td class="${td}" title="${workerTooltip(w)}"><span class="${BADGE} ${cls}">${label}</span></td>
+        <td class="${td} space-x-1">${modelChips(w, jobs)}</td>
     </tr>`;
+}
+
+// Models cell: serving models are green; others show their newest job result
+// (passed bootstrap amber, failed red with the code in the tooltip).
+function modelChips(w, jobs) {
+    const serving = (w.models || []).map(m => m.name).filter(Boolean);
+    const seen = new Set(serving);
+    const chips = serving.map(name => safeHtml`<span class="${BADGE} ${GREEN}" title="Serving">${name}</span>`);
+    for (const j of jobs) {
+        const name = j.model || j.candidate;
+        if (!name || seen.has(name) || !['passed', 'failed'].includes(j.state)) continue;
+        seen.add(name);
+        const failed = j.state === 'failed';
+        chips.push(safeHtml`<span class="${BADGE} ${failed ? RED : AMBER}" title="${failed ? `Failed: ${j.code || j.resolution || ''}` : 'Passed the smoke test; not serving'}">${name}</span>`);
+    }
+    return chips.length ? chips : '—';
 }
 
 // Job state badge; "queued" and "no_capacity" get readable labels.
@@ -140,10 +157,10 @@ function renderTable(headers, rows, emptyText) {
 }
 
 // Workers: name and status only; details live in the tooltip.
-function renderWorkersSection(workers) {
+function renderWorkersSection(workers, jobs = []) {
     return safeHtml`<div class="hpe-card rounded-lg p-5 shadow-sm space-y-3">
         <h3 class="text-sm font-bold text-slate-500">Workers</h3>
-        ${renderTable(['Name', 'Status'], workers.map(workerRow), 'No workers.')}
+        ${renderTable(['Name', 'Status', 'Models'], workers.map(w => workerRow(w, jobs)), 'No workers.')}
     </div>`;
 }
 
@@ -195,7 +212,7 @@ async function renderLlmDashboard(container) {
             <div class="space-y-4">
                 ${renderStatus(status)}
                 <h2 class="text-lg font-bold text-navy">LLM Dashboard</h2>
-                ${renderWorkersSection(state.workers)}
+                ${renderWorkersSection(state.workers, state.jobs)}
                 ${renderJobsSection(state.jobs)}
                 ${renderMetricsSection(state.metrics)}
             </div>` });
