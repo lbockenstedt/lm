@@ -213,7 +213,7 @@ approved, connected worker that has a fresh inventory report and a fresh
 hardware report (a worker with no hardware report yet is skipped). Models the
 worker does not already serve (same name and digest) are prepared and then
 activated **one at a time, smallest first**; at most two workers pull at once
-hub-wide. The hub never re-pulls a model the worker already serves.
+hub-wide. The hub never re-pulls a model the worker already serves. A worker whose runtime is merely restarting (`runtime_not_started`, for example after an update) is not re-provisioned: the hub restarts the runtime and provisions only what is still missing once the worker reports its models. A model that fails its fixtures (`fixture_mismatch`) is not retried for six hours, and that window is saved on the hub (`llm_provision_unfit`), so a hub restart does not rerun the bootstrap.
 
 - **RAM minimums.** A model is skipped when the worker reports less RAM than
   its minimum (conservative weights plus 64k KV cache estimates): 16 GiB

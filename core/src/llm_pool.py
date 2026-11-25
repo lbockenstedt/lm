@@ -89,8 +89,10 @@ RUNTIME_STOP_CAUSES = {
 }
 # A worker reporting one of these has no runtime installed, so it sends no
 # inventory; the provisioner treats it as serving nothing and installs it.
-NO_RUNTIME_CODES = {"runtime_not_started", "runtime_unit_missing", "runtime_unit_symlink",
-                    "runtime_binary_missing"}
+# runtime_not_started is deliberately absent: the runtime is installed and the hub is already
+# restarting it (after an update or reboot), and treating that as "serves nothing" re-bootstrapped
+# every model and kept the worker out of inference.
+NO_RUNTIME_CODES = {"runtime_unit_missing", "runtime_unit_symlink", "runtime_binary_missing"}
 WORKER_ISSUE_CODES = {
     "runtime_version_mismatch", "runtime_unavailable", "runtime_not_started",
 } | RUNTIME_STOP_CAUSES
@@ -367,7 +369,8 @@ class LlmPool:
         wanted = [key for key in missing if key not in small]
         if not wanted:
             self.provision_failures.pop(pk, None)
-        return [key for key in wanted if self.provision_retry_at.get((pk, key), 0) <= now]
+        unfit = self._unfit_keys(pk, now)
+        return [key for key in wanted if key not in unfit and self.provision_retry_at.get((pk, key), 0) <= now]
 
     async def provision_once(self):
         """Start provisioning on workers that lack catalog models; never blocks on a pull.
@@ -409,6 +412,27 @@ class LlmPool:
             await asyncio.sleep(PROVISION_POLL_S)
         return job
 
+    def _set_unfit(self, pk, key, until):
+        """Persist (or with until=None clear) the time before which a model is not retried on a worker."""
+        saved = self.hub.state.get_global_config().get("llm_provision_unfit")
+        saved = {w: dict(rows) for w, rows in saved.items() if isinstance(rows, dict)} if isinstance(saved, dict) else {}
+        if until is None:
+            saved.get(pk, {}).pop(key, None)
+        else:
+            saved.setdefault(pk, {})[key] = until
+        saved = {w: rows for w, rows in saved.items() if rows}
+        self.hub.state.update_global_config({"llm_provision_unfit": saved})
+
+    def _unfit_keys(self, pk, now):
+        """Catalog keys still inside their persisted unfit window for this worker; also seeds the failure codes."""
+        saved = self.hub.state.get_global_config().get("llm_provision_unfit")
+        rows = saved.get(pk) if isinstance(saved, dict) else None
+        active = {key for key, until in (rows or {}).items()
+                  if key in CANDIDATES and isinstance(until, (int, float)) and until > time.time()}
+        for key in active:
+            self.provision_failures.setdefault(pk, {}).setdefault(CANDIDATES[key]["label"], "fixture_mismatch")
+        return active
+
     def _provision_failed(self, pk, key, code):
         """Record a failed step: exponential backoff for this model and the code for the dashboard."""
         count = self.provision_fail_count.get((pk, key), 0)
@@ -416,6 +440,9 @@ class LlmPool:
         if code == "fixture_mismatch":
             # The model is deterministically unfit for this hardware; retrying only burns CPU.
             delay = PROVISION_BACKOFF_MAX
+            # Persisted so a hub restart (every deploy) does not re-run the multi-minute CPU bootstrap,
+            # which keeps the worker unavailable for inference while it runs.
+            self._set_unfit(pk, key, time.time() + delay)
         self.provision_fail_count[(pk, key)] = count + 1
         self.provision_retry_at[(pk, key)] = time.monotonic() + delay
         self.provision_failures.setdefault(pk, {})[CANDIDATES[key]["label"]] = code
@@ -451,6 +478,7 @@ class LlmPool:
         job = await self._wait_job(job)
         if job["state"] != "passed":
             return self._provision_failed(pk, key, job.get("code", "unsupported_or_invalid_reply"))
+        self._set_unfit(pk, key, None)
         # Success: drop the saved preparation so a reconnect replay cannot re-pull a
         # candidate copy the agent has already pruned after activation.
         configured = self.hub.state.get_global_config().get("llm_worker_preparations")

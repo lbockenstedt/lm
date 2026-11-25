@@ -1678,3 +1678,29 @@ def test_dashboard_catalog_states_survive_without_job_history(monkeypatch):
     assert got["deepseek-r1-70b"] == ("failed", "fixture_mismatch")
     assert got["qwen36-coding"] == ("too_small", None)
     assert got["gemma4-12b"][0] in ("not_loaded", "serving")
+
+
+def test_unfit_model_is_not_retried_after_a_hub_restart(monkeypatch):
+    """A fixture_mismatch is remembered across a restart, so the CPU bootstrap does not run again."""
+    pool = prov_pool(monkeypatch, served=("gemma4-12b", "qwen36-coding", "qwen38-scout"))
+    pool._provision_failed("a", "deepseek-r1-70b", "fixture_mismatch")
+    # A new pool object stands in for the restarted hub; only the saved config survives.
+    fresh = prov_pool(monkeypatch, served=("gemma4-12b", "qwen36-coding", "qwen38-scout"))
+    fresh.hub.state = pool.hub.state
+    assert fresh._provision_plan("a") == []
+    row = next(w for w in fresh.dashboard()["workers"] if w["name"] == "Worker a")
+    assert {c["key"]: c["state"] for c in row["catalog"]}["deepseek-r1-70b"] == "failed"
+    # Once the window passes, the model is tried again.
+    monkeypatch.setattr(llm_pool.time, "time", lambda: pool.hub.state.get_global_config()
+                        ["llm_provision_unfit"]["a"]["deepseek-r1-70b"] + 1)
+    assert fresh._provision_plan("a") == ["deepseek-r1-70b"]
+
+
+def test_stopped_runtime_is_not_reprovisioned_but_missing_install_is(monkeypatch):
+    """A restarting runtime (runtime_not_started) serves nothing only briefly; do not re-bootstrap every model."""
+    pool = prov_pool(monkeypatch)
+    pool.inventory.pop("a")
+    pool.worker_issues["a"] = {"code": "runtime_not_started"}
+    assert pool._provision_plan("a") == []
+    pool.worker_issues["a"] = {"code": "runtime_binary_missing"}
+    assert pool._provision_plan("a")
