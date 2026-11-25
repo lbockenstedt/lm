@@ -228,8 +228,9 @@ def test_activation_approves_only_after_serving_probe_and_can_rollback(tmp_path,
     record = llm_activation.publish(candidate, "a" * 64)
     catalog = llm_activation.SERVING_RUNTIME / "llm-models.json"
     assert json.loads(catalog.read_text()) == {}
-    # Ollama mkdirs manifests-v2 at startup and the serving store is read-only.
-    assert (llm_activation.SERVING_RUNTIME / "models" / "manifests-v2").is_dir()
+    # Ollama reads manifests-v2 (and mkdirs it) on a read-only store and reports its digest.
+    v2 = llm_activation.SERVING_RUNTIME / "models/manifests-v2/ollama.com/library/test/cpu"
+    assert hashlib.sha256(v2.read_bytes()).hexdigest() == candidate["digest"]
     llm_activation.finalize(record)
     assert json.loads(catalog.read_text()) == {candidate["model"]: candidate["digest"]}
     llm_activation.rollback(record)
@@ -345,6 +346,13 @@ def _store(tmp_path, monkeypatch, rewrite):
     path.write_bytes(stored)
     monkeypatch.setattr(llm_activation, "CANDIDATE_STORE", store)
     return {"model": "demo:tag", "digest": pinned}, stored, original
+
+
+def test_v2_manifest_is_the_pinned_registry_manifest_even_when_the_legacy_one_was_rewritten(tmp_path, monkeypatch):
+    """Ollama reports the v2 file's digest, which must be the pinned one."""
+    candidate, stored, original = _store(tmp_path, monkeypatch, rewrite=True)
+    assert llm_activation._registry_manifest(candidate, stored) == json.dumps(
+        original, separators=(",", ":")).encode()
 
 
 def test_manifest_rewritten_by_the_client_is_bound_to_the_pinned_registry_manifest(tmp_path, monkeypatch):

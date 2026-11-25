@@ -140,6 +140,17 @@ def _manifest(candidate):
     return parts, raw, list(dict.fromkeys(digests))
 
 
+def _registry_manifest(candidate, raw):
+    """Return the pinned registry manifest bytes, the content of Ollama's v2 manifest file."""
+    if hashlib.sha256(raw).hexdigest() == candidate["digest"]:
+        return raw
+    pinned = _read_regular(_store_path(CANDIDATE_STORE, "blobs", f"sha256-{candidate['digest']}"),
+                           MAX_MANIFEST)
+    if hashlib.sha256(pinned).hexdigest() != candidate["digest"]:
+        raise ValueError("Candidate manifest digest mismatch")
+    return pinned
+
+
 def _referenced_digests(skip):
     """Return every blob digest named by a manifest other than ``skip``.
 
@@ -315,8 +326,15 @@ def publish(candidate, expected_runtime_digest):
         manifest_path.parent.mkdir(parents=True)
         manifest_path.write_bytes(manifest)
         manifest_path.chmod(0o644)
-        # Ollama 0.40+ mkdirs manifests-v2 at startup; the serving store is read-only (500 on /api/tags).
-        (staged / "manifests-v2").mkdir()
+        # Ollama 0.40+ reads manifests-v2 and mkdirs it at startup, but the serving store is
+        # read-only. It reports the digest of the v2 file (the pinned registry manifest), so
+        # the legacy manifest alone would never match the pinned digest.
+        v2_parts = ("manifests-v2", "ollama.com", *parts[2:])
+        v2_path = staged.joinpath(*v2_parts)
+        v2_path.parent.mkdir(parents=True)
+        v2_bytes = _registry_manifest(candidate, manifest)
+        v2_path.write_bytes(v2_bytes)
+        v2_path.chmod(0o644)
         if created:
             runtime = root / "runtime"
             shutil.copytree(CANDIDATE_RUNTIME, runtime, symlinks=True)
@@ -359,7 +377,6 @@ def publish(candidate, expected_runtime_digest):
                     identity = source.stat()
                     os.link(source, target, follow_symlinks=False)
                     added_blobs.append((target, identity.st_dev, identity.st_ino))
-            _mkdirs(destination, ("manifests-v2",))
             _mkdirs(destination, parts[:-1])
             target = _store_path(destination, *parts)
             added = not target.exists() and not target.is_symlink()
@@ -367,11 +384,19 @@ def publish(candidate, expected_runtime_digest):
                 os.link(manifest_path, target, follow_symlinks=False)
             elif _read_regular(target, MAX_MANIFEST) != manifest:
                 raise ValueError("Existing serving manifest conflicts with the selected model")
+            _mkdirs(destination, v2_parts[:-1])
+            target_v2 = _store_path(destination, *v2_parts)
+            added_v2 = not target_v2.exists() and not target_v2.is_symlink()
+            if added_v2:
+                os.link(v2_path, target_v2, follow_symlinks=False)
+            elif _read_regular(target_v2, MAX_MANIFEST) != v2_bytes:
+                raise ValueError("Existing serving manifest conflicts with the selected model")
         except BaseException:
             _remove_added_blobs(added_blobs)
             raise
         return {"created": False, "before": before, "after": after,
                 "manifest": target, "manifest_bytes": manifest, "manifest_added": added,
+                "manifest_v2": target_v2, "manifest_v2_bytes": v2_bytes, "manifest_v2_added": added_v2,
                 "added_blobs": added_blobs, "committed": False}
 
 
@@ -400,6 +425,11 @@ def rollback(record):
     if record["manifest_added"]:
         target = record["manifest"]
         if _read_regular(target, MAX_MANIFEST) != record["manifest_bytes"]:
+            raise ValueError("Serving manifest changed during rollback")
+        target.unlink()
+    if record["manifest_v2_added"]:
+        target = record["manifest_v2"]
+        if _read_regular(target, MAX_MANIFEST) != record["manifest_v2_bytes"]:
             raise ValueError("Serving manifest changed during rollback")
         target.unlink()
     _remove_added_blobs(record["added_blobs"])
