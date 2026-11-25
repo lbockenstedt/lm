@@ -1358,6 +1358,22 @@ def run_provision(pool):
     asyncio.run(go())
 
 
+def test_provisioner_waits_for_the_worker_to_report_idle_before_activating(monkeypatch):
+    """A stale busy report right after a bootstrap must not fail the activation as worker_changed."""
+    pool = prov_pool(monkeypatch)
+    fake_agent(pool, [])
+    real, calls = pool.start_activation, []
+
+    def flaky(worker, key, auto=False):
+        """Refuse the first two attempts, as a stale busy report does."""
+        calls.append(key)
+        return False if len(calls) <= 2 else real(worker, key, auto)
+    pool.start_activation = flaky
+    run_provision(pool)
+    assert not pool.provision_failures
+    assert len(calls) == len(ORDER) + 2
+
+
 def test_catalog_has_ram_minimums_in_gib():
     """Each catalog entry carries the owner-chosen minimum RAM."""
     assert {k: v["min_ram_bytes"] // GIB for k, v in CANDIDATES.items()} == {
@@ -1406,6 +1422,16 @@ def test_provisioner_skips_workers_without_hardware_report(monkeypatch):
     fake_agent(pool, order)
     run_provision(pool)
     assert order == []
+
+
+def test_unfit_model_does_not_flag_a_worker_that_serves_others(monkeypatch):
+    """fixture_mismatch waits the longest backoff and leaves a serving worker out of attention."""
+    pool = prov_pool(monkeypatch, served=("gemma4-12b",))
+    pool.provision_failures["a"] = {"DeepSeek": "fixture_mismatch"}
+    row = next(w for w in pool.dashboard()["workers"] if w["name"] == "Worker a")
+    assert row["state"] == "ready" and "fixture_mismatch" in row["detail"]
+    pool._provision_failed("a", "deepseek-r1-70b", "fixture_mismatch")
+    assert pool.provision_retry_at[("a", "deepseek-r1-70b")] - llm_pool.time.monotonic() > 20000
 
 
 def test_failure_sets_backoff_and_attention_and_is_not_retried_early(monkeypatch):
