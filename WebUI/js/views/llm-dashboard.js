@@ -93,7 +93,7 @@ function jobRow(j) {
                     top-p ${j.options.top_p ?? 'default'}; top-k ${j.options.top_k ?? 'default'};
                     repeat penalty ${j.options.repeat_penalty ?? 'default'}</div>` : ''}
             ${j.mode === 'bootstrap' ? (j.fixtures || []).map(fixture => safeHtml`<div>${fixture.fixture}:
-                    ${fixture.passed ? 'pass' : 'fail'} (${fixture.elapsed_s ?? '—'} s)</div>`) : ''}
+                    ${fixture.passed ? 'pass' : 'fail'} (${fixture.elapsed_s ?? '—'} s${fixture.done_reason && !fixture.passed ? `, ${fixture.done_reason}, ${fixture.eval_count ?? '?'} tokens` : ''})</div>`) : ''}
             ${(j.fixture_deltas || []).map((delta, i) => safeHtml`<div>
                 ${delta.fixture}: ${j.baseline.fixtures[i].passed ? 'pass' : 'fail'}
                 to ${j.fixtures[i].passed ? 'pass' : 'fail'}

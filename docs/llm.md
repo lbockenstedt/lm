@@ -56,7 +56,7 @@ of serving with an unapproved version.
 - Alternatively, supply `task` instead of `model` and `digest`. With no
   configuration the hub uses a built-in task map: `summary` and `docs` →
   Gemma 4 12B; `pr_summary` → Gemma 4 12B, then Qwen 3.8 scout; `coding` → Qwen 3.6 coding, then Qwen 3.8 scout; `scout` →
-  Qwen 3.8 scout; `reasoning` → DeepSeek R1 70B, then Qwen 3.8 scout. Each
+  Qwen 3.8 scout; `reasoning` → DeepSeek R1 70B, then Qwen 3.8 scout; `review` → Qwen 3.8 scout (review pass 1); `review_deep` → DeepSeek R1 70B only (review pass 2). Each
   entry carries the candidate's pinned digest and sampling options. The
   optional `llm_task_models` setting in `POST /setup/config` overrides it per
   task with ordered lists of `{model, digest}` records; an operator entry for
@@ -99,6 +99,26 @@ repository under `llm_ab_pr_repos` to its `tenant` and pinned AB SAN
 (`certificate`). The `pr_summary` task uses the built-in default map unless `llm_task_models` overrides it.
 This does not change validation, final review, builds, or log triage. An
 unavailable hub summary is omitted rather than sent through AB's own providers.
+
+Other AB work uses the `LLM_COMPLETE` hub request (same AppBuilder client
+certificate). Set `llm_ab_work` in `POST /api/llm/admin/settings` to
+`{tenant, certificate, tasks}`: the tenant must be non-shared, the certificate
+is the pinned AB SAN, and `tasks` is the allowlist of task names AB may run
+(for example `scout`, `review`, `review_deep`, `coding`). The tenant comes only from this
+setting, never from the request. A task outside the list, or a different
+certificate, returns `not_configured`; a busy pool returns `no_capacity`, and
+AB then falls back to its own providers. The `review` task is a filter
+reviewer; The review ladder is `review` (Qwen), then `review_deep` (DeepSeek, skipped
+when it is not serving), then AB's cloud frontier reviewer, whose verdict
+alone passes a panel. Findings go back to the coder and through the same
+ladder until they are fixed or rounds stop making progress.
+
+To replay old AB work against the local models from an operator session, POST
+`{tenant, task, prompt, format}` to the loopback `POST /admin/ops/llm-complete`
+(same token as the other `/admin/ops` levers). It runs `llm_pool.complete` for
+that non-shared tenant and returns the pool's answer, so a past review or triage
+prompt can be compared against what the cloud reviewers said. AB's
+`scripts/lm_replay.py` wraps this.
 
 Optional cloud overflow is limited to explicitly opted-in **public** repositories
 (`allow_public_cloud: true` on the hub repo mapping, plus confirmed public GitHub

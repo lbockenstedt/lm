@@ -74,7 +74,10 @@ def _run_case(request, port, model, fixture, prompt, options=None):
         )
     except (SyntaxError, ValueError, RecursionError):
         passed = False
+    # done_reason ("length" means the model ran out of tokens, e.g. while reasoning) explains a fail.
+    reason = reply.get("done_reason")
     return {"fixture": fixture, "passed": passed, "elapsed_s": round(elapsed, 3),
+            **({"done_reason": reason} if reason in ("stop", "length", "load", "unload") else {}),
             **{key: reply[key] for key in ("load_duration", "eval_duration", "eval_count")
                if type(reply.get(key)) is int and 0 <= reply[key] < 2**53}}
 
