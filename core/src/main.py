@@ -9317,6 +9317,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         try:
             if req_type == "LLM_PR_SUMMARY":
                 return await self.llm_pool.ab_pr_summary(req, peer_cert_identity)
+            if req_type == "LLM_COMPLETE":
+                return await self.llm_pool.ab_complete(req, peer_cert_identity)
             # Return all logs, minus security lines (AB files public GitHub issues).
             if req_type == "GET_LOGS":
                 out = await asyncio.to_thread(self.collect_all_logs)

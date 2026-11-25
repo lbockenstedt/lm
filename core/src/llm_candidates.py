@@ -47,6 +47,8 @@ DEFAULT_TASK_MODELS = {
     "coding": ["qwen36-coding", "qwen38-scout"],
     "scout": ["qwen38-scout"],
     "reasoning": ["deepseek-r1-70b", "qwen38-scout"],
+    "review": ["qwen38-scout"],  # review pass 1: Qwen filter
+    "review_deep": ["deepseek-r1-70b"],  # review pass 2: DeepSeek; no fallback, AB skips it when absent
 }
 
 

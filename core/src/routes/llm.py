@@ -15,7 +15,7 @@ from llm_pool import HARDWARE_LIMITS, QUEUE_WAIT_MAX, queue_wait, SAMPLING_LIMIT
 
 
 POOL_SETTINGS = ("llm_task_models", "llm_ab_pr_repos", "llm_qualification_candidates",
-                 "llm_queue_wait_s", "llm_auto_provision", "llm_cloud_profiles")
+                 "llm_queue_wait_s", "llm_auto_provision", "llm_ab_work", "llm_cloud_profiles")
 TASK_KEY = r"[A-Za-z0-9_\-]{1,64}"
 REPO_KEY = r"[A-Za-z0-9_.\-]{1,100}/[A-Za-z0-9_.\-]{1,100}"
 SAN_LIMIT = 255
@@ -97,6 +97,16 @@ def validate_pool_config(hub, config):
                 or row.keys() - {"tenant", "certificate", "allow_public_cloud"}
                 for name, row in repos.items()):
             raise HTTPException(400, "Repository policies require a tenant and a pinned certificate SAN")
+    if "llm_ab_work" in config:
+        rule = config["llm_ab_work"]
+        if (not isinstance(rule, dict) or rule.keys() - {"tenant", "certificate", "tasks"}
+                or not isinstance(rule.get("tenant"), str) or tenant_is_shared(rule["tenant"])
+                or not hub.state.get_tenant(rule["tenant"])
+                or not isinstance(rule.get("certificate"), str)
+                or not 0 < len(rule["certificate"].strip()) <= SAN_LIMIT
+                or not isinstance(rule.get("tasks"), list) or len(rule["tasks"]) > 32
+                or any(not isinstance(t, str) or not re.fullmatch(TASK_KEY, t) for t in rule["tasks"])):
+            raise HTTPException(400, "AppBuilder work requires a tenant, a pinned certificate SAN and task names")
     if "llm_qualification_candidates" in config:
         candidates = config["llm_qualification_candidates"]
         if not isinstance(candidates, dict) or len(candidates) > 32 or any(
