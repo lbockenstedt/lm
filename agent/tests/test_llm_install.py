@@ -585,15 +585,16 @@ def test_additive_publish_failure_leaves_no_new_manifest(tmp_path, monkeypatch):
     first = _activation_fixture(tmp_path, monkeypatch)
     llm_activation.finalize(llm_activation.publish(first, "a" * 64))
     store = llm_activation.CANDIDATE_STORE
-    manifest = json.dumps({"config": {"digest": "sha256:" + "5" * 64}, "layers": []}).encode()
+    blob = hashlib.sha256(b"x").hexdigest()
+    manifest = json.dumps({"config": {"digest": f"sha256:{blob}"}, "layers": []}).encode()
     legacy = store / "manifests/registry.ollama.ai/library/second/cpu"
     legacy.parent.mkdir(parents=True)
     legacy.write_bytes(manifest)
-    (store / "blobs" / f"sha256-{'5' * 64}").write_bytes(b"x")
+    (store / "blobs" / f"sha256-{blob}").write_bytes(b"x")
     serving = llm_activation.SERVING_RUNTIME / "models"
     conflict = serving / "manifests-v2/ollama.com/library/second/cpu"
     conflict.parent.mkdir(parents=True)
     conflict.write_bytes(b"other")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="manifest conflicts"):
         llm_activation.publish({"model": "second:cpu", "digest": hashlib.sha256(manifest).hexdigest()}, "a" * 64)
     assert not (serving / "manifests/registry.ollama.ai/library/second/cpu").exists()
