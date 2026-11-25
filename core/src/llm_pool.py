@@ -306,7 +306,21 @@ class LlmPool:
                 detail = "; ".join(f"{label}: fixture_mismatch" for label in failures)
             elif self.provision_skipped.get(pk):
                 detail = "; ".join(f"Too small for {label}" for label in self.provision_skipped[pk])
+            serving = {name for name, _ in (report[2].items() if fresh else ())}
+            skipped = self.provision_skipped.get(pk, ())
+            catalog = []
+            for ckey, spec in CANDIDATES.items():
+                label = spec["label"]
+                # One explicit state per catalog model, so "not serving" never depends on job history.
+                row = ("serving" if spec["model"] in serving else
+                       "preparing" if job and job.get("kind") in ("bootstrap", "activation")
+                       and job.get("candidate") == label else
+                       "failed" if failures and label in failures else
+                       "too_small" if label in skipped else "not_loaded")
+                catalog.append({"key": ckey, "model": spec["model"], "label": label, "state": row,
+                                **({"code": failures[label]} if row == "failed" else {})})
             workers.append({"name": self.hub.state.get_module_name(pk), "state": state,
+                            "catalog": catalog,
                             "issues": [self.worker_issues[pk]] if pk in self.worker_issues else [],
                             "version": self.runtime_versions.get(pk) if fresh else None,
                             "capabilities": capabilities,

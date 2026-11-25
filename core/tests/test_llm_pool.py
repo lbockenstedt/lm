@@ -1580,6 +1580,8 @@ def test_dashboard_shows_provisioning_with_model_label(monkeypatch):
         row = next(w for w in pool.dashboard()["workers"] if w["name"] == "Worker a")
         assert row["state"] == "provisioning"
         assert row["detail"] == "Preparing " + CANDIDATES["gemma4-12b"]["label"]
+        states = {c["key"]: c["state"] for c in row["catalog"]}
+        assert states["gemma4-12b"] == "preparing" and set(states) == set(CANDIDATES)
         gate.set()
         await asyncio.gather(*list(pool.provision_tasks))
 
@@ -1662,3 +1664,17 @@ def test_worker_without_a_runtime_is_provisioned_from_hardware_alone(monkeypatch
     fake_agent(pool, order)
     run_provision(pool)
     assert order == ORDER
+
+
+def test_dashboard_catalog_states_survive_without_job_history(monkeypatch):
+    """Every catalog model has an explicit state even after finished jobs are cleared."""
+    pool = prov_pool(monkeypatch)
+    label = CANDIDATES["deepseek-r1-70b"]["label"]
+    pool.provision_failures["a"] = {label: "fixture_mismatch"}
+    pool.provision_skipped["a"] = [CANDIDATES["qwen36-coding"]["label"]]
+    pool.jobs.clear()
+    row = next(w for w in pool.dashboard()["workers"] if w["name"] == "Worker a")
+    got = {c["key"]: (c["state"], c.get("code")) for c in row["catalog"]}
+    assert got["deepseek-r1-70b"] == ("failed", "fixture_mismatch")
+    assert got["qwen36-coding"] == ("too_small", None)
+    assert got["gemma4-12b"][0] in ("not_loaded", "serving")

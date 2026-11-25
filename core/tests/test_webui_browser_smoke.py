@@ -116,7 +116,9 @@ def test_llm_dashboard_shows_worker_status_badges_and_tooltips(hub_url_and_sessi
     base, token = hub_url_and_session
     digest = "a" * 64
     workers = [
-        {"name": "W Ready", "state": "ready", "capabilities": {"vcpus": 16}, "models": [{"name": "trial:cpu", "digest": digest}]},
+        {"name": "W Ready", "state": "ready", "capabilities": {"vcpus": 16}, "models": [{"name": "trial:cpu", "digest": digest}],
+         "catalog": [{"key": "a", "model": "trial:cpu", "state": "serving"},
+                     {"key": "b", "model": "deep:70b", "state": "failed", "code": "fixture_mismatch"}]},
         {"name": "W Busy", "state": "busy"},
         {"name": "W Prov", "state": "provisioning", "detail": "gemma"},
         {"name": "W Off", "state": "no_fresh_report"},
@@ -159,6 +161,8 @@ def test_llm_dashboard_shows_worker_status_badges_and_tooltips(hub_url_and_sessi
             assert "16 vCPUs" in ready_tip and "trial:cpu" in ready_tip
             assert "runtime_unit_missing" in cards["W Attn"].get_attribute("title")
             page.get_by_text("Queued", exact=True).wait_for()
+            # Model chips come from the catalog states, not job history.
+            assert cards["W Ready"].get_by_text("deep:70b · failed").get_attribute("title") == "Failed: fixture_mismatch"
             # The Settings panel and Qualify controls are gone.
             assert page.get_by_role("button", name="Settings", exact=True).count() == 0
             assert page.get_by_role("button", name="Qualify", exact=True).count() == 0
