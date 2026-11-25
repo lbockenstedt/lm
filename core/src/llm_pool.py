@@ -193,6 +193,7 @@ PROVISION_MAX_WORKERS = 2
 PROVISION_BACKOFF_BASE = 900
 PROVISION_BACKOFF_MAX = 21600
 PROVISION_POLL_S = 2
+ACTIVATION_IDLE_WAIT_S = 90
 
 
 def queue_wait(config):
@@ -277,13 +278,16 @@ class LlmPool:
             failure = ({"model": next(iter(failures)), "code": next(iter(failures.values()))}
                        if failures else None)
             detail = ""
+            # A model that fails its fixtures is not worker trouble while the worker serves others.
+            unfit_only = bool(failure and fresh and report[2]
+                              and all(code == "fixture_mismatch" for code in failures.values()))
             state = ("pending" if not self.hub.approved_modules.get(pk) else
                      "disconnected" if socket is None else
                      "draining" if self.hub.is_draining(pk) else
                      # Provisioning comes before unavailable and busy: a new worker with no
                      # models reports "no_matching_models" and is reserved while it runs.
                      "provisioning" if provisioning else
-                     "attention" if failure and (fresh or pk in self.worker_issues) else
+                     "attention" if failure and not unfit_only and (fresh or pk in self.worker_issues) else
                      "unavailable" if pk in self.worker_issues else
                      "no_fresh_report" if not fresh else
                      "busy" if pk in self.reserved or not report[3] else "ready")
@@ -291,6 +295,8 @@ class LlmPool:
                 detail = ("Preparing " if job["kind"] == "bootstrap" else "Activating ") + job["candidate"]
             elif state == "attention":
                 detail = f"{failure['code']}: {failure['model']}"
+            elif unfit_only:
+                detail = "; ".join(f"{label}: fixture_mismatch" for label in failures)
             elif self.provision_skipped.get(pk):
                 detail = "; ".join(f"Too small for {label}" for label in self.provision_skipped[pk])
             workers.append({"name": self.hub.state.get_module_name(pk), "state": state,
@@ -386,6 +392,9 @@ class LlmPool:
         """Record a failed step: exponential backoff for this model and the code for the dashboard."""
         count = self.provision_fail_count.get((pk, key), 0)
         delay = min(PROVISION_BACKOFF_MAX, PROVISION_BACKOFF_BASE * 2 ** count)
+        if code == "fixture_mismatch":
+            # The model is deterministically unfit for this hardware; retrying only burns CPU.
+            delay = PROVISION_BACKOFF_MAX
         self.provision_fail_count[(pk, key)] = count + 1
         self.provision_retry_at[(pk, key)] = time.monotonic() + delay
         self.provision_failures.setdefault(pk, {})[CANDIDATES[key]["label"]] = code
@@ -408,7 +417,14 @@ class LlmPool:
         job = await self._wait_job(job)
         if job["state"] != "passed":
             return self._provision_failed(pk, key, job.get("code", "unsupported_or_invalid_reply"))
+        # The worker's last status report may still say "busy" from the bootstrap that just
+        # ended; a worker already serving models stays non-idle until its next report.
         job = self.start_activation(pk, key, auto=True)
+        for _ in range(ACTIVATION_IDLE_WAIT_S // 2):
+            if job:
+                break
+            await asyncio.sleep(PROVISION_POLL_S)
+            job = self.start_activation(pk, key, auto=True)
         if not job:
             return self._provision_failed(pk, key, "worker_changed")
         job = await self._wait_job(job)
