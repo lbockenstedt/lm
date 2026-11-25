@@ -1226,6 +1226,18 @@ def test_ab_pr_summary_routes_to_default_model_with_no_operator_map():
     assert pool.hub.request_response.call_args.args[0] in ("a", "b")
 
 
+def test_inference_jobs_record_the_worker_and_spread_across_workers():
+    """Back-to-back requests go to different workers, and each job row names the worker that ran it."""
+    gemma = CANDIDATES["gemma4-12b"]
+    pool = make_pool()
+    report_all(pool, gemma["model"], gemma["digest"])
+    pool.hub.request_response.return_value = {"status": "SUCCESS", "text": "ok"}
+    for _ in range(2):
+        asyncio.run(pool.complete("tenant-a", {"model": gemma["model"], "digest": gemma["digest"], "prompt": "x"}))
+    workers = [job["worker"] for job in pool.jobs if job.get("kind") == "inference"]
+    assert sorted(workers) == ["Worker a", "Worker b"]
+
+
 def test_ab_complete_requires_certificate_and_allowlisted_task():
     """AB work runs only for the pinned certificate, an allowed task and the configured tenant."""
     qwen = CANDIDATES["qwen38-scout"]

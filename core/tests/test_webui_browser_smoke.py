@@ -168,3 +168,48 @@ def test_llm_dashboard_shows_worker_status_badges_and_tooltips(hub_url_and_sessi
             assert page.get_by_role("button", name="Qualify", exact=True).count() == 0
         finally:
             browser.close()
+
+
+def test_llm_dashboard_saves_appbuilder_work_rule(hub_url_and_session):
+    """The AppBuilder work card loads the saved rule, hides shared tenants and saves only llm_ab_work."""
+    base, token = hub_url_and_session
+    saved = []
+
+    def settings(route):
+        """Serve the stored rule on GET and record what a POST saves."""
+        if route.request.method == "POST":
+            saved.append(route.request.post_data_json)
+            return route.fulfill(json={"status": "ok"})
+        route.fulfill(json={"llm_ab_work": {"tenant": "acme", "certificate": "ab-old", "tasks": ["scout", "custom"]}})
+
+    with sync_api.sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            context = browser.new_context()
+            context.add_cookies([{"name": "lm_session", "value": token, "url": base}])
+            page = context.new_page()
+            page.route("**/api/llm/admin/dashboard", lambda route: route.fulfill(json={"workers": [], "jobs": []}))
+            page.route("**/api/llm/admin/settings", settings)
+            page.route("**/setup/tenants", lambda route: route.fulfill(json={"tenants": [
+                {"id": "acme", "name": "Acme"}, {"id": "shared", "name": "Shared", "shared": True}]}))
+            page.goto(base + "/")
+            page.wait_for_function("window.lmCoreLoaded && typeof currentUser !== 'undefined' && !!currentUser")
+            page.evaluate("_rebuildMainNav([], [])")
+            page.locator("#nav-llm").click()
+            page.get_by_text("AppBuilder work", exact=True).wait_for()
+            tenant = page.locator("select[data-action=abTenant]")
+            page.wait_for_function("document.querySelector('select[data-action=abTenant]').value === 'acme'")
+            assert tenant.locator("option").all_inner_texts() == ["Select a tenant", "Acme"]
+            assert page.locator("input[data-input=abCertificate]").input_value() == "ab-old"
+            # Tick one more task; a saved task outside the known list stays listed and ticked.
+            page.locator("input[data-action=abTask][value=review]").check()
+            assert page.locator("input[data-action=abTask][value=custom]").is_checked()
+            page.get_by_role("button", name="Save", exact=True).click()
+            for _ in range(50):
+                if saved:
+                    break
+                page.wait_for_timeout(100)
+            assert saved == [{"llm_ab_work": {"tenant": "acme", "certificate": "ab-old",
+                                              "tasks": ["scout", "custom", "review"]}}]
+        finally:
+            browser.close()
