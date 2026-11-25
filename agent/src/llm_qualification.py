@@ -54,6 +54,32 @@ def _artifact(spec):
     return model, digest, version
 
 
+_THINK = re.compile(r"\A\s*<think>.*?</think>\s*", re.DOTALL)
+_FENCE = re.compile(r"\A\s*```[\w+-]*\n(.*?)\n?```\s*\Z", re.DOTALL)
+
+
+def _unwrap(text):
+    """Drop a leading reasoning block and one surrounding code fence; the answer itself is untouched."""
+    if not isinstance(text, str):
+        return text
+    text = _THINK.sub("", text, count=1)
+    fenced = _FENCE.match(text)
+    return fenced.group(1) if fenced else text
+
+
+def _shape(text):
+    """Name the wrapper around a reply (never its content) so a failed fixture can be diagnosed."""
+    if not isinstance(text, str):
+        return "no_text"
+    if not text.strip():
+        return "empty"
+    if text.lstrip().startswith("<think>"):
+        return "think_block"
+    if "```" in text:
+        return "code_fence"
+    return "plain"
+
+
 def _run_case(request, port, model, fixture, prompt, options=None):
     """Score exact semantics and capture timing without retaining generated text."""
     profile = {"num_predict": 1024, **options} if options is not None else {
@@ -66,8 +92,10 @@ def _run_case(request, port, model, fixture, prompt, options=None):
     reply = request("/api/generate", body, 3600 if options is not None else 240, port=port)
     elapsed = time.monotonic() - started
     valid = reply.get("done") is True and reply.get("done_reason") == "stop" and reply.get("model") == model
+    raw = reply.get("response")
+    shape = _shape(raw)
+    text = _unwrap(raw)
     try:
-        text = reply.get("response")
         passed = valid and isinstance(text, str) and (
             json.loads(text) == JSON_EXPECTED if fixture == "json"
             else ast.dump(ast.parse(text)) == ast.dump(ast.parse(PYTHON_EXPECTED))
@@ -78,6 +106,7 @@ def _run_case(request, port, model, fixture, prompt, options=None):
     reason = reply.get("done_reason")
     return {"fixture": fixture, "passed": passed, "elapsed_s": round(elapsed, 3),
             **({"done_reason": reason} if reason in ("stop", "length", "load", "unload") else {}),
+            **({"shape": shape} if not passed else {}),
             **{key: reply[key] for key in ("load_duration", "eval_duration", "eval_count")
                if type(reply.get(key)) is int and 0 <= reply[key] < 2**53}}
 

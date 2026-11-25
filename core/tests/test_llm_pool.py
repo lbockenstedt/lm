@@ -1258,6 +1258,10 @@ def test_qualification_result_keeps_only_known_done_reasons():
     kept = qualification_result({**base, "fixtures": rows("length")})["fixtures"]
     assert kept[1]["done_reason"] == "length" and kept[1]["eval_count"] == 1024
     assert "done_reason" not in qualification_result({**base, "fixtures": rows("<b>x</b>")})["fixtures"][1]
+    shaped = [{"fixture": "json", "passed": True}, {"fixture": "indentation", "passed": False, "shape": "think_block"}]
+    assert qualification_result({**base, "fixtures": shaped})["fixtures"][1]["shape"] == "think_block"
+    shaped[1]["shape"] = "<b>x</b>"
+    assert "shape" not in qualification_result({**base, "fixtures": shaped})["fixtures"][1]
 
 
 def test_queue_wait_setting_validates_and_round_trips():

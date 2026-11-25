@@ -623,3 +623,16 @@ def test_activation_waits_for_a_runtime_that_answers_errors_while_starting(tmp_p
     worker._available_models = inventory
     result = asyncio.run(worker.handle_command("LLM_ACTIVATE", {"candidate": "gemma4-12b"}))
     assert result["code"] == "activated" and calls == []
+
+
+@pytest.mark.parametrize("reply, passed, shape", [
+    ("def classify(value):\n    if value > 0:\n        return 1\n    return 0\n", True, "plain"),
+    ("<think>reasoning</think>\n```python\ndef classify(value):\n    if value > 0:\n        return 1\n    return 0\n```", True, "think_block"),
+    ("Here you go:\n```python\ndef classify(value):\n    return 1\n```", False, "code_fence"),
+])
+def test_python_fixture_accepts_think_and_fence_wrappers_and_reports_shape(reply, passed, shape):
+    """A reasoning model's <think> block or one code fence is not a wrong answer; other prose still fails."""
+    request = lambda *a, **k: {"done": True, "done_reason": "stop", "model": "m", "response": reply}
+    row = qualification._run_case(request, 1, "m", "indentation", "p", {"num_ctx": 1})
+    assert row["passed"] is passed
+    assert row.get("shape") == (None if passed else shape)
