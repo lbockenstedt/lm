@@ -1572,3 +1572,17 @@ def test_replay_of_manual_preparation_does_not_reach_a_reassigned_tenant_worker(
     row["auto"] = True
     asyncio.run(go())
     pool.hub.request_response.assert_called()
+
+
+def test_worker_without_a_runtime_is_provisioned_from_hardware_alone(monkeypatch):
+    """A fresh worker reports an error (no inventory); the provisioner still installs it."""
+    pool = prov_pool(monkeypatch)
+    sock = pool.hub.active_connections["a"]
+    pool.report("a", sock, {"status": "ERROR", "code": "runtime_not_started",
+                            "detail_code": "runtime_binary_missing",
+                            "capabilities": {"mode": "cpu", "ram_bytes": 128 * GIB, "vcpus": 8}})
+    assert "a" not in pool.inventory
+    order = []
+    fake_agent(pool, order)
+    run_provision(pool)
+    assert order == ORDER
