@@ -55,6 +55,7 @@ function workerTooltip(w) {
     ];
     const codes = (w.issues || []).map(issue => issue.code).filter(Boolean);
     if (codes.length) lines.push(`Issues: ${codes.join(', ')}`);
+    if (w.detail) lines.push(w.detail);
     if (w.qualification) lines.push('Qualification only');
     return lines.join('\n');
 }
