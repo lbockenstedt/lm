@@ -143,15 +143,22 @@ def _run(key, request, approved_baseline, *, spec=None, progress=None):
         return {"status": "ERROR", "code": "baseline_unavailable"}
     if request("/api/version", port=PORT).get("version") != version:
         return {"status": "ERROR", "code": "runtime_version_mismatch"}
-    # Validate the artifact after download and before running any fixture.
-    if progress:
-        progress("pull")
+    # Download only when the exact digest is not already in the candidate store; a re-run (every
+    # hub restart retries a failed bootstrap) must not touch the registry or show "pull".
     try:
-        pulled = request("/api/pull", {"model": model, "stream": False}, 7200, port=PORT)
+        present = _installed(request, PORT, model, digest)
     except (OSError, ValueError, http.client.HTTPException):
-        return {"status": "ERROR", "code": "candidate_pull_failed"}
-    if pulled.get("status") != "success":
-        return {"status": "ERROR", "code": "candidate_pull_failed"}
+        present = False
+    if not present:
+        if progress:
+            progress("pull")
+        try:
+            pulled = request("/api/pull", {"model": model, "stream": False}, 7200, port=PORT)
+        except (OSError, ValueError, http.client.HTTPException):
+            return {"status": "ERROR", "code": "candidate_pull_failed"}
+        if pulled.get("status") != "success":
+            return {"status": "ERROR", "code": "candidate_pull_failed"}
+    # Validate the artifact before running any fixture.
     if not _installed(request, PORT, model, digest):
         return {"status": "ERROR", "code": "candidate_digest_mismatch"}
     # Nothing from a real job is provided to the candidate runtime.
