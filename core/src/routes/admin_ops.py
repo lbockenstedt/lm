@@ -1609,6 +1609,20 @@ def register(app, hub, ctx):
         return {"jobs": [{key: j.get(key) for key in ("model", "worker", "state", "code", "elapsed_s", "finished_at")}
                          for j in rows[:500]]}
 
+    # Lift the six-hour fixture_mismatch window so a worker retries its missing models now.
+    @app.post("/admin/ops/llm-retry")
+    async def admin_ops_llm_retry(request: Request):
+        """Clear LM provisioning backoffs. Body: ``{"target": "<llm spoke id>"}``, or empty for every worker."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        target = str((body if isinstance(body, dict) else {}).get("target") or "").strip()
+        cleared = hub.llm_pool.retry_provisioning(hub._primary_key(target) if target else None)
+        logger.warning("admin_ops: llm-retry via loopback target=%s cleared=%s", target or "all", cleared)
+        return {"status": "ok", "cleared": cleared}
+
     # Queue + timeout diagnostics for one spoke.
     @app.post("/admin/ops/spoke-queue")
     async def admin_ops_spoke_queue(request: Request):

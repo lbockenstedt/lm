@@ -1428,6 +1428,17 @@ def test_provisioner_waits_for_the_worker_to_report_idle_before_activating(monke
     assert len(calls) == len(ORDER) + 2
 
 
+def test_retry_provisioning_lifts_the_fixture_mismatch_window_for_one_worker(monkeypatch):
+    """The operator lever clears the saved unfit window, backoff and failure row, so the model is planned again."""
+    pool = prov_pool(monkeypatch, workers="ab")
+    for worker in "ab":
+        pool._provision_failed(worker, "deepseek-r1-70b", "fixture_mismatch")
+    assert "deepseek-r1-70b" not in pool._provision_plan("a")
+    assert pool.retry_provisioning("a") == ["a"]
+    assert "deepseek-r1-70b" in pool._provision_plan("a")
+    assert "a" not in pool.provision_failures and "deepseek-r1-70b" not in pool._provision_plan("b")
+
+
 def test_finished_jobs_older_than_seven_days_are_dropped_but_metrics_stay(monkeypatch):
     """Job rows expire after a week; the per-model totals are kept."""
     pool = make_pool()
