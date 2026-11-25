@@ -153,7 +153,9 @@ def qualification_result(data):
         if (not isinstance(row, dict) or row.get("fixture") != expected
                 or not isinstance(row.get("passed"), bool)):
             return None
-        results.append({"fixture": expected, "passed": row["passed"], **{
+        results.append({"fixture": expected, "passed": row["passed"],
+                        **({"done_reason": row["done_reason"]}
+                           if row.get("done_reason") in ("stop", "length", "load", "unload") else {}), **{
             name: row[name] for name in ("elapsed_s", "eval_count", "eval_duration", "load_duration")
             if type(row.get(name)) in (int, float) and 0 <= row[name] < 2**53
         }})

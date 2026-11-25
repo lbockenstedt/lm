@@ -1248,6 +1248,18 @@ def test_ab_complete_requires_certificate_and_allowlisted_task():
     assert deep["status"] == "ERROR" and deep["code"] == "no_capacity"
 
 
+def test_qualification_result_keeps_only_known_done_reasons():
+    """A fixture's done_reason ("length" = out of tokens) is kept for diagnosis; other values are dropped."""
+    from llm_pool import qualification_result
+    gemma = CANDIDATES["gemma4-12b"]
+    rows = lambda reason: [{"fixture": "json", "passed": True, "done_reason": "stop"},
+                           {"fixture": "indentation", "passed": False, "done_reason": reason, "eval_count": 1024}]
+    base = {"model": gemma["model"], "digest": gemma["digest"], "version": "0.40.16"}
+    kept = qualification_result({**base, "fixtures": rows("length")})["fixtures"]
+    assert kept[1]["done_reason"] == "length" and kept[1]["eval_count"] == 1024
+    assert "done_reason" not in qualification_result({**base, "fixtures": rows("<b>x</b>")})["fixtures"][1]
+
+
 def test_queue_wait_setting_validates_and_round_trips():
     """llm_queue_wait_s saves only as an integer 0..3600 and is returned with its default."""
     pool = make_pool()
