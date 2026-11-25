@@ -167,7 +167,7 @@ def test_cpu_candidate_uses_separate_store_and_fixed_fixtures(tmp_path, monkeypa
     result = qualification._run("cpu", request, {baseline["model"]: baseline["digest"]})
     assert result["code"] == expected
     # An artifact already in the store is never pulled again; a missing one is.
-    assert bool(pulls) is (fault == "pull")
+    assert bool(pulls) is (fault in ("pull", "digest"))
     if fault in (None, "indentation", "baseline_indentation"):
         assert len(generations) == 4 and generations[0][1] == generations[2][1]
         assert all(fixture["passed"] for fixture in result["baseline"]["fixtures"]) is (fault != "baseline_indentation")
