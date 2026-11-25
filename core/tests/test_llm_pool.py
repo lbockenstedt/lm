@@ -1374,6 +1374,18 @@ def test_provisioner_waits_for_the_worker_to_report_idle_before_activating(monke
     assert len(calls) == len(ORDER) + 2
 
 
+def test_finished_jobs_older_than_seven_days_are_dropped_but_metrics_stay(monkeypatch):
+    """Job rows expire after a week; the per-model totals are kept."""
+    pool = make_pool()
+    old = {"kind": "bootstrap", "state": "passed", "candidate": "x", "tier": "local",
+           "model": "m:1", "digest": "d", "version": "0.40.16", "elapsed_s": 1.0}
+    pool._finish(dict(old))
+    pool.jobs[0]["finished_at"] -= llm_pool.JOB_RETENTION_S + 5
+    pool._finish(dict(old))
+    assert len(pool.dashboard()["jobs"]) == 1
+    assert pool.dashboard()["metrics"][0]["completed"] == 2
+
+
 def test_catalog_has_ram_minimums_in_gib():
     """Each catalog entry carries the owner-chosen minimum RAM."""
     assert {k: v["min_ram_bytes"] // GIB for k, v in CANDIDATES.items()} == {
