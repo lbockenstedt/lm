@@ -315,6 +315,8 @@ def publish(candidate, expected_runtime_digest):
         manifest_path.parent.mkdir(parents=True)
         manifest_path.write_bytes(manifest)
         manifest_path.chmod(0o644)
+        # Ollama 0.40+ mkdirs manifests-v2 at startup; the serving store is read-only (500 on /api/tags).
+        (staged / "manifests-v2").mkdir()
         if created:
             runtime = root / "runtime"
             shutil.copytree(CANDIDATE_RUNTIME, runtime, symlinks=True)
@@ -357,6 +359,7 @@ def publish(candidate, expected_runtime_digest):
                     identity = source.stat()
                     os.link(source, target, follow_symlinks=False)
                     added_blobs.append((target, identity.st_dev, identity.st_ino))
+            _mkdirs(destination, ("manifests-v2",))
             _mkdirs(destination, parts[:-1])
             target = _store_path(destination, *parts)
             added = not target.exists() and not target.is_symlink()
