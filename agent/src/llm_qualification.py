@@ -4,6 +4,7 @@ import ast
 import asyncio
 import http.client
 import json
+import logging
 import re
 import subprocess
 import time
@@ -17,6 +18,7 @@ MANIFEST = Path("/etc/lm/llm-qualification.json")
 # (llm_spoke.SERVING_PORT); private to the VM, so fixed rather than configured.
 PORT = 11439
 BASELINE_PORT = 11438
+log = logging.getLogger(__name__)
 CANDIDATE_SERVICE = "lm-llm-candidate.service"
 JSON_EXPECTED = {"items": [{"label": "CPU", "count": 2}]}
 PYTHON_EXPECTED = "def classify(value):\n    if value > 0:\n        return 1\n    return 0\n"
@@ -102,6 +104,12 @@ def _run_case(request, port, model, fixture, prompt, options=None):
         )
     except (SyntaxError, ValueError, RecursionError):
         passed = False
+    if not passed:
+        # The fixture prompt is synthetic (no job data), so the head and tail of the reply are safe to log.
+        excerpt = raw if isinstance(raw, str) and len(raw) <= 800 else (
+            f"{raw[:500]} ... {raw[-300:]}" if isinstance(raw, str) else repr(raw))
+        log.warning("qualification fixture %s failed on %s: done_reason=%s shape=%s eval_count=%s reply=%r",
+                    fixture, model, reply.get("done_reason"), shape, reply.get("eval_count"), excerpt)
     # done_reason ("length" means the model ran out of tokens, e.g. while reasoning) explains a fail.
     reason = reply.get("done_reason")
     return {"fixture": fixture, "passed": passed, "elapsed_s": round(elapsed, 3),
