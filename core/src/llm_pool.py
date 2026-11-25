@@ -155,7 +155,9 @@ def qualification_result(data):
             return None
         results.append({"fixture": expected, "passed": row["passed"],
                         **({"done_reason": row["done_reason"]}
-                           if row.get("done_reason") in ("stop", "length", "load", "unload") else {}), **{
+                           if row.get("done_reason") in ("stop", "length", "load", "unload") else {}),
+                        **({"shape": row["shape"]} if row.get("shape") in (
+                            "no_text", "empty", "think_block", "code_fence", "plain") else {}), **{
             name: row[name] for name in ("elapsed_s", "eval_count", "eval_duration", "load_duration")
             if type(row.get(name)) in (int, float) and 0 <= row[name] < 2**53
         }})
