@@ -1010,10 +1010,15 @@ class LlmPool:
         if (not isinstance(tenant, str) or not tenant or tenant_is_shared(tenant)
                 or not self.hub.state.get_tenant(tenant)):
             return {"status": "ERROR", "code": "not_configured"}
-        return await self.complete(tenant, {
+        result = await self.complete(tenant, {
             "task": task, "prompt": request.get("prompt"),
             "format": request.get("format", "text"),
         })
+        # A reasoning model (deepseek-r1) puts its chain of thought in a leading <think> block even with
+        # thinking disabled; AB parses the verdict that follows, so hand it only the answer.
+        if isinstance(result, dict) and isinstance(result.get("text"), str):
+            result = {**result, "text": re.sub(r"\A\s*<think>.*?</think>\s*", "", result["text"], count=1, flags=re.DOTALL)}
+        return result
 
     async def _public_cloud_summary(self, tenant, prompt, unavailable):
         """Try eligible cloud capacity only for a trusted public PR summary."""

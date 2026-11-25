@@ -1240,6 +1240,10 @@ def test_ab_complete_requires_certificate_and_allowlisted_task():
     assert asyncio.run(pool.ab_complete({**request, "task": "coding"}, ("ab-client",)))["code"] == "not_configured"
     ok = asyncio.run(pool.ab_complete(request, ("ab-client",)))
     assert ok["status"] == "SUCCESS" and ok["model"] == qwen["model"]
+    # A leading reasoning block is dropped; text without one is untouched.
+    pool.hub.request_response.return_value = {"status": "SUCCESS", "text": "<think>\nhmm\n</think>\n{\"verdict\":\"Approve\"}"}
+    assert asyncio.run(pool.ab_complete(request, ("ab-client",)))["text"] == '{"verdict":"Approve"}'
+    pool.hub.request_response.return_value = {"status": "SUCCESS", "text": "[]"}
     # Pass 1 review is Qwen; pass 2 is DeepSeek only and never falls back to Qwen.
     review = asyncio.run(pool.ab_complete({**request, "task": "review"}, ("ab-client",)))
     assert review["status"] == "SUCCESS" and review["model"] == qwen["model"]
