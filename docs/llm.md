@@ -113,6 +113,13 @@ when it is not serving), then AB's cloud frontier reviewer, whose verdict
 alone passes a panel. Findings go back to the coder and through the same
 ladder until they are fixed or rounds stop making progress.
 
+To replay old AB work against the local models from an operator session, POST
+`{tenant, task, prompt, format}` to the loopback `POST /admin/ops/llm-complete`
+(same token as the other `/admin/ops` levers). It runs `llm_pool.complete` for
+that non-shared tenant and returns the pool's answer, so a past review or triage
+prompt can be compared against what the cloud reviewers said. AB's
+`scripts/lm_replay.py` wraps this.
+
 Optional cloud overflow is limited to explicitly opted-in **public** repositories
 (`allow_public_cloud: true` on the hub repo mapping, plus confirmed public GitHub
 visibility from AB). Enable only for repositories cleared for that provider.

@@ -40,7 +40,7 @@ import secrets
 # Hub HTTP error type, request object and shared logger.
 from api import HTTPException, Request, logger
 # Helper that unwraps a spoke's relayed reply envelope.
-from access import raw_tenant_id, same_tenant, unwrap_spoke
+from access import raw_tenant_id, same_tenant, tenant_is_shared, unwrap_spoke
 
 # Argument-shape guard for the diagnostic bundle's unit / repo / log / lines
 # parameters. Deliberately strict: letters, digits, and the handful of path /
@@ -1577,6 +1577,28 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=500, detail=str(e))
         # Return the command_runner result.
         return {"status": "ok", "target": target, "result": res}
+
+    # Replay a prompt through the LM pool, for workflow and accuracy tests.
+    @app.post("/admin/ops/llm-complete")
+    async def admin_ops_llm_complete(request: Request):
+        """Run one prompt on the LM-hosted models, as AppBuilder's LLM_COMPLETE would.
+
+        Body: ``{"tenant": "<non-shared tenant>", "task": "<llm task>" | "model"+"digest",
+        "prompt": "...", "format": "text|json|python"}``. Lets an operator session replay
+        old AB work (a review, a triage) against the local models and compare answers.
+        """
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        body = body if isinstance(body, dict) else {}
+        tenant = body.pop("tenant", None)
+        if (not isinstance(tenant, str) or not hub.state.get_tenant(tenant)
+                or tenant_is_shared(tenant)):
+            raise HTTPException(status_code=400, detail="a non-shared tenant is required")
+        logger.warning("admin_ops: llm-complete via loopback tenant=%s task=%r", tenant, body.get("task"))
+        return await hub.llm_pool.complete(tenant, body)
 
     # Queue + timeout diagnostics for one spoke.
     @app.post("/admin/ops/spoke-queue")
