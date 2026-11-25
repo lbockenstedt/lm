@@ -13098,6 +13098,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         retry_task = asyncio.create_task(self.run_retry_loop())
         persistence_task = asyncio.create_task(self.state.persistence_loop())
         repo_sync_task = asyncio.create_task(self.run_repo_sync_loop())
+        llm_provision_task = asyncio.create_task(self.run_llm_provision_loop())
         watchdog_bridge_task = asyncio.create_task(self.run_watchdog_bridge_loop())
         statuspage_push_task = asyncio.create_task(self.run_statuspage_push_loop())
         mps_task = asyncio.create_task(self.run_mps_loop())
@@ -13472,6 +13473,20 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 except (asyncio.CancelledError, Exception):  # noqa: BLE001
                     pass
 
+
+    async def run_llm_provision_loop(self):
+        """Every 60 s, start pulling missing catalog models on approved LLM workers.
+
+        run_sync_loop runs cycles one after another, so a pass never starts while
+        the previous one is running, and it logs rather than raises, so the loop
+        never dies. The pulls themselves run as per-worker tasks in LlmPool.
+        """
+        async def _body():
+            """Run one reconciler pass."""
+            await self.llm_pool.provision_once()
+
+        await run_sync_loop(stagger=45, body=_body, delay=lambda: 60,
+                            error_label="llm provision failed")
 
     async def run_hub_heartbeat_loop(self):
         """Emit a greppable [heartbeat] line into self.logs every ~60s so
