@@ -118,6 +118,43 @@ single-instance guard; the rogue script never kills itself.
 
 ---
 
+## Rogue DNS burst (static IP + fixed DNS + query load) — `rogue_dns_burst`
+
+**Alert: Rogue DNS server / DNS anomaly (same as `rogue_dns`); no quota lever.**
+A copy of `rogue_dns` that, besides the headless Firefox browsing, sends a
+steady DNS query load to the rogue server while the static phase lasts.
+`rogue_dns` itself is unchanged. It is catalogued as an exclusive failure sim
+(`multi_capable: false`, wireless). Clients keep their IP, so cs lists it in
+`QT_EXCLUDE_NONISOLATING_SIMS` and it is not shed as a no-IP dongle. Requires
+the companion cs client update (cs#284); ship the LM catalog first.
+
+In **Simulations → Config** set `rogue_dns_burst_server` (and, if needed,
+`rogue_dns_burst_domains`) under **Address**, then enable `rogue_dns_burst` in
+the target `[s0]`–`[s9]` buckets or per-client overrides. The rogue server must
+already exist and answer at the supplied IP; no address is built into the repo.
+
+| Section | Key | Default | Purpose |
+|---|---|---|---|
+| `[s0]`–`[s9]` | `rogue_dns_burst` | `off` | Enable the repeating cycle for these clients |
+| `[address]` | `rogue_dns_burst_server` | blank | Rogue DNS server IPv4; blank or invalid skips the sim |
+| `[address]` | `rogue_dns_burst_domains` | `www.google.com, www.youtube.com, www.linkedin.com` | Domains queried round-robin, one per line |
+| `[simulation]` | `rogue_dns_burst_dhcp_interval` | `1800` | Seconds in the DHCP phase between runs |
+| `[simulation]` | `rogue_dns_burst_duration` | `3600` | Seconds of static phase with browsing and query load |
+| `[simulation]` | `rogue_dns_burst_browse_interval` | `60` | Seconds between browse requests |
+| `[simulation]` | `rogue_dns_burst_rate` | `20` | Queries per second, before the DNS ceiling |
+| `[simulation]` | `rogue_dns_burst_max_pending` | `40` | Maximum queries in flight (waits on the oldest when full) |
+
+The state machine, state file (`rogue_dns_burst.state`) and DHCP restore are
+those of `rogue_dns`. During the static phase a background loop launches
+`rogue_dns_burst_rate` queries each second (`dig` on Linux, `Resolve-DnsName`
+with a 2 s timeout on Windows). The rate goes through the shared
+`dns_ceiling_rate` and gateway breaker; there is no second throttle. The loop
+and its own children are stopped before DHCP is restored, also on INT/TERM/exit,
+and the script never kills processes of its own kind. If `dig` is missing the
+Linux client logs it and runs without the burst.
+
+---
+
 ## The two levers in detail
 
 ### 1. Config (`simulation.conf`) — the per-client break

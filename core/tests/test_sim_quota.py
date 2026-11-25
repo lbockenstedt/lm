@@ -634,6 +634,15 @@ def test_rogue_dns_catalog_metadata():
     }
 
 
+def test_rogue_dns_burst_catalog_metadata():
+    """The burst variant is offered as a wireless-exclusive failure sim."""
+    ids = {s["sim_id"] for s in sim_quota.available_sims_from_ini("")}
+    assert "rogue_dns_burst" in ids
+    assert sim_quota.SIM_META["rogue_dns_burst"] == {
+        "category": "failure", "multi_capable": False, "media": "wireless",
+    }
+
+
 def test_sim_meta_is_the_sims_json_list():
     # sims.json is the one sim list; the hub must not keep its own copy.
     import json
