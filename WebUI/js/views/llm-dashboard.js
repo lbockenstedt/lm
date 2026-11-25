@@ -4,7 +4,9 @@
 //   Jobs:    recent jobs with Refresh and "Clear finished jobs".
 //   Metrics: the compact per-model metrics table, kept for performance evaluation.
 // An ES module: the main nav opens it through lmViews.llm(container).
-// Fetches GET /api/llm/admin/dashboard and POSTs /api/llm/admin/jobs/clear.
+//   AppBuilder work: which tenant, AppBuilder certificate and tasks may use the pool (the llm_ab_work setting).
+// Fetches GET /api/llm/admin/dashboard, POSTs /api/llm/admin/jobs/clear, and reads and saves
+// /api/llm/admin/settings (llm_ab_work only) with the tenant list from /setup/tenants.
 import { safeHtml } from '../core/safe-html.js';
 import { createView, delegate } from '../core/view.js';
 
@@ -207,6 +209,37 @@ function renderMetricsSection(metrics) {
     </div>`;
 }
 
+// Tasks AppBuilder can send to the pool, with what each one runs on.
+const AB_TASKS = [
+    ['scout', 'Scout: code search and triage (Qwen 3.8)'],
+    ['coding', 'Coding: builds and fixes (Qwen 3.6)'],
+    ['summary', 'Summary: PR and log summaries (Gemma 4)'],
+    ['review', 'Review: first-pass reviewer (Qwen 3.8)'],
+    ['review_deep', 'Review deep: second-pass reviewer (DeepSeek R1)'],
+];
+const INPUT = 'w-full border border-slate-300 rounded px-2 py-1.5 text-sm';
+
+// AppBuilder work: the allowlist the hub applies to AppBuilder's LLM_COMPLETE requests.
+function renderAbWorkSection(ab, tenants) {
+    // Keep a saved task that is not in the known list so saving never drops it.
+    const tasks = [...AB_TASKS, ...ab.tasks.filter(t => !AB_TASKS.some(([k]) => k === t)).map(t => [t, t])];
+    const ready = ab.tenant && ab.certificate.trim();
+    return safeHtml`<div class="hpe-card rounded-lg p-5 shadow-sm space-y-3">
+        <h3 class="text-sm font-bold text-slate-500">AppBuilder work</h3>
+        <p class="text-xs text-slate-500">Lets AppBuilder run the selected tasks on the local models. A task that is not ticked, or a different certificate, is refused and AppBuilder uses its own providers.</p>
+        <label class="block text-xs font-bold text-slate-500">Tenant
+            <select data-action="abTenant" class="${INPUT}" title="Tenant the work is billed and scoped to; the shared tenant is not allowed">
+                <option value=""${ab.tenant ? '' : ' selected'}>Select a tenant</option>
+                ${tenants.map(t => safeHtml`<option value="${t.id}"${t.id === ab.tenant ? ' selected' : ''}>${t.name}</option>`)}
+            </select></label>
+        <label class="block text-xs font-bold text-slate-500">AppBuilder certificate SAN
+            <input data-input="abCertificate" type="text" maxlength="255" value="${ab.certificate}" class="${INPUT}" title="The name on AppBuilder's client certificate"></label>
+        <div class="space-y-1">${tasks.map(([key, label]) => safeHtml`
+            <label class="flex items-center gap-2 text-xs text-slate-700"><input type="checkbox" data-action="abTask" value="${key}"${ab.tasks.includes(key) ? ' checked' : ''}>${label}</label>`)}</div>
+        <div class="flex justify-end"><button data-action="saveAbWork" type="button" class="bg-navy text-white rounded-full px-4 py-1.5 text-xs font-bold${ready ? '' : ' opacity-50 cursor-not-allowed'}"${ready ? '' : safeHtml` disabled`} title="Save the AppBuilder work rule">Save</button></div>
+    </div>`;
+}
+
 // ── Public API ───────────────────────────────────────────────────────────────
 
 // Ignore stale requests if a second load reuses the same root element.
@@ -220,7 +253,7 @@ async function renderLlmDashboard(container) {
     // Stale-render guard: ignore async results once the user navigated away.
     const isCurrent = () => visits.get(container) === visit && currentView === 'llm' && container.isConnected;
 
-    const state = { workers: [], jobs: [], metrics: [] };
+    const state = { workers: [], jobs: [], metrics: [], tenants: [], ab: { tenant: '', certificate: '', tasks: [] } };
     let status = { type: '', message: '' };
     let loading = false;
 
@@ -231,6 +264,7 @@ async function renderLlmDashboard(container) {
                 ${renderWorkersSection(state.workers)}
                 ${renderJobsSection(state.jobs)}
                 ${renderMetricsSection(state.metrics)}
+                ${renderAbWorkSection(state.ab, state.tenants)}
             </div>` });
     // Bind once; morphing keeps delegated listeners on the container.
     delegate(container, {
@@ -253,6 +287,28 @@ async function renderLlmDashboard(container) {
             await load();
         },
         refresh: () => { load(); },
+        // Form edits stay in state so a refresh keeps what was typed.
+        abTenant: (el) => { state.ab.tenant = el.value; view.refresh(); },
+        abCertificate: (el) => { state.ab.certificate = el.value; view.refresh(); },
+        abTask: (el) => {
+            const tasks = state.ab.tasks.filter(t => t !== el.value);
+            state.ab.tasks = el.checked ? [...tasks, el.value] : tasks;
+        },
+        // Save only llm_ab_work; the hub validates the tenant, certificate and task names.
+        saveAbWork: async (el) => {
+            el.disabled = true;
+            try {
+                await apiJson('/api/llm/admin/settings', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ llm_ab_work: {
+                        tenant: state.ab.tenant, certificate: state.ab.certificate.trim(), tasks: state.ab.tasks } }),
+                });
+                if (isCurrent()) showToast('AppBuilder work saved.', 'success');
+            } catch (e) {
+                if (isCurrent()) showToast(e.message || String(e), 'error');
+            }
+            if (isCurrent()) el.disabled = false;
+        },
     });
 
     // Keep the cached snapshot visible while refreshing.
@@ -275,9 +331,25 @@ async function renderLlmDashboard(container) {
         if (isCurrent()) view.refresh();
     }
 
+    // Load the saved AppBuilder rule and the tenant choices once; config pages never auto-refresh.
+    async function loadAbWork() {
+        try {
+            const [settings, tenants] = await Promise.all([
+                apiJson('/api/llm/admin/settings'), apiJson('/setup/tenants', { credentials: 'same-origin' })]);
+            if (!isCurrent()) return;
+            const rule = settings.llm_ab_work || {};
+            state.ab = { tenant: rule.tenant || '', certificate: rule.certificate || '',
+                         tasks: Array.isArray(rule.tasks) ? rule.tasks : [] };
+            state.tenants = (tenants.tenants || []).filter(t => !t.shared && !t.is_group);
+            view.refresh();
+        } catch (e) {
+            if (isCurrent()) showToast('AppBuilder settings load failed: ' + (e.message || e), 'error');
+        }
+    }
+
     // Initial load.
     view.refresh();
-    await load();
+    await Promise.all([load(), loadAbWork()]);
 }
 
 lmViews.llm = renderLlmDashboard;
