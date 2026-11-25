@@ -100,7 +100,9 @@ def ollama_request(path, body=None, timeout=3, *, port=SERVING_PORT):
         )
         reply = conn.getresponse()
         if reply.status != 200:
-            raise ValueError(f"Ollama returned an error status: {reply.status} for {path}")
+            # Ollama explains a 5xx in a small JSON body; keep a bounded, single-line copy for the log.
+            detail = reply.read(300).decode("utf-8", "replace").replace("\n", " ").strip()
+            raise ValueError(f"Ollama returned an error status: {reply.status} for {path}: {detail}")
         content = reply.read(MAX_RESPONSE_BYTES + 1)
         if len(content) > MAX_RESPONSE_BYTES:
             raise ValueError("Ollama response exceeds the size limit")
