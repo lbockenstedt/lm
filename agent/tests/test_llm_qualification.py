@@ -238,7 +238,7 @@ def test_bootstrap_smoke_uses_pinned_model_and_configured_options_without_baseli
         if path == "/api/tags":
             return {"models": [{"name": "test:new", "digest": "c" * 64 if bad_digest else digest}]}
         generated.append(body)
-        assert timeout == 900
+        assert timeout == 3600
         return {"done": True, "done_reason": "stop", "model": "test:new",
                 "response": json.dumps(qualification.JSON_EXPECTED) if body.get("format")
                 else qualification.PYTHON_EXPECTED}
