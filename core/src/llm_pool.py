@@ -1252,7 +1252,7 @@ class LlmPool:
             try:
                 # A lost response is ambiguous. Do not replay on another worker.
                 reply = await asyncio.wait_for(self.hub.request_response(
-                    key, "LLM_COMPLETE", request, timeout=930), timeout=935)
+                    key, "LLM_COMPLETE", request, timeout=7230), timeout=7235)
             except (TimeoutError, ConnectionError):
                 return {"status": "ERROR", "code": "dispatch_outcome_unknown"}
             finally:
