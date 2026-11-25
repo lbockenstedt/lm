@@ -4,6 +4,7 @@ import ast
 import asyncio
 import http.client
 import json
+import logging
 import re
 import subprocess
 import time
@@ -17,6 +18,7 @@ MANIFEST = Path("/etc/lm/llm-qualification.json")
 # (llm_spoke.SERVING_PORT); private to the VM, so fixed rather than configured.
 PORT = 11439
 BASELINE_PORT = 11438
+log = logging.getLogger(__name__)
 CANDIDATE_SERVICE = "lm-llm-candidate.service"
 JSON_EXPECTED = {"items": [{"label": "CPU", "count": 2}]}
 PYTHON_EXPECTED = "def classify(value):\n    if value > 0:\n        return 1\n    return 0\n"
@@ -102,6 +104,12 @@ def _run_case(request, port, model, fixture, prompt, options=None):
         )
     except (SyntaxError, ValueError, RecursionError):
         passed = False
+    if not passed:
+        # The fixture prompt is synthetic (no job data), so the head and tail of the reply are safe to log.
+        excerpt = raw if isinstance(raw, str) and len(raw) <= 800 else (
+            f"{raw[:500]} ... {raw[-300:]}" if isinstance(raw, str) else repr(raw))
+        log.warning("qualification fixture %s failed on %s: done_reason=%s shape=%s eval_count=%s reply=%r",
+                    fixture, model, reply.get("done_reason"), shape, reply.get("eval_count"), excerpt)
     # done_reason ("length" means the model ran out of tokens, e.g. while reasoning) explains a fail.
     reason = reply.get("done_reason")
     return {"fixture": fixture, "passed": passed, "elapsed_s": round(elapsed, 3),
@@ -143,15 +151,22 @@ def _run(key, request, approved_baseline, *, spec=None, progress=None):
         return {"status": "ERROR", "code": "baseline_unavailable"}
     if request("/api/version", port=PORT).get("version") != version:
         return {"status": "ERROR", "code": "runtime_version_mismatch"}
-    # Validate the artifact after download and before running any fixture.
-    if progress:
-        progress("pull")
+    # Download only when the exact digest is not already in the candidate store; a re-run (every
+    # hub restart retries a failed bootstrap) must not touch the registry or show "pull".
     try:
-        pulled = request("/api/pull", {"model": model, "stream": False}, 7200, port=PORT)
+        present = _installed(request, PORT, model, digest)
     except (OSError, ValueError, http.client.HTTPException):
-        return {"status": "ERROR", "code": "candidate_pull_failed"}
-    if pulled.get("status") != "success":
-        return {"status": "ERROR", "code": "candidate_pull_failed"}
+        present = False
+    if not present:
+        if progress:
+            progress("pull")
+        try:
+            pulled = request("/api/pull", {"model": model, "stream": False}, 7200, port=PORT)
+        except (OSError, ValueError, http.client.HTTPException):
+            return {"status": "ERROR", "code": "candidate_pull_failed"}
+        if pulled.get("status") != "success":
+            return {"status": "ERROR", "code": "candidate_pull_failed"}
+    # Validate the artifact before running any fixture.
     if not _installed(request, PORT, model, digest):
         return {"status": "ERROR", "code": "candidate_digest_mismatch"}
     # Nothing from a real job is provided to the candidate runtime.

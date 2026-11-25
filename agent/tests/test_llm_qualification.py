@@ -137,7 +137,7 @@ def test_cpu_candidate_uses_separate_store_and_fixed_fixtures(tmp_path, monkeypa
     manifest = tmp_path / "qualification.json"
     manifest.write_text(json.dumps({"cpu": {**candidate, "baseline": baseline}}))
     monkeypatch.setattr(qualification, "MANIFEST", manifest)
-    generations = []
+    generations, pulls = [], []
 
     def request(path, body=None, timeout=3, *, port):
         """Simulate candidate and baseline Ollama on two ports."""
@@ -147,8 +147,11 @@ def test_cpu_candidate_uses_separate_store_and_fixed_fixtures(tmp_path, monkeypa
             return {"version": "0.40.0" if new and fault == "version" else active["version"]}
         if path == "/api/pull":
             assert new and body["model"] == candidate["model"]
+            pulls.append(1)
             return {"status": "error" if fault == "pull" else "success"}
         if path == "/api/tags":
+            if new and fault == "pull":
+                return {"models": []}
             return {"models": [{"name": active["model"],
                                 "digest": "c" * 64 if new and fault == "digest" else active["digest"]}]}
         assert path == "/api/generate"
@@ -163,6 +166,8 @@ def test_cpu_candidate_uses_separate_store_and_fixed_fixtures(tmp_path, monkeypa
 
     result = qualification._run("cpu", request, {baseline["model"]: baseline["digest"]})
     assert result["code"] == expected
+    # An artifact already in the store is never pulled again; a missing one is.
+    assert bool(pulls) is (fault in ("pull", "digest"))
     if fault in (None, "indentation", "baseline_indentation"):
         assert len(generations) == 4 and generations[0][1] == generations[2][1]
         assert all(fixture["passed"] for fixture in result["baseline"]["fixtures"]) is (fault != "baseline_indentation")
