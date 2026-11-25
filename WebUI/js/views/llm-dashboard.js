@@ -1,6 +1,6 @@
-// LLM → Dashboard: a simple global-admin view with three tables.
-//   Workers: name plus a status badge (Ready / Busy / Provisioning / Offline / Needs attention);
-//            hover the badge for CPU, RAM, models and any issue codes.
+// LLM → Dashboard: a simple global-admin view.
+//   Workers: one card per worker with its status badge (Ready / Busy / Provisioning / Offline / Needs attention),
+//            hardware, and a badge per model (serving, passed, failed) plus any issue codes.
 //   Jobs:    recent jobs with Refresh and "Clear finished jobs".
 //   Metrics: the compact per-model metrics table, kept for performance evaluation.
 // An ES module: the main nav opens it through lmViews.llm(container).
@@ -62,16 +62,6 @@ function workerTooltip(w) {
     return lines.join('\n');
 }
 
-// One worker row: name and status badge with the details in its tooltip.
-function workerRow(w, jobs = []) {
-    const { label, cls } = workerStatus(w);
-    return safeHtml`<tr class="${ROW}">
-        <td class="${td} font-medium">${w.name || '—'}</td>
-        <td class="${td}" title="${workerTooltip(w)}"><span class="${BADGE} ${cls}">${label}</span></td>
-        <td class="${td} space-x-1">${modelChips(w, jobs)}</td>
-    </tr>`;
-}
-
 // Models cell: serving models are green; others show their newest job result
 // (passed bootstrap amber, failed red with the code in the tooltip).
 function modelChips(w, jobs) {
@@ -86,6 +76,27 @@ function modelChips(w, jobs) {
         chips.push(safeHtml`<span class="${BADGE} ${failed ? RED : AMBER}" title="${failed ? `Failed: ${j.code || j.resolution || ''}` : 'Passed the smoke test; not serving'}">${name}</span>`);
     }
     return chips.length ? chips : '—';
+}
+
+// One worker card: name and status badge, hardware line, then one row per model.
+function workerCard(w, jobs) {
+    const { label, cls } = workerStatus(w);
+    const cap = w.capabilities || {};
+    const ram = cap.ram_bytes == null ? '—' : `${(cap.ram_bytes / (1024 ** 3)).toFixed(1)} GiB`;
+    const hardware = `${cap.cpu_model || '—'} · ${cap.vcpus ?? '—'} vCPUs · ${ram}${cap.arch ? ` · ${cap.arch}` : ''}`;
+    const codes = (w.issues || []).map(issue => issue.code).filter(Boolean);
+    const notes = [...codes, w.detail].filter(Boolean).join(' — ');
+    return safeHtml`<div class="border border-slate-200 rounded-lg p-4 space-y-2 bg-white" title="${workerTooltip(w)}">
+        <div class="flex items-center justify-between gap-2">
+            <span class="text-sm font-bold text-slate-700">${w.name || '—'}</span>
+            <span class="${BADGE} ${cls}">${label}</span>
+        </div>
+        <div class="text-xs text-slate-500">${hardware}</div>
+        ${w.qualification ? safeHtml`<div class="text-xs text-slate-500">Qualification only</div>` : ''}
+        <div class="text-xs font-bold text-slate-500 pt-1">Models</div>
+        <div class="flex flex-wrap gap-1">${modelChips(w, jobs)}</div>
+        ${notes ? safeHtml`<div class="text-xs text-red-700">${notes}</div>` : ''}
+    </div>`;
 }
 
 // Job state badge; "queued" and "no_capacity" get readable labels.
@@ -156,11 +167,14 @@ function renderTable(headers, rows, emptyText) {
     </div>`;
 }
 
-// Workers: name and status only; details live in the tooltip.
+// Workers: one card per worker, in a responsive grid.
 function renderWorkersSection(workers, jobs = []) {
+    const cards = workers.length
+        ? workers.map(w => workerCard(w, jobs))
+        : safeHtml`<p class="text-sm text-slate-500 italic">No workers.</p>`;
     return safeHtml`<div class="hpe-card rounded-lg p-5 shadow-sm space-y-3">
         <h3 class="text-sm font-bold text-slate-500">Workers</h3>
-        ${renderTable(['Name', 'Status', 'Models'], workers.map(w => workerRow(w, jobs)), 'No workers.')}
+        <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">${cards}</div>
     </div>`;
 }
 
