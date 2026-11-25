@@ -115,7 +115,7 @@ function jobRow(j) {
     return safeHtml`<tr class="${ROW}">
         <td class="${td}">${j.kind || '—'}</td>
         <td class="${td}">${jobBadge(j.state)}</td>
-        <td class="${td}">${j.model || j.candidate || '—'} ${j.version || ''} (${j.tier})</td>
+        <td class="${td}">${j.model || j.candidate || '—'} ${j.version || ''} (${j.tier})${j.worker && j.kind === 'inference' ? safeHtml`<div class="text-slate-500">on ${j.worker}</div>` : ''}</td>
         <td class="${tdM}">${j.elapsed_s != null ? (j.elapsed_s < 60 ? Math.round(j.elapsed_s * 10) / 10 + 's' : Math.round(j.elapsed_s / 60) + 'm') : '—'}</td>
         <td class="${td} text-slate-500" title="${j.resolution || (j.issues || []).map(issue => issue.resolution).join(' ')}">
             ${j.code || ''}

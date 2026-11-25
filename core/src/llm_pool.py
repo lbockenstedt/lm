@@ -797,7 +797,8 @@ class LlmPool:
                 and all(row["passed"] for row in result["fixtures"] + baseline["fixtures"])))
             if code in ("qualified", "bootstrap_smoke_passed") and not passed:
                 code = "unsupported_or_invalid_reply"
-            job.update(state="passed" if passed else "failed", code=code)
+            # A busy worker never ran the check; it is retried, so it is not a failure.
+            job.update(state="passed" if passed else "cancelled" if code == "busy" else "failed", code=code)
         except asyncio.CancelledError:
             job.update(state="failed", code="dispatch_outcome_unknown")
             raise
@@ -1296,6 +1297,7 @@ class LlmPool:
                     or self._older_waiter_wants(key, ticket)):
                 continue  # no await between this check and the reservation below
             job["version"] = self.runtime_versions.get(key)
+            job["worker"] = self.hub.state.get_module_name(key)
             self.reserved.add(key)
             started = self.last_dispatch[key] = time.monotonic()
             try:
