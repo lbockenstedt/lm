@@ -145,18 +145,19 @@ def test_llm_dashboard_shows_worker_status_badges_and_tooltips(hub_url_and_sessi
             nav.click()
             page.get_by_text("W Ready", exact=True).wait_for()
             # Each raw API state maps to its badge label; unknown states show their raw text.
-            badges = {name: page.locator(f"tr:has-text('{name}') td:nth-child(2)") for name in
-                      ("W Ready", "W Busy", "W Prov", "W Off", "W Attn", "W Odd")}
+            cards = {name: page.locator(f"xpath=//span[text()='{name}']/ancestor::div[@title][1]") for name in
+                     ("W Ready", "W Busy", "W Prov", "W Off", "W Attn", "W Odd")}
+            badges = {name: card.locator("span").nth(1) for name, card in cards.items()}
             assert badges["W Ready"].inner_text() == "Ready"
             assert badges["W Busy"].inner_text() == "Busy"
             assert badges["W Prov"].inner_text() == "Provisioning: gemma"
             assert badges["W Off"].inner_text() == "Offline"
             assert badges["W Attn"].inner_text() == "Needs attention"
             assert badges["W Odd"].inner_text() == "weird"
-            # Details live in the tooltip, not in extra columns.
-            ready_tip = badges["W Ready"].get_attribute("title")
+            # Details live in the card tooltip.
+            ready_tip = cards["W Ready"].get_attribute("title")
             assert "16 vCPUs" in ready_tip and "trial:cpu" in ready_tip
-            assert "runtime_unit_missing" in badges["W Attn"].get_attribute("title")
+            assert "runtime_unit_missing" in cards["W Attn"].get_attribute("title")
             page.get_by_text("Queued", exact=True).wait_for()
             # The Settings panel and Qualify controls are gone.
             assert page.get_by_role("button", name="Settings", exact=True).count() == 0
