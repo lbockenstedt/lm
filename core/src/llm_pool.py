@@ -86,6 +86,10 @@ RUNTIME_STOP_CAUSES = {
     "runtime_unit_missing", "runtime_unit_symlink", "runtime_binary_missing",
     "runtime_start_failed",
 }
+# A worker reporting one of these has no runtime installed, so it sends no
+# inventory; the provisioner treats it as serving nothing and installs it.
+NO_RUNTIME_CODES = {"runtime_not_started", "runtime_unit_missing", "runtime_unit_symlink",
+                    "runtime_binary_missing"}
 WORKER_ISSUE_CODES = {
     "runtime_version_mismatch", "runtime_unavailable", "runtime_not_started",
 } | RUNTIME_STOP_CAUSES
@@ -279,7 +283,7 @@ class LlmPool:
                      # Provisioning comes before unavailable and busy: a new worker with no
                      # models reports "no_matching_models" and is reserved while it runs.
                      "provisioning" if provisioning else
-                     "attention" if failure and fresh else
+                     "attention" if failure and (fresh or pk in self.worker_issues) else
                      "unavailable" if pk in self.worker_issues else
                      "no_fresh_report" if not fresh else
                      "busy" if pk in self.reserved or not report[3] else "ready")
@@ -314,13 +318,16 @@ class LlmPool:
         socket = self.hub.active_connections.get(pk)
         now = time.monotonic()
         report, hardware = self.inventory.get(pk), self.hardware.get(pk)
-        if (socket is None or not report or report[1] is not socket or now - report[0] >= 75
-                or not hardware or hardware[1] is not socket or now - hardware[0] >= 75):
+        if (socket is None or not hardware or hardware[1] is not socket or now - hardware[0] >= 75):
+            return []
+        fresh_report = bool(report and report[1] is socket and now - report[0] < 75)
+        no_runtime = (self.worker_issues.get(pk) or {}).get("code") in NO_RUNTIME_CODES
+        if not fresh_report and not no_runtime:
             return []
         ram = hardware[2].get("ram_bytes")
         if type(ram) is not int:
             return []
-        served = set(report[2].items())
+        served = set(report[2].items()) if fresh_report else set()
         # Every catalog model, smallest first so a worker serves something useful soonest;
         # a model added to the catalog is provisioned without touching this code.
         missing = [key for key in sorted(CANDIDATES, key=lambda k: CANDIDATES[k]["min_ram_bytes"])
