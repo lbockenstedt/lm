@@ -101,7 +101,9 @@ This does not change validation, final review, builds, or log triage. An
 unavailable hub summary is omitted rather than sent through AB's own providers.
 
 Other AB work uses the `LLM_COMPLETE` hub request (same AppBuilder client
-certificate). Set `llm_ab_work` in `POST /api/llm/admin/settings` to
+certificate). In the WebUI, LLM → Dashboard → **AppBuilder work** edits this rule
+(tenant, certificate SAN and ticked tasks; the shared tenant and tenant groups
+are not offered). The API equivalent is setting `llm_ab_work` in `POST /api/llm/admin/settings` to
 `{tenant, certificate, tasks}`: the tenant must be non-shared, the certificate
 is the pinned AB SAN, and `tasks` is the allowlist of task names AB may run
 (for example `scout`, `review`, `review_deep`, `coding`). The tenant comes only from this
