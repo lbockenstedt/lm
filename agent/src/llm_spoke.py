@@ -23,7 +23,7 @@ logger = logging.getLogger("LLMSpoke")
 
 MAX_PROMPT_BYTES = 64 * 1024
 MAX_RESPONSE_BYTES = 256 * 1024
-INFERENCE_TIMEOUT = 900
+INFERENCE_TIMEOUT = 7200  # slow CPU models may take hours; speed does not matter
 # Start from the owner's CLI pin; Linux CPU artifacts still need qualification.
 DEFAULT_OLLAMA_VERSION = PUBLIC_RUNTIME_VERSION
 SERVICE = "lm-llm-ollama.service"
