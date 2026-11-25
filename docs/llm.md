@@ -184,6 +184,43 @@ removes that model's copy from the candidate store to avoid doubling disk use
 (blobs shared with another candidate model are kept); to activate it again,
 run **Prepare and test** to pull it again.
 
+### Automatic provisioning
+
+Every approved LLM worker of any tenant automatically gets all four pinned
+catalog models (Gemma 4 12B, Qwen 3.8 27B, Qwen 3.6 coding, DeepSeek R1 70B),
+with no clicks and no Shared test worker. Once a minute the hub checks each
+approved, connected worker that has a fresh inventory report and a fresh
+hardware report (a worker with no hardware report yet is skipped). Models the
+worker does not already serve (same name and digest) are prepared and then
+activated **one at a time, smallest first**; at most two workers pull at once
+hub-wide. The hub never re-pulls a model the worker already serves.
+
+- **RAM minimums.** A model is skipped when the worker reports less RAM than
+  its minimum (conservative weights plus 64k KV cache estimates): 16 GiB
+  Gemma, 32 GiB Qwen 3.8, 40 GiB Qwen 3.6, 64 GiB DeepSeek. The dashboard
+  shows "Too small for <model>".
+- **Backoff.** A failed step stops that worker's pass and delays a retry of
+  that model by 15 minutes, doubling per failure up to 6 hours; success resets
+  it. The worker shows **Needs attention** with the failure code and model.
+- **Status.** While a model is prepared or activated the worker shows
+  **Provisioning** and routing treats it as busy.
+- **Cleanup.** After activation passes, the saved preparation row
+  (`llm_worker_preparations`) is removed so a reconnect cannot re-pull a model
+  whose candidate copy the agent has pruned. To re-activate a model, pull it
+  again (Prepare, then Activate, or remove it from the worker and let the
+  provisioner pull it).
+- **Knob.** The global config `llm_auto_provision` (default `true`); set it to
+  `false` to stop automatic provisioning. It is saved through
+  `POST /api/llm/admin/settings` (a boolean) and returned by `GET` of the same
+  route; the simplified dashboard has no field for it. The manual routes keep
+  working.
+- **Tenant scope.** Only the hub's own reconciler and reconnect replay manage
+  every approved LLM worker. The admin Prepare/Activate routes still reach
+  Shared-tenant workers only, so a superadmin cannot remote-control a tenant's
+  spoke.
+- Workers listed in `llm_qualification_candidates` also serve inference now.
+  Tenant scoping is unchanged: a tenant's own pool beats the Shared one.
+
 The public candidates use a 65,536-token context. Gemma 4 12B uses temperature
 0.7, top-p 0.8 and top-k 64; Qwen 3.6 coding uses 0.6, 0.95, 20 and repeat
 penalty 1; Qwen 3.8 scouting uses 1, 0.95, 20 and repeat penalty 1; DeepSeek R1 70B

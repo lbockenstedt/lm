@@ -183,6 +183,12 @@ QUEUE_POLL_S = 2
 MAX_QUEUED = 64
 QUEUE_WAIT_DEFAULT = 600
 QUEUE_WAIT_MAX = 3600
+# Auto-provisioning: at most this many workers pull models at once hub-wide, a failed
+# model waits 15 min, doubling per failure up to 6 h, and a step is polled this often.
+PROVISION_MAX_WORKERS = 2
+PROVISION_BACKOFF_BASE = 900
+PROVISION_BACKOFF_MAX = 21600
+PROVISION_POLL_S = 2
 
 
 def queue_wait(config):
@@ -218,6 +224,13 @@ class LlmPool:
         self.worker_options = {}
         self.bootstrap_done = {}
         self.bootstrap_retry_at = {}
+        # Auto-provisioning state (volatile; the live inventory is re-checked each pass).
+        self.provision_retry_at = {}
+        self.provision_fail_count = {}
+        self.provision_skipped = {}
+        self.provision_failures = {}
+        self.provisioning = set()
+        self.provision_tasks = set()
 
     def qualification_candidates(self):
         """Resolve configured candidates to approved Shared test workers only."""
@@ -254,17 +267,35 @@ class LlmPool:
             hardware = self.hardware.get(pk)
             capabilities = (hardware[2] if hardware and hardware[1] is socket
                             and time.monotonic() - hardware[0] < 75 else {})
+            job = self.qualification_jobs.get(pk)
+            provisioning = job is not None and job.get("kind") in ("bootstrap", "activation")
+            failures = self.provision_failures.get(pk)
+            failure = ({"model": next(iter(failures)), "code": next(iter(failures.values()))}
+                       if failures else None)
+            detail = ""
             state = ("pending" if not self.hub.approved_modules.get(pk) else
                      "disconnected" if socket is None else
                      "draining" if self.hub.is_draining(pk) else
+                     # Provisioning comes before unavailable and busy: a new worker with no
+                     # models reports "no_matching_models" and is reserved while it runs.
+                     "provisioning" if provisioning else
+                     "attention" if failure and fresh else
                      "unavailable" if pk in self.worker_issues else
                      "no_fresh_report" if not fresh else
                      "busy" if pk in self.reserved or not report[3] else "ready")
+            if state == "provisioning":
+                detail = ("Preparing " if job["kind"] == "bootstrap" else "Activating ") + job["candidate"]
+            elif state == "attention":
+                detail = f"{failure['code']}: {failure['model']}"
+            elif self.provision_skipped.get(pk):
+                detail = "; ".join(f"Too small for {label}" for label in self.provision_skipped[pk])
             workers.append({"name": self.hub.state.get_module_name(pk), "state": state,
                             "issues": [self.worker_issues[pk]] if pk in self.worker_issues else [],
                             "version": self.runtime_versions.get(pk) if fresh else None,
                             "capabilities": capabilities,
                             "qualification": pk in test_workers,
+                            "detail": detail,
+                            "skipped": list(self.provision_skipped.get(pk, ())),
                             "models": [{"name": name, "digest": digest}
                                        for name, digest in (report[2].items() if fresh else ())]})
         jobs = (list(self.qualification_jobs.values()) + list(self.active_jobs.values())
@@ -273,6 +304,131 @@ class LlmPool:
                 "candidates": [{"key": key, "label": label,
                                 "worker": self.hub.state.get_module_name(pk)}
                                for key, (pk, label) in candidates.items()]}
+
+    def _provision_plan(self, pk):
+        """Return the catalog keys to pull now on a worker, smallest first.
+
+        Needs a fresh inventory and hardware report; otherwise returns nothing so a
+        worker we cannot yet size is never loaded. Also refreshes the 'too small'
+        list and clears a stale failure once nothing is left to pull."""
+        socket = self.hub.active_connections.get(pk)
+        now = time.monotonic()
+        report, hardware = self.inventory.get(pk), self.hardware.get(pk)
+        if (socket is None or not report or report[1] is not socket or now - report[0] >= 75
+                or not hardware or hardware[1] is not socket or now - hardware[0] >= 75):
+            return []
+        ram = hardware[2].get("ram_bytes")
+        if type(ram) is not int:
+            return []
+        served = set(report[2].items())
+        # Every catalog model, smallest first so a worker serves something useful soonest;
+        # a model added to the catalog is provisioned without touching this code.
+        missing = [key for key in sorted(CANDIDATES, key=lambda k: CANDIDATES[k]["min_ram_bytes"])
+                   if (CANDIDATES[key]["model"], CANDIDATES[key]["digest"]) not in served]
+        small = [key for key in missing if ram < CANDIDATES[key]["min_ram_bytes"]]
+        if small:
+            self.provision_skipped[pk] = [CANDIDATES[key]["label"] for key in small]
+        else:
+            self.provision_skipped.pop(pk, None)
+        wanted = [key for key in missing if key not in small]
+        if not wanted:
+            self.provision_failures.pop(pk, None)
+        return [key for key in wanted if self.provision_retry_at.get((pk, key), 0) <= now]
+
+    async def provision_once(self):
+        """Start provisioning on workers that lack catalog models; never blocks on a pull.
+
+        Each worker gets its own task (one model at a time), and at most
+        PROVISION_MAX_WORKERS run at once hub-wide, so a multi-hour pull never
+        delays the next 60 s pass or blocks the hub."""
+        if self.hub.state.get_global_config().get("llm_auto_provision", True) is False:
+            return
+        metadata = self.hub.state.system_state.get("module_metadata", {})
+        for pk, record in list(metadata.items()):
+            if len(self.provisioning) >= PROVISION_MAX_WORKERS:
+                break
+            if (not isinstance(record, dict) or record.get("module_type") != "llm"
+                    or not self.hub.approved_modules.get(pk) or pk in self.provisioning
+                    or pk in self.reserved):
+                continue
+            keys = self._provision_plan(pk)
+            if keys:
+                self.provisioning.add(pk)
+                task = asyncio.create_task(self._provision_worker(pk, keys))
+                self.provision_tasks.add(task)
+                task.add_done_callback(self.provision_tasks.discard)
+
+    async def _provision_worker(self, pk, keys):
+        """Provision a worker's missing models one after another, stopping at a failure."""
+        try:
+            for key in keys:
+                if not await self._provision_model(pk, key):
+                    break
+        except Exception:  # noqa: BLE001 - one worker must never kill the reconciler
+            logger.exception("LLM provisioning of %s failed", self._label(pk))
+        finally:
+            self.provisioning.discard(pk)
+
+    async def _wait_job(self, job):
+        """Wait for a bootstrap or activation job to leave the running state."""
+        while job["state"] == "running":
+            await asyncio.sleep(PROVISION_POLL_S)
+        return job
+
+    def _provision_failed(self, pk, key, code):
+        """Record a failed step: exponential backoff for this model and the code for the dashboard."""
+        count = self.provision_fail_count.get((pk, key), 0)
+        delay = min(PROVISION_BACKOFF_MAX, PROVISION_BACKOFF_BASE * 2 ** count)
+        self.provision_fail_count[(pk, key)] = count + 1
+        self.provision_retry_at[(pk, key)] = time.monotonic() + delay
+        self.provision_failures.setdefault(pk, {})[CANDIDATES[key]["label"]] = code
+        logger.warning("LLM worker %s: provisioning %s failed (%s); retry in %ds",
+                       self._label(pk), key, code, delay)
+        return False
+
+    async def _provision_model(self, pk, key):
+        """Prepare then activate one catalog model; return True when it is now served.
+
+        A worker that is merely busy or not ready returns False without a backoff
+        (the next pass retries); only a failed step starts the backoff."""
+        try:
+            job = await self.start_bootstrap(pk, key, auto=True)
+        except Exception as exc:  # noqa: BLE001 - a failed config save is a failed step
+            logger.warning("LLM worker %s: cannot save preparation: %s", self._label(pk), exc)
+            return self._provision_failed(pk, key, "preparation_state_failed")
+        if not job:
+            return False
+        job = await self._wait_job(job)
+        if job["state"] != "passed":
+            return self._provision_failed(pk, key, job.get("code", "unsupported_or_invalid_reply"))
+        job = self.start_activation(pk, key, auto=True)
+        if not job:
+            return self._provision_failed(pk, key, "worker_changed")
+        job = await self._wait_job(job)
+        if job["state"] != "passed":
+            return self._provision_failed(pk, key, job.get("code", "unsupported_or_invalid_reply"))
+        # Success: drop the saved preparation so a reconnect replay cannot re-pull a
+        # candidate copy the agent has already pruned after activation.
+        configured = self.hub.state.get_global_config().get("llm_worker_preparations")
+        if isinstance(configured, dict) and pk in configured:
+            row = configured[pk]
+            floors = self.hub.state.get_global_config().get("llm_worker_prep_revisions")
+            floors = dict(floors) if isinstance(floors, dict) else {}
+            if isinstance(row, dict) and type(row.get("revision")) is int:
+                floors[pk] = max(floors.get(pk, 0), row["revision"])
+            self.hub.state.update_global_config(
+                {"llm_worker_preparations": {k: v for k, v in configured.items() if k != pk},
+                 "llm_worker_prep_revisions": floors})
+            await self.hub.state.save_state_now()
+        self.provision_fail_count.pop((pk, key), None)
+        self.provision_retry_at.pop((pk, key), None)
+        # A later model's success must not hide an earlier, still-backed-off failure.
+        failed = self.provision_failures.get(pk)
+        if failed:
+            failed.pop(CANDIDATES[key]["label"], None)
+            if not failed:
+                self.provision_failures.pop(pk, None)
+        return True
 
     def _finish(self, job):
         """Record a terminal job row and fold it into the per-model metrics."""
@@ -315,12 +471,12 @@ class LlmPool:
         return removed
 
     def start_qualification(self, key):
-        """Schedule a synthetic job only on its configured Shared worker."""
+        """Schedule a synthetic job only on its configured Shared test worker; return its job."""
         candidate = self.qualification_candidates().get(key)
         if not candidate:
             return False
         worker, label = candidate
-        socket = self._available_test_worker(worker)
+        socket = self._available_worker(worker)
         if socket is None:
             return False
         job = {"kind": "qualification", "state": "running", "candidate": label, "tier": "local",
@@ -328,15 +484,20 @@ class LlmPool:
         self.qualification_jobs[worker] = job
         self.reserved.add(worker)
         asyncio.create_task(self._qualify(worker, socket, key, job))
-        return True
+        return job
 
-    def _available_test_worker(self, worker):
-        """Check that the configured Shared worker is connected and not reserved."""
+    def _available_worker(self, worker, auto=False):
+        """Return the socket of an approved, connected, fresh, idle, unreserved LLM worker.
+
+        Admin-triggered work (auto=False) only reaches Shared-tenant workers: a
+        superadmin never remote-controls a tenant's spoke (fleet rule 5.5). The
+        hub's own reconciler and reconnect replay (auto=True) manage every
+        approved LLM worker, since that is a fleet-wide hub policy."""
         metadata = self.hub.state.system_state.get("module_metadata", {})
         record = metadata.get(worker, {})
         if (not isinstance(record, dict) or record.get("module_type") != "llm"
                 or not self.hub.approved_modules.get(worker)
-                or not tenant_is_shared(record.get("tenant_id"))):
+                or not (auto or tenant_is_shared(record.get("tenant_id")))):
             return None
         socket = self.hub.active_connections.get(worker)
         report = self.inventory.get(worker)
@@ -350,13 +511,13 @@ class LlmPool:
             return None
         return socket
 
-    async def start_bootstrap(self, worker, key):
-        """Reserve an approved Shared worker for one pinned synthetic candidate."""
+    async def start_bootstrap(self, worker, key, auto=False):
+        """Reserve an approved LLM worker for one pinned candidate; return its job."""
         if (not isinstance(worker, str) or not 0 < len(worker) <= 255
                 or not isinstance(key, str) or key not in CANDIDATES):
             return False
         worker = self.hub._primary_key(worker)
-        socket = self._available_test_worker(worker)
+        socket = self._available_worker(worker, auto)
         if socket is None:
             return False
         configured = self.hub.state.get_global_config().get("llm_worker_preparations")
@@ -366,10 +527,19 @@ class LlmPool:
         request_id = uuid.uuid4().hex
         prior = desired.get(worker)
         prior_revision = prior.get("revision", 0) if isinstance(prior, dict) else 0
+        # The worker's journal keeps its last revision after the replay row is removed,
+        # so the next request must start above the highest revision ever used.
+        floors = self.hub.state.get_global_config().get("llm_worker_prep_revisions")
+        floor = floors.get(worker, 0) if isinstance(floors, dict) else 0
+        if type(floor) is int and type(prior_revision) is int:
+            prior_revision = max(prior_revision, floor)
         if type(prior_revision) is not int or not 0 <= prior_revision < 2**53 - 1:
             return False
         revision = prior_revision + 1
         desired[worker] = {"candidate": key, "request_id": request_id, "revision": revision}
+        if auto:
+            # Provenance: only a reconciler-made row may be replayed on a tenant worker.
+            desired[worker]["auto"] = True
         self.reserved.add(worker)
         try:
             self.hub.state.update_global_config({"llm_worker_preparations": desired})
@@ -385,17 +555,17 @@ class LlmPool:
                 self.hub.state.update_global_config({"llm_worker_preparations": restored})
             self.reserved.discard(worker)
             raise
-        self._schedule_bootstrap(worker, socket, key, request_id, revision)
-        return True
+        return self._schedule_bootstrap(worker, socket, key, request_id, revision, auto)
 
-    def _schedule_bootstrap(self, worker, socket, key, request_id, revision):
-        """Track and dispatch a persisted, idempotent preparation request."""
+    def _schedule_bootstrap(self, worker, socket, key, request_id, revision, auto=False):
+        """Track and dispatch a persisted, idempotent preparation request; return its job."""
         job = {"kind": "bootstrap", "state": "running", "candidate": CANDIDATES[key]["label"], "tier": "local",
                "worker": self.hub.state.get_module_name(worker)}
         self.qualification_jobs[worker] = job
         self.reserved.add(worker)
         asyncio.create_task(self._qualify(
-            worker, socket, key, job, bootstrap=True, request_id=request_id, revision=revision))
+            worker, socket, key, job, bootstrap=True, request_id=request_id, revision=revision, auto=auto))
+        return job
 
     def reconcile_bootstrap(self, worker):
         """Replay a saved preparation on reconnect or after an ambiguous reply."""
@@ -410,12 +580,13 @@ class LlmPool:
                 or self.bootstrap_done.get(worker) == request_id
                 or self.bootstrap_retry_at.get(worker, 0) > time.monotonic()):
             return
-        socket = self._available_test_worker(worker)
+        auto = row.get("auto") is True
+        socket = self._available_worker(worker, auto)
         if socket is not None:
-            self._schedule_bootstrap(worker, socket, key, request_id, revision)
+            self._schedule_bootstrap(worker, socket, key, request_id, revision, auto)
 
-    def start_activation(self, worker, key):
-        """Schedule explicit activation on the approved Shared test worker."""
+    def start_activation(self, worker, key, auto=False):
+        """Schedule activation of a prepared model on an approved LLM worker; return its job."""
         if (not isinstance(worker, str) or not 0 < len(worker) <= 255
                 or not isinstance(key, str) or key not in CANDIDATES):
             return False
@@ -424,17 +595,17 @@ class LlmPool:
         row = desired.get(worker) if isinstance(desired, dict) else None
         if not isinstance(row, dict) or row.get("candidate") != key:
             return False
-        socket = self._available_test_worker(worker)
+        socket = self._available_worker(worker, auto)
         if socket is None:
             return False
         job = {"kind": "activation", "state": "running", "candidate": CANDIDATES[key]["label"],
                "tier": "local", "worker": self.hub.state.get_module_name(worker)}
         self.qualification_jobs[worker] = job
         self.reserved.add(worker)
-        asyncio.create_task(self._activate(worker, socket, key, job))
-        return True
+        asyncio.create_task(self._activate(worker, socket, key, job, auto))
+        return job
 
-    async def _activate(self, worker, socket, key, job):
+    async def _activate(self, worker, socket, key, job, auto=False):
         """Validate the activation reply without replaying an ambiguous result."""
         started = time.monotonic()
         try:
@@ -442,7 +613,8 @@ class LlmPool:
             desired = self.hub.state.get_global_config().get("llm_worker_preparations")
             selection = desired.get(worker) if isinstance(desired, dict) else None
             if (not isinstance(row, dict) or row.get("module_type") != "llm"
-                    or not tenant_is_shared(row.get("tenant_id")) or not self.hub.approved_modules.get(worker)
+                    or not self.hub.approved_modules.get(worker)
+                    or not (auto or tenant_is_shared(row.get("tenant_id")))
                     or not isinstance(selection, dict) or selection.get("candidate") != key
                     or self.hub.active_connections.get(worker) is not socket):
                 job.update(state="failed", code="worker_changed")
@@ -479,14 +651,16 @@ class LlmPool:
             job["elapsed_s"] = round(time.monotonic() - started, 3)
             self._finish(job)
 
-    async def _qualify(self, worker, socket, key, job, bootstrap=False, request_id=None, revision=None):
+    async def _qualify(self, worker, socket, key, job, bootstrap=False, request_id=None, revision=None,
+                       auto=False):
         """Store only validated qualification results from the reserved socket."""
         start = time.monotonic()
         try:
             candidate = self.qualification_candidates().get(key) if not bootstrap else None
             metadata = self.hub.state.system_state.get("module_metadata", {}).get(worker, {})
             valid = (isinstance(metadata, dict) and metadata.get("module_type") == "llm"
-                     and self.hub.approved_modules.get(worker) and tenant_is_shared(metadata.get("tenant_id")))
+                     and self.hub.approved_modules.get(worker)
+                     and (auto or tenant_is_shared(metadata.get("tenant_id"))))
             if (not valid or (not bootstrap and (not candidate or candidate[0] != worker))
                     or self.hub.active_connections.get(worker) is not socket):
                 job.update(state="failed", code="worker_changed")
@@ -699,6 +873,7 @@ class LlmPool:
         self.worker_options.pop(key, None)
         self.worker_issues.pop(key, None)
         self.start_attempts.pop(key, None)
+        self.provision_skipped.pop(key, None)
 
     def diagnostics_for(self, tenant):
         """Return only issues for workers in scope; no prompt or output retention."""
@@ -808,10 +983,8 @@ class LlmPool:
         """Select the tenant's own pool even if it is entirely disconnected."""
         metadata = self.hub.state.system_state.get("module_metadata", {})
         own, shared = [], []
-        test_workers = {pk for pk, _ in self.qualification_candidates().values()}
         for key, record in metadata.items():
             if (not isinstance(record, dict)
-                    or key in test_workers
                     or record.get("module_type") != "llm"
                     or not self.hub.approved_modules.get(key)):
                 continue
