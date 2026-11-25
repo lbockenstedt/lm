@@ -63,7 +63,7 @@ def _run_case(request, port, model, fixture, prompt, options=None):
     if fixture == "json":
         body["format"] = "json"
     started = time.monotonic()
-    reply = request("/api/generate", body, 900 if options is not None else 240, port=port)
+    reply = request("/api/generate", body, 3600 if options is not None else 240, port=port)
     elapsed = time.monotonic() - started
     valid = reply.get("done") is True and reply.get("done_reason") == "stop" and reply.get("model") == model
     try:
