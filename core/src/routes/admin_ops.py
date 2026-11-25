@@ -1600,6 +1600,15 @@ def register(app, hub, ctx):
         logger.warning("admin_ops: llm-complete via loopback tenant=%s task=%r", tenant, body.get("task"))
         return await hub.llm_pool.complete(tenant, body)
 
+    # Recent pool inference jobs, so a load test can see how work spread across workers.
+    @app.get("/admin/ops/llm-jobs")
+    async def admin_ops_llm_jobs(request: Request):
+        """List recent LM pool inference jobs (model, worker, state, seconds); never the prompts."""
+        _guard(request)
+        rows = [j for j in hub.llm_pool.dashboard()["jobs"] if j.get("kind") == "inference"]
+        return {"jobs": [{key: j.get(key) for key in ("model", "worker", "state", "code", "elapsed_s", "finished_at")}
+                         for j in rows[:500]]}
+
     # Queue + timeout diagnostics for one spoke.
     @app.post("/admin/ops/spoke-queue")
     async def admin_ops_spoke_queue(request: Request):
