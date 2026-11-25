@@ -16,9 +16,11 @@ async function apiJson(path, init) {
     return body;
 }
 
-const th = 'px-3 py-1.5 text-left text-xs font-bold text-slate-500 whitespace-nowrap';
-const td = 'px-3 py-1.5 text-xs text-slate-700 whitespace-nowrap';
-const tdM = 'px-3 py-1.5 text-xs text-slate-700 font-mono whitespace-nowrap';
+const th = 'px-4 py-2 text-left font-medium whitespace-nowrap';
+const td = 'px-4 py-2 text-xs text-slate-700 whitespace-nowrap';
+const tdM = 'px-4 py-2 text-xs text-slate-700 font-mono whitespace-nowrap';
+const ROW = 'border-b border-slate-100 hover:bg-slate-50';
+const BADGE = 'px-2 py-0.5 rounded-full text-xs font-bold border';
 
 const GREEN = 'bg-emerald-100 text-emerald-800 border-emerald-200';
 const AMBER = 'bg-amber-100 text-amber-800 border-amber-200';
@@ -63,9 +65,9 @@ function workerTooltip(w) {
 // One worker row: name and status badge with the details in its tooltip.
 function workerRow(w) {
     const { label, cls } = workerStatus(w);
-    return safeHtml`<tr class="border-b border-slate-100">
+    return safeHtml`<tr class="${ROW}">
         <td class="${td} font-medium">${w.name || '—'}</td>
-        <td class="${td}" title="${workerTooltip(w)}"><span class="px-2 py-0.5 rounded text-xs font-bold border ${cls}">${label}</span></td>
+        <td class="${td}" title="${workerTooltip(w)}"><span class="${BADGE} ${cls}">${label}</span></td>
     </tr>`;
 }
 
@@ -73,12 +75,12 @@ function workerRow(w) {
 function jobBadge(state) {
     const labels = { queued: 'Queued', running: 'Running', passed: 'Passed', failed: 'Failed', cancelled: 'Cancelled', no_capacity: 'No capacity' };
     const colours = { passed: GREEN, failed: RED, running: BLUE, queued: AMBER };
-    return safeHtml`<span class="px-2 py-0.5 rounded text-xs font-bold border ${colours[state] || GREY}">${labels[state] || String(state ?? '—')}</span>`;
+    return safeHtml`<span class="${BADGE} ${colours[state] || GREY}">${labels[state] || String(state ?? '—')}</span>`;
 }
 
 // One job row.
 function jobRow(j) {
-    return safeHtml`<tr class="border-b border-slate-100">
+    return safeHtml`<tr class="${ROW}">
         <td class="${td}">${j.kind || '—'}</td>
         <td class="${td}">${jobBadge(j.state)}</td>
         <td class="${td}">${j.model || j.candidate || '—'} ${j.version || ''} (${j.tier})</td>
@@ -103,7 +105,7 @@ function jobRow(j) {
 
 // One metrics row.
 function metricsRow(m) {
-    return safeHtml`<tr class="border-b border-slate-100">
+    return safeHtml`<tr class="${ROW}">
         <td class="${td} font-medium" title="${m.digest || ''}">${m.model || '—'} ${m.version || ''}</td>
         <td class="${td}">${m.tier || '—'} / ${m.kind}</td>
         <td class="${tdM}">${m.completed != null ? m.completed : '—'}</td>
@@ -129,9 +131,9 @@ function renderTable(headers, rows, emptyText) {
     const body = rows.length
         ? rows
         : safeHtml`<tr><td colspan="${headers.length}" class="${td} text-slate-400 italic">${emptyText}</td></tr>`;
-    return safeHtml`<div class="border border-slate-200 rounded-md overflow-x-auto">
+    return safeHtml`<div class="border border-slate-200 rounded-lg overflow-x-auto">
         <table class="w-full text-left">
-            <thead><tr class="border-b border-slate-200">${headers.map(h => safeHtml`<th class="${th}">${h}</th>`)}</tr></thead>
+            <thead class="bg-slate-50 text-xs text-slate-500"><tr class="border-b border-slate-200">${headers.map(h => safeHtml`<th class="${th}">${h}</th>`)}</tr></thead>
             <tbody>${body}</tbody>
         </table>
     </div>`;
@@ -139,8 +141,8 @@ function renderTable(headers, rows, emptyText) {
 
 // Workers: name and status only; details live in the tooltip.
 function renderWorkersSection(workers) {
-    return safeHtml`<div class="mb-4">
-        <h3 class="text-sm font-bold text-slate-600 mb-2">Workers</h3>
+    return safeHtml`<div class="hpe-card rounded-lg p-5 shadow-sm space-y-3">
+        <h3 class="text-sm font-bold text-slate-500">Workers</h3>
         ${renderTable(['Name', 'Status'], workers.map(workerRow), 'No workers.')}
     </div>`;
 }
@@ -149,13 +151,13 @@ function renderWorkersSection(workers) {
 function renderJobsSection(jobs) {
     // Offer the clear control only when a row is terminal; running and queued rows are never cleared.
     const finished = jobs.some(job => job.state !== 'running' && job.state !== 'queued');
-    const clear = safeHtml`<button data-action="clearJobs" type="button" class="hpe-btn hpe-btn-secondary"${finished ? '' : safeHtml` disabled`}>Clear finished jobs</button>`;
+    const clear = safeHtml`<button data-action="clearJobs" type="button" class="bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-full px-3 py-1.5 text-xs font-bold${finished ? '' : ' opacity-50 cursor-not-allowed'}"${finished ? '' : safeHtml` disabled`}>Clear finished jobs</button>`;
     const headers = ['Kind', 'State', 'Model', 'Elapsed', 'Code'];
-    return safeHtml`<div class="mb-4">
-        <div class="flex items-center justify-between mb-2">
+    return safeHtml`<div class="hpe-card rounded-lg p-5 shadow-sm space-y-3">
+        <div class="flex items-center justify-between">
             <h3 class="text-sm font-bold text-slate-600">Jobs</h3>
             <div class="flex items-center gap-2">
-                <button data-action="refresh" type="button" class="hpe-btn hpe-btn-secondary">Refresh</button>
+                <button data-action="refresh" type="button" class="bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-full px-3 py-1.5 text-xs font-bold">Refresh</button>
                 ${clear}
             </div>
         </div>
@@ -166,8 +168,8 @@ function renderJobsSection(jobs) {
 // Metrics: availability counts and completed inference timings per model.
 function renderMetricsSection(metrics) {
     const headers = ['Model', 'Tier / Kind', 'Passed', 'Failed', 'No capacity', 'Mean Elapsed'];
-    return safeHtml`<div class="mb-4">
-        <h3 class="text-sm font-bold text-slate-600 mb-2">Metrics</h3>
+    return safeHtml`<div class="hpe-card rounded-lg p-5 shadow-sm space-y-3">
+        <h3 class="text-sm font-bold text-slate-500">Metrics</h3>
         ${renderTable(headers, metrics.map(metricsRow), 'No metrics.')}
     </div>`;
 }
@@ -192,7 +194,7 @@ async function renderLlmDashboard(container) {
     const view = createView({ el: container, state, render: () => safeHtml`
             <div class="space-y-4">
                 ${renderStatus(status)}
-                <h2 class="text-base font-bold text-slate-700">LLM Dashboard</h2>
+                <h2 class="text-lg font-bold text-navy">LLM Dashboard</h2>
                 ${renderWorkersSection(state.workers)}
                 ${renderJobsSection(state.jobs)}
                 ${renderMetricsSection(state.metrics)}
