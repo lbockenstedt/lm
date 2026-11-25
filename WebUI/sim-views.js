@@ -2320,7 +2320,7 @@ async function csDemoLoad() {
 
 function csDemoOptions(activeScenario) {
     const names = Object.keys(window._csDemoScenarios || {});
-    if (!names.length) names.push('normal', 'dns_fail', 'dns_latency', 'dhcp_fail', 'assoc_fail', 'auth_fail', 'ssidpw_fail', 'mac_auth_fail', 'port_flap', 'rogue_dns');
+    if (!names.length) names.push('normal', 'dns_fail', 'dns_latency', 'dhcp_fail', 'assoc_fail', 'auth_fail', 'ssidpw_fail', 'mac_auth_fail', 'port_flap', 'rogue_dns', 'rogue_dns_burst');
     return names.map(n => `<option value="${csEscape(n)}" ${n === activeScenario ? 'selected' : ''}>${csEscape(n)}</option>`).join('');
 }
 
@@ -2413,7 +2413,7 @@ window.csDemoClear = async function (btn) {
 // Alphabetical so the sim knobs + the Simulation facet dropdown list in order.
 const CS_CONTROL_FLAGS = ['assoc_fail', 'auth_fail', 'client_offline', 'collab', 'dhcp_fail', 'dns_fail',
     'dns_latency', 'download', 'iperf', 'kill_switch', 'mac_auth_fail', 'ping_test', 'port_flap',
-    'rogue_dns', 'ssidpw_fail', 'www_discover', 'www_traffic'];
+    'rogue_dns', 'rogue_dns_burst', 'ssidpw_fail', 'www_discover', 'www_traffic'];
 
 
 
@@ -4242,6 +4242,7 @@ const CS_ONOFF_KEYS = new Set([
     'ssidpw_fail', 'auth_fail', 'mac_auth_fail', 'syslog', 'web_server',
     'dhcp_fail', 'dns_fail', 'dns_latency', 'assoc_fail', 'port_flap', 'ping_test',
     'download', 'www_traffic', 'www_discover', 'collab', 'iperf', 'rogue_dns',
+    'rogue_dns_burst',
 ]);
 
 // Choices shared by the structured editor and the Pool & SSID matrix.
@@ -4295,6 +4296,11 @@ const CS_SIM_SECTION_FIELDS = {
         ['rogue_dns_dhcp_interval', 'Rogue DNS DHCP Interval (s)'],
         ['rogue_dns_duration', 'Rogue DNS Duration (s)'],
         ['rogue_dns_browse_interval', 'Rogue DNS Browse Interval (s)'],
+        ['rogue_dns_burst_dhcp_interval', 'Rogue DNS Burst DHCP Interval (s)'],
+        ['rogue_dns_burst_duration', 'Rogue DNS Burst Duration (s)'],
+        ['rogue_dns_burst_browse_interval', 'Rogue DNS Burst Browse Interval (s)'],
+        ['rogue_dns_burst_rate', 'Rogue DNS Burst Rate (queries/s)'],
+        ['rogue_dns_burst_max_pending', 'Rogue DNS Burst Max In-Flight Queries'],
         ['gw_ping_timeout_s', 'Gateway Ping Timeout'],
     ],
     server: [['server_url', 'Server Url']],
@@ -4304,6 +4310,8 @@ const CS_SIM_SECTION_FIELDS = {
         ['dns_bad_ip_1', 'Dns Bad Ip 1'], ['dns_bad_ip_2', 'Dns Bad Ip 2'],
         ['dns_bad_ip_3', 'Dns Bad Ip 3'],
         ['rogue_dns_server', 'Rogue DNS Server IP'],
+        ['rogue_dns_burst_server', 'Rogue DNS Burst Server IP'],
+        ['rogue_dns_burst_domains', 'Rogue DNS Burst Domains (one per line)', 'list'],
         ['dns_bad_record_1', 'Dns Bad Record 1'], ['dns_bad_record_2', 'Dns Bad Record 2'],
         ['dns_bad_record_3', 'Dns Bad Record 3'],
         ['iperf_server', 'Iperf Server'], ['syslog_server', 'Syslog Server'],
@@ -4316,6 +4324,7 @@ const CS_SIM_BUCKET_FIELDS = [
     ['client_offline', 'Client Offline'],
     ['dhcp_fail', 'Dhcp Fail'], ['dns_fail', 'Dns Fail'], ['dns_latency', 'Dns Latency'],
     ['rogue_dns', 'Rogue DNS (static IP + fixed DNS)'],
+    ['rogue_dns_burst', 'Rogue DNS Burst (static IP + fixed DNS + query load)'],
     ['assoc_fail', 'Assoc Fail'], ['port_flap', 'Port Flap'],
     ['ping_test', 'Ping Test'], ['download', 'Download'],
     ['www_traffic', 'Www Traffic'], ['www_discover', 'WWW Discover - Network Diagnostics'], ['collab', 'Collab'], ['iperf', 'Iperf'],
@@ -4366,7 +4375,7 @@ function csSimField(section, key, label, value, type) {
     }
     if (CS_ONOFF_KEYS.has(key)) {
         const lc = v.toLowerCase();
-        const on = lc === 'on', off = lc === 'off';
+        const on = ['on', 'true', '1'].includes(lc), off = ['off', 'false', '0'].includes(lc);
         // A missing/empty value shows "— default —" (empty), NOT "off" — so a
         // field absent from the source is never silently saved as off (which had
         // been flipping web_server off and disabling clients). Empty serializes
@@ -6861,7 +6870,7 @@ function csUOField(user, key, value) {
     const attrs = `data-cs-uo-user="${csEscape(user)}" data-cs-uo-key="${csEscape(key)}"`;
     if (CS_ONOFF_KEYS.has(key)) {
         const lc = v.toLowerCase();
-        const on = lc === 'on', off = lc === 'off';
+        const on = ['on', 'true', '1'].includes(lc), off = ['off', 'false', '0'].includes(lc);
         return `<div class="flex flex-col gap-1">
           <label class="text-xs text-slate-500 font-bold">${csEscape(label)}</label>
           <select ${attrs} onchange="csUOSet(this)"

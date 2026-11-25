@@ -116,6 +116,15 @@ CI/tooling changes are omitted unless they change what an operator sees.
 
 ### Simulations
 
+- **Rogue DNS burst** (`rogue_dns_burst`) adds a default-off wireless
+  Linux/Windows simulation that works like Rogue DNS (static IP, fixed DNS
+  server, Firefox browsing) and also sends a steady DNS query load (default
+  20 queries/s, at most 40 in flight) to that server during the static phase.
+  The load goes through the shared DNS ceiling and gateway breaker. Clients
+  keep their IP. The catalog entry, client controls and config editor fields
+  are in this change; deploy it before the companion cs#284 client update.
+  See [alert-generation.md](alert-generation.md#rogue-dns-burst-static-ip--fixed-dns--query-load--rogue_dns_burst).
+
 - **Learned-value approvals are saved again.** Since Aug 6 a stable Learning-lab row's proposal never reached Setup → Simulations → Learned Values, approving one left it in the queue, and rejecting one failed with a server error. All three work again. The first pass after the update proposes each known-good whose proposal was lost, including those whose row no longer learns; one rejected before Aug 6 may be proposed once more, and rejecting it again is final. A proposal now carries the floor learned with its count. When several sites learn the same alert, the tenant keeps the best of them (the highest count, then a learned floor) and proposes it once. See [cs.md](cs.md).
 
 ### External DNS
