@@ -31,7 +31,7 @@ def test_worker_checks_local_runtime_pin_before_advertising_models(
     models = {"test:cpu": digest} if with_models else {}
     probes = []
 
-    def request(path):
+    def request(path, **_kw):
         """Return the running version and one approved model."""
         probes.append(path)
         if path == "/api/version":
@@ -582,3 +582,44 @@ def test_activation_reply_survives_a_malformed_candidate_store(tmp_path, monkeyp
     assert result["code"] == "activated"
     assert sorted(p.name for p in (store / "blobs").iterdir()) == before
     assert (store / Path(*parts)).exists()
+
+
+def test_activation_waits_for_a_runtime_that_answers_errors_while_starting(tmp_path, monkeypatch):
+    """A freshly started Ollama answering 5xx for a while must not trigger a rollback."""
+    monkeypatch.setattr(llm_provisioning, "STATE", tmp_path / "private" / "preparation.json")
+    candidate = CANDIDATES["gemma4-12b"]
+    llm_provisioning.save_state({
+        "candidate": "gemma4-12b", "request_id": "a" * 32, "revision": 1, "state": "passed",
+        "result": {"status": "SUCCESS", "code": "bootstrap_smoke_passed", **candidate},
+    })
+    calls = []
+    monkeypatch.setattr(llm_activation, "publish", lambda model, digest: {"created": True})
+    monkeypatch.setattr(llm_activation, "finalize", lambda record: None)
+    monkeypatch.setattr(llm_activation, "rollback", lambda record: calls.append("rollback"))
+    monkeypatch.setattr(llm_activation, "prune_candidate", lambda model: None)
+    monkeypatch.setattr(llm_spoke.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(llm_spoke, "runtime_service", lambda action: True)
+    failures = {"left": 30}
+
+    def request(*_a, **_kw):
+        """Fail more times than the old 20-attempt window allowed, then answer."""
+        if failures["left"] > 0:
+            failures["left"] -= 1
+            raise ValueError("Ollama returned an error status: 503 for /api/version")
+        return {"version": "0.40.16"}
+
+    async def no_sleep(_seconds):
+        """Skip the real wait between polls."""
+
+    monkeypatch.setattr(llm_spoke, "ollama_request", request)
+    monkeypatch.setattr(llm_spoke.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(qualification, "_installed", lambda *_a: True)
+    worker = llm_spoke.LlmSpoke("test-worker", {})
+
+    async def inventory():
+        """Approve the artifact."""
+        return {candidate["model"]: candidate["digest"]}
+
+    worker._available_models = inventory
+    result = asyncio.run(worker.handle_command("LLM_ACTIVATE", {"candidate": "gemma4-12b"}))
+    assert result["code"] == "activated" and calls == []

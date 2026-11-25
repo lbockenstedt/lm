@@ -32,6 +32,7 @@ RUNTIME_BINARY_PATH = Path("/opt/lm-llm/bin/ollama")
 # Loopback-only port of SERVICE (its OLLAMA_HOST). Fixed, not a setting: it never leaves
 # the VM, and staying off Ollama's 11434 means a system Ollama can't be mistaken for ours.
 SERVING_PORT = 11438
+ACTIVATION_READY_S = 120
 CATALOG = Path("/etc/lm/llm-models.json")
 BUNDLE_CATALOG = Path("/opt/lm-llm/llm-models.json")
 
@@ -99,7 +100,7 @@ def ollama_request(path, body=None, timeout=3, *, port=SERVING_PORT):
         )
         reply = conn.getresponse()
         if reply.status != 200:
-            raise ValueError("Ollama returned an error status")
+            raise ValueError(f"Ollama returned an error status: {reply.status} for {path}")
         content = reply.read(MAX_RESPONSE_BYTES + 1)
         if len(content) > MAX_RESPONSE_BYTES:
             raise ValueError("Ollama response exceeds the size limit")
@@ -206,7 +207,10 @@ class LlmSpoke(BaseSpoke):
                     raise ValueError("Serving service failed to start")
                 self._service_started = True
             # systemd Type=exec can report started before the API listens.
-            for attempt in range(20):
+            # A freshly started Ollama can answer 5xx or stall while it scans a large store,
+            # so allow it ACTIVATION_READY_S before giving up and rolling back.
+            deadline = time.monotonic() + ACTIVATION_READY_S
+            while True:
                 try:
                     version = await asyncio.to_thread(ollama_request, "/api/version")
                     if version.get("version") != self._runtime_version:
@@ -214,12 +218,14 @@ class LlmSpoke(BaseSpoke):
                     if await asyncio.to_thread(_installed, ollama_request, SERVING_PORT,
                                                candidate["model"], candidate["digest"]):
                         break
-                except (OSError, ValueError, http.client.HTTPException):
-                    if attempt == 19:
+                except (OSError, ValueError, http.client.HTTPException) as exc:
+                    if time.monotonic() >= deadline:
                         raise
-                await asyncio.sleep(0.5)
-            else:
-                raise ValueError("Published model is not present in the serving inventory")
+                    logger.info("LLM serving runtime not ready yet: %s", exc)
+                else:
+                    if time.monotonic() >= deadline:
+                        raise ValueError("Published model is not present in the serving inventory")
+                await asyncio.sleep(1)
             await asyncio.to_thread(finalize, record)
             models = await self._available_models()
             if models.get(candidate["model"]) != candidate["digest"]:
@@ -316,7 +322,7 @@ class LlmSpoke(BaseSpoke):
                     catalog = {}
         if not isinstance(catalog, dict) or not catalog:
             return {}
-        inventory = await asyncio.to_thread(ollama_request, "/api/tags")
+        inventory = await asyncio.to_thread(ollama_request, "/api/tags", timeout=120)
         rows = inventory.get("models")
         if not isinstance(rows, list):
             raise ValueError("Invalid Ollama inventory")
