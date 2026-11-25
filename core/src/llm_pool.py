@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import time
+from time import time as _wall_clock  # epoch seconds for job expiry
 import uuid
 from collections import deque
 from collections.abc import Mapping
@@ -193,6 +194,7 @@ PROVISION_MAX_WORKERS = 2
 PROVISION_BACKOFF_BASE = 900
 PROVISION_BACKOFF_MAX = 21600
 PROVISION_POLL_S = 2
+JOB_RETENTION_S = 7 * 86400
 ACTIVATION_IDLE_WAIT_S = 90
 
 
@@ -259,6 +261,7 @@ class LlmPool:
 
     def dashboard(self):
         """Return bounded operational metadata, with no prompts, output or credentials."""
+        self._prune_jobs()
         candidates = self.qualification_candidates()
         test_workers = {pk for pk, _ in candidates.values()}
         metadata = self.hub.state.system_state.get("module_metadata", {})
@@ -453,8 +456,16 @@ class LlmPool:
                 self.provision_failures.pop(pk, None)
         return True
 
+    def _prune_jobs(self):
+        """Drop finished job rows older than the retention window; metrics are kept."""
+        cutoff = _wall_clock() - JOB_RETENTION_S
+        while self.jobs and self.jobs[0].get("finished_at", cutoff + 1) < cutoff:
+            self.jobs.popleft()
+
     def _finish(self, job):
         """Record a terminal job row and fold it into the per-model metrics."""
+        job["finished_at"] = _wall_clock()
+        self._prune_jobs()
         if job["state"] == "queued":
             # A cancelled or expired wait never ran; history rows are always terminal.
             job.update(state="no_capacity", code="no_capacity")
