@@ -258,8 +258,8 @@ def test_bootstrap_smoke_can_run_on_shared_worker_without_serving_runtime():
     assert "baseline" not in job
 
 
-def test_public_candidate_only_prepares_on_an_approved_shared_worker():
-    """A global administrator cannot use this action on tenant-owned workers."""
+def test_public_candidate_prepares_on_any_approved_llm_worker_but_not_other_modules():
+    """Preparation is no longer Shared-only, but still needs an approved LLM module."""
     pool = make_pool()
     pool.report("c", pool.hub.active_connections["c"], {
         "status": "ERROR", "code": "runtime_not_started", "detail_code": "runtime_binary_missing",
@@ -275,7 +275,8 @@ def test_public_candidate_only_prepares_on_an_approved_shared_worker():
 
     async def exercise():
         """Check reservation, valid identity and the final diagnostic."""
-        assert not await pool.start_bootstrap("a", "gemma4-12b")
+        pool.hub.state.system_state["module_metadata"]["d"]["module_type"] = "nw"
+        assert not await pool.start_bootstrap("d", "gemma4-12b")
         assert not await pool.start_bootstrap("c", "unapproved")
         assert await pool.start_bootstrap("c", "gemma4-12b")
         assert not await pool.start_bootstrap("c", "gemma4-12b")
@@ -337,20 +338,23 @@ def test_failed_preparation_save_does_not_dispatch_new_request():
     asyncio.run(exercise())
 
 
-def test_activation_is_scoped_to_selected_shared_worker():
-    """Only the selected Shared worker may receive an explicit activation."""
+def test_activation_is_scoped_to_selected_llm_worker():
+    """Only a worker with a matching saved preparation may be activated, and only LLM modules."""
     pool = make_pool()
     pool.hub.state.update_global_config({"llm_worker_preparations": {
         "c": {"candidate": "gemma4-12b", "request_id": "a" * 32, "revision": 1},
         "a": {"candidate": "gemma4-12b", "request_id": "b" * 32, "revision": 1},
+        "d": {"candidate": "gemma4-12b", "request_id": "c" * 32, "revision": 1},
     }})
+    pool.hub.state.system_state["module_metadata"]["d"]["module_type"] = "nw"
     candidate = CANDIDATES["gemma4-12b"]
     pool.hub.request_response.return_value = {"status": "SUCCESS", "code": "activated",
                                               "model": candidate["model"], "digest": candidate["digest"]}
 
     async def exercise():
-        """A tenant-owned worker is always excluded."""
-        assert not pool.start_activation("a", "gemma4-12b")
+        """A non-LLM module or a mismatched key is rejected; a tenant-owned worker is not."""
+        assert not pool.start_activation("d", "gemma4-12b")
+        assert not pool.start_activation("a", "qwen38-scout")
         assert not pool.start_activation("c", "qwen38-scout")
         assert pool.start_activation("c", "gemma4-12b")
         task = next(t for t in asyncio.all_tasks() if t.get_coro().__name__ == "_activate")
@@ -1297,3 +1301,274 @@ def test_no_capable_worker_still_records_no_capacity_per_artifact(monkeypatch):
     assert result["code"] == "no_capacity"
     assert [(row["state"], row["model"]) for row in pool.jobs] == [
         ("no_capacity", "preferred:latest"), ("no_capacity", "other:latest")]
+
+
+# --- automatic provisioning ---------------------------------------------------
+
+GIB = 2**30
+ORDER = ["gemma4-12b", "qwen38-scout", "qwen36-coding", "deepseek-r1-70b"]
+
+
+def prov_pool(monkeypatch, ram=128 * GIB, served=(), workers="a"):
+    """Build a pool whose listed workers report the given RAM and served catalog keys."""
+    pool = make_pool()
+    monkeypatch.setattr(llm_pool, "PROVISION_POLL_S", 0)
+    for worker in workers:
+        pool.report(worker, pool.hub.active_connections[worker], {
+            "status": "SUCCESS", "available": True,
+            "models": {CANDIDATES[k]["model"]: CANDIDATES[k]["digest"] for k in served},
+            "capabilities": {"mode": "cpu", "ram_bytes": ram, "vcpus": 8},
+        })
+    return pool
+
+
+def fake_agent(pool, order, fail=None):
+    """Answer PREPARE/ACTIVATE like a healthy worker, recording the model order."""
+    journal = {}
+
+    async def reply(worker, command, data, timeout=None):
+        """Return the success reply for one command, or a failure for `fail`."""
+        key = data["candidate"]
+        if command == "LLM_PREPARE":
+            # Mirror the agent's persisted journal: a reused revision with a new id is rejected.
+            last = journal.get(worker)
+            if last and (data["revision"] < last[0] or (
+                    data["revision"] == last[0] and data["request_id"] != last[1])):
+                return {"status": "ERROR", "code": "preparation_superseded"}
+            journal[worker] = (data["revision"], data["request_id"])
+            order.append(key)
+            if key == fail:
+                return {"status": "ERROR", "code": "candidate_pull_failed"}
+            return {"status": "SUCCESS", "code": "bootstrap_smoke_passed", "mode": "bootstrap",
+                    "model": CANDIDATES[key]["model"], "digest": CANDIDATES[key]["digest"],
+                    "options": CANDIDATES[key]["options"], "version": "0.40.16",
+                    "fixtures": [{"fixture": "json", "passed": True},
+                                 {"fixture": "indentation", "passed": True}]}
+        return {"status": "SUCCESS", "code": "activated",
+                "model": CANDIDATES[key]["model"], "digest": CANDIDATES[key]["digest"]}
+    pool.hub.request_response.side_effect = reply
+
+
+def run_provision(pool):
+    """Run one reconciler pass and wait for the tasks it started."""
+    async def go():
+        """Start the pass, then await every per-worker task."""
+        await pool.provision_once()
+        await asyncio.gather(*list(pool.provision_tasks))
+    asyncio.run(go())
+
+
+def test_catalog_has_ram_minimums_in_gib():
+    """Each catalog entry carries the owner-chosen minimum RAM."""
+    assert {k: v["min_ram_bytes"] // GIB for k, v in CANDIDATES.items()} == {
+        "gemma4-12b": 16, "qwen36-coding": 40, "qwen38-scout": 32, "deepseek-r1-70b": 64}
+
+
+def test_provisioner_installs_missing_models_smallest_first_on_a_non_shared_worker(monkeypatch):
+    """A tenant-owned worker gets all four models in order and the preparation row is removed."""
+    pool = prov_pool(monkeypatch)
+    order = []
+    fake_agent(pool, order)
+    run_provision(pool)
+    assert order == ORDER
+    assert not pool.hub.state.get_global_config()["llm_worker_preparations"]
+    assert not pool.provision_failures and not pool.reserved and not pool.provisioning
+    activations = [c.args[2]["candidate"] for c in pool.hub.request_response.call_args_list
+                   if c.args[1] == "LLM_ACTIVATE"]
+    assert activations == ORDER
+
+
+def test_provisioner_skips_models_already_served(monkeypatch):
+    """A model the worker reports with the pinned digest is never pulled again."""
+    pool = prov_pool(monkeypatch, served=("gemma4-12b", "qwen36-coding"))
+    order = []
+    fake_agent(pool, order)
+    run_provision(pool)
+    assert order == ["qwen38-scout", "deepseek-r1-70b"]
+
+
+def test_provisioner_skips_models_too_big_for_the_worker(monkeypatch):
+    """A 36 GiB worker gets Gemma and Qwen 3.8 only, and the dashboard says why."""
+    pool = prov_pool(monkeypatch, ram=36 * GIB)
+    order = []
+    fake_agent(pool, order)
+    run_provision(pool)
+    assert order == ["gemma4-12b", "qwen38-scout"]
+    row = next(w for w in pool.dashboard()["workers"] if w["name"] == "Worker a")
+    assert len(row["skipped"]) == 2 and "Too small for" in row["detail"]
+
+
+def test_provisioner_skips_workers_without_hardware_report(monkeypatch):
+    """A worker with no hardware report cannot be sized, so nothing is pulled."""
+    pool = prov_pool(monkeypatch, workers="")
+    pool.report("a", pool.hub.active_connections["a"], {"status": "SUCCESS", "models": {}, "available": True})
+    order = []
+    fake_agent(pool, order)
+    run_provision(pool)
+    assert order == []
+
+
+def test_failure_sets_backoff_and_attention_and_is_not_retried_early(monkeypatch):
+    """A failed pull stops the worker's pass, shows attention, and waits out the backoff."""
+    pool = prov_pool(monkeypatch)
+    order = []
+    fake_agent(pool, order, fail="qwen38-scout")
+    run_provision(pool)
+    assert order == ["gemma4-12b", "qwen38-scout"]
+    assert list(pool.provision_failures["a"].values()) == ["candidate_pull_failed"]
+    row = next(w for w in pool.dashboard()["workers"] if w["name"] == "Worker a")
+    assert row["state"] == "attention" and "candidate_pull_failed" in row["detail"]
+    # Within the backoff nothing is retried (the worker reports again, still idle).
+    prov_pool_report = pool.hub.active_connections["a"]
+    pool.report("a", prov_pool_report, {
+        "status": "SUCCESS", "available": True,
+        "models": {CANDIDATES["gemma4-12b"]["model"]: CANDIDATES["gemma4-12b"]["digest"]},
+        "capabilities": {"mode": "cpu", "ram_bytes": 128 * GIB}})
+    order.clear()
+    pool.hub.state.get_global_config()["llm_worker_preparations"] = {}
+    run_provision(pool)
+    assert order == ["qwen36-coding", "deepseek-r1-70b"] or order == []
+    assert "qwen38-scout" not in order
+    # Once the backoff elapses the failed model is retried first.
+    pool.provision_retry_at[("a", "qwen38-scout")] = 0
+    order.clear()
+    run_provision(pool)
+    assert order[0] == "qwen38-scout"
+
+
+def test_backoff_doubles_and_is_capped(monkeypatch):
+    """Failures back off 15 min, 30, 60 ... never past 6 hours."""
+    pool = prov_pool(monkeypatch)
+    now = 1000.0
+    monkeypatch.setattr(llm_pool.time, "monotonic", lambda: now)
+    delays = []
+    for _ in range(8):
+        pool._provision_failed("a", "gemma4-12b", "x")
+        delays.append(pool.provision_retry_at[("a", "gemma4-12b")] - now)
+    assert delays[:3] == [900, 1800, 3600] and max(delays) == 21600
+
+
+def test_provisioner_runs_at_most_two_workers_at_once(monkeypatch):
+    """A third worker waits for the next pass while two are busy."""
+    pool = prov_pool(monkeypatch, workers="abc")
+    gate = asyncio.Event()
+    seen = set()
+
+    async def slow(worker, command, data, timeout=None):
+        """Hold every PREPARE until released, noting which workers are in flight."""
+        seen.add(worker)
+        await gate.wait()
+        return {"status": "ERROR", "code": "candidate_pull_failed"}
+
+    pool.hub.request_response.side_effect = slow
+
+    async def go():
+        """Start a pass, let the pulls begin, then release them."""
+        await pool.provision_once()
+        await asyncio.sleep(0.05)
+        assert len(pool.provisioning) == 2 and len(seen) == 2
+        await pool.provision_once()
+        assert len(pool.provisioning) == 2
+        gate.set()
+        await asyncio.gather(*list(pool.provision_tasks))
+
+    asyncio.run(go())
+
+
+def test_provisioner_knob_off_does_nothing(monkeypatch):
+    """llm_auto_provision=false stops the reconciler."""
+    pool = prov_pool(monkeypatch)
+    pool.hub.state.get_global_config()["llm_auto_provision"] = False
+    order = []
+    fake_agent(pool, order)
+    run_provision(pool)
+    assert order == [] and not pool.provision_tasks
+
+
+def test_dashboard_shows_provisioning_with_model_label(monkeypatch):
+    """While a model is being prepared the worker is 'provisioning', not 'busy'."""
+    pool = prov_pool(monkeypatch)
+    gate = asyncio.Event()
+
+    async def slow(*args, **kwargs):
+        """Hold the pull open so the dashboard can be sampled."""
+        await gate.wait()
+        return {"status": "ERROR", "code": "candidate_pull_failed"}
+
+    pool.hub.request_response.side_effect = slow
+
+    async def go():
+        """Sample the dashboard mid-pull."""
+        await pool.provision_once()
+        await asyncio.sleep(0.05)
+        row = next(w for w in pool.dashboard()["workers"] if w["name"] == "Worker a")
+        assert row["state"] == "provisioning"
+        assert row["detail"] == "Preparing " + CANDIDATES["gemma4-12b"]["label"]
+        gate.set()
+        await asyncio.gather(*list(pool.provision_tasks))
+
+    asyncio.run(go())
+
+
+def test_non_shared_worker_in_qualification_manifest_still_serves_inference():
+    """Workers listed as qualification candidates are no longer excluded from tenant pools."""
+    pool = make_pool()
+    pool.hub.state.get_global_config()["llm_qualification_candidates"] = {
+        "cpu": {"worker": "c", "label": "CPU trial"}}
+    assert pool._tenant_workers("tenant-without-workers") == ["c"]
+
+
+def test_admin_prepare_stays_shared_only_but_reconciler_reaches_tenant_workers(monkeypatch):
+    """Admin Prepare/Activate never reach a tenant spoke; the hub's own reconciler does."""
+    pool = prov_pool(monkeypatch)
+    key = next(iter(CANDIDATES))
+    assert asyncio.run(pool.start_bootstrap("a", key)) is False
+    assert pool._available_worker("a") is None
+    assert pool._available_worker("a", True) is not None
+    assert pool._available_worker("c") is not None
+
+
+def test_manual_activation_rechecks_shared_tenancy_at_dispatch(monkeypatch):
+    """A Shared worker reassigned to a tenant before dispatch is not sent a manual command."""
+    pool = prov_pool(monkeypatch, workers="c")
+    key = next(iter(CANDIDATES))
+    pool.hub.state.get_global_config()["llm_worker_preparations"] = {"c": {"candidate": key}}
+    pool.hub.state.system_state["module_metadata"]["c"]["tenant_id"] = "tenant-a"
+    job = {"kind": "activation", "state": "running", "candidate": "x", "tier": "local", "worker": "w"}
+    asyncio.run(pool._activate("c", pool.hub.active_connections["c"], key, job))
+    assert job["code"] == "worker_changed"
+    pool.hub.request_response.assert_not_called()
+
+
+def test_later_success_keeps_earlier_model_failure_visible(monkeypatch):
+    """Needs attention stays until the failed model itself succeeds."""
+    pool = prov_pool(monkeypatch)
+    keys = list(CANDIDATES)
+    pool.provision_failures["a"] = {CANDIDATES[keys[0]]["label"]: "candidate_pull_failed",
+                                    CANDIDATES[keys[2]]["label"]: "activation_failed"}
+    fake_agent(pool, [])
+    assert asyncio.run(pool._provision_model("a", keys[1])) is True
+    assert "a" in pool.provision_failures
+    assert asyncio.run(pool._provision_model("a", keys[0])) is True
+    assert list(pool.provision_failures["a"].values()) == ["activation_failed"]
+    assert asyncio.run(pool._provision_model("a", keys[2])) is True
+    assert "a" not in pool.provision_failures
+
+
+def test_replay_of_manual_preparation_does_not_reach_a_reassigned_tenant_worker(monkeypatch):
+    """A row saved by a manual Prepare is replayed only while the worker is Shared."""
+    pool = prov_pool(monkeypatch, workers="c")
+    key = next(iter(CANDIDATES))
+    row = {"candidate": key, "request_id": "a" * 32, "revision": 1}
+    pool.hub.state.get_global_config()["llm_worker_preparations"] = {"c": row}
+    pool.hub.state.system_state["module_metadata"]["c"]["tenant_id"] = "tenant-a"
+
+    async def go():
+        """Replay on reconnect and let any scheduled task run."""
+        pool.reconcile_bootstrap("c")
+        await asyncio.sleep(0.05)
+    asyncio.run(go())
+    pool.hub.request_response.assert_not_called()
+    row["auto"] = True
+    asyncio.run(go())
+    pool.hub.request_response.assert_called()
