@@ -228,6 +228,8 @@ def test_activation_approves_only_after_serving_probe_and_can_rollback(tmp_path,
     record = llm_activation.publish(candidate, "a" * 64)
     catalog = llm_activation.SERVING_RUNTIME / "llm-models.json"
     assert json.loads(catalog.read_text()) == {}
+    # Ollama mkdirs manifests-v2 at startup and the serving store is read-only.
+    assert (llm_activation.SERVING_RUNTIME / "models" / "manifests-v2").is_dir()
     llm_activation.finalize(record)
     assert json.loads(catalog.read_text()) == {candidate["model"]: candidate["digest"]}
     llm_activation.rollback(record)
