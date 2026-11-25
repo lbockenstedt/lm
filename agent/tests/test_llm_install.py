@@ -578,3 +578,22 @@ def test_prune_keeps_blobs_when_the_manifest_cannot_be_deleted(tmp_path, monkeyp
     before = _blob_names(store)
     assert llm_activation.prune_candidate(one) == 0
     assert _blob_names(store) == before
+
+
+def test_additive_publish_failure_leaves_no_new_manifest(tmp_path, monkeypatch):
+    """A conflicting v2 manifest aborts publication without stranding the legacy manifest."""
+    first = _activation_fixture(tmp_path, monkeypatch)
+    llm_activation.finalize(llm_activation.publish(first, "a" * 64))
+    store = llm_activation.CANDIDATE_STORE
+    manifest = json.dumps({"config": {"digest": "sha256:" + "5" * 64}, "layers": []}).encode()
+    legacy = store / "manifests/registry.ollama.ai/library/second/cpu"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_bytes(manifest)
+    (store / "blobs" / f"sha256-{'5' * 64}").write_bytes(b"x")
+    serving = llm_activation.SERVING_RUNTIME / "models"
+    conflict = serving / "manifests-v2/ollama.com/library/second/cpu"
+    conflict.parent.mkdir(parents=True)
+    conflict.write_bytes(b"other")
+    with pytest.raises(ValueError):
+        llm_activation.publish({"model": "second:cpu", "digest": hashlib.sha256(manifest).hexdigest()}, "a" * 64)
+    assert not (serving / "manifests/registry.ollama.ai/library/second/cpu").exists()

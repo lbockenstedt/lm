@@ -365,6 +365,7 @@ def publish(candidate, expected_runtime_digest):
         after = (json.dumps({**catalog, candidate["model"]: candidate["digest"]}) + "\n").encode()
         destination = serving / "models"
         added_blobs = []
+        linked = []
         try:
             for digest in blobs:
                 name = f"sha256-{digest}"
@@ -382,6 +383,7 @@ def publish(candidate, expected_runtime_digest):
             added = not target.exists() and not target.is_symlink()
             if added:
                 os.link(manifest_path, target, follow_symlinks=False)
+                linked.append(target)
             elif _read_regular(target, MAX_MANIFEST) != manifest:
                 raise ValueError("Existing serving manifest conflicts with the selected model")
             _mkdirs(destination, v2_parts[:-1])
@@ -389,9 +391,12 @@ def publish(candidate, expected_runtime_digest):
             added_v2 = not target_v2.exists() and not target_v2.is_symlink()
             if added_v2:
                 os.link(v2_path, target_v2, follow_symlinks=False)
+                linked.append(target_v2)
             elif _read_regular(target_v2, MAX_MANIFEST) != v2_bytes:
                 raise ValueError("Existing serving manifest conflicts with the selected model")
         except BaseException:
+            for path in linked:
+                path.unlink(missing_ok=True)
             _remove_added_blobs(added_blobs)
             raise
         return {"created": False, "before": before, "after": after,
