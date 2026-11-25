@@ -62,24 +62,26 @@ function workerTooltip(w) {
     return lines.join('\n');
 }
 
-// Models cell: serving models are green; others show their newest job result
-// (passed bootstrap amber, failed red with the code in the tooltip).
-function modelChips(w, jobs) {
-    const serving = (w.models || []).map(m => m.name).filter(Boolean);
-    const seen = new Set(serving);
-    const chips = serving.map(name => safeHtml`<span class="${BADGE} ${GREEN}" title="Serving">${name}</span>`);
-    for (const j of jobs) {
-        const name = j.model || j.candidate;
-        if (!name || seen.has(name) || !['passed', 'failed'].includes(j.state)) continue;
-        seen.add(name);
-        const failed = j.state === 'failed';
-        chips.push(safeHtml`<span class="${BADGE} ${failed ? RED : AMBER}" title="${failed ? `Failed: ${j.code || j.resolution || ''}` : 'Passed the smoke test; not serving'}">${name}</span>`);
-    }
+// Models cell: one chip per catalog model with an explicit state from the worker/hub,
+// never inferred from job history (clearing finished jobs must not change it).
+function modelChips(w) {
+    const states = {
+        serving: [GREEN, 'Serving', ''],
+        preparing: [BLUE, 'Preparing', ' · preparing'],
+        failed: [RED, 'Failed', ' · failed'],
+        too_small: [GREY, 'Worker too small for this model', ' · too small'],
+        not_loaded: [GREY, 'Not loaded', ' · not loaded'],
+    };
+    const chips = (w.catalog || []).map(c => {
+        const [cls, tip, suffix] = states[c.state] || [GREY, String(c.state), ''];
+        const title = c.state === 'failed' && c.code ? `Failed: ${c.code}` : tip;
+        return safeHtml`<span class="${BADGE} ${cls}" title="${title}">${c.model}${suffix}</span>`;
+    });
     return chips.length ? chips : '—';
 }
 
 // One worker card: name and status badge, hardware line, then one row per model.
-function workerCard(w, jobs) {
+function workerCard(w) {
     const { label, cls } = workerStatus(w);
     const cap = w.capabilities || {};
     const ram = cap.ram_bytes == null ? '—' : `${(cap.ram_bytes / (1024 ** 3)).toFixed(1)} GiB`;
@@ -94,7 +96,7 @@ function workerCard(w, jobs) {
         <div class="text-xs text-slate-500">${hardware}</div>
         ${w.qualification ? safeHtml`<div class="text-xs text-slate-500">Qualification only</div>` : ''}
         <div class="text-xs font-bold text-slate-500 pt-1">Models</div>
-        <div class="flex flex-wrap gap-1">${modelChips(w, jobs)}</div>
+        <div class="flex flex-wrap gap-1">${modelChips(w)}</div>
         ${notes ? safeHtml`<div class="text-xs text-red-700">${notes}</div>` : ''}
     </div>`;
 }
@@ -168,9 +170,9 @@ function renderTable(headers, rows, emptyText) {
 }
 
 // Workers: one card per worker, in a responsive grid.
-function renderWorkersSection(workers, jobs = []) {
+function renderWorkersSection(workers) {
     const cards = workers.length
-        ? workers.map(w => workerCard(w, jobs))
+        ? workers.map(workerCard)
         : safeHtml`<p class="text-sm text-slate-500 italic">No workers.</p>`;
     return safeHtml`<div class="hpe-card rounded-lg p-5 shadow-sm space-y-3">
         <h3 class="text-sm font-bold text-slate-500">Workers</h3>
@@ -226,7 +228,7 @@ async function renderLlmDashboard(container) {
             <div class="space-y-4">
                 ${renderStatus(status)}
                 <h2 class="text-lg font-bold text-navy">LLM Dashboard</h2>
-                ${renderWorkersSection(state.workers, state.jobs)}
+                ${renderWorkersSection(state.workers)}
                 ${renderJobsSection(state.jobs)}
                 ${renderMetricsSection(state.metrics)}
             </div>` });
