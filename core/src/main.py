@@ -183,6 +183,9 @@ _INTERNAL_NETS = tuple(ipaddress.ip_network(c) for c in (
 # before the footer dot escalates from amber "pending" to red "stuck". Long
 # enough that a routine pull + watchdog restart never trips it.
 # Seconds before version drift is reported as "stuck".
+# AppBuilder LLM jobs the hub runs at once on the pool; the pool queues the rest.
+AB_LLM_REQUEST_TYPES = ("LLM_PR_SUMMARY", "LLM_COMPLETE")
+AB_LLM_MAX_JOBS = 16
 _UPDATE_STUCK_S = float(os.environ.get("LM_UPDATE_STUCK_S", "3600") or 3600)
 
 # request_response wakes the moment its reply arrives (an asyncio.Event set by
@@ -6388,7 +6391,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Read the request and its id, and run the handler.
         req = payload.get("data", {}) or {}
         req_id = msg_data.get("header", {}).get("message_id")
-        if (not allow_llm and isinstance(req, dict) and req.get("type") == "LLM_PR_SUMMARY"
+        if (not allow_llm and isinstance(req, dict) and req.get("type") in AB_LLM_REQUEST_TYPES
                 and self._hub_request_authorized(spoke_id, peer_cert_identity)):
             result = {"status": "ERROR", "code": "no_capacity", "retryable": True}
         else:
@@ -8501,15 +8504,16 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Slow inference must not block the websocket's receive/heartbeat loop.
         data = payload.get("data")
         identity = getattr(conn.websocket, "peer_cert_identity", None)
-        if (isinstance(data, dict) and data.get("type") == "LLM_PR_SUMMARY"
-                and self._hub_request_authorized(conn.spoke_id, identity)
-                and len(self._ab_llm_jobs) < 4):
-            task = asyncio.create_task(self._handle_hub_request(
-                conn.spoke_id, msg_data, payload, identity, reply_socket=conn.websocket))
-            self._ab_llm_jobs.add(task)
-            task.add_done_callback(self._ab_llm_jobs.discard)
-            return
-        if isinstance(data, dict) and data.get("type") == "LLM_PR_SUMMARY":
+        # LLM_COMPLETE runs concurrently too: AppBuilder shares one connection, and
+        # handling each job inline let only one run on the pool at a time.
+        if isinstance(data, dict) and data.get("type") in AB_LLM_REQUEST_TYPES:
+            if (self._hub_request_authorized(conn.spoke_id, identity)
+                    and len(self._ab_llm_jobs) < AB_LLM_MAX_JOBS):
+                task = asyncio.create_task(self._handle_hub_request(
+                    conn.spoke_id, msg_data, payload, identity, reply_socket=conn.websocket))
+                self._ab_llm_jobs.add(task)
+                task.add_done_callback(self._ab_llm_jobs.discard)
+                return
             await self._handle_hub_request(
                 conn.spoke_id, msg_data, payload, identity, allow_llm=False)
         else:
