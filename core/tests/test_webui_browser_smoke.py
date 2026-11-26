@@ -147,9 +147,10 @@ def test_llm_dashboard_shows_worker_status_badges_and_tooltips(hub_url_and_sessi
             nav.click()
             page.get_by_text("W Ready", exact=True).wait_for()
             # Each raw API state maps to its badge label; unknown states show their raw text.
-            cards = {name: page.locator(f"xpath=//span[text()='{name}']/ancestor::div[@title][1]") for name in
+            # Each worker is a table row; its tooltip (title) carries the details.
+            cards = {name: page.locator(f"xpath=//td[text()='{name}']/ancestor::tr[1]") for name in
                      ("W Ready", "W Busy", "W Prov", "W Off", "W Attn", "W Odd")}
-            badges = {name: card.locator("span").nth(1) for name, card in cards.items()}
+            badges = {name: row.locator("td").nth(2).locator("span") for name, row in cards.items()}
             assert badges["W Ready"].inner_text() == "Ready"
             assert badges["W Busy"].inner_text() == "Busy"
             assert badges["W Prov"].inner_text() == "Provisioning: gemma"
