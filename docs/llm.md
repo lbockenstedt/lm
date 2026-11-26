@@ -106,7 +106,7 @@ certificate). In the WebUI, LLM → Dashboard → **AppBuilder work** edits this
 `{tenant, tasks}`: the tenant may be the shared tenant (AppBuilder is shared; it then uses the shared workers), and `tasks` is the allowlist of task names AB may run
 (for example `scout`, `review`, `review_deep`, `coding`). The tenant comes only from this
 setting, never from the request. The caller is the AppBuilder certificate marked in the LE module (`ab_cert_identities`); an optional `certificate` in the rule narrows it to one SAN. A task outside the list, or a different
-certificate, returns `not_configured`; a busy pool returns `no_capacity`, and
+certificate, returns `not_configured`; up to 16 AppBuilder jobs run on the pool at once over AppBuilder's single connection (more get `no_capacity`); a busy pool returns `no_capacity`, and
 AB retries it (or, with `lm_pool_only` off in AB, uses its own providers). The `review` task is a filter
 reviewer; The review ladder is `review` (Qwen), then `review_deep` (DeepSeek, skipped
 when it is not serving), then AB's cloud frontier reviewer, whose verdict
