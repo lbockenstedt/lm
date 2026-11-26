@@ -72,6 +72,17 @@ def make_pool():
     return pool
 
 
+def test_dashboard_names_each_workers_tenant_and_never_its_id():
+    """The worker row shows the tenant's name, 'Shared' for the shared tenant, and '' when unassigned."""
+    pool = make_pool()
+    pool.hub.state.get_tenant = lambda tid: {"name": "Acme Labs"} if tid == "tenant-a" else None
+    rows = {row["name"]: row for row in pool.dashboard()["workers"]}
+    assert rows["Worker a"]["tenant"] == "Acme Labs"
+    assert rows["Worker c"]["tenant"] == "Shared"
+    assert rows["Worker d"]["tenant"] == ""
+    assert all("tenant-" not in str(row["tenant"]) for row in rows.values())
+
+
 def test_clear_finished_jobs_keeps_running_jobs_and_returns_count():
     """Clearing removes only terminal history rows, and reports how many went."""
     pool = make_pool()
