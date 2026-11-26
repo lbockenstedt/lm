@@ -20,6 +20,8 @@ Pure functions over plain dicts (``{ip: entry}`` per tenant).
 import ipaddress
 from typing import Any, Dict, Iterable, List, Set
 
+import monitor_templates
+
 # Keep entries 37 days: NetBox tombstones after 7 days unseen and deletes 30 days later,
 # so the registry must outlive that. Hosts seen in the last 24 hours are monitored.
 KEEP_SECONDS = 37 * 86400       # NetBox deletes after 7d + 30d unseen
@@ -175,9 +177,14 @@ def monitor_rows(by_tenant: Dict[str, Dict[str, Dict[str, Any]]], now: float,
             name = str(e.get("hostname") or "").strip()
             if not name or name.casefold() in skip_names:
                 continue
-            out.append({"tenant_id": tid, "name": name, "address": ip,
-                        "type": monitor_type(e, "host"),
-                        "snmp_ok": True, "snmp_secret": e["snmp_credential_id"]})
+            row = {"tenant_id": tid, "name": name, "address": ip,
+                   "type": monitor_type(e, "host"),
+                   "snmp_ok": True, "snmp_secret": e["snmp_credential_id"]}
+            # An unclassified box (a PDU, say) carries its sysDescr so monitoring can
+            # pick or build a template for its device type.
+            if monitor_templates.is_unclassified(e):
+                row["sys_descr"] = monitor_templates.scrub(e["profile"]["sys_descr"])
+            out.append(row)
     return out
 
 
