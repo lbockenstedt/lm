@@ -1256,6 +1256,11 @@ def test_ab_complete_requires_certificate_and_allowlisted_task():
     report_all(pool, qwen["model"], qwen["digest"])
     pool.hub.request_response.return_value = {"status": "SUCCESS", "text": "[]"}
     request = {"task": "scout", "prompt": "list files"}
+    # With no rule saved AB uses the shared tenant for its default tasks (these test workers are not shared).
+    assert asyncio.run(pool.ab_complete(request, ("ab-client",))).get("code") != "not_configured"
+    assert asyncio.run(pool.ab_complete({**request, "task": "other"}, ("ab-client",)))["code"] == "not_configured"
+    # An explicit empty rule turns AB's pool work off.
+    pool.hub.state.system_state["global_config"]["llm_ab_work"] = {"tenant": "shared", "tasks": []}
     assert asyncio.run(pool.ab_complete(request, ("ab-client",)))["code"] == "not_configured"
     pool.hub.state.system_state["global_config"]["llm_ab_work"] = {
         "tenant": "tenant-a", "certificate": "ab-client", "tasks": ["scout", "review"]}
