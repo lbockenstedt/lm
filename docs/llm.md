@@ -52,7 +52,8 @@ of serving with an unapproved version.
 - `POST /api/llm/complete?tenant=…` accepts `model`, `digest`, `prompt`, and
   optional `format` (`text`, `json`, or `python`). JSON must be an object or
   array. Python drafts are syntax-checked but never executed. Outputs are
-  advisory, not verified for correctness.
+  advisory, not verified for correctness. A prompt may be up to 192 KiB (the workers'
+  64k-token context); a larger one is `invalid_request`.
 - Alternatively, supply `task` instead of `model` and `digest`. With no
   configuration the hub uses a built-in task map: `summary` and `docs` →
   Gemma 4 12B; `pr_summary` → Gemma 4 12B, then Qwen 3.8 scout; `coding` → Qwen 3.6 coding, then Qwen 3.8 scout; `scout` →
@@ -104,7 +105,7 @@ Other AB work uses the `LLM_COMPLETE` hub request (same AppBuilder client
 certificate). In the WebUI, LLM → Dashboard → **AppBuilder work** edits this rule
 (tenant and ticked tasks; tenant groups are not offered). The API equivalent is setting `llm_ab_work` in `POST /api/llm/admin/settings` to
 `{tenant, tasks}`: the tenant may be the shared tenant (AppBuilder is shared; it then uses the shared workers), and `tasks` is the allowlist of task names AB may run
-(for example `scout`, `review`, `review_deep`, `coding`). With no rule saved, AppBuilder uses the shared workers for `scout`, `summary`, `pr_summary`, `coding`, `review` and `review_deep`; saving a rule (even with no tasks) replaces that default. The tenant comes only from this
+(for example `scout`, `review`, `review_deep`, `coding`). With no rule saved, AppBuilder uses the shared workers for `scout`, `summary`, `pr_summary`, `coding`, `reasoning`, `review` and `review_deep`; saving a rule (even with no tasks) replaces that default. The tenant comes only from this
 setting, never from the request. The caller is the AppBuilder certificate marked in the LE module (`ab_cert_identities`); an optional `certificate` in the rule narrows it to one SAN. A task outside the list, or a different
 certificate, returns `not_configured`; up to 16 AppBuilder jobs run on the pool at once over AppBuilder's single connection (more get `no_capacity`); a busy pool returns `no_capacity`, and
 AB retries it (or, with `lm_pool_only` off in AB, uses its own providers). The `review` task is a filter

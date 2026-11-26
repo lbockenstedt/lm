@@ -77,6 +77,8 @@ def valid_model(model, digest):
             and isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest))
 
 
+# Largest prompt a job may carry; the workers' 64k-token context fits about this much code plus a reply.
+MAX_PROMPT_BYTES = 192 * 1024
 HARDWARE_LIMITS = {"vcpus": 65536, "ram_bytes": 2**52}
 # hub.request_response returns this, rather than raising, when a reply times
 # out, and also without sending anything while the spoke is draining.
@@ -213,7 +215,7 @@ def queue_wait(config):
 
 
 # Pool tasks AppBuilder may run when no llm_ab_work rule is saved.
-AB_DEFAULT_TASKS = ("scout", "summary", "pr_summary", "coding", "review", "review_deep")
+AB_DEFAULT_TASKS = ("scout", "summary", "pr_summary", "coding", "reasoning", "review", "review_deep")
 
 
 class LlmPool:
@@ -1150,7 +1152,7 @@ class LlmPool:
         output_format = data.get("format", "text")
         if (not isinstance(tenant, str) or not tenant.strip()
                 or not isinstance(prompt, str) or not prompt.strip()
-                or len(prompt.encode("utf-8", errors="replace")) > 65536
+                or len(prompt.encode("utf-8", errors="replace")) > MAX_PROMPT_BYTES
                 or output_format not in ("text", "json", "python")):
             return {"status": "ERROR", "code": "invalid_request"}
 
