@@ -265,6 +265,18 @@ class LlmPool:
                 candidates[key] = (pk, label[:100])
         return candidates
 
+    def _tenant_label(self, owner):
+        """Return the tenant's display name, 'Shared' for the shared tenant, or '' when unassigned or unknown.
+
+        The raw tenant id is never returned: the dashboard shows names only.
+        """
+        if not owner:
+            return ""
+        if tenant_is_shared(owner):
+            return "Shared"
+        record = self.hub.state.get_tenant(owner)
+        return (record.get("name") if isinstance(record, dict) else None) or ""
+
     def dashboard(self):
         """Return bounded operational metadata, with no prompts, output or credentials."""
         self._prune_jobs()
@@ -322,6 +334,7 @@ class LlmPool:
                 catalog.append({"key": ckey, "model": spec["model"], "label": label, "state": row,
                                 **({"code": failures[label]} if row == "failed" else {})})
             workers.append({"name": self.hub.state.get_module_name(pk), "state": state,
+                            "tenant": self._tenant_label(metadata[pk].get("tenant_id")),
                             "catalog": catalog,
                             "issues": [self.worker_issues[pk]] if pk in self.worker_issues else [],
                             "version": self.runtime_versions.get(pk) if fresh else None,
