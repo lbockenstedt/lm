@@ -8,6 +8,7 @@ backend — the LM WebUI is the only front end.
 import re
 
 # Request/exception types and the shared logger from the main API module.
+import monitor_templates
 from api import HTTPException, Request, logger
 
 
@@ -60,6 +61,8 @@ async def inventory_devices(hub):
             tenant_snmp.setdefault(c.get("tenant_id") or "default", c["snmp_community"])
     # Output rows, plus the names already present (case-insensitive) so extras are not duplicated.
     out = []
+    # Device types still without a template decision (signature -> sysDescr).
+    pending = {}
     names = {str(d.get("name")).casefold() for d in inv}
     # LLDP neighbours that are not scanned devices (e.g. TOR switches) are
     # monitored too once verify_credentials found them answering SNMP.
@@ -171,8 +174,17 @@ async def inventory_devices(hub):
             # Lets the sync re-key the device's existing host instead of
             # creating a second one next to it.
             row["moved_from"] = former
+        # An unclassified SNMP box takes the template LM decided for its device type;
+        # a type with no decision yet is queued for the background resolver.
+        if community and d.get("sys_descr"):
+            sig = monitor_templates.signature(d["sys_descr"])
+            if sig and monitor_templates.chosen(gc, sig):
+                row["template"] = monitor_templates.chosen(gc, sig)
+            elif sig:
+                pending[sig] = d["sys_descr"]
         # Collect the finished row.
         out.append(row)
+    hub._monitor_template_pending = pending
     logger.info("monitoring: %d devices (%d pinned from IPAM), %d skipped (no verified SNMP)",
                 len(out), len(watched), skipped)
     return out
@@ -403,9 +415,16 @@ async def run_monitoring_sync_once(hub, trigger="scheduled"):
         return None
     # Push the whole inventory (not a dry run) and wait up to 5 minutes.
     try:
+        devices = await inventory_devices(hub)
+        # Pick or build templates for new device types; the next sync links them.
+        pending = getattr(hub, "_monitor_template_pending", None)
+        if pending:
+            try:
+                await monitor_templates.resolve(hub, pending)
+            except Exception as e:  # noqa: BLE001 - never block the sync
+                logger.warning("monitor-templates: pass failed: %s", e)
         res = await hub.request_response(
-            sid, "MON_SYNC", {"devices": await inventory_devices(hub), "dry_run": False},
-            timeout=300.0)
+            sid, "MON_SYNC", {"devices": devices, "dry_run": False}, timeout=300.0)
     # Record the failure for the status card, then let the caller see it.
     except Exception as e:  # noqa: BLE001
         record_monitoring_sync(hub, error=e, trigger=trigger)
