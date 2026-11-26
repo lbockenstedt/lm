@@ -1259,6 +1259,15 @@ def test_ab_complete_requires_certificate_and_allowlisted_task():
     # Pass 1 review is Qwen; pass 2 is DeepSeek only and never falls back to Qwen.
     review = asyncio.run(pool.ab_complete({**request, "task": "review"}, ("ab-client",)))
     assert review["status"] == "SUCCESS" and review["model"] == qwen["model"]
+    # With no certificate in the rule, the LE-pinned AppBuilder caller is enough.
+    pool.hub.state.system_state["global_config"]["llm_ab_work"].pop("certificate")
+    assert asyncio.run(pool.ab_complete(request, ("anyone",)))["status"] == "SUCCESS"
+    pool.hub.state.system_state["global_config"]["llm_ab_work"]["certificate"] = "ab-client"
+    # The shared tenant is allowed and serves from the shared workers.
+    pool.hub.state.system_state["global_config"]["llm_ab_work"]["tenant"] = "shared"
+    shared_ok = asyncio.run(pool.ab_complete(request, ("ab-client",)))
+    assert shared_ok["status"] == "SUCCESS"
+    pool.hub.state.system_state["global_config"]["llm_ab_work"]["tenant"] = "tenant-a"
     pool.hub.state.system_state["global_config"]["llm_ab_work"]["tasks"].append("review_deep")
     deep = asyncio.run(pool.ab_complete({**request, "task": "review_deep"}, ("ab-client",)))
     assert deep["status"] == "ERROR" and deep["code"] == "no_capacity"

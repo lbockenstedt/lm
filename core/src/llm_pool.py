@@ -1021,12 +1021,17 @@ class LlmPool:
         rule = self.hub.state.get_global_config().get("llm_ab_work")
         task = request.get("task")
         if (not isinstance(rule, dict) or not isinstance(task, str)
-                or task not in (rule.get("tasks") or ())
-                or rule.get("certificate") not in (certificate_names or ())):
+                or task not in (rule.get("tasks") or ())):
             return {"status": "ERROR", "code": "not_configured"}
+        # The caller is already the AppBuilder cert pinned in the LE module
+        # (ab_cert_identities); a certificate in the rule only narrows that further.
+        pinned = rule.get("certificate")
+        if pinned and pinned not in (certificate_names or ()):
+            return {"status": "ERROR", "code": "not_configured"}
+        # AppBuilder is a shared service, so its rule may name the shared tenant.
         tenant = rule.get("tenant")
-        if (not isinstance(tenant, str) or not tenant or tenant_is_shared(tenant)
-                or not self.hub.state.get_tenant(tenant)):
+        if (not isinstance(tenant, str) or not tenant
+                or not (tenant_is_shared(tenant) or self.hub.state.get_tenant(tenant))):
             return {"status": "ERROR", "code": "not_configured"}
         result = await self.complete(tenant, {
             "task": task, "prompt": request.get("prompt"),
