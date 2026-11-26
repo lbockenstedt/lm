@@ -102,14 +102,12 @@ unavailable hub summary is omitted rather than sent through AB's own providers.
 
 Other AB work uses the `LLM_COMPLETE` hub request (same AppBuilder client
 certificate). In the WebUI, LLM → Dashboard → **AppBuilder work** edits this rule
-(tenant, certificate SAN and ticked tasks; the shared tenant and tenant groups
-are not offered). The API equivalent is setting `llm_ab_work` in `POST /api/llm/admin/settings` to
-`{tenant, certificate, tasks}`: the tenant must be non-shared, the certificate
-is the pinned AB SAN, and `tasks` is the allowlist of task names AB may run
+(tenant and ticked tasks; tenant groups are not offered). The API equivalent is setting `llm_ab_work` in `POST /api/llm/admin/settings` to
+`{tenant, tasks}`: the tenant may be the shared tenant (AppBuilder is shared; it then uses the shared workers), and `tasks` is the allowlist of task names AB may run
 (for example `scout`, `review`, `review_deep`, `coding`). The tenant comes only from this
-setting, never from the request. A task outside the list, or a different
+setting, never from the request. The caller is the AppBuilder certificate marked in the LE module (`ab_cert_identities`); an optional `certificate` in the rule narrows it to one SAN. A task outside the list, or a different
 certificate, returns `not_configured`; a busy pool returns `no_capacity`, and
-AB then falls back to its own providers. The `review` task is a filter
+AB retries it (or, with `lm_pool_only` off in AB, uses its own providers). The `review` task is a filter
 reviewer; The review ladder is `review` (Qwen), then `review_deep` (DeepSeek, skipped
 when it is not serving), then AB's cloud frontier reviewer, whose verdict
 alone passes a panel. Findings go back to the coder and through the same

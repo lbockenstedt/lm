@@ -100,13 +100,13 @@ def validate_pool_config(hub, config):
     if "llm_ab_work" in config:
         rule = config["llm_ab_work"]
         if (not isinstance(rule, dict) or rule.keys() - {"tenant", "certificate", "tasks"}
-                or not isinstance(rule.get("tenant"), str) or tenant_is_shared(rule["tenant"])
-                or not hub.state.get_tenant(rule["tenant"])
-                or not isinstance(rule.get("certificate"), str)
-                or not 0 < len(rule["certificate"].strip()) <= SAN_LIMIT
+                or not isinstance(rule.get("tenant"), str) or not rule["tenant"].strip()
+                or not (tenant_is_shared(rule["tenant"]) or hub.state.get_tenant(rule["tenant"]))
+                or not (rule.get("certificate") is None or (isinstance(rule["certificate"], str)
+                        and len(rule["certificate"].strip()) <= SAN_LIMIT))
                 or not isinstance(rule.get("tasks"), list) or len(rule["tasks"]) > 32
                 or any(not isinstance(t, str) or not re.fullmatch(TASK_KEY, t) for t in rule["tasks"])):
-            raise HTTPException(400, "AppBuilder work requires a tenant, a pinned certificate SAN and task names")
+            raise HTTPException(400, "AppBuilder work requires a tenant and task names")
     if "llm_qualification_candidates" in config:
         candidates = config["llm_qualification_candidates"]
         if not isinstance(candidates, dict) or len(candidates) > 32 or any(
