@@ -110,10 +110,10 @@ function jobBadge(state) {
     return safeHtml`<span class="${BADGE} ${colours[state] || GREY}">${labels[state] || String(state ?? '—')}</span>`;
 }
 
-// One job row.
-function jobRow(j) {
+// One job row; the Kind cell appears only when the list mixes kinds.
+function jobRow(j, showKind) {
     return safeHtml`<tr class="${ROW}">
-        <td class="${td}">${j.kind || '—'}</td>
+        ${showKind ? safeHtml`<td class="${td}">${j.kind || '—'}</td>` : ''}
         <td class="${td}">${jobBadge(j.state)}</td>
         <td class="${td}">${j.model || j.candidate || '—'} ${j.version || ''} (${j.tier})${j.worker && j.kind === 'inference' ? safeHtml`<div class="text-slate-500">on ${j.worker}</div>` : ''}</td>
         <td class="${tdM}">${j.elapsed_s != null ? (j.elapsed_s < 60 ? Math.round(j.elapsed_s * 10) / 10 + 's' : Math.round(j.elapsed_s / 60) + 'm') : '—'}</td>
@@ -187,7 +187,9 @@ function renderJobsSection(jobs) {
     // Offer the clear control only when a row is terminal; running and queued rows are never cleared.
     const finished = jobs.some(job => job.state !== 'running' && job.state !== 'queued');
     const clear = safeHtml`<button data-action="clearJobs" type="button" class="bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-full px-3 py-1.5 text-xs font-bold${finished ? '' : ' opacity-50 cursor-not-allowed'}"${finished ? '' : safeHtml` disabled`}>Clear finished jobs</button>`;
-    const headers = ['Kind', 'State', 'Model', 'Elapsed', 'Code'];
+    // A Kind column that says the same thing on every row carries no information.
+    const showKind = new Set(jobs.map(job => job.kind)).size > 1;
+    const headers = [...(showKind ? ['Kind'] : []), 'State', 'Model', 'Elapsed', 'Code'];
     return safeHtml`<div class="hpe-card rounded-lg p-5 shadow-sm space-y-3">
         <div class="flex items-center justify-between">
             <h3 class="text-sm font-bold text-slate-600">Jobs</h3>
@@ -196,7 +198,7 @@ function renderJobsSection(jobs) {
                 ${clear}
             </div>
         </div>
-        ${renderTable(headers, jobs.map(jobRow), 'No jobs.')}
+        ${renderTable(headers, jobs.map(job => jobRow(job, showKind)), 'No jobs.')}
     </div>`;
 }
 
