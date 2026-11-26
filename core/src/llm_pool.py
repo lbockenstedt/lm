@@ -215,7 +215,7 @@ def queue_wait(config):
 
 
 # Pool tasks AppBuilder may run when no llm_ab_work rule is saved.
-AB_DEFAULT_TASKS = ("scout", "summary", "pr_summary", "coding", "review", "review_deep")
+AB_DEFAULT_TASKS = ("scout", "summary", "pr_summary", "coding", "reasoning", "review", "review_deep")
 
 
 class LlmPool:
