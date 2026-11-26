@@ -433,6 +433,23 @@ class LlmPool:
             self.provision_failures.setdefault(pk, {}).setdefault(CANDIDATES[key]["label"], "fixture_mismatch")
         return active
 
+    def retry_provisioning(self, pk=None):
+        """Forget every provisioning backoff and unfit window (one worker, or all); return the worker keys cleared.
+
+        An operator lever: a model that failed its fixtures is not always unfit (a slow CPU worker can
+        miss the token cap once and pass on the next try), so the six-hour window can be lifted by hand."""
+        keys = {pk} if pk else set(self.provision_failures) | set(
+            (self.hub.state.get_global_config().get("llm_provision_unfit") or {}))
+        saved = self.hub.state.get_global_config().get("llm_provision_unfit")
+        left = {w: rows for w, rows in saved.items() if w not in keys} if isinstance(saved, dict) else {}
+        self.hub.state.update_global_config({"llm_provision_unfit": left})
+        for worker in keys:
+            self.provision_failures.pop(worker, None)
+        for table in (self.provision_retry_at, self.provision_fail_count):
+            for item in [k for k in table if k[0] in keys]:
+                table.pop(item)
+        return sorted(keys)
+
     def _provision_failed(self, pk, key, code):
         """Record a failed step: exponential backoff for this model and the code for the dashboard."""
         count = self.provision_fail_count.get((pk, key), 0)
