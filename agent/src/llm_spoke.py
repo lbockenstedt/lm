@@ -21,7 +21,7 @@ from agent.src.llm_options import SAMPLING_LIMITS, valid_sampling
 # role's own log bucket on the hub.
 logger = logging.getLogger("LLMSpoke")
 
-MAX_PROMPT_BYTES = 64 * 1024
+MAX_PROMPT_BYTES = 192 * 1024  # keep equal to the hub limit in core/src/llm_pool.py
 MAX_RESPONSE_BYTES = 256 * 1024
 INFERENCE_TIMEOUT = 7200  # slow CPU models may take hours; speed does not matter
 # Start from the owner's CLI pin; Linux CPU artifacts still need qualification.

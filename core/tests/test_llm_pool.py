@@ -1756,3 +1756,13 @@ def test_stopped_runtime_is_not_reprovisioned_but_missing_install_is(monkeypatch
     assert pool._provision_plan("a") == []
     pool.worker_issues["a"] = {"code": "runtime_binary_missing"}
     assert pool._provision_plan("a")
+
+
+def test_prompt_size_limit_is_192_kib():
+    """A 100 KiB prompt is accepted; one past 192 KiB is an invalid_request."""
+    pool = make_pool()
+    pool.hub.request_response.return_value = {"status": "SUCCESS", "text": "ok"}
+    big = {**JOB, "prompt": "x" * (100 * 1024)}
+    assert asyncio.run(pool.complete("tenant-a", big)).get("code") != "invalid_request"
+    over = {**JOB, "prompt": "x" * (llm_pool.MAX_PROMPT_BYTES + 1)}
+    assert asyncio.run(pool.complete("tenant-a", over))["code"] == "invalid_request"

@@ -52,7 +52,8 @@ of serving with an unapproved version.
 - `POST /api/llm/complete?tenant=…` accepts `model`, `digest`, `prompt`, and
   optional `format` (`text`, `json`, or `python`). JSON must be an object or
   array. Python drafts are syntax-checked but never executed. Outputs are
-  advisory, not verified for correctness.
+  advisory, not verified for correctness. A prompt may be up to 192 KiB (the workers'
+  64k-token context); a larger one is `invalid_request`.
 - Alternatively, supply `task` instead of `model` and `digest`. With no
   configuration the hub uses a built-in task map: `summary` and `docs` →
   Gemma 4 12B; `pr_summary` → Gemma 4 12B, then Qwen 3.8 scout; `coding` → Qwen 3.6 coding, then Qwen 3.8 scout; `scout` →
