@@ -212,6 +212,10 @@ def queue_wait(config):
     return max(0, min(QUEUE_WAIT_MAX, value))
 
 
+# Pool tasks AppBuilder may run when no llm_ab_work rule is saved.
+AB_DEFAULT_TASKS = ("scout", "summary", "pr_summary", "coding", "review", "review_deep")
+
+
 class LlmPool:
     """Keep only volatile worker metadata and in-flight reservations."""
 
@@ -1032,6 +1036,9 @@ class LlmPool:
         server-side llm_ab_work setting, never from the caller.
         """
         rule = self.hub.state.get_global_config().get("llm_ab_work")
+        # AppBuilder is a shared service: with no rule saved it uses the shared workers for its tasks.
+        if rule is None:
+            rule = {"tenant": "shared", "tasks": list(AB_DEFAULT_TASKS)}
         task = request.get("task")
         if (not isinstance(rule, dict) or not isinstance(task, str)
                 or task not in (rule.get("tasks") or ())):
