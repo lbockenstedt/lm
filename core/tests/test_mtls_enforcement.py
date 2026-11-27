@@ -202,7 +202,7 @@ def test_certless_unbound_spoke_enrolls_then_falls_back_after_budget(ca, mtls_on
     h = _hub()
     assert h._mtls_connect_gate("spoke-1", "spoke-1", _WS()) == ("enroll", "no-cert")
     h.state.system_state["mtls_enroll"] = {"spoke-1": {"attempts": enf._MTLS_ENROLL_MAX}}
-    assert h._mtls_connect_gate("spoke-1", "spoke-1", _WS()) == ("ok", "enroll-exhausted")
+    assert h._mtls_connect_gate("spoke-1", "spoke-1", _WS()) == ("reject", "enroll-exhausted")
 
 
 def test_strict_mode_never_falls_back(ca, mtls_on):
@@ -584,3 +584,44 @@ def test_hub_fanout_reports_refusals_and_skips_role_subspokes():
     assert out["skipped"] == ["feed"]
     assert {s for s, _, _ in sent} == {"a", "b"}
     assert all(c == "SPOKE_SET_TLS_VERIFY" and d == {"mode": "on"} for _, c, d in sent)
+
+
+def test_revoke_spoke_mtls_cert_actively_severs_live_socket():
+    class _MockWS:
+        def __init__(self):
+            self.closed = False
+            self.close_code = None
+            self.close_reason = None
+        async def close(self, code=1000, reason=""):
+            self.closed = True
+            self.close_code = code
+            self.close_reason = reason
+
+    import types
+    h = main.LabManagerHub.__new__(main.LabManagerHub)
+    h._primary_key = lambda s: s
+    h.state = types.SimpleNamespace(system_state={}, save_state_now=lambda: asyncio.sleep(0))
+    h.send_to_spoke = lambda msg: asyncio.sleep(0)
+    h.record_spoke_event = lambda *args: None
+    h._mtls_record_revoked_serial = lambda *args: None
+
+    ws = _MockWS()
+    h.active_connections = {"spoke-compromised": ws}
+
+    res = _run(h._revoke_spoke_mtls_cert("spoke-compromised"))
+    assert res["status"] == "SUCCESS"
+    assert ws.closed is True
+    assert ws.close_code == 4403
+    assert "revoked" in ws.close_reason.lower()
+
+
+def test_signer_refuses_empty_secret():
+    from security.signer import MessageSigner
+    ms_empty = MessageSigner("")
+    assert ms_empty.verify({"signature": "abc", "payload": {}}) is False
+    assert ms_empty.verify_bytes(b"data", "abc") is False
+    try:
+        ms_empty.sign_bytes(b"data")
+        assert False, "Should raise ValueError on empty secret"
+    except ValueError:
+        pass

@@ -291,9 +291,12 @@ class HubMtlsEnforcementMixin:
             return "reject", "cert-required"
         # How many enrollments this spoke has already failed.
         attempts = int((self._mtls_records("mtls_enroll").get(pk) or {}).get("attempts") or 0)
-        # Too many failures and not strict: fall back to degraded cert-less operation.
-        if attempts >= _MTLS_ENROLL_MAX and not self._mtls_strict():
-            return "ok", "enroll-exhausted"
+        # Repeated enrollment failures must not degrade to cert-less 'ok': reject in non-strict,
+        # hold in enrollment-only in strict.
+        if attempts >= _MTLS_ENROLL_MAX:
+            if self._mtls_strict():
+                return "enroll", "no-cert"
+            return "reject", "enroll-exhausted"
         # Otherwise hold it in enrollment-only mode.
         return "enroll", "no-cert"
 
@@ -301,7 +304,7 @@ class HubMtlsEnforcementMixin:
     async def _mtls_reject(self, spoke_id: str, pk: str, websocket, reason: str) -> None:
         """Log, record and close a spoke connection refused by the mTLS gate."""
         # "Cert required" style reasons get 4401; bad presented certs get 4403.
-        code = CLOSE_CERT_REQUIRED if reason in ("cert-required", "revoked-identity") \
+        code = CLOSE_CERT_REQUIRED if reason in ("cert-required", "revoked-identity", "enroll-exhausted") \
             else CLOSE_CERT_REJECTED
         # Human-readable close reason.
         text = {
@@ -309,6 +312,7 @@ class HubMtlsEnforcementMixin:
             "revoked-identity": "mTLS cert revoked (re-issue from the hub to re-enroll)",
             "revoked-cert": "mTLS client cert revoked",
             "cert-identity-mismatch": "mTLS client cert does not belong to this spoke",
+            "enroll-exhausted": "mTLS enrollment attempts exhausted (re-issue from the hub to re-enroll)",
         }.get(reason, "mTLS rejected")
         # Log the refusal.
         logger.warning(f"[mtls] refusing {spoke_id}: {text} ({reason})")
