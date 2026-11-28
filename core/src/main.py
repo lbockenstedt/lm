@@ -9176,6 +9176,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             self.record_spoke_event(spoke_id, "mtls_cert_revoked", "")
         except Exception:  # noqa: BLE001
             pass
+        # Actively sever any established (nailed-up) WebSocket connection to prevent zombie session persistence
+        try:
+            ws = self.active_connections.get(pk)
+            if ws is not None:
+                logger.warning(f"[mtls] Actively severing live socket for revoked spoke {spoke_id} (pk={pk})")
+                await ws.close(code=4403, reason="mTLS client cert revoked")
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[mtls] Socket close exception on revoke for {spoke_id}: {e}")
         # Log and report success.
         logger.info(f"[mtls] revoked Hub-CA client cert for {spoke_id}")
         return {"status": "SUCCESS", "spoke_id": spoke_id}

@@ -40,7 +40,7 @@ def encode_frame(signer, msg: Dict[str, Any]) -> str:
     # Serialise once with no spaces; these exact bytes are what gets signed and sent.
     body = json.dumps(msg, separators=(',', ':'))
     # Sign the body bytes, or leave the signature empty when no key exists yet.
-    sig = signer.sign_bytes(body.encode()) if signer is not None else ""
+    sig = signer.sign_bytes(body.encode()) if (signer is not None and getattr(signer, "secret", None)) else ""
     # Join as "<sig>.<body>"; the hex signature never contains a dot, so it splits cleanly.
     return sig + "." + body
 
@@ -96,12 +96,16 @@ class MessageSigner:
         serialized ONCE. Signing raw bytes is what lets the receiver verify the
         received body directly (verify_bytes) without re-serialising — the win
         that removed the per-frame json.dumps from hub ingest."""
+        if not self.secret:
+            raise ValueError("Cannot compute HMAC signature with empty or missing secret")
         # Use the shared secret as the HMAC key and return the hex digest.
         return hmac.new(self.secret.encode(), message_bytes, hashlib.sha256).hexdigest()
 
     def verify(self, msg: Dict[str, Any]) -> bool:
         """Verifies the signature of a message."""
-        # A message without a signature can never verify.
+        # A signer without a secret or a message without a signature can never verify.
+        if not self.secret:
+            return False
         sig = msg.get("signature")
         if not sig:
             return False
@@ -144,6 +148,8 @@ class MessageSigner:
         ingest CPU is gone. Constant-time compare (compare_digest); a mismatch
         logs length + hex prefix only, never the raw (possibly token-bearing)
         bytes. See docs/backpressure-throttling.md §7."""
+        if not self.secret or not signature:
+            return False
         # Recompute the HMAC over the received bytes and compare in constant time.
         expected = self.sign_bytes(message_bytes)
         result = hmac.compare_digest(expected, signature)
