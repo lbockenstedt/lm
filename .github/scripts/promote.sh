@@ -72,7 +72,7 @@ fi
 trap '[ -n "${PROMOTE_TMPDIR:-}" ] && rm -rf "$PROMOTE_TMPDIR"' EXIT
 
 # Paths lm owns and syncs into every repo (twins.json "fleet": files and dirs).
-FLEET_OWNED_RE='^(\.github/(fleet-rules\.md|ai-budget\.json|model-policy\.json|copilot-instructions\.md)$|\.github/(agents|hooks)/|\.claude/skills/)'
+FLEET_OWNED_RE='^(\.github/(fleet-rules\.md|ai-budget\.json|model-policy\.json|copilot-instructions\.md|scripts/(promote\.sh|bump_version\.py|promotion_selftest\.sh))$|\.github/(agents|hooks)/|\.claude/skills/)'
 # Unmerged fleet-owned paths that are safe to resolve to the source copy. Only on a
 # forward promotion (dev -> qa, qa -> main): a back-merge's source is the older
 # branch, so its copy must not win. A repo's own "<repo>-*" agent/hook/skill is not
