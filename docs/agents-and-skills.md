@@ -26,7 +26,8 @@ owns. On every lm `dev` push that changes them, `sync-fleet-files.yml` runs
 - copies `.github/fleet-rules.md`, `.github/agents/`, `.claude/skills/` and
   the AI spend gate (`.github/hooks/`, `.github/ai-budget.json`), the
   model policy (`.github/model-policy.json`) and the Copilot instructions
-  (`.github/copilot-instructions.md`) into each repo, removing files lm no longer has (except a repo's own `<repo>-*`
+  (`.github/copilot-instructions.md`) and the promotion scripts (`.github/scripts/promote.sh`, `bump_version.py`,
+  `promotion_selftest.sh`; repos ran stale hand-copied versions) into each repo, removing files lm no longer has (except a repo's own `<repo>-*`
   agents and skills);
 - writes the rules into each repo's `AGENTS.md`, between the
   `fleet-rules:begin` and `fleet-rules:end` markers, so any tool that
