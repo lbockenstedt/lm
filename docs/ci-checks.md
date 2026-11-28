@@ -164,6 +164,14 @@ run log warns. When the units cannot be listed at all, the body says their
 intent is UNKNOWN and names the cause: `promote.sh` reported no `unit_sha`,
 `git rev-list` failed, or it found no commit between the target and the unit.
 
+**Fleet-owned files never stall a promotion.** `sync-fleet-files.yml` copies the files in `twins.json`
+(`fleet-rules.md`, `copilot-instructions.md`, `ai-budget.json`, `model-policy.json`, `.github/agents/`,
+`.github/hooks/`, `.claude/skills/`) onto dev and onto qa/main separately, so the merge often sees the same
+file added on both sides (add/add). `promote.sh` resolves a conflict in those paths to the source branch's
+copy, as it pins `VERSION`, on a forward promotion only (dev to qa, qa to main). Back-merges, a repo's own
+`<repo>-*` agents and skills, and any other conflict still stop the promotion for a human. The self-test
+(`promotion_selftest.sh`) covers both cases.
+
 ## Promoting several repos
 
 `.github/scripts/promote_fleet.sh [--to qa|main] <repo>...` dispatches
