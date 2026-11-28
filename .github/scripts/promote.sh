@@ -71,6 +71,19 @@ if [ -z "${PROMOTE_REEXEC:-}" ]; then
 fi
 trap '[ -n "${PROMOTE_TMPDIR:-}" ] && rm -rf "$PROMOTE_TMPDIR"' EXIT
 
+# Paths lm owns and syncs into every repo (twins.json "fleet": files and dirs).
+FLEET_OWNED_RE='^(\.github/(fleet-rules\.md|ai-budget\.json|model-policy\.json|copilot-instructions\.md)$|\.github/(agents|hooks)/|\.claude/skills/)'
+# Unmerged fleet-owned paths that are safe to resolve to the source copy. Only on a
+# forward promotion (dev -> qa, qa -> main): a back-merge's source is the older
+# branch, so its copy must not win. A repo's own "<repo>-*" agent/hook/skill is not
+# lm's to overwrite, so it still stops for a human.
+fleet_conflicts() {
+  case "$SRC>$TGT" in dev\>qa|qa\>main|dev\>main) ;; *) return 0 ;; esac
+  local repo="${GITHUB_REPOSITORY:-}"; repo="${repo##*/}"
+  [ -n "$repo" ] || repo="$(basename "$PWD")"
+  git ls-files -u | awk '{print $4}' | sort -u | grep -E "$FLEET_OWNED_RE" \
+    | grep -Ev "^(\.github/(agents|hooks)|\.claude/skills)/${repo}-" || true
+}
 version_files() { git ls-tree -r --name-only "origin/$TGT" | grep -E '(^|/)VERSION$' || true; }
 
 git rev-parse --verify "origin/$TGT" >/dev/null 2>&1 || { echo "::error::target branch $TGT does not exist"; exit 1; }
@@ -114,6 +127,21 @@ stage_to() {
     git rm -q --cached "$f" 2>/dev/null || true
     rm -f "$f"
   done < <(git diff --cached --name-only --diff-filter=A | grep -E '(^|/)VERSION$' || true)
+
+  # Fleet-owned files (twins.json "fleet") are copied by sync-fleet-files.yml onto dev
+  # AND qa/main separately, so the same file is often "added" on both sides and the
+  # merge reports add/add. lm owns them, the source branch holds the newer copy, and
+  # the sync would overwrite any other result, so take the source's version instead
+  # of stalling every promotion in the repo until a human resolves it.
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if git cat-file -e "$endpoint:$f" 2>/dev/null; then
+      git checkout -q "$endpoint" -- "$f"
+    else
+      git rm -q --cached "$f" 2>/dev/null || true
+      rm -f "$f"
+    fi
+  done < <(fleet_conflicts)
 
   if git ls-files -u | grep -q .; then
     # Diagnose, but do NOT decide. A conflict while EXTENDING a unit is
