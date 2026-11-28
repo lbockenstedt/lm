@@ -163,4 +163,36 @@ case "$(cat VERSION)" in
 esac
 chk "and it still promoted the oldest unit" "$(cat gamma.py 2>/dev/null)" "gamma"
 
+echo "== fleet-owned file added on both sides does not stall the promotion =="
+# sync-fleet-files copies the file onto dev and onto qa separately: add/add.
+git checkout -q -B qa origin/qa; mkdir -p .github
+echo "fleet text on qa" > .github/copilot-instructions.md; git add .github/copilot-instructions.md; git commit -qm "sync on qa"; git push -q origin qa
+git checkout -q -B dev origin/dev
+echo "fleet text on dev" > .github/copilot-instructions.md; git add .github/copilot-instructions.md; git commit -qm "sync on dev"
+echo "zz" > zz.py; git add zz.py; git commit -qm "add zz"
+git push -q origin dev; git fetch -q origin
+SRC=dev TGT=qa BR=promote/dev-to-qa bash .github/scripts/promote.sh >/dev/null 2>&1 || true
+chk "fleet file resolved to the source copy" "$(cat .github/copilot-instructions.md 2>/dev/null)" "fleet text on dev"
+git push -q origin promote/dev-to-qa:qa; git fetch -q origin
+
+echo "== a conflict in a real source file still stops for a human =="
+git checkout -q -B qa origin/qa; echo "qa side" > real.py; git add real.py; git commit -qm "qa real"; git push -q origin qa
+git checkout -q -B dev origin/dev; echo "dev side" > real.py; git add real.py; git commit -qm "dev real"; git push -q origin dev; git fetch -q origin
+out=$(SRC=dev TGT=qa BR=promote/dev-to-qa bash .github/scripts/promote.sh 2>&1 || true)
+case "$out" in *"merge conflict outside VERSION"*) echo "  PASS real conflict still reported"; pass=$((pass+1));;
+  *) echo "  FAIL expected a conflict report, got: $out"; fail=$((fail+1));; esac
+
+echo "== a fleet-file conflict in the back-merge direction, or in a repo-owned agent, still stops =="
+git merge --abort >/dev/null 2>&1 || true; git reset -q --hard
+git checkout -q -B qa origin/qa; mkdir -p .github/agents; echo "qa agent" > .github/agents/$(basename "$PWD")-x.agent.md; echo "qa fleet" > .github/ai-budget.json; echo "qa" > .github/ai-budget.json.bak
+git add .github; git commit -qm "qa owned"; git push -q origin qa
+git checkout -q -B dev origin/dev; mkdir -p .github/agents; echo "dev agent" > .github/agents/$(basename "$PWD")-x.agent.md; echo "dev fleet" > .github/ai-budget.json; echo "dev" > .github/ai-budget.json.bak
+git add .github; git commit -qm "dev owned"; git push -q origin dev; git fetch -q origin
+out=$(GITHUB_REPOSITORY="o/$(basename "$PWD")" SRC=dev TGT=qa BR=promote/dev-to-qa bash .github/scripts/promote.sh 2>&1 || true)
+case "$out" in *"-x.agent.md"*"ai-budget.json.bak"*) echo "  PASS repo-owned agent and look-alike file conflicts still reported"; pass=$((pass+1));;
+  *) echo "  FAIL expected a conflict report, got: $out"; fail=$((fail+1));; esac
+out=$(SRC=qa TGT=dev BR=backmerge/qa-to-dev bash .github/scripts/promote.sh 2>&1 || true)
+case "$out" in *"ai-budget.json"*"ai-budget.json.bak"*) echo "  PASS back-merge fleet conflict still reported"; pass=$((pass+1));;
+  *) echo "  FAIL expected a conflict report, got: $out"; fail=$((fail+1));; esac
+
 echo; echo "RESULT: $pass passed, $fail failed"; rm -rf "$T"; [ "$fail" -eq 0 ]
