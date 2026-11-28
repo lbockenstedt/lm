@@ -195,4 +195,38 @@ out=$(SRC=qa TGT=dev BR=backmerge/qa-to-dev bash .github/scripts/promote.sh 2>&1
 case "$out" in *"ai-budget.json"*"ai-budget.json.bak"*) echo "  PASS back-merge fleet conflict still reported"; pass=$((pass+1));;
   *) echo "  FAIL expected a conflict report, got: $out"; fail=$((fail+1));; esac
 
+echo "== a promotion script added on both sides resolves to the source copy, and lm syncs all three =="
+git merge --abort >/dev/null 2>&1 || true; git reset -q --hard
+F=.github/scripts/promotion_selftest.sh
+git checkout -q -B qa origin/qa; echo "qa script" > $F; git add $F; git commit -qm "qa script"; git push -q origin qa
+# Earlier sections left unrelated conflicts between dev and qa; start dev from qa.
+git checkout -q -B dev origin/qa~1; echo "dev script" > $F; git add $F; git commit -qm "dev script"; git push -q -f origin dev; git fetch -q origin
+# Run the real promoter, not the clone's file, which is the one in conflict.
+if SRC=dev TGT=qa BR=promote/dev-to-qa bash "$TPL/promote.sh" >/dev/null 2>&1; then rc=ok; else rc=failed; fi
+chk "the promotion ran to completion" "$rc" "ok"
+chk "the script resolved to the source copy" "$(cat $F 2>/dev/null)" "dev script"
+if [ -f "$TPL/../../.github/twins.json" ]; then
+  for f in promote.sh bump_version.py promotion_selftest.sh; do
+    grep -q "\"\.github/scripts/$f\"" "$TPL/../../.github/twins.json" && grep -q "'\.github/scripts/$f'" "$TPL/../../.github/workflows/sync-fleet-files.yml" \
+      && { echo "  PASS $f is in the fleet sync"; pass=$((pass+1)); } || { echo "  FAIL $f missing from twins.json or the sync trigger"; fail=$((fail+1)); }
+  done
+fi
+
+echo "== AGENTS.md: a conflict only in the fleet-rules block resolves; one outside it still stops =="
+mk() { printf 'repo facts: %s\n<!-- fleet-rules:begin (synced from lm/.github/fleet-rules.md -- edit there) -->\n%s\n<!-- fleet-rules:end -->\n' "$1" "$2"; }
+git merge --abort >/dev/null 2>&1 || true; git reset -q --hard
+git checkout -q -B qa origin/qa; mk base v0 > AGENTS.md; git add AGENTS.md; git commit -qm "agents base"; git push -q -f origin qa
+git checkout -q -B dev qa; mk base v-dev > AGENTS.md; git commit -qam "dev block"; git push -q -f origin dev
+git checkout -q qa; mk base v-qa > AGENTS.md; git commit -qam "qa block"; git push -q origin qa; git fetch -q origin
+if SRC=dev TGT=qa BR=promote/dev-to-qa bash "$TPL/promote.sh" >/dev/null 2>&1; then rc=ok; else rc=failed; fi
+chk "block-only conflict: promotion ran" "$rc" "ok"
+chk "block-only conflict: source block kept" "$(sed -n 3p AGENTS.md)" "v-dev"
+git merge --abort >/dev/null 2>&1 || true; git reset -q --hard
+git checkout -q -B qa origin/qa; mk base v0 > AGENTS.md; git commit -qam "agents base 2"; git push -q -f origin qa
+git checkout -q -B dev qa; mk dev-facts v-dev > AGENTS.md; git commit -qam "dev facts"; git push -q -f origin dev
+git checkout -q qa; mk qa-facts v-qa > AGENTS.md; git commit -qam "qa facts"; git push -q origin qa; git fetch -q origin
+out=$(SRC=dev TGT=qa BR=promote/dev-to-qa bash "$TPL/promote.sh" 2>&1 || true)
+case "$out" in *"merge conflict outside VERSION"*) echo "  PASS conflict outside the block still reported"; pass=$((pass+1));;
+  *) echo "  FAIL expected a conflict report, got: $out"; fail=$((fail+1));; esac
+
 echo; echo "RESULT: $pass passed, $fail failed"; rm -rf "$T"; [ "$fail" -eq 0 ]
