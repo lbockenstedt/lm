@@ -19,6 +19,9 @@ on:
       - '.github/ai-budget.json'
       - '.github/model-policy.json'
       - '.github/copilot-instructions.md'
+      - '.github/scripts/promote.sh'
+      - '.github/scripts/bump_version.py'
+      - '.github/scripts/promotion_selftest.sh'
       - '.github/twins.json'
   workflow_dispatch:
 
